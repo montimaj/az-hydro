@@ -10,7 +10,7 @@ Existing methods to estimate withdrawals are either expensive and time-consuming
 
 Arizona is currently in its 28th-year long-term drought, which has depleted surface water reserves from the Colorado River. Consequently, groundwater resources in Southern and South-Central Arizona are under significant stress resulting in land subsidence. Hence, reliable and efficient groundwater pumping monitoring solutions are critical to addressing this region's water security issues.
 
-This augmented proposal aims to enhance our existing machine learning and remote sensing-based model estimates in Arizona. Current model limitations include uncertainty in the effect of surface water on groundwater use and irrigation efficiency. Further, while our model is capable of making forecasts, extensive data pre-processing is required to produce forecasts. If funded, this proposal will provide us with the necessary resources to develop a robust model that provides actionable withdrawal estimates in light of ongoing and future reductions in the Colorado River and other surface water bodies.
+This work aims to enhance our existing machine learning and remote sensing-based model estimates in Arizona. Current model limitations include uncertainty in the effect of surface water on groundwater use and irrigation efficiency. Further, while our model is capable of making forecasts, extensive data pre-processing is required to produce forecasts. This research will provide us with the necessary resources to develop a robust model that provides actionable withdrawal estimates in light of ongoing and future reductions in the Colorado River and other surface water bodies.
 
 
 ## Getting Started
