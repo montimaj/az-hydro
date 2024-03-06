@@ -38,7 +38,7 @@ Open Linux/Mac terminal or Windows PowerShell and run the following:
 ```
 conda create -y -n azhydro python=3.11
 conda activate azhydro
-conda install -y -c conda-forge rioxarray geopandas lightgbm py-xgboost earthengine-api rasterstats seaborn openpyxl
+conda install -y -c conda-forge rioxarray geopandas lightgbm py-xgboost earthengine-api xee rasterstats seaborn openpyxl
 conda install -y -c conda-forge dask-ml dask-jobqueue swifter
 ```
 

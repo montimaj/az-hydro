@@ -1,0 +1,457 @@
+"""
+Contains codes for handling Google Earth Engine datasets
+"""
+
+# Author: Dr. Sayantan Majumdar
+# Email: sayantan.majumdar@dri.edu
+
+import ee
+import os
+import time
+import requests
+import numpy as np
+import geopandas as gpd
+import rasterio as rio
+
+from .sysops import makedirs
+from google.cloud import storage
+from shapely.geometry import Polygon
+from dask import delayed, compute
+from dask.distributed import Client, LocalCluster
+
+
+def create_fishnet(
+        input_gdf: gpd.GeoDataFrame,
+        fishnet_unit: str = 'm',
+        fishnet_size: int = 1000,
+        fishnet_crs: str = 'EPSG:26712',
+        output_dir: str = '../../Data/Inputs/GW_Data/'
+) -> gpd.GeoDataFrame:
+    """
+    Create 1 km or 1 mi fishnet from an input geodataframe.
+
+    Args:
+    input_gdf (gpd.GeoDataFrame): Input geodataframe.
+    fishnet_unit (str): Whether to create polygon grids in m or mi.
+    fishnet_size (str): Defaults to 1000 m. If fishnet_unit = 'mi', then 1609.34 m grid will be used.
+    fishnet_crs (str): Defaults to the Arizona UTM Zone 12.
+    output_dir (str): Output directory to store the fishnets.
+
+    Returns:
+        The fishnet as a gpd.GeoDataFrame.
+    """
+
+    fishnet_file = f'{output_dir}AZ_Polygons_{fishnet_size}{fishnet_unit}.geojson'
+    if os.path.exists(fishnet_file):
+        return gpd.read_file(fishnet_file)
+    gdf = input_gdf.to_crs(fishnet_crs)
+    xmin, ymin, xmax, ymax = gdf.total_bounds
+    if fishnet_unit == 'mi':
+        fishnet_size *= 1609.34 / 1000
+    length = fishnet_size
+    wide = fishnet_size
+    cols = list(np.arange(xmin, xmax + wide, wide))
+    rows = list(np.arange(ymin, ymax + length, length))
+    polygons = []
+    for x in cols[:-1]:
+        for y in rows[:-1]:
+            polygons.append(Polygon([(x, y), (x + wide, y), (x + wide, y + length), (x, y + length)]))
+    fishnet = gpd.GeoDataFrame({'geometry': polygons}, crs=fishnet_crs).clip(gdf).reset_index(drop=True)
+    fishnet['FID'] = fishnet.index + 1
+    fishnet.to_file(fishnet_file)
+    return fishnet
+
+
+def generate_chunks(input_list: list[...], num_chunks: int):
+    """
+    Partition a list into equally sized chunks.
+
+    Args:
+        input_list (List): List of objects.
+        num_chunks (int): Number of chunks.
+
+    Returns:
+        Generator object
+    """
+
+    num_chunks = max(1, num_chunks)
+    for idx in range(0, len(input_list), num_chunks):
+        yield input_list[idx: idx + num_chunks]
+
+
+def download_gee_tile(
+        tile_values: tuple[int, float, float, float],
+        download_dir: str,
+        year_list: list,
+        gcloud_project: (str) = 'azhydro',
+        verbose: bool = False
+):
+    """
+    Download GEE tile through dask.
+
+    Args:
+    tile_values (tuple (int, float, float, float)): Tile values as a tuple of (FID, xmin, ymin, xmax, ymax)
+    download_dir (str): Download directory path.
+    year_list (list): List of years in YYYY format.
+    gcloud_project (str): GCloud project name.
+    verbose (bool): Set True to see extra details on file downloads.
+
+    Returns:
+        None.
+    """
+
+    retry_ee_init = True
+    while retry_ee_init:
+        try:
+            ee.Initialize(
+                project=gcloud_project,
+                opt_url='https://earthengine-highvolume.googleapis.com'
+            )
+            retry_ee_init = False
+        except (ee.EEException, requests.exceptions.RequestException, Exception) as e:
+            print('Initialization exception', e)
+            retry_ee_init = True
+            time.sleep(1)
+    openet_ic = [
+        ee.ImageCollection("OpenET/ENSEMBLE/CONUS/GRIDMET/MONTHLY/v2_0"),
+        ee.ImageCollection("projects/openet/ensemble/conus/gridmet/monthly/provisional")
+    ]
+    ssebop_ic = [
+        ee.ImageCollection("OpenET/SSEBOP/CONUS/GRIDMET/MONTHLY/v2_0"),
+        ee.ImageCollection("projects/openet/ssebop/conus/gridmet/monthly/provisional")
+    ]
+    eemetric_ic = [
+        ee.ImageCollection("OpenET/EEMETRIC/CONUS/GRIDMET/MONTHLY/v2_0"),
+        ee.ImageCollection("projects/openet/eemetric/conus/gridmet/monthly/provisional")
+    ]
+    sims_ic = [
+        ee.ImageCollection("OpenET/SIMS/CONUS/GRIDMET/MONTHLY/v2_0"),
+        ee.ImageCollection("projects/openet/sims/conus/gridmet/monthly/provisional")
+    ]
+    pt_jpl_ic = [
+        ee.ImageCollection("OpenET/PTJPL/CONUS/GRIDMET/MONTHLY/v2_0"),
+        ee.ImageCollection("projects/openet/ptjpl/conus/gridmet/monthly/provisional")
+    ]
+    geesebal_ic = [
+        ee.ImageCollection("OpenET/GEESEBAL/CONUS/GRIDMET/MONTHLY/v2_0"),
+        ee.ImageCollection("projects/openet/geesebal/conus/gridmet/monthly/provisional")
+    ]
+    disalexi_ic = [
+        ee.ImageCollection("OpenET/DISALEXI/CONUS/GRIDMET/MONTHLY/v2_0"),
+        ee.ImageCollection("projects/openet/disalexi/conus/gridmet/monthly/provisional")
+    ]
+    gridmet_ic = ee.ImageCollection("IDAHO_EPSCOR/GRIDMET")
+    gridmet_drought_ic = ee.ImageCollection("GRIDMET/DROUGHT")
+    irrmapper_ic = ee.ImageCollection("UMT/Climate/IrrMapper_RF/v1_2")
+    cdl_ic = ee.ImageCollection("USDA/NASS/CDL")
+    hsg = ee.Image(
+        'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/land_use/'
+        'hydrologic_group'
+    ).rename('HSG')
+    soil_depth = ee.Image(
+        'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/land_use/soil_depth'
+    ).rename('soil_depth_mm')
+    ksat_mean = ee.Image(
+        'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/physical/ksat_mean'
+    ).rename('ksat_mean_micromps')
+    nasa_dem = ee.Image("NASA/NASADEM_HGT/001").select('elevation').rename('elevation_m')
+    nasa_dem_slope = ee.Terrain.slope(nasa_dem).rename('slope')
+    ee_geom = ee.Geometry.Rectangle(tile_values[1:])
+    for year in year_list:
+        local_file_name = f'{download_dir}Tile_{tile_values[0]}_{year}.tif'
+        if os.path.exists(local_file_name):
+            try:
+                tile_rio = rio.open(local_file_name, mode='r')
+                tile_rio.close()
+                continue
+            except rio.errors.RasterioIOError:
+                os.remove(local_file_name)
+                print(local_file_name, 'corrupted. Downloading again...')
+        irr = irrmapper_ic.filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+            .select('classification') \
+            .max()
+        mask = irr.eq(0)
+        irr_mask = irr.updateMask(mask).remap([0], [1])
+        tile_irr_sum = irr_mask.reduceRegion(
+            reducer=ee.Reducer.sum(),
+            scale=30,
+            geometry=ee_geom
+        )
+        retry_irr_mask = True
+        valid_tile = True
+        while retry_irr_mask:
+            try:
+                valid_tile = tile_irr_sum.getInfo()['remapped'] > 0
+                retry_irr_mask = False
+            except ee.EEException as e:
+                print('Error:', e, '.Retrying...')
+                retry_irr_mask = True
+                time.sleep(5)
+        if valid_tile:
+            openet_idx = 0
+            if year < 2016 or year > 2022:
+                openet_idx = 1
+            openet_ensemble = openet_ic[openet_idx].select('et_ensemble_mad') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
+            ssebop_et = ssebop_ic[openet_idx].select('et') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
+            eemetric_et = eemetric_ic[openet_idx].select('et') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
+            sims_et = sims_ic[openet_idx].select('et') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
+            pt_jpl_et = pt_jpl_ic[openet_idx].select('et') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
+            geesebal_et = geesebal_ic[openet_idx].select('et') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
+            disalexi_et = disalexi_ic[openet_idx].select('et') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
+            gridmet_precip = gridmet_ic.select('pr') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
+            gridmet_tmmx = gridmet_ic.select('tmmx') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .median()
+            gridmet_tmmn = gridmet_ic.select('tmmn') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .median()
+            gridmet_eto = gridmet_ic.select('eto') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
+            gridmet_etr = gridmet_ic.select('etr') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
+            gridmet_vpd = gridmet_ic.select('vpd') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
+            gridmet_vs = gridmet_ic.select('vs') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .mean()
+            gridmet_rmax = gridmet_ic.select('rmax') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .median()
+            gridmet_rmin = gridmet_ic.select('rmin') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .median()
+            gridmet_spi1y = gridmet_drought_ic.select('spi1y') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .median()
+            gridmet_eddi1y = gridmet_drought_ic.select('eddi1y') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .median()
+            gridmet_spei1y = gridmet_drought_ic.select('spei1y') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .median()
+            gridmet_pdsi = gridmet_drought_ic.select('pdsi') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .median()
+            cdl_start_year = year
+            cdl_end_year = year + 1
+            if year < 2008:
+                cdl_start_year = 2008
+                cdl_end_year = year_list[-1]
+                cdl = cdl_ic.filterDate(f'{cdl_start_year}-01-01', f'{cdl_end_year + 1}-01-01') \
+                    .select('cropland') \
+                    .mode()
+            else:
+                cdl = cdl_ic.filterDate(f'{cdl_start_year}-01-01', f'{cdl_end_year + 1}-01-01') \
+                    .select('cropland') \
+                    .first()
+            data_bands = [
+                openet_ensemble,
+                ssebop_et,
+                eemetric_et,
+                sims_et,
+                pt_jpl_et,
+                geesebal_et,
+                disalexi_et,
+                gridmet_precip,
+                gridmet_tmmx,
+                gridmet_tmmn,
+                gridmet_eto,
+                gridmet_etr,
+                gridmet_vpd,
+                gridmet_vs,
+                gridmet_rmax,
+                gridmet_rmin,
+                gridmet_spi1y,
+                gridmet_eddi1y,
+                gridmet_spei1y,
+                gridmet_pdsi,
+                cdl,
+                hsg,
+                soil_depth,
+                ksat_mean,
+                nasa_dem,
+                nasa_dem_slope
+            ]
+            data_band_names = [
+                'annual_et_ensemble_mm',
+                'annual_et_ssebop_mm',
+                'annual_et_eemetric_mm',
+                'annual_et_sims_mm',
+                'annual_et_pt_jpl_mm',
+                'annual_et_geesebal_mm',
+                'annual_et_disalexi_mm',
+                'annual_gridmet_precip_mm',
+                'annual_tmmx_K',
+                'annual_tmmn_K',
+                'annual_eto_mm',
+                'annual_etr_mm',
+                'annual_vpd_kPa',
+                'annual_vs_mps',
+                'annual_rmax',
+                'annual_rmin',
+                'annual_spi1y',
+                'annual_eddi1y',
+                'annual_spei1y',
+                'annual_pdsi',
+                'crop_cdl',
+                'HSG',
+                'soil_depth_mm',
+                'ksat_mean_micromps',
+                'elevation_m',
+                'slope'
+            ]
+            data_img = openet_ensemble.rename(data_band_names[0])
+            for band, band_name in zip(data_bands, data_band_names):
+                if band_name == 'annual_et_disalexi_mm' and year < 2001:
+                    band = ee.ImageCollection([
+                        ssebop_et,
+                        eemetric_et,
+                        sims_et,
+                        pt_jpl_et,
+                        geesebal_et,
+                    ]).mean()
+                band = band.rename(band_name)
+                data_img = data_img.addBands(band, overwrite=True)
+            data_img = data_img.multiply(irr_mask)
+            retry_download = True
+            while retry_download:
+                try:
+                    gee_url = data_img.getDownloadUrl({
+                        'scale': 30,
+                        'region': ee_geom,
+                        'format': 'GEO_TIFF',
+                        'crs': 'EPSG:4326'
+                    })
+                    if verbose:
+                        print('Dowloading', local_file_name, '...')
+                    r = requests.get(
+                        gee_url,
+                        allow_redirects=True,
+                        timeout=None,
+                        stream=True
+                    )
+                    with open(local_file_name, 'wb') as fd:
+                        for chunk in r.iter_content(chunk_size=1024):
+                            fd.write(chunk)
+                    retry_download = False
+                except (ee.EEException, requests.exceptions.RequestException) as e:
+                    print('Error', e, 'during', local_file_name, 'download!')
+                    print('Retrying download...')
+                    retry_download = True
+                time.sleep(0.001)
+    time.sleep(0.001)
+
+
+def download_gee_data(
+        geom_file: str,
+        gcloud_project: str = 'azhydro',
+        gcloud_bucket: str = 'azhydro',
+        download_dir: str = '../../Data/Inputs/GEE_Data/',
+        start_year: int = 1991,
+        end_year: int = 2023,
+        skip_download: bool = False,
+        tile_size: int = 10000,
+        num_workers: int = 32
+) -> str:
+    """
+    Download multiple GEE datasets as rasters at 100 m spatial resolution.
+
+    Args:
+    geom_file (str): Area of interest shapefile or geojson path. E.g., the AZ state geojson or shapefile
+    gcloud_project (str): Name of the Google Cloud Project. This should have the GEE API service enabled.
+    gcloud_bucket (str): Name of the GCloud bucket.
+    download_dir (str): Download directory
+    start_year (int): Start year in YYYY format
+    end_year (int): End year in YYYY format
+    skip_download (bool): Set True to skip downloading and return existing CSV files.
+    tile_size (int): Tile size for downloading GEE Data. Default is 10000 m.
+    num_workers (int): Number of tiles to parallely download. Note that both tile_size and num_workers have quotas for
+    free GEE users.
+
+    Returns:
+        str: Directory path containing all the mosaicked rasters.
+    """
+
+    data_dir = f'{download_dir}GEE_Data/GEE_Tiles/'
+    makedirs(data_dir)
+    if not skip_download:
+        print('Downloading GEE data...')
+        ee.Initialize(
+            project=gcloud_project,
+            opt_url='https://earthengine-highvolume.googleapis.com'
+        )
+        gee_crs = 'EPSG:4326'
+        area_gdf = gpd.read_file(geom_file)
+        ee_geom = ee.Geometry.Rectangle(area_gdf.to_crs(gee_crs).total_bounds.tolist())
+        huc12_path = 'AZ_HUC12.geojson'
+        huc12_local_path = f'{download_dir}GEE_Data/{huc12_path}'
+        if not os.path.exists(huc12_local_path):
+            huc12_fc = ee.FeatureCollection('USGS/WBD/2017/HUC12').filterBounds(ee_geom)
+            task = ee.batch.Export.table.toCloudStorage(
+                collection=huc12_fc,
+                description='AZ HUC12',
+                bucket=gcloud_bucket,
+                fileNamePrefix=huc12_path,
+                fileFormat='GeoJSON'
+            )
+            task.start()
+            print(f'Waiting to download the HUC12 polygons over the study area from GCloud...')
+            while task.active():
+                continue
+            storage_client = storage.Client()
+            storage_bucket = storage_client.bucket(gcloud_bucket)
+            gcloud_blob = storage.Blob(bucket=storage_bucket, name=huc12_path)
+            print('Downloading', huc12_path)
+            gcloud_blob.download_to_filename(huc12_local_path)
+        year_list = list(range(start_year, end_year + 1))
+        print(f'Creating Fishnet with {tile_size} m tile size...')
+        fishnet_gdf = create_fishnet(
+            area_gdf,
+            fishnet_size=tile_size,
+            output_dir=f'{download_dir}/GW_Data/'
+        ).to_crs(gee_crs)
+        tile_val_list = []
+        for _, tile in fishnet_gdf.iterrows():
+            tile_gdf = gpd.GeoDataFrame(data={
+                'geometry': [tile.geometry],
+                'FID': [tile.FID]
+            })
+            xmin, ymin, xmax, ymax = tile_gdf.total_bounds.tolist()
+            fid = int(tile_gdf.iloc[0]['FID'])
+            tile_val_list.append((fid, xmin, ymin, xmax, ymax))
+        tile_chunks = generate_chunks(tile_val_list, num_workers)
+        itr = 1
+        num_chunks = int(np.ceil(fishnet_gdf.shape[0] / num_workers))
+        dask_cluster = LocalCluster(n_workers=num_workers, memory_limit='1G')
+        dask_cluster.scale(num_workers)
+        dask_client = Client(dask_cluster)
+        dask_client.wait_for_workers(1)
+        print(f'Using {num_workers} local workers...')
+        for tile_chunk in tile_chunks:
+            print(f'Working on tile chunk {itr} / {num_chunks} ...')
+            compute(
+                delayed(download_gee_tile)(tile_vals, data_dir, year_list, gcloud_project, verbose=False)
+                for tile_vals in tile_chunk
+            )
+            itr += 1
+        dask_client.close()
+    return data_dir
