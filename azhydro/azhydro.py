@@ -13,7 +13,7 @@ if __name__ == '__main__':
     input_dir = '../Data/Inputs/'
     gcloud_project = 'azhydro'
     gcloud_bucket = 'azhydro'
-    start_year = 1991
+    start_year = 1985
     end_year = 2023
     skip_download = False
     tile_size = 10000

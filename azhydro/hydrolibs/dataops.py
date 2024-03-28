@@ -83,7 +83,8 @@ def download_gee_tile(
         tile_values: tuple[int, float, float, float],
         download_dir: str,
         year_list: list,
-        gcloud_project: (str) = 'azhydro',
+        data_band_names: list,
+        gcloud_project: str = 'azhydro',
         verbose: bool = False
 ):
     """
@@ -93,6 +94,7 @@ def download_gee_tile(
     tile_values (tuple (int, float, float, float)): Tile values as a tuple of (FID, xmin, ymin, xmax, ymax)
     download_dir (str): Download directory path.
     year_list (list): List of years in YYYY format.
+    data_band_names (list): List of data bands as strings.
     gcloud_project (str): GCloud project name.
     verbose (bool): Set True to see extra details on file downloads.
 
@@ -108,41 +110,46 @@ def download_gee_tile(
                 opt_url='https://earthengine-highvolume.googleapis.com'
             )
             retry_ee_init = False
-        except (ee.EEException, requests.exceptions.RequestException, Exception) as e:
+        except (ee.EEException, requests.exceptions.RequestException, requests.exceptions.ConnectionError, Exception) as e:
             print('Initialization exception', e)
             retry_ee_init = True
             time.sleep(1)
     openet_ic = [
         ee.ImageCollection("OpenET/ENSEMBLE/CONUS/GRIDMET/MONTHLY/v2_0"),
-        ee.ImageCollection("projects/openet/ensemble/conus/gridmet/monthly/provisional")
+        ee.ImageCollection("projects/openet/assets/ensemble/conus/gridmet/monthly/provisional")
     ]
     ssebop_ic = [
         ee.ImageCollection("OpenET/SSEBOP/CONUS/GRIDMET/MONTHLY/v2_0"),
-        ee.ImageCollection("projects/openet/ssebop/conus/gridmet/monthly/provisional")
+        ee.ImageCollection("projects/openet/assets/ssebop/conus/gridmet/monthly/provisional")
     ]
     eemetric_ic = [
         ee.ImageCollection("OpenET/EEMETRIC/CONUS/GRIDMET/MONTHLY/v2_0"),
-        ee.ImageCollection("projects/openet/eemetric/conus/gridmet/monthly/provisional")
+        ee.ImageCollection("projects/openet/assets/eemetric/conus/gridmet/monthly/provisional")
     ]
     sims_ic = [
         ee.ImageCollection("OpenET/SIMS/CONUS/GRIDMET/MONTHLY/v2_0"),
-        ee.ImageCollection("projects/openet/sims/conus/gridmet/monthly/provisional")
+        ee.ImageCollection("projects/openet/assets/sims/conus/gridmet/monthly/provisional")
     ]
     pt_jpl_ic = [
         ee.ImageCollection("OpenET/PTJPL/CONUS/GRIDMET/MONTHLY/v2_0"),
-        ee.ImageCollection("projects/openet/ptjpl/conus/gridmet/monthly/provisional")
+        ee.ImageCollection("projects/openet/assets/ptjpl/conus/gridmet/monthly/provisional")
     ]
     geesebal_ic = [
         ee.ImageCollection("OpenET/GEESEBAL/CONUS/GRIDMET/MONTHLY/v2_0"),
-        ee.ImageCollection("projects/openet/geesebal/conus/gridmet/monthly/provisional")
+        ee.ImageCollection("projects/openet/assets/geesebal/conus/gridmet/monthly/provisional")
     ]
     disalexi_ic = [
         ee.ImageCollection("OpenET/DISALEXI/CONUS/GRIDMET/MONTHLY/v2_0"),
-        ee.ImageCollection("projects/openet/disalexi/conus/gridmet/monthly/provisional")
+        ee.ImageCollection("projects/openet/assets/disalexi/conus/gridmet/monthly/provisional")
     ]
     gridmet_ic = ee.ImageCollection("IDAHO_EPSCOR/GRIDMET")
     gridmet_drought_ic = ee.ImageCollection("GRIDMET/DROUGHT")
-    irrmapper_ic = ee.ImageCollection("UMT/Climate/IrrMapper_RF/v1_2")
+    gridmet_bc_ic = ee.ImageCollection('projects/openet/reference_et/gridmet/monthly')
+    prism_ic = ee.ImageCollection('OREGONSTATE/PRISM/AN81m')
+    daymet_ic = ee.ImageCollection('NASA/ORNL/DAYMET_V4')
+    conus404_ic = ee.ImageCollection('projects/openet/meteorology/conus/conus404/daily')
+    terraclimate_ic = ee.ImageCollection('IDAHO_EPSCOR/TERRACLIMATE')
+    irrmapper_ic = ee.ImageCollection('projects/ee-dgketchum/assets/IrrMapper/IrrMapperComp')
     cdl_ic = ee.ImageCollection("USDA/NASS/CDL")
     hsg = ee.Image(
         'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/land_use/'
@@ -183,13 +190,13 @@ def download_gee_tile(
             try:
                 valid_tile = tile_irr_sum.getInfo()['remapped'] > 0
                 retry_irr_mask = False
-            except ee.EEException as e:
+            except (ee.EEException, requests.exceptions.RequestException, requests.exceptions.ConnectionError) as e:
                 print('Error:', e, '.Retrying...')
                 retry_irr_mask = True
                 time.sleep(5)
         if valid_tile:
             openet_idx = 0
-            if year < 2016 or year > 2022:
+            if year < 2016:
                 openet_idx = 1
             openet_ensemble = openet_ic[openet_idx].select('et_ensemble_mad') \
                 .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
@@ -227,6 +234,12 @@ def download_gee_tile(
             gridmet_etr = gridmet_ic.select('etr') \
                 .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
                 .sum()
+            gridmet_bc_eto = gridmet_bc_ic.select('eto') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
+            gridmet_bc_etr = gridmet_bc_ic.select('etr') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
             gridmet_vpd = gridmet_ic.select('vpd') \
                 .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
                 .sum()
@@ -251,6 +264,67 @@ def download_gee_tile(
             gridmet_pdsi = gridmet_drought_ic.select('pdsi') \
                 .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
                 .median()
+            prism_precip = prism_ic.select('ppt') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
+            prism_tmmx = prism_ic.select('tmax') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .median() \
+                .add(273.15)
+            prism_tmmn = prism_ic.select('tmin') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .median()\
+                .add(273.15)
+            terraclimate_sm_first = terraclimate_ic.select('soil') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .first()
+            terraclimate_sm = terraclimate_ic.select('soil') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sort('system:time_start', False) \
+                .first() \
+                .subtract(terraclimate_sm_first) \
+                .multiply(0.1)
+            terraclimate_ro = terraclimate_ic.select('ro') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
+            if year < 2023:
+                daymet_precip = daymet_ic.select('prcp') \
+                    .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                    .sum()
+                daymet_tmmx = daymet_ic.select('tmax') \
+                    .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                    .median() \
+                    .add(273.15)
+                daymet_tmmn = daymet_ic.select('tmin') \
+                    .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                    .median() \
+                    .add(273.15)
+                conus404_precip = conus404_ic.select('PREC_ACC_NC') \
+                    .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                    .sum()
+                conus404_tmmx = conus404_ic.select('T2_MAX') \
+                    .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                    .median() \
+                    .add(273.15)
+                conus404_tmmn = conus404_ic.select('T2_MIN') \
+                    .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                    .median() \
+                    .add(273.15)
+                conus404_eto = conus404_ic.select('ETO_ASCE') \
+                    .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                    .sum()
+                conus404_etr = conus404_ic.select('ETR_ASCE') \
+                    .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                    .sum()
+            else:
+                daymet_precip = gridmet_precip
+                daymet_tmmx = gridmet_tmmx
+                daymet_tmmn = gridmet_tmmn
+                conus404_precip = gridmet_precip
+                conus404_tmmx = gridmet_tmmx
+                conus404_tmmn = gridmet_tmmn
+                conus404_eto = gridmet_bc_eto
+                conus404_etr = gridmet_bc_etr
             cdl_start_year = year
             cdl_end_year = year + 1
             if year < 2008:
@@ -276,6 +350,8 @@ def download_gee_tile(
                 gridmet_tmmn,
                 gridmet_eto,
                 gridmet_etr,
+                gridmet_bc_eto,
+                gridmet_bc_etr,
                 gridmet_vpd,
                 gridmet_vs,
                 gridmet_rmax,
@@ -284,40 +360,25 @@ def download_gee_tile(
                 gridmet_eddi1y,
                 gridmet_spei1y,
                 gridmet_pdsi,
+                prism_precip,
+                prism_tmmx,
+                prism_tmmn,
+                daymet_precip,
+                daymet_tmmx,
+                daymet_tmmn,
+                conus404_precip,
+                conus404_tmmx,
+                conus404_tmmn,
+                conus404_eto,
+                conus404_etr,
+                terraclimate_sm,
+                terraclimate_ro,
                 cdl,
                 hsg,
                 soil_depth,
                 ksat_mean,
                 nasa_dem,
                 nasa_dem_slope
-            ]
-            data_band_names = [
-                'annual_et_ensemble_mm',
-                'annual_et_ssebop_mm',
-                'annual_et_eemetric_mm',
-                'annual_et_sims_mm',
-                'annual_et_pt_jpl_mm',
-                'annual_et_geesebal_mm',
-                'annual_et_disalexi_mm',
-                'annual_gridmet_precip_mm',
-                'annual_tmmx_K',
-                'annual_tmmn_K',
-                'annual_eto_mm',
-                'annual_etr_mm',
-                'annual_vpd_kPa',
-                'annual_vs_mps',
-                'annual_rmax',
-                'annual_rmin',
-                'annual_spi1y',
-                'annual_eddi1y',
-                'annual_spei1y',
-                'annual_pdsi',
-                'crop_cdl',
-                'HSG',
-                'soil_depth_mm',
-                'ksat_mean_micromps',
-                'elevation_m',
-                'slope'
             ]
             data_img = openet_ensemble.rename(data_band_names[0])
             for band, band_name in zip(data_bands, data_band_names):
@@ -353,7 +414,7 @@ def download_gee_tile(
                         for chunk in r.iter_content(chunk_size=1024):
                             fd.write(chunk)
                     retry_download = False
-                except (ee.EEException, requests.exceptions.RequestException) as e:
+                except (ee.EEException, requests.exceptions.RequestException, requests.exceptions.ConnectionError) as e:
                     print('Error', e, 'during', local_file_name, 'download!')
                     print('Retrying download...')
                     retry_download = True
@@ -366,7 +427,7 @@ def download_gee_data(
         gcloud_project: str = 'azhydro',
         gcloud_bucket: str = 'azhydro',
         download_dir: str = '../../Data/Inputs/GEE_Data/',
-        start_year: int = 1991,
+        start_year: int = 1985,
         end_year: int = 2023,
         skip_download: bool = False,
         tile_size: int = 10000,
@@ -438,10 +499,58 @@ def download_gee_data(
             xmin, ymin, xmax, ymax = tile_gdf.total_bounds.tolist()
             fid = int(tile_gdf.iloc[0]['FID'])
             tile_val_list.append((fid, xmin, ymin, xmax, ymax))
+        data_band_names = [
+            'annual_et_ensemble_mm',
+            'annual_et_ssebop_mm',
+            'annual_et_eemetric_mm',
+            'annual_et_sims_mm',
+            'annual_et_pt_jpl_mm',
+            'annual_et_geesebal_mm',
+            'annual_et_disalexi_mm',
+            'annual_gridmet_precip_mm',
+            'annual_gridmet_tmmx_K',
+            'annual_gridmet_tmmn_K',
+            'annual_gridmet_eto_mm',
+            'annual_gridmet_etr_mm',
+            'annual_gridmet_bc_eto_mm',
+            'annual_gridmet_bc_etr_mm',
+            'annual_gridmet_vpd_kPa',
+            'annual_gridmet_vs_mps',
+            'annual_gridmet_rmax',
+            'annual_gridmet_rmin',
+            'annual_gridmet_spi1y',
+            'annual_gridmet_eddi1y',
+            'annual_gridmet_spei1y',
+            'annual_gridmet_pdsi',
+            'annual_prism_precip_mm',
+            'annual_prism_tmmx_K',
+            'annual_prism_tmmn_K',
+            'annual_daymet_precip_mm',
+            'annual_daymet_tmmx_K',
+            'annual_daymet_tmmn_K',
+            'annual_conus404_precip_mm',
+            'annual_conus404_tmmx_K',
+            'annual_conus404_tmmn_K',
+            'annual_conus404_eto_mm',
+            'annual_conus404_etr_mm',
+            'annual_terraclimate_sm_change_mm',
+            'annual_terraclimate_ro_mm',
+            'crop_cdl',
+            'HSG',
+            'soil_depth_mm',
+            'ksat_mean_micromps',
+            'elevation_m',
+            'slope'
+        ]
+        print('Each tile has the following bands in order:')
+        for band_idx, band_name in enumerate(data_band_names):
+            print(band_idx + 1, band_name)
+        print('\n')
+        tile_val_list = tile_val_list[1408:]
         tile_chunks = generate_chunks(tile_val_list, num_workers)
-        itr = 1
+        itr = 45
         num_chunks = int(np.ceil(fishnet_gdf.shape[0] / num_workers))
-        dask_cluster = LocalCluster(n_workers=num_workers, memory_limit='1G')
+        dask_cluster = LocalCluster(n_workers=num_workers, memory_limit='0.5G')
         dask_cluster.scale(num_workers)
         dask_client = Client(dask_cluster)
         dask_client.wait_for_workers(1)
@@ -449,7 +558,11 @@ def download_gee_data(
         for tile_chunk in tile_chunks:
             print(f'Working on tile chunk {itr} / {num_chunks} ...')
             compute(
-                delayed(download_gee_tile)(tile_vals, data_dir, year_list, gcloud_project, verbose=False)
+                delayed(download_gee_tile)(
+                    tile_vals, data_dir, year_list,
+                    data_band_names, gcloud_project,
+                    verbose=False
+                )
                 for tile_vals in tile_chunk
             )
             itr += 1
