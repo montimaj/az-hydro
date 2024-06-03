@@ -8,10 +8,16 @@ Source: https://code.usgs.gov/map/wu/aiwum-2.0-hydromap_ml-mirror/-/blob/main/ai
 
 import os
 import shutil
-import sys
 from glob import glob
-from os.path import dirname, abspath
-sys.path.insert(0, dirname(abspath(__file__)))
+
+
+def az_nodata() -> float:
+    """Return fixed no data value for rasters.
+
+    Returns
+        float: Pre-defined/hard-coded default no data value for the USGS MAP Project.
+    """
+    return -32767.0
 
 
 def makedirs(directory_list: tuple[str, ...] | str) -> None:
@@ -91,3 +97,21 @@ def copy_files(
         if verbose:
             print('Copying', f, 'to', outfile, '...')
         shutil.copyfile(f, outfile)
+
+
+def copy_file(input_file, output_file, suffix='', ext='.tif', verbose=True):
+    """
+    Copy a single file
+    :param input_file: Input file name
+    :param output_file: Output file name (should not contain extension)
+    :param suffix: Suffix string to append to output_file
+    :param ext: Extension of output file
+    :param verbose: Set True to get info on copy
+    :return: None
+    """
+
+    if suffix or ext:
+        output_file += suffix + ext
+    if verbose:
+        print('Copying', input_file, 'to', output_file, '...')
+    shutil.copyfile(input_file, output_file)

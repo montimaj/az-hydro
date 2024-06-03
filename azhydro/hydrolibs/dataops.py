@@ -13,7 +13,7 @@ import numpy as np
 import geopandas as gpd
 import rasterio as rio
 
-from .sysops import makedirs
+from sysops import makedirs
 from google.cloud import storage
 from shapely.geometry import Polygon
 from dask import delayed, compute
@@ -110,7 +110,9 @@ def download_gee_tile(
                 opt_url='https://earthengine-highvolume.googleapis.com'
             )
             retry_ee_init = False
-        except (ee.EEException, requests.exceptions.RequestException, requests.exceptions.ConnectionError, Exception) as e:
+        except (ee.EEException, requests.exceptions.RequestException,
+                requests.exceptions.ConnectionError, Exception
+                ) as e:
             print('Initialization exception', e)
             retry_ee_init = True
             time.sleep(1)
@@ -546,9 +548,8 @@ def download_gee_data(
         for band_idx, band_name in enumerate(data_band_names):
             print(band_idx + 1, band_name)
         print('\n')
-        tile_val_list = tile_val_list[1408:]
         tile_chunks = generate_chunks(tile_val_list, num_workers)
-        itr = 45
+        itr = 1
         num_chunks = int(np.ceil(fishnet_gdf.shape[0] / num_workers))
         dask_cluster = LocalCluster(n_workers=num_workers, memory_limit='0.5G')
         dask_cluster.scale(num_workers)
