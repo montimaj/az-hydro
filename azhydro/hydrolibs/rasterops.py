@@ -160,7 +160,7 @@ def crop_raster(
                 cropToCutline=True,
                 targetAlignedPixels=True,
                 xRes=xres, yRes=yres,
-                outputType='Float32',
+                outputType=gdal.GDT_Float32,
                 format='GTiff',
                 options=['-overwrite']
             )

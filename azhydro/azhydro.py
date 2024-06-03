@@ -31,7 +31,7 @@ if __name__ == '__main__':
     xres = 1000
     yres = 1000
     fill_attr = 'AF Pumped'
-    load_files = False
+    load_files = True
 
     gee_data_dir = download_gee_data(
         az_state,
@@ -59,6 +59,7 @@ if __name__ == '__main__':
         ref_file=ref_gw_file,
         already_reprojected=load_files
     )
+    load_files = False
     gw_raster_dir = gwops.create_gw_rasters(
         output_gw_vector_dir,
         output_gw_raster_dir,
