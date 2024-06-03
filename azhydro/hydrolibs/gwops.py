@@ -1,4 +1,8 @@
-# Author: Sayantan Majumdar
+"""
+Handle groundwater withdrawal processing codes.
+"""
+
+# Author: Dr. Sayantan Majumdar
 # Email: sayantan.majumdar@dri.edu
 
 import rasterops as rops

@@ -1,5 +1,9 @@
-# Author: Sayantan Majumdar
-# Email: sayantan.majumdar@colostate.edu
+"""
+Handle various raster operations.
+"""
+
+# Author: Dr. Sayantan Majumdar
+# Email: sayantan.majumdar@dri.edu
 
 import matplotlib.pyplot as plt
 import rasterio as rio

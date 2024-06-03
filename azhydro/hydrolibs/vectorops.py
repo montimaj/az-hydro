@@ -1,5 +1,9 @@
-# Author: Sayantan Majumdar
-# Email: sayantan.majumdar@colostate.edu
+"""
+Handle various vector operations
+"""
+
+# Author: Dr. Sayantan Majumdar
+# Email: sayantan.majumdar@dri.edu
 
 import geopandas as gpd
 import pandas as pd
