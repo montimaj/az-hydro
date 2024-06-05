@@ -14,8 +14,10 @@ import geopandas as gpd
 import rasterio as rio
 
 from sysops import makedirs
+from rasterops import reproject_raster_gdal
 from google.cloud import storage
 from shapely.geometry import Polygon
+from glob import glob
 from dask import delayed, compute
 from dask.distributed import Client, LocalCluster
 
@@ -434,7 +436,7 @@ def download_gee_data(
         skip_download: bool = False,
         tile_size: int = 10000,
         num_workers: int = 32
-) -> str:
+) -> tuple[str, list[str,...]]:
     """
     Download multiple GEE datasets as rasters at 100 m spatial resolution.
 
@@ -451,12 +453,56 @@ def download_gee_data(
     free GEE users.
 
     Returns:
-        str: Directory path containing all the mosaicked rasters.
+        tuple (str, list (str, ...)): Tuple containing the directory path containing all the downloaded GEE tiles and
+        the ordered list of band names for each tile.
     """
 
     data_dir = f'{download_dir}GEE_Data/GEE_Tiles/'
-    makedirs(data_dir)
+    data_band_names = [
+        'annual_et_ensemble_mm',
+        'annual_et_ssebop_mm',
+        'annual_et_eemetric_mm',
+        'annual_et_sims_mm',
+        'annual_et_pt_jpl_mm',
+        'annual_et_geesebal_mm',
+        'annual_et_disalexi_mm',
+        'annual_gridmet_precip_mm',
+        'annual_gridmet_tmmx_K',
+        'annual_gridmet_tmmn_K',
+        'annual_gridmet_eto_mm',
+        'annual_gridmet_etr_mm',
+        'annual_gridmet_bc_eto_mm',
+        'annual_gridmet_bc_etr_mm',
+        'annual_gridmet_vpd_kPa',
+        'annual_gridmet_vs_mps',
+        'annual_gridmet_rmax',
+        'annual_gridmet_rmin',
+        'annual_gridmet_spi1y',
+        'annual_gridmet_eddi1y',
+        'annual_gridmet_spei1y',
+        'annual_gridmet_pdsi',
+        'annual_prism_precip_mm',
+        'annual_prism_tmmx_K',
+        'annual_prism_tmmn_K',
+        'annual_daymet_precip_mm',
+        'annual_daymet_tmmx_K',
+        'annual_daymet_tmmn_K',
+        'annual_conus404_precip_mm',
+        'annual_conus404_tmmx_K',
+        'annual_conus404_tmmn_K',
+        'annual_conus404_eto_mm',
+        'annual_conus404_etr_mm',
+        'annual_terraclimate_sm_change_mm',
+        'annual_terraclimate_ro_mm',
+        'crop_cdl',
+        'HSG',
+        'soil_depth_mm',
+        'ksat_mean_micromps',
+        'elevation_m',
+        'slope'
+    ]
     if not skip_download:
+        makedirs(data_dir)
         print('Downloading GEE data...')
         ee.Initialize(
             project=gcloud_project,
@@ -501,49 +547,6 @@ def download_gee_data(
             xmin, ymin, xmax, ymax = tile_gdf.total_bounds.tolist()
             fid = int(tile_gdf.iloc[0]['FID'])
             tile_val_list.append((fid, xmin, ymin, xmax, ymax))
-        data_band_names = [
-            'annual_et_ensemble_mm',
-            'annual_et_ssebop_mm',
-            'annual_et_eemetric_mm',
-            'annual_et_sims_mm',
-            'annual_et_pt_jpl_mm',
-            'annual_et_geesebal_mm',
-            'annual_et_disalexi_mm',
-            'annual_gridmet_precip_mm',
-            'annual_gridmet_tmmx_K',
-            'annual_gridmet_tmmn_K',
-            'annual_gridmet_eto_mm',
-            'annual_gridmet_etr_mm',
-            'annual_gridmet_bc_eto_mm',
-            'annual_gridmet_bc_etr_mm',
-            'annual_gridmet_vpd_kPa',
-            'annual_gridmet_vs_mps',
-            'annual_gridmet_rmax',
-            'annual_gridmet_rmin',
-            'annual_gridmet_spi1y',
-            'annual_gridmet_eddi1y',
-            'annual_gridmet_spei1y',
-            'annual_gridmet_pdsi',
-            'annual_prism_precip_mm',
-            'annual_prism_tmmx_K',
-            'annual_prism_tmmn_K',
-            'annual_daymet_precip_mm',
-            'annual_daymet_tmmx_K',
-            'annual_daymet_tmmn_K',
-            'annual_conus404_precip_mm',
-            'annual_conus404_tmmx_K',
-            'annual_conus404_tmmn_K',
-            'annual_conus404_eto_mm',
-            'annual_conus404_etr_mm',
-            'annual_terraclimate_sm_change_mm',
-            'annual_terraclimate_ro_mm',
-            'crop_cdl',
-            'HSG',
-            'soil_depth_mm',
-            'ksat_mean_micromps',
-            'elevation_m',
-            'slope'
-        ]
         print('Each tile has the following bands in order:')
         for band_idx, band_name in enumerate(data_band_names):
             print(band_idx + 1, band_name)
@@ -568,4 +571,74 @@ def download_gee_data(
             )
             itr += 1
         dask_client.close()
-    return data_dir
+    return data_dir, data_band_names
+
+
+def resample_gee_tiles(
+        gee_tile_dir: str,
+        data_band_names: list[str, ...],
+        output_dir: str,
+        raster_res: float = 1000,
+        num_workers: int = 32,
+        already_resampled: bool = False
+) -> None:
+    """
+    Resample 30-m GEE tiles to a higher scale.
+
+    Args:
+        gee_tile_dir (str): GEE tile directory.
+        data_band_names (str): List of data band names.
+        output_dir (str): Output directory.
+        start_year (int): Start year in YYYY.
+        end_year (int): End year in YYYY.
+        raster_res (float): Raster resolution in m.
+        num_workers (int): Number of dask workers to use to resample GEE tiles.
+        already_resampled (bool): Set True to skip resampling.
+
+    Returns:
+        None.
+    """
+
+    if not already_resampled:
+        data_band_dict = {}
+        categorical_bands = [
+            'annual_gridmet_spi1y',
+            'annual_gridmet_eddi1y',
+            'annual_gridmet_spei1y',
+            'annual_gridmet_pdsi',
+            'crop_cdl',
+            'HSG',
+        ]
+        for band_num, data_band_name in enumerate(data_band_names):
+            if data_band_name not in categorical_bands:
+                val = (band_num + 1, 'average', 'float32')
+            else:
+                val = (band_num + 1, 'mode', 'byte')
+            data_band_dict[data_band_name] = val
+        gee_tiles = sorted(glob(gee_tile_dir + '*.tif'))
+        tile_chunks = generate_chunks(gee_tiles, num_workers)
+        itr = 1
+        num_chunks = int(np.ceil(len(gee_tiles) / num_workers))
+        dask_cluster = LocalCluster(n_workers=num_workers, memory_limit='1.5G')
+        dask_cluster.scale(num_workers)
+        dask_client = Client(dask_cluster)
+        dask_client.wait_for_workers(1)
+        print(f'Using {num_workers} local workers...')
+        resampling_factor = raster_res / 30
+        for tile_chunk in tile_chunks:
+            print(f'Working on tile chunk {itr} / {num_chunks} ...')
+            compute(
+                delayed(reproject_raster_gdal)(
+                    tile, None, resampling_factor,
+                    'average', True,
+                    None, None, None,
+                    'float32', data_band_dict,
+                    output_dir
+                )
+                for tile in tile_chunk
+            )
+            itr += 1
+        dask_client.close()
+        print('All tiles resampled...')
+    else:
+        print('GEE tiles already resampled...')

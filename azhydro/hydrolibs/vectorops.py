@@ -325,6 +325,7 @@ def shp2raster(
             initValues=0., layers=[layer_name],
             burnValues=[burn_value], allTouched=True
         )
+    gdal.UseExceptions()
     gdal.Rasterize(
         outfile_path,
         input_shp_file,

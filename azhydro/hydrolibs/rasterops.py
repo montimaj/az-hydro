@@ -11,6 +11,7 @@ import geopandas as gpd
 import numpy as np
 import os
 import multiprocessing
+import subprocess
 
 from osgeo import gdal
 from joblib import Parallel, delayed
@@ -20,7 +21,7 @@ from shapely.geometry import mapping
 from shapely.geometry import Point
 from glob import glob
 from fiona import transform
-from sysops import az_nodata
+from sysops import az_nodata, makedirs
 
 
 def read_raster_as_arr(
@@ -246,39 +247,48 @@ def get_raster_extent(
 
 def reproject_raster_gdal(
         input_raster_file: str,
-        outfile_path: str,
+        outfile_path: str or None = None,
         resampling_factor: int | None = 1,
         resampling_func: str = 'near',
         downsampling: bool = True,
         from_raster: str | rio.DatasetReader | None = None,
-        keep_original: bool = False,
         dst_xres: float | None = None,
         dst_yres: float | None = None,
-        output_dtype: str = 'float32'
+        output_dtype: str = 'float32',
+        src_band_dict: dict[str, tuple[int, str, str]] | None = None,
+        dst_tile_dir: str or None = None
 ) -> None:
     """Reproject raster using GDALWarp Python API.
 
     Args:
-        input_raster_file (str): Input raster file.
-        outfile_path (str): Output file path.
+        input_raster_file (str): Input raster file. This should follow Tile_<tile_number>_<year>.tif naming convention
+                                 if src_band_dict is specified.
+        outfile_path (str): Output file path. Set to None if src_band_dict is used.
         resampling_factor (int or None): Resampling factor (default 1).
         resampling_func (str): Resampling function. Valid names include 'near', 'bilinear', 'cubic', 'cubicspline',
                                'lanczos', 'sum', 'average', 'mode', 'max', 'min', 'med', 'q1', 'q3'.
         downsampling (bool): Downsample raster (default True).
         from_raster (str or rio.DatasetReader or None): Reproject input raster considering another raster
                                                         (either raster path or rasterio object).
-        keep_original (bool): Set True to only use the new projection system from 'from_raster'.
-                              The original raster extent is not changed.
         dst_xres (float or None): Target xres in input_raster_file units. Set resampling_factor to None.
         dst_yres (float or None): Target yres in input_raster_file units. Set resampling factor to None.
         output_dtype (str):  Output data type. Valid data types include 'byte', 'int16', 'int32', 'float32'.
+        src_band_dict (dict (str, tuple (int, str, str)) or None : A dictionary of source band names (as keys) and a
+                                                                   tuple of band number (one indexing),
+                                                                   band-specific resampling_func, and output_dtype.
+                                                                   By default, this is set to None. If not None, then
+                                                                   the number of key, value pairs should match the
+                                                                   number of bands in input_raster_file.
+        dst_tile_dir (str): If src_band_dict is used, the dst_tile_dir must be specified to write all the output tiles
+                            as TIF files.
 
     Returns:
         None
     """
+
     src_raster_file = rio.open(input_raster_file)
     rfile = src_raster_file
-    if from_raster and not keep_original:
+    if from_raster:
         if isinstance(from_raster, str):
             rfile = rio.open(from_raster)
         else:
@@ -306,18 +316,52 @@ def reproject_raster_gdal(
         'int32': gdal.GDT_Int32,
         'float32': gdal.GDT_Float32
     }
-    warp_options = gdal.WarpOptions(
-        outputBounds=extent,
-        dstNodata=no_data,
-        dstSRS=dst_proj,
-        resampleAlg=resampling_dict[resampling_func],
-        xRes=xres, yRes=yres,
-        outputType=output_dtype_dict[output_dtype],
-        multithread=True,
-        format='GTiff',
-        options=['-overwrite']
-    )
-    gdal.Warp(outfile_path, input_raster_file, options=warp_options)
+    gdal.UseExceptions()
+    gdal.PushErrorHandler('CPLQuietErrorHandler')
+    if src_band_dict is None:
+        warp_options = gdal.WarpOptions(
+            outputBounds=extent,
+            dstNodata=no_data,
+            dstSRS=dst_proj,
+            resampleAlg=resampling_dict[resampling_func],
+            xRes=xres, yRes=yres,
+            outputType=output_dtype_dict[output_dtype],
+            multithread=True,
+            format='GTiff',
+            options=['-overwrite']
+        )
+        gdal.Warp(outfile_path, input_raster_file, options=warp_options)
+    else:
+        year = input_raster_file[input_raster_file.rfind('_') + 1: input_raster_file.rfind('.')]
+        tile_num = input_raster_file[input_raster_file.rfind('Tile'): input_raster_file.find(year) - 1]
+        dst_tile_dir_year = f'{dst_tile_dir}{year}/'
+        makedirs(dst_tile_dir_year)
+        output_bands = []
+        for band_name in src_band_dict.keys():
+            band_num, resampling_func, output_dtype = src_band_dict[band_name]
+            outfile_path = f'{dst_tile_dir_year}{tile_num}_B{band_num}.tif'
+            warp_options = gdal.WarpOptions(
+                srcBands=[band_num],
+                dstBands=[1],
+                outputBounds=extent,
+                dstNodata=no_data,
+                dstSRS=dst_proj,
+                resampleAlg=resampling_dict[resampling_func],
+                xRes=xres, yRes=yres,
+                outputType=output_dtype_dict[output_dtype],
+                format='GTiff',
+                options=['-overwrite']
+            )
+            gdal.Warp(outfile_path, input_raster_file, options=warp_options)
+            output_bands.append(outfile_path)
+        output_tile = f'{dst_tile_dir}{tile_num}_{year}.tif'
+        output_bands = ' '.join(output_bands)
+        gdal_sys_call = f'{os.environ["CONDA_PREFIX"]}/bin/gdal_merge.py -separate {output_bands} -o {output_tile}'
+        subprocess.call(
+            gdal_sys_call,
+            shell=True,
+            stdout=subprocess.DEVNULL
+        )
 
 
 def crop_rasters(
@@ -398,8 +442,8 @@ def convert_gw_data(
     for raster_file in glob(input_raster_dir + pattern):
         out_raster = outdir + raster_file[raster_file.rfind(os.sep) + 1:]
         raster_arr, raster_ref = read_raster_as_arr(raster_file)
-        transform = raster_ref.get_transform()
-        xres, yres = transform[1] / 1000., transform[5] / 1000.
+        transform_ = raster_ref.get_transform()
+        xres, yres = transform_[1] / 1000., transform_[5] / 1000.
         raster_arr[~np.isnan(raster_arr)] *= 1.233 / (np.abs(xres * yres))
         no_data = az_nodata()
         raster_arr[np.isnan(raster_arr)] = no_data

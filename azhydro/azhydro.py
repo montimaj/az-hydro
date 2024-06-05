@@ -6,7 +6,7 @@ Main driver file for running the project.
 # Email: sayantan.majumdar@dri.edu
 
 import hydrolibs.gwops as gwops
-from hydrolibs.dataops import download_gee_data
+import hydrolibs.dataops as dataops
 
 if __name__ == '__main__':
     input_dir = '../Data/Inputs/'
@@ -31,9 +31,10 @@ if __name__ == '__main__':
     xres = 1000
     yres = 1000
     fill_attr = 'AF Pumped'
-    load_files = False
+    load_files = True
+    resampled_tile_dir = f'{output_dir}GEE_Tiles_{xres}m/'
 
-    gee_data_dir = download_gee_data(
+    gee_data_dir, data_band_names = dataops.download_gee_data(
         az_state,
         gcloud_project,
         gcloud_bucket,
@@ -74,4 +75,13 @@ if __name__ == '__main__':
         output_gw_raster_dir,
         az_state_file=f'{vector_reproj_dir}AZ.geojson',
         already_cropped=load_files
+    )
+    load_files = False
+    dataops.resample_gee_tiles(
+        gee_data_dir,
+        data_band_names,
+        resampled_tile_dir,
+        xres,
+        num_workers,
+        load_files
     )
