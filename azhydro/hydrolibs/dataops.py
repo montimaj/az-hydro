@@ -619,9 +619,10 @@ def resample_gee_tiles(
                 val = (band_num + 1, 'mode', gdal_dtype)
             data_band_dict[data_band_name] = val
         gee_tiles = sorted(glob(gee_tile_dir + '*.tif'))
-        tile_chunks = generate_chunks(gee_tiles, num_workers)
-        itr = 1
+        itr = 130
+        gee_tiles = gee_tiles[(itr - 1) * num_workers:]
         num_chunks = int(np.ceil(len(gee_tiles) / num_workers))
+        tile_chunks = generate_chunks(gee_tiles, num_workers)
         dask_cluster = LocalCluster(n_workers=num_workers, memory_limit='1.5G')
         dask_cluster.scale(num_workers)
         dask_client = Client(dask_cluster)

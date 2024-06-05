@@ -337,31 +337,34 @@ def reproject_raster_gdal(
         dst_tile_dir_year = f'{dst_tile_dir}{year}/'
         makedirs(dst_tile_dir_year)
         output_bands = []
-        for band_name in src_band_dict.keys():
-            band_num, resampling_func, output_dtype = src_band_dict[band_name]
-            outfile_path = f'{dst_tile_dir_year}{tile_num}_B{band_num}.tif'
-            warp_options = gdal.WarpOptions(
-                srcBands=[band_num],
-                dstBands=[1],
-                outputBounds=extent,
-                dstNodata=no_data,
-                dstSRS=dst_proj,
-                resampleAlg=resampling_dict[resampling_func],
-                xRes=xres, yRes=yres,
-                outputType=output_dtype_dict[output_dtype],
-                format='GTiff',
-                options=['-overwrite']
+        try:
+            for band_name in src_band_dict.keys():
+                band_num, resampling_func, output_dtype = src_band_dict[band_name]
+                outfile_path = f'{dst_tile_dir_year}{tile_num}_B{band_num}.tif'
+                warp_options = gdal.WarpOptions(
+                    srcBands=[band_num],
+                    dstBands=[1],
+                    outputBounds=extent,
+                    dstNodata=no_data,
+                    dstSRS=dst_proj,
+                    resampleAlg=resampling_dict[resampling_func],
+                    xRes=xres, yRes=yres,
+                    outputType=output_dtype_dict[output_dtype],
+                    format='GTiff',
+                    options=['-overwrite']
+                )
+                gdal.Warp(outfile_path, input_raster_file, options=warp_options)
+                output_bands.append(outfile_path)
+            output_tile = f'{dst_tile_dir}{tile_num}_{year}.tif'
+            output_bands = ' '.join(output_bands)
+            gdal_sys_call = f'{os.environ["CONDA_PREFIX"]}/bin/gdal_merge.py -separate {output_bands} -o {output_tile}'
+            subprocess.call(
+                gdal_sys_call,
+                shell=True,
+                stdout=subprocess.DEVNULL
             )
-            gdal.Warp(outfile_path, input_raster_file, options=warp_options)
-            output_bands.append(outfile_path)
-        output_tile = f'{dst_tile_dir}{tile_num}_{year}.tif'
-        output_bands = ' '.join(output_bands)
-        gdal_sys_call = f'{os.environ["CONDA_PREFIX"]}/bin/gdal_merge.py -separate {output_bands} -o {output_tile}'
-        subprocess.call(
-            gdal_sys_call,
-            shell=True,
-            stdout=subprocess.DEVNULL
-        )
+        except Exception as e:
+            print('Error occurred while resampling', input_raster_file, '\ne')
 
 
 def crop_rasters(
