@@ -613,7 +613,10 @@ def resample_gee_tiles(
             if data_band_name not in categorical_bands:
                 val = (band_num + 1, 'average', 'float32')
             else:
-                val = (band_num + 1, 'mode', 'byte')
+                gdal_dtype = 'int16'
+                if data_band_name in ['crop_cdl', 'HSG']:
+                    gdal_dtype = 'byte'
+                val = (band_num + 1, 'mode', gdal_dtype)
             data_band_dict[data_band_name] = val
         gee_tiles = sorted(glob(gee_tile_dir + '*.tif'))
         tile_chunks = generate_chunks(gee_tiles, num_workers)
