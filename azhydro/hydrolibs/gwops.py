@@ -8,6 +8,8 @@ Handle groundwater withdrawal processing codes.
 import rasterops as rops
 import vectorops as vops
 import os
+import shutil
+import numpy as np
 
 from sysops import makedirs
 from glob import glob
@@ -69,7 +71,6 @@ def crop_gw_rasters(
     """
 
     cropped_dir = f'{output_gw_dir}GW_Cropped/'
-    output_gw_dir = f'{cropped_dir}Fixed/'
     if not already_cropped:
         makedirs(cropped_dir)
         rops.crop_rasters(
@@ -77,15 +78,9 @@ def crop_gw_rasters(
             input_mask_file=az_state_file,
             ext_mask=True
         )
-        makedirs(output_gw_dir)
-        rops.fix_gw_raster_values(
-            cropped_dir,
-            outdir=output_gw_dir,
-            fix_only_negative=True
-        )
     else:
         print('GW rasters already cropped')
-    return output_gw_dir
+    return cropped_dir
 
 
 def preprocess_gw_csv(
@@ -135,15 +130,98 @@ def preprocess_gw_csv(
     return ref_file
 
 
+def create_gw_depth_rasters(
+        gw_volume_dir: str,
+        irrigated_area_dir: str,
+        outdir: str,
+        gw_pattern: str = '*.tif',
+        irr_prefix: str = 'IRR'
+) -> None:
+    """
+    Create GW withdrawal depth rasters.
+
+    Args:
+        gw_volume_dir (str): Input GW volume (acreft) directory.
+        irrigated_area_dir (str): The mosaicked annual irrigated area raster (km2) directory path.
+        outdir (str): Output raster directory containing the GW depth rasters (mm).
+        gw_pattern (str): File extension for the GW withdrawal rasters.
+        irr_prefix (str): Prefix for the irrigation raster files.
+
+    Returns:
+        None.
+    """
+
+    irr_reproj_dir = f'{irrigated_area_dir}Irr_Reproj/'
+    makedirs(irr_reproj_dir)
+    for gw_volume_file in glob(gw_volume_dir + gw_pattern):
+        year = gw_volume_file[gw_volume_file.rfind('_') + 1: gw_volume_file.rfind('.')]
+        irr_file = glob(f'{irrigated_area_dir}{irr_prefix}*{year}.tif')[0]
+        irr_reproj_file = f'{irr_reproj_dir}{irr_file[irr_file.rfind(os.sep) + 1:]}'
+        rops.reproject_raster_gdal(
+            irr_file,
+            irr_reproj_file,
+            from_raster=gw_volume_file
+        )
+        gw_depth_file = f'{outdir}{gw_volume_file[gw_volume_file.rfind(os.sep) + 1:]}'
+        gw_vol_arr, gw_vol_ref = rops.read_raster_as_arr(gw_volume_file)
+        irr_area_arr, _ = rops.read_raster_as_arr(irr_reproj_file)
+        irr_area_arr[np.isnan(gw_vol_arr)] = np.nan
+        gw_vol_arr[~np.isnan(gw_vol_arr)] *= 1.233 / irr_area_arr
+        no_data = rops.az_nodata()
+        gw_vol_arr[np.isnan(gw_vol_arr)] = no_data
+        rops.write_raster(
+            gw_vol_arr, gw_vol_ref, transform_=gw_vol_ref.transform,
+            outfile_path=gw_depth_file, no_data_value=no_data
+        )
+
+
+def fix_gw_raster_values(
+        input_raster_dir: str,
+        outdir: str,
+        max_threshold: float = 1e+5,
+        fix_only_negative: bool = False,
+        gw_pattern: str = 'GW*.tif'
+) -> None:
+    """
+    Fix unusually large values introduced by gdal_rasterize sometimes or remove negative pumpings indicating
+    no well data.
+
+    Args:
+        input_raster_dir (str): Input raster directory.
+        outdir (str): Output directory.
+        max_threshold (float): Max value beyond which values will be set to no data value, default unit is acrefeet.
+        fix_only_negative (bool): Set True to fix only negative values.
+        gw_pattern (str): File extension for the GW withdrawal rasters.
+
+    Returns:
+        None.
+    """
+
+    for raster_file in glob(input_raster_dir + gw_pattern):
+        out_raster = outdir + raster_file[raster_file.rfind(os.sep) + 1:]
+        raster_arr, raster_file = rops.read_raster_as_arr(raster_file)
+        no_data = rops.az_nodata()
+        raster_arr[np.isnan(raster_arr)] = no_data
+        raster_arr[np.logical_and(raster_arr > 0, raster_arr < 1e-8)] = 0.
+        if fix_only_negative:
+            raster_arr[raster_arr < 0] = no_data
+        else:
+            raster_arr[raster_arr >= max_threshold] = no_data
+        rops.write_raster(
+            raster_arr, raster_file, transform_=raster_file.transform,
+            outfile_path=out_raster, no_data_value=no_data
+        )
+
+
 def create_gw_rasters(
         input_gw_dir: str,
         output_gw_dir: str,
+        irrigated_area_dir: str,
         xres: float = 1000.,
         yres: float = 1000.,
-        max_gw: float = 3000.,
         value_field: str | None = None,
         value_field_pos: int = 0,
-        convert_units: bool = True,
+        irr_prefix: str = 'IRR',
         already_created: bool = True
 ) -> str:
     """
@@ -152,51 +230,48 @@ def create_gw_rasters(
     Args:
         input_gw_dir (str): Input directory containing preprocessed GW files from #preprocess_gw_csv.
         output_gw_dir (str): Output directory.
+        irrigated_area_dir (str): The mosaicked annual irrigated area raster directory path.
         xres (float): X-Resolution (map unit).
         yres (float): Y-Resolution (map unit).
         max_gw (float): Maximum GW pumping in mm. Any value higher than this will be set to no data.
         value_field (str or None): Name of the value attribute. Set None to use value_field_pos.
         value_field_pos (int): Value field position (zero indexing).
-        convert_units (bool): If true, converts GW pumping values in acreft to mm.
+        irr_prefix (str): Prefix for the irrigation raster files.
         already_created (bool): Set False to re-compute GW pumping rasters.
 
     Returns:
-        str: Output raster directory path.
+        str: Output raster directory path containing the GW withdrawal depth rasters (mm).
     """
 
-    fixed_dir = f'{output_gw_dir}Fixed/'
-    converted_dir = f'{output_gw_dir}Converted/'
-    if convert_units:
-        final_gw_dir = converted_dir
-    else:
-        final_gw_dir = fixed_dir
+    gw_depth_dir = f'{output_gw_dir}GW_Depths/'
     if not already_created:
-        print('Converting SHP to TIF...')
-        makedirs(fixed_dir)
+        print('Creating GW withdrawal volume (acreft) rasters...')
+        gw_volume_dir_uncorrected = f'{output_gw_dir}Uncorrected_GW_Volumes/'
+        makedirs((gw_volume_dir_uncorrected, gw_depth_dir))
         vops.shps2rasters(
             input_gw_dir,
-            output_gw_dir,
+            gw_volume_dir_uncorrected,
             xres=xres, yres=yres,
             value_field=value_field,
             value_field_pos=value_field_pos
         )
-        if convert_units:
-            max_gw *= xres * yres / 1.233e+6
-        rops.fix_gw_raster_values(
-            output_gw_dir,
-            max_threshold=max_gw,
-            outdir=fixed_dir
+        gw_volume_dir = f'{output_gw_dir}GW_Volumes/'
+        fix_gw_raster_values(
+            gw_volume_dir_uncorrected,
+            gw_volume_dir,
+            fix_only_negative=True
         )
-        final_gw_dir = fixed_dir
-        if convert_units:
-            print('Changing GW units from acreft to mm')
-            makedirs(converted_dir)
-            rops.convert_gw_data(fixed_dir, converted_dir)
-            final_gw_dir = converted_dir
+        shutil.rmtree(gw_volume_dir_uncorrected, ignore_errors=True)
+        print('Creating GW withdrawal depth (mm) rasters...')
+        create_gw_depth_rasters(
+            gw_volume_dir,
+            gw_depth_dir,
+            irrigated_area_dir,
+            irr_prefix=irr_prefix
+        )
     else:
         print('GW  pumping rasters already created')
-    return final_gw_dir
-
+    return gw_depth_dir
 
 
 

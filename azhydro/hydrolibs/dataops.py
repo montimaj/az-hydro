@@ -9,12 +9,13 @@ import ee
 import os
 import time
 import requests
+import subprocess
 import numpy as np
 import geopandas as gpd
 import rasterio as rio
 
 from sysops import makedirs
-from rasterops import reproject_raster_gdal
+from rasterops import reproject_raster_gdal, read_raster_as_arr, write_raster
 from google.cloud import storage
 from shapely.geometry import Polygon
 from glob import glob
@@ -586,11 +587,9 @@ def resample_gee_tiles(
     Resample 30-m GEE tiles to a higher scale.
 
     Args:
-        gee_tile_dir (str): GEE tile directory.
+        gee_tile_dir (str): GEE tile directory containing the 30-m multi-band rasters.
         data_band_names (str): List of data band names.
         output_dir (str): Output directory.
-        start_year (int): Start year in YYYY.
-        end_year (int): End year in YYYY.
         raster_res (float): Raster resolution in m.
         num_workers (int): Number of dask workers to use to resample GEE tiles.
         already_resampled (bool): Set True to skip resampling.
@@ -619,7 +618,7 @@ def resample_gee_tiles(
                 val = (band_num + 1, 'mode', gdal_dtype)
             data_band_dict[data_band_name] = val
         gee_tiles = sorted(glob(gee_tile_dir + '*.tif'))
-        itr = 130
+        itr = 1
         gee_tiles = gee_tiles[(itr - 1) * num_workers:]
         num_chunks = int(np.ceil(len(gee_tiles) / num_workers))
         tile_chunks = generate_chunks(gee_tiles, num_workers)
@@ -646,3 +645,130 @@ def resample_gee_tiles(
         print('All tiles resampled...')
     else:
         print('GEE tiles already resampled...')
+
+
+def create_irrigation_tiles(
+        gee_tile_dir: str,
+        output_dir: str,
+        start_year: int = 1985,
+        end_year: int = 2023,
+        raster_res: float = 1000,
+        output_prefix: str = 'IRR',
+        already_created: bool = False
+) -> str:
+    """
+    Create irrigated area tile rasters by aggregating 30-m GEE tiles which are already masked using IrrMapper.
+
+    Args:
+        gee_tile_dir: GEE tile directory containing the 30-m multi-band rasters.
+        output_dir (str): Output directory.
+        start_year (int): Start year in YYYY.
+        end_year (int): End year in YYYY.
+        raster_res (float): Raster resolution in m.
+        output_prefix (str): Prefix for the output file names.
+        already_created (bool): Set True to skip creating irrigated area rasters.
+
+    Returns:
+        str: Directory path to the resampled irrigated area tiles
+    """
+
+    irr_resampled_dir = f'{output_dir}Irrigation_{raster_res}m/'
+    if not already_created:
+        irr_30m_dir = f'{output_dir}Irrigation_30m/'
+        makedirs((irr_30m_dir, irr_resampled_dir))
+        resampling_factor = raster_res / 30
+        for year in range(start_year, end_year + 1):
+            gee_yearly_tiles = glob(f'{gee_tile_dir}*{year}.tif')
+            for tile in gee_yearly_tiles:
+                tile_file = tile[tile.rfind(os.sep) + 1:]
+                try:
+                    tile_arr, tile_obj = read_raster_as_arr(tile)
+                    tile_arr[tile_arr > 0] = .0009 # 900 m2 = 0.0009 km2
+                    irr_raster_file_30m = f'{irr_30m_dir}{output_prefix}_{tile_file}'
+                    write_raster(
+                        tile_arr,
+                        tile_obj,
+                        transform_=tile_obj.transform,
+                        outfile_path=irr_raster_file_30m,
+                        no_data_value=0,
+                        num_bands=1
+                    )
+                    irr_raster_file_resampled = f'{irr_resampled_dir}{output_prefix}_{tile_file}'
+                    reproject_raster_gdal(
+                        irr_raster_file_30m,
+                        irr_raster_file_resampled,
+                        resampling_factor=resampling_factor,
+                        resampling_func='sum'
+                    )
+                except Exception as e:
+                    print('Error occured while processing', tile, '\n', e)
+                    continue
+    return irr_resampled_dir
+
+
+def mosaic_tiles(
+        input_tile_dir: str,
+        output_dir: str,
+        start_year: int = 1985,
+        end_year: int = 2023,
+        output_prefix: str = 'Predictor',
+        already_mosaicked: bool = False,
+) -> None:
+    """
+    Mosaic all tiles based on the start and end years.
+
+    Args:
+        input_tile_dir (str): Input tile directory. The naming convention is Tile_<tile_number>_<year>.tif.
+        output_dir (str): Output directory.
+        start_year (int): Start year in YYYY.
+        end_year (int): End year in YYYY.
+        output_prefix (str): Output prefix name to append to output files.
+        already_mosaicked (bool): Set True to skip mosaicking.
+
+    Returns:
+        None.
+    """
+
+    if not already_mosaicked:
+        makedirs(output_dir)
+        for year in range(start_year, end_year + 1):
+            tiles = ' '.join(glob(f'{input_tile_dir}*{year}.tif'))
+            merged_tif = f'{output_dir}{output_prefix}_{year}.tif'
+            gdal_sys_call = f'{os.environ["CONDA_PREFIX"]}/bin/gdal_merge.py -o {merged_tif} -of GTiff -init 0 {tiles}'
+            subprocess.call(
+                gdal_sys_call,
+                shell=True,
+                stdout=subprocess.DEVNULL
+            )
+
+
+def reproject_gee_mosaics(
+        gee_mosaic_dir: str,
+        output_dir: str,
+        gw_data_dir: str,
+        already_reprojected: bool = False
+) -> None:
+    """
+    Reproject all predictor data mosaics using groundwater withdrawal rasters.
+
+    Args:
+        gee_mosaic_dir (str): Path to the GEE mosaics.
+        output_dir (str): Output directory to store the reprojected rasters.
+        gw_data_dir (str): Groundwater depth raster directory.
+        already_reprojected (bool): Set True to skip reprojecting the mosaics.
+
+    Returns:
+        None.
+    """
+
+    if not already_reprojected:
+        makedirs(output_dir)
+        gee_mosaics = glob(gee_mosaic_dir + '*.tif')
+        gw_ref = glob(gw_data_dir + '*.tif')[0]
+        for gee_mosaic in gee_mosaics:
+            gee_mosaic_reproj = f'{output_dir}{gee_mosaic[gee_mosaic.rfind(os.sep) + 1:]}'
+            reproject_raster_gdal(
+                gee_mosaic,
+                gee_mosaic_reproj,
+                from_raster=gw_ref
+            )

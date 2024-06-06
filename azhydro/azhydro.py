@@ -28,11 +28,14 @@ if __name__ == '__main__':
     skip_download = True
     tile_size = 10000
     num_workers = 32
-    xres = 1000
-    yres = 1000
+    xres = 500
+    yres = 500
     fill_attr = 'AF Pumped'
-    load_files = True
     resampled_tile_dir = f'{output_dir}GEE_Tiles_{xres}m/'
+    gee_mosaic_data_dir = f'{output_dir}GEE_Mosaics/'
+    pred_data_dir = f'{output_dir}Predictor_Data/'
+    irr_output_prefix = 'IRR'
+    load_files = True
 
     gee_data_dir, data_band_names = dataops.download_gee_data(
         az_state,
@@ -45,7 +48,6 @@ if __name__ == '__main__':
         tile_size,
         num_workers
     )
-
     ref_gw_file = gwops.preprocess_gw_csv(
         well_reg_file,
         gw_csv_dir,
@@ -60,21 +62,22 @@ if __name__ == '__main__':
         ref_file=ref_gw_file,
         already_reprojected=load_files
     )
-
-    gw_raster_dir = gwops.create_gw_rasters(
-        output_gw_vector_dir,
-        output_gw_raster_dir,
-        already_created=load_files,
-        value_field=fill_attr,
-        xres=xres,
-        yres=yres,
-        max_gw=3000
+    irr_tile_dir = dataops.create_irrigation_tiles(
+        gee_data_dir,
+        output_dir,
+        start_year,
+        end_year,
+        xres,
+        output_prefix=irr_output_prefix,
+        already_created=load_files
     )
-    output_gw_raster_dir = gwops.crop_gw_rasters(
-        output_gw_raster_dir,
-        output_gw_raster_dir,
-        az_state_file=f'{vector_reproj_dir}AZ.geojson',
-        already_cropped=load_files
+    dataops.mosaic_tiles(
+        irr_tile_dir,
+        gee_mosaic_data_dir,
+        start_year,
+        end_year,
+        output_prefix=irr_output_prefix,
+        already_mosaicked=load_files
     )
     load_files = False
     dataops.resample_gee_tiles(
@@ -85,3 +88,33 @@ if __name__ == '__main__':
         num_workers,
         load_files
     )
+    dataops.mosaic_tiles(
+        resampled_tile_dir,
+        gee_mosaic_data_dir,
+        start_year,
+        end_year,
+        already_mosaicked=load_files
+    )
+    gw_raster_dir = gwops.create_gw_rasters(
+        output_gw_vector_dir,
+        output_gw_raster_dir,
+        irrigated_area_dir=gee_mosaic_data_dir,
+        already_created=load_files,
+        value_field=fill_attr,
+        xres=xres,
+        yres=yres,
+        irr_prefix=irr_output_prefix
+    )
+    gw_raster_dir = gwops.crop_gw_rasters(
+        gw_raster_dir,
+        gw_raster_dir,
+        az_state_file=f'{vector_reproj_dir}AZ.geojson',
+        already_cropped=load_files
+    )
+    dataops.reproject_gee_mosaics(
+        gee_mosaic_data_dir,
+        pred_data_dir,
+        gw_raster_dir,
+        already_reprojected=load_files
+    )
+

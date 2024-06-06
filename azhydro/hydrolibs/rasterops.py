@@ -66,7 +66,8 @@ def write_raster(
         outfile_path: str,
         no_data_value: float,
         ref_file: str | None = None,
-        out_crs: str | None = None
+        out_crs: str | None = None,
+        num_bands: int | None = None
 ) -> None:
     """Write raster file in GeoTIFF format.
 
@@ -78,6 +79,7 @@ def write_raster(
         no_data_value (float): No data value for raster (default float32 type is considered).
         ref_file (str): Write output raster considering parameters from reference raster file path
         out_crs (str): Output crs.
+        num_bands (int or None): Number of bands to write. If None, raster_file.count number of bands will be used.
 
     Returns:
         None
@@ -88,6 +90,8 @@ def write_raster(
     crs = raster_file.crs
     if out_crs:
         crs = out_crs
+    if num_bands is None:
+        num_bands = raster_file.count
     with rio.open(
             outfile_path,
             'w',
@@ -97,10 +101,10 @@ def write_raster(
             dtype=raster_data.dtype,
             crs=crs,
             transform=transform_,
-            count=raster_file.count,
+            count=num_bands,
             nodata=no_data_value
     ) as dst:
-        dst.write(raster_data, raster_file.count)
+        dst.write(raster_data, num_bands)
 
 
 def crop_raster(
@@ -248,7 +252,7 @@ def get_raster_extent(
 def reproject_raster_gdal(
         input_raster_file: str,
         outfile_path: str or None = None,
-        resampling_factor: int | None = 1,
+        resampling_factor: float | None = 1,
         resampling_func: str = 'near',
         downsampling: bool = True,
         from_raster: str | rio.DatasetReader | None = None,
@@ -264,7 +268,7 @@ def reproject_raster_gdal(
         input_raster_file (str): Input raster file. This should follow Tile_<tile_number>_<year>.tif naming convention
                                  if src_band_dict is specified.
         outfile_path (str): Output file path. Set to None if src_band_dict is used.
-        resampling_factor (int or None): Resampling factor (default 1).
+        resampling_factor (float or None): Resampling factor (default 1).
         resampling_func (str): Resampling function. Valid names include 'near', 'bilinear', 'cubic', 'cubicspline',
                                'lanczos', 'sum', 'average', 'mode', 'max', 'min', 'med', 'q1', 'q3'.
         downsampling (bool): Downsample raster (default True).
@@ -286,58 +290,58 @@ def reproject_raster_gdal(
         None
     """
 
-    src_raster_file = rio.open(input_raster_file)
-    rfile = src_raster_file
-    if from_raster:
-        if isinstance(from_raster, str):
-            rfile = rio.open(from_raster)
+    try:
+        src_raster_file = rio.open(input_raster_file)
+        rfile = src_raster_file
+        if from_raster:
+            if isinstance(from_raster, str):
+                rfile = rio.open(from_raster)
+            else:
+                rfile = from_raster
+            resampling_factor = 1
+        xres, yres = rfile.res
+        extent = get_raster_extent(rfile)
+        dst_proj = rfile.crs.to_string()
+        no_data = src_raster_file.nodata
+        if dst_xres and dst_yres:
+            xres, yres = dst_xres, dst_yres
+        elif resampling_factor:
+            if not downsampling:
+                resampling_factor = 1 / resampling_factor
+            xres, yres = xres * resampling_factor, yres * resampling_factor
+        resampling_dict = {
+            'near': gdal.GRA_NearestNeighbour, 'bilinear': gdal.GRA_Bilinear, 'cubic': gdal.GRA_Cubic,
+            'cubicspline': gdal.GRA_CubicSpline, 'lanczos': gdal.GRA_Lanczos,  'sum': gdal.GRA_Sum,
+            'average': gdal.GRA_Average, 'mode': gdal.GRA_Mode, 'max': gdal.GRA_Max,
+            'min': gdal.GRA_Min, 'med': gdal.GRA_Med, 'q1': gdal.GRA_Q1, 'q3': gdal.GRA_Q3,
+        }
+        output_dtype_dict = {
+            'byte': gdal.GDT_Byte,
+            'int16': gdal.GDT_Int16,
+            'int32': gdal.GDT_Int32,
+            'float32': gdal.GDT_Float32
+        }
+        gdal.UseExceptions()
+        gdal.PushErrorHandler('CPLQuietErrorHandler')
+        if src_band_dict is None:
+            warp_options = gdal.WarpOptions(
+                outputBounds=extent,
+                dstNodata=no_data,
+                dstSRS=dst_proj,
+                resampleAlg=resampling_dict[resampling_func],
+                xRes=xres, yRes=yres,
+                outputType=output_dtype_dict[output_dtype],
+                multithread=True,
+                format='GTiff',
+                options=['-overwrite']
+            )
+            gdal.Warp(outfile_path, input_raster_file, options=warp_options)
         else:
-            rfile = from_raster
-        resampling_factor = 1
-    xres, yres = rfile.res
-    extent = get_raster_extent(rfile)
-    dst_proj = rfile.crs.to_string()
-    no_data = src_raster_file.nodata
-    if dst_xres and dst_yres:
-        xres, yres = dst_xres, dst_yres
-    elif resampling_factor:
-        if not downsampling:
-            resampling_factor = 1 / resampling_factor
-        xres, yres = xres * resampling_factor, yres * resampling_factor
-    resampling_dict = {
-        'near': gdal.GRA_NearestNeighbour, 'bilinear': gdal.GRA_Bilinear, 'cubic': gdal.GRA_Cubic,
-        'cubicspline': gdal.GRA_CubicSpline, 'lanczos': gdal.GRA_Lanczos,  'sum': gdal.GRA_Sum,
-        'average': gdal.GRA_Average, 'mode': gdal.GRA_Mode, 'max': gdal.GRA_Max,
-        'min': gdal.GRA_Min, 'med': gdal.GRA_Med, 'q1': gdal.GRA_Q1, 'q3': gdal.GRA_Q3,
-    }
-    output_dtype_dict = {
-        'byte': gdal.GDT_Byte,
-        'int16': gdal.GDT_Int16,
-        'int32': gdal.GDT_Int32,
-        'float32': gdal.GDT_Float32
-    }
-    gdal.UseExceptions()
-    gdal.PushErrorHandler('CPLQuietErrorHandler')
-    if src_band_dict is None:
-        warp_options = gdal.WarpOptions(
-            outputBounds=extent,
-            dstNodata=no_data,
-            dstSRS=dst_proj,
-            resampleAlg=resampling_dict[resampling_func],
-            xRes=xres, yRes=yres,
-            outputType=output_dtype_dict[output_dtype],
-            multithread=True,
-            format='GTiff',
-            options=['-overwrite']
-        )
-        gdal.Warp(outfile_path, input_raster_file, options=warp_options)
-    else:
-        year = input_raster_file[input_raster_file.rfind('_') + 1: input_raster_file.rfind('.')]
-        tile_num = input_raster_file[input_raster_file.rfind('Tile'): input_raster_file.find(year) - 1]
-        dst_tile_dir_year = f'{dst_tile_dir}{year}/'
-        makedirs(dst_tile_dir_year)
-        output_bands = []
-        try:
+            year = input_raster_file[input_raster_file.rfind('_') + 1: input_raster_file.rfind('.')]
+            tile_num = input_raster_file[input_raster_file.rfind('Tile'): input_raster_file.find(year) - 1]
+            dst_tile_dir_year = f'{dst_tile_dir}{year}/'
+            makedirs(dst_tile_dir_year)
+            output_bands = []
             for band_name in src_band_dict.keys():
                 band_num, resampling_func, output_dtype = src_band_dict[band_name]
                 outfile_path = f'{dst_tile_dir_year}{tile_num}_B{band_num}.tif'
@@ -363,8 +367,8 @@ def reproject_raster_gdal(
                 shell=True,
                 stdout=subprocess.DEVNULL
             )
-        except Exception as e:
-            print('Error occurred while resampling', input_raster_file, '\ne')
+    except Exception as e:
+        print('Error occurred while resampling', input_raster_file, '\n', e)
 
 
 def crop_rasters(
@@ -423,72 +427,3 @@ def parallel_crop_rasters(
         out_raster, ext_mask=ext_mask,
         multi_poly=multi_poly
     )
-
-
-def convert_gw_data(
-        input_raster_dir: str,
-        outdir: str,
-        pattern: str = '*.tif'
-) -> None:
-    """
-    Convert groundwater data (in acreft) to mm.
-
-    Args:
-        input_raster_dir (str): Input raster directory.
-        outdir (str): Output raster directory.
-        pattern (str): Raster extension.
-
-    Returns:
-        None.
-    """
-
-    for raster_file in glob(input_raster_dir + pattern):
-        out_raster = outdir + raster_file[raster_file.rfind(os.sep) + 1:]
-        raster_arr, raster_ref = read_raster_as_arr(raster_file)
-        transform_ = raster_ref.get_transform()
-        xres, yres = transform_[1] / 1000., transform_[5] / 1000.
-        raster_arr[~np.isnan(raster_arr)] *= 1.233 / (np.abs(xres * yres))
-        no_data = az_nodata()
-        raster_arr[np.isnan(raster_arr)] = no_data
-        write_raster(
-            raster_arr, raster_ref, transform_=raster_ref.transform,
-            outfile_path=out_raster, no_data_value=no_data
-        )
-
-
-def fix_gw_raster_values(
-        input_raster_dir: str,
-        outdir: str,
-        max_threshold: float = 1e+5,
-        fix_only_negative: bool = False,
-        pattern: str = 'GW*.tif'
-) -> None:
-    """
-    Fix unusually large values introduced by gdal_rasterize sometimes or remove negative pumpings indicating
-    no well data.
-
-    Args:
-        input_raster_dir (str): Input raster directory.
-        outdir (str): Output directory.
-        max_threshold (float): Max value beyond which values will be set to no data value, default unit is acrefeet.
-        fix_only_negative (bool): Set True to fix only negative values.
-        pattern (str): File pattern.
-
-    Returns:
-        None.
-    """
-
-    for raster_file in glob(input_raster_dir + pattern):
-        out_raster = outdir + raster_file[raster_file.rfind(os.sep) + 1:]
-        raster_arr, raster_file = read_raster_as_arr(raster_file)
-        no_data = az_nodata()
-        raster_arr[np.isnan(raster_arr)] = no_data
-        raster_arr[np.logical_and(raster_arr > 0, raster_arr < 1e-8)] = 0.
-        if fix_only_negative:
-            raster_arr[raster_arr < 0] = no_data
-        else:
-            raster_arr[raster_arr >= max_threshold] = no_data
-        write_raster(
-            raster_arr, raster_file, transform_=raster_file.transform,
-            outfile_path=out_raster, no_data_value=no_data
-        )
