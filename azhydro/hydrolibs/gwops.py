@@ -155,24 +155,26 @@ def create_gw_depth_rasters(
     makedirs(irr_reproj_dir)
     for gw_volume_file in glob(gw_volume_dir + gw_pattern):
         year = gw_volume_file[gw_volume_file.rfind('_') + 1: gw_volume_file.rfind('.')]
-        irr_file = glob(f'{irrigated_area_dir}{irr_prefix}*{year}.tif')[0]
-        irr_reproj_file = f'{irr_reproj_dir}{irr_file[irr_file.rfind(os.sep) + 1:]}'
-        rops.reproject_raster_gdal(
-            irr_file,
-            irr_reproj_file,
-            from_raster=gw_volume_file
-        )
-        gw_depth_file = f'{outdir}{gw_volume_file[gw_volume_file.rfind(os.sep) + 1:]}'
-        gw_vol_arr, gw_vol_ref = rops.read_raster_as_arr(gw_volume_file)
-        irr_area_arr, _ = rops.read_raster_as_arr(irr_reproj_file)
-        irr_area_arr[np.isnan(gw_vol_arr)] = np.nan
-        gw_vol_arr[~np.isnan(gw_vol_arr)] *= 1.233 / irr_area_arr
-        no_data = rops.az_nodata()
-        gw_vol_arr[np.isnan(gw_vol_arr)] = no_data
-        rops.write_raster(
-            gw_vol_arr, gw_vol_ref, transform_=gw_vol_ref.transform,
-            outfile_path=gw_depth_file, no_data_value=no_data
-        )
+        irr_file = f'{irrigated_area_dir}{irr_prefix}_{year}.tif'
+        if os.path.exists(irr_file):
+            irr_reproj_file = f'{irr_reproj_dir}{irr_prefix}_{year}.tif'
+            rops.reproject_raster_gdal(
+                irr_file,
+                irr_reproj_file,
+                from_raster=gw_volume_file
+            )
+            gw_depth_file = f'{outdir}{gw_volume_file[gw_volume_file.rfind(os.sep) + 1:]}'
+            gw_vol_arr, gw_vol_ref = rops.read_raster_as_arr(gw_volume_file)
+            irr_area_arr, _ = rops.read_raster_as_arr(irr_reproj_file)
+            irr_area_arr[np.isnan(gw_vol_arr)] = np.nan
+            gw_depth_arr = gw_vol_arr * 1.233 / irr_area_arr
+            no_data = rops.az_nodata()
+            gw_depth_arr[np.isnan(gw_depth_arr)] = no_data
+            gw_depth_arr[np.isinf(gw_depth_arr)] = no_data
+            rops.write_raster(
+                gw_depth_arr, gw_vol_ref, transform_=gw_vol_ref.transform,
+                outfile_path=gw_depth_file, no_data_value=no_data
+            )
 
 
 def fix_gw_raster_values(
@@ -248,25 +250,26 @@ def create_gw_rasters(
         print('Creating GW withdrawal volume (acreft) rasters...')
         gw_volume_dir_uncorrected = f'{output_gw_dir}Uncorrected_GW_Volumes/'
         makedirs((gw_volume_dir_uncorrected, gw_depth_dir))
-        vops.shps2rasters(
-            input_gw_dir,
-            gw_volume_dir_uncorrected,
-            xres=xres, yres=yres,
-            value_field=value_field,
-            value_field_pos=value_field_pos
-        )
+        # vops.shps2rasters(
+        #     input_gw_dir,
+        #     gw_volume_dir_uncorrected,
+        #     xres=xres, yres=yres,
+        #     value_field=value_field,
+        #     value_field_pos=value_field_pos
+        # )
         gw_volume_dir = f'{output_gw_dir}GW_Volumes/'
-        fix_gw_raster_values(
-            gw_volume_dir_uncorrected,
-            gw_volume_dir,
-            fix_only_negative=True
-        )
+        makedirs(gw_volume_dir)
+        # fix_gw_raster_values(
+        #     gw_volume_dir_uncorrected,
+        #     gw_volume_dir,
+        #     fix_only_negative=True
+        # )
         shutil.rmtree(gw_volume_dir_uncorrected, ignore_errors=True)
         print('Creating GW withdrawal depth (mm) rasters...')
         create_gw_depth_rasters(
             gw_volume_dir,
-            gw_depth_dir,
             irrigated_area_dir,
+            gw_depth_dir,
             irr_prefix=irr_prefix
         )
     else:

@@ -79,7 +79,7 @@ if __name__ == '__main__':
         output_prefix=irr_output_prefix,
         already_mosaicked=load_files
     )
-    load_files = False
+
     dataops.resample_gee_tiles(
         gee_data_dir,
         data_band_names,
@@ -95,6 +95,7 @@ if __name__ == '__main__':
         end_year,
         already_mosaicked=load_files
     )
+    load_files = False
     gw_raster_dir = gwops.create_gw_rasters(
         output_gw_vector_dir,
         output_gw_raster_dir,
