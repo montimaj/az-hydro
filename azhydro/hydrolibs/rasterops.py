@@ -339,12 +339,13 @@ def reproject_raster_gdal(
             gdal.Warp(outfile_path, input_raster_file, options=warp_options)
         else:
             year = input_raster_file[input_raster_file.rfind('_') + 1: input_raster_file.rfind('.')]
+            tile_num = input_raster_file[input_raster_file.rfind('Tile'): input_raster_file.find(year) - 1]
             dst_tile_dir_year = f'{dst_tile_dir}{year}/'
             makedirs(dst_tile_dir_year)
             output_bands = []
             for band_name in src_band_dict.keys():
                 band_num, resampling_func, output_dtype = src_band_dict[band_name]
-                outfile_path = f'{dst_tile_dir_year}B{band_num}.tif'
+                outfile_path = f'{dst_tile_dir_year}{tile_num}_B{band_num}.tif'
                 warp_options = gdal.WarpOptions(
                     srcBands=[band_num],
                     dstBands=[1],
@@ -359,7 +360,7 @@ def reproject_raster_gdal(
                 )
                 gdal.Warp(outfile_path, input_raster_file, options=warp_options)
                 output_bands.append(outfile_path)
-            output_tile = f'{dst_tile_dir}Predictor_{year}.tif'
+            output_tile = f'{dst_tile_dir}{tile_num}_{year}.tif'
             output_bands = ' '.join(output_bands)
             gdal_sys_call = f'{os.environ["CONDA_PREFIX"]}/bin/gdal_merge.py -separate {output_bands} -o {output_tile}'
             subprocess.call(

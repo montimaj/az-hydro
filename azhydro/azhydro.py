@@ -64,7 +64,6 @@ if __name__ == '__main__':
         ref_file=ref_gw_file,
         already_reprojected=load_files
     )
-    load_files = False
     irr_tile_dir = dataops.create_irrigation_tiles(
         gee_data_dir,
         output_dir,
@@ -82,6 +81,7 @@ if __name__ == '__main__':
         output_prefix=irr_output_prefix,
         already_mosaicked=load_files
     )
+    load_files = False
     dataops.resample_gee_tiles(
         gee_data_dir,
         data_band_names,
