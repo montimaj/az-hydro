@@ -29,8 +29,8 @@ if __name__ == '__main__':
     skip_download = True
     tile_size = 10000
     num_workers = 32
-    xres = 500
-    yres = 500
+    xres = 1000
+    yres = 1000
     fill_attr = 'AF Pumped'
     resampled_gee_mosaic_dir = f'{output_dir}GEE_Mosaics_{xres}m/'
     resampled_tile_dir = f'{output_dir}GEE_Tiles_{xres}m/'
