@@ -437,7 +437,7 @@ def download_gee_data(
         skip_download: bool = False,
         tile_size: int = 10000,
         num_workers: int = 32
-) -> tuple[str, list[str,...]]:
+) -> tuple[str, list[str, ...]]:
     """
     Download multiple GEE datasets as rasters at 100 m spatial resolution.
 
@@ -575,6 +575,78 @@ def download_gee_data(
     return data_dir, data_band_names
 
 
+def resample_gee_mosaics(
+        gee_mosaic_dir: str,
+        data_band_names: list[str, ...],
+        output_dir: str,
+        raster_res: float = 1000,
+        num_workers: int = 32,
+        already_resampled: bool = False
+) -> None:
+    """
+    Resample 30-m GEE mosaics to a higher scale.
+
+    Args:
+        gee_mosaic_dir (str): GEE mosaic directory containing the 30-m multi-band rasters.
+        data_band_names (str): List of data band names.
+        output_dir (str): Output directory.
+        raster_res (float): Raster resolution in m.
+        num_workers (int): Number of dask workers to use to resample GEE mosaics.
+        already_resampled (bool): Set True to skip resampling.
+
+    Returns:
+        None.
+    """
+
+    if not already_resampled:
+        data_band_dict = {}
+        categorical_bands = [
+            'annual_gridmet_spi1y',
+            'annual_gridmet_eddi1y',
+            'annual_gridmet_spei1y',
+            'annual_gridmet_pdsi',
+            'crop_cdl',
+            'HSG',
+        ]
+        for band_num, data_band_name in enumerate(data_band_names):
+            if data_band_name not in categorical_bands:
+                val = (band_num + 1, 'average', 'float32')
+            else:
+                gdal_dtype = 'int16'
+                if data_band_name in ['crop_cdl', 'HSG']:
+                    gdal_dtype = 'byte'
+                val = (band_num + 1, 'mode', gdal_dtype)
+            data_band_dict[data_band_name] = val
+        gee_mosaics = sorted(glob(gee_mosaic_dir + '*.tif'))
+        itr = 1
+        gee_mosaics = gee_mosaics[(itr - 1) * num_workers:]
+        num_chunks = int(np.ceil(len(gee_mosaics) / num_workers))
+        tile_chunks = generate_chunks(gee_mosaics, num_workers)
+        dask_cluster = LocalCluster(n_workers=num_workers, memory_limit='1.5G')
+        dask_cluster.scale(num_workers)
+        dask_client = Client(dask_cluster)
+        dask_client.wait_for_workers(1)
+        print(f'Using {num_workers} local workers...')
+        resampling_factor = raster_res / 30
+        for tile_chunk in tile_chunks:
+            print(f'Working on mosaic chunk {itr} / {num_chunks} ...')
+            compute(
+                delayed(reproject_raster_gdal)(
+                    tile, None, resampling_factor,
+                    'average', True,
+                    None, None, None,
+                    'float32', data_band_dict,
+                    output_dir
+                )
+                for tile in tile_chunk
+            )
+            itr += 1
+        dask_client.close()
+        print('All mosaics resampled...')
+    else:
+        print('GEE mosaics already resampled...')
+
+
 def resample_gee_tiles(
         gee_tile_dir: str,
         data_band_names: list[str, ...],
@@ -647,6 +719,64 @@ def resample_gee_tiles(
         print('GEE tiles already resampled...')
 
 
+def create_irrigation_rasters(
+        gee_mosaic_dir: str,
+        output_dir: str,
+        start_year: int = 1985,
+        end_year: int = 2023,
+        raster_res: float = 1000,
+        output_prefix: str = 'IRR',
+        already_created: bool = False
+) -> str:
+    """
+    Create irrigation rasters using the 30-m GEE mosaics which are already masked using IrrMapper.
+
+    Args:
+        gee_mosaic_dir: GEE mosaic directory containing the 30-m multi-band rasters.
+        output_dir (str): Output directory.
+        start_year (int): Start year in YYYY.
+        end_year (int): End year in YYYY.
+        raster_res (float): Raster resolution in m.
+        output_prefix (str): Prefix for the output file names.
+        already_created (bool): Set True to skip creating irrigation rasters.
+
+    Returns:
+        str: Directory path to the resampled irrigation rasters. Each <raster_res> size pixel contains the number of
+             irrigated pixels at the 30-m scale.
+    """
+
+    irr_resampled_dir = f'{output_dir}Irrigation_{raster_res}m/'
+    if not already_created:
+        irr_30m_dir = f'{output_dir}Irrigation_30m/'
+        makedirs((irr_30m_dir, irr_resampled_dir))
+        resampling_factor = raster_res / 30
+        for year in range(start_year, end_year + 1):
+            gee_mosaic = glob(f'{gee_mosaic_dir}*{year}.tif')[0]
+            try:
+                mosaic_arr, mosaic_obj = read_raster_as_arr(gee_mosaic)
+                mosaic_arr[mosaic_arr > 0] = 1
+                irr_raster_file_30m = f'{irr_30m_dir}{output_prefix}_{year}'
+                write_raster(
+                    mosaic_arr,
+                    mosaic_obj,
+                    transform_=mosaic_obj.transform,
+                    outfile_path=irr_raster_file_30m,
+                    no_data_value=0,
+                    num_bands=1
+                )
+                irr_raster_file_resampled = f'{irr_resampled_dir}{output_prefix}_{year}'
+                reproject_raster_gdal(
+                    irr_raster_file_30m,
+                    irr_raster_file_resampled,
+                    resampling_factor=resampling_factor,
+                    resampling_func='sum'
+                )
+            except Exception as e:
+                print('Error occured while processing', gee_mosaic, '\n', e)
+                continue
+    return irr_resampled_dir
+
+
 def create_irrigation_tiles(
         gee_tile_dir: str,
         output_dir: str,
@@ -657,7 +787,7 @@ def create_irrigation_tiles(
         already_created: bool = False
 ) -> str:
     """
-    Create irrigated area tile rasters by aggregating 30-m GEE tiles which are already masked using IrrMapper.
+    Create irrigation tiles by aggregating 30-m GEE tiles which are already masked using IrrMapper.
 
     Args:
         gee_tile_dir: GEE tile directory containing the 30-m multi-band rasters.
@@ -669,7 +799,8 @@ def create_irrigation_tiles(
         already_created (bool): Set True to skip creating irrigated area rasters.
 
     Returns:
-        str: Directory path to the resampled irrigated area tiles
+        str: Directory path to the resampled irrigation tiles. Each <raster_res> size pixel contains the number of
+             irrigated pixels at the 30-m scale.
     """
 
     irr_resampled_dir = f'{output_dir}Irrigation_{raster_res}m/'
@@ -683,7 +814,7 @@ def create_irrigation_tiles(
                 tile_file = tile[tile.rfind(os.sep) + 1:]
                 try:
                     tile_arr, tile_obj = read_raster_as_arr(tile)
-                    tile_arr[tile_arr > 0] = .0009 # 900 m2 = 0.0009 km2
+                    tile_arr[tile_arr > 0] = 1
                     irr_raster_file_30m = f'{irr_30m_dir}{output_prefix}_{tile_file}'
                     write_raster(
                         tile_arr,

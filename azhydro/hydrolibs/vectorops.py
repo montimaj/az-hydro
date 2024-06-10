@@ -184,7 +184,7 @@ def add_attribute_well_reg_multiple(
     Args:
         input_well_reg_file (str): Input Well Registry shapefile or geojson path.
         input_gw_csv_dir (str): Input GW csv directory containing yearly withdrawal CSVs.
-        out_gw_shp_file (str): Output GWSI shapefile having GW withdrawal data.
+        out_gw_shp_dir (str): Output directory to store the GW withdrawal data.
         fill_attr (str): Attribute present in the CSV file to add to Well Registry
         filter_attr (str): Remove specific wells based on this attribute. Set None to disable filtering.
         filter_attr_value (str): Value for filter_attr
@@ -411,4 +411,3 @@ def parallel_shp2raster(
         burn_value=burn_value,
         add_value=add_value
     )
-

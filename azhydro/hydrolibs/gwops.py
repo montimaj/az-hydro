@@ -130,53 +130,6 @@ def preprocess_gw_csv(
     return ref_file
 
 
-def create_gw_depth_rasters(
-        gw_volume_dir: str,
-        irrigated_area_dir: str,
-        outdir: str,
-        gw_pattern: str = '*.tif',
-        irr_prefix: str = 'IRR'
-) -> None:
-    """
-    Create GW withdrawal depth rasters.
-
-    Args:
-        gw_volume_dir (str): Input GW volume (acreft) directory.
-        irrigated_area_dir (str): The mosaicked annual irrigated area raster (km2) directory path.
-        outdir (str): Output raster directory containing the GW depth rasters (mm).
-        gw_pattern (str): File extension for the GW withdrawal rasters.
-        irr_prefix (str): Prefix for the irrigation raster files.
-
-    Returns:
-        None.
-    """
-
-    irr_reproj_dir = f'{irrigated_area_dir}Irr_Reproj/'
-    makedirs(irr_reproj_dir)
-    for gw_volume_file in glob(gw_volume_dir + gw_pattern):
-        year = gw_volume_file[gw_volume_file.rfind('_') + 1: gw_volume_file.rfind('.')]
-        irr_file = f'{irrigated_area_dir}{irr_prefix}_{year}.tif'
-        if os.path.exists(irr_file):
-            irr_reproj_file = f'{irr_reproj_dir}{irr_prefix}_{year}.tif'
-            rops.reproject_raster_gdal(
-                irr_file,
-                irr_reproj_file,
-                from_raster=gw_volume_file
-            )
-            gw_depth_file = f'{outdir}{gw_volume_file[gw_volume_file.rfind(os.sep) + 1:]}'
-            gw_vol_arr, gw_vol_ref = rops.read_raster_as_arr(gw_volume_file)
-            irr_area_arr, _ = rops.read_raster_as_arr(irr_reproj_file)
-            irr_area_arr[np.isnan(gw_vol_arr)] = np.nan
-            gw_depth_arr = gw_vol_arr * 1.233 / irr_area_arr
-            no_data = rops.az_nodata()
-            gw_depth_arr[np.isnan(gw_depth_arr)] = no_data
-            gw_depth_arr[np.isinf(gw_depth_arr)] = no_data
-            rops.write_raster(
-                gw_depth_arr, gw_vol_ref, transform_=gw_vol_ref.transform,
-                outfile_path=gw_depth_file, no_data_value=no_data
-            )
-
-
 def fix_gw_raster_values(
         input_raster_dir: str,
         outdir: str,
@@ -215,67 +168,85 @@ def fix_gw_raster_values(
         )
 
 
-def create_gw_rasters(
+def create_gw_volume_rasters(
         input_gw_dir: str,
         output_gw_dir: str,
-        irrigated_area_dir: str,
         xres: float = 1000.,
         yres: float = 1000.,
         value_field: str | None = None,
         value_field_pos: int = 0,
-        irr_prefix: str = 'IRR',
         already_created: bool = True
-) -> str:
+) -> None:
     """
-    Create GW rasters from shapefiles.
+    Create GW pumping volume rasters from shapefiles.
 
     Args:
         input_gw_dir (str): Input directory containing preprocessed GW files from #preprocess_gw_csv.
         output_gw_dir (str): Output directory.
-        irrigated_area_dir (str): The mosaicked annual irrigated area raster directory path.
         xres (float): X-Resolution (map unit).
         yres (float): Y-Resolution (map unit).
-        max_gw (float): Maximum GW pumping in mm. Any value higher than this will be set to no data.
         value_field (str or None): Name of the value attribute. Set None to use value_field_pos.
         value_field_pos (int): Value field position (zero indexing).
-        irr_prefix (str): Prefix for the irrigation raster files.
-        already_created (bool): Set False to re-compute GW pumping rasters.
+        already_created (bool): Set False to re-compute GW pumping volume rasters.
 
     Returns:
-        str: Output raster directory path containing the GW withdrawal depth rasters (mm).
+        str: Output raster directory path containing the GW pumping volume rasters (acreft).
     """
 
-    gw_depth_dir = f'{output_gw_dir}GW_Depths/'
     if not already_created:
         print('Creating GW withdrawal volume (acreft) rasters...')
         gw_volume_dir_uncorrected = f'{output_gw_dir}Uncorrected_GW_Volumes/'
-        makedirs((gw_volume_dir_uncorrected, gw_depth_dir))
-        # vops.shps2rasters(
-        #     input_gw_dir,
-        #     gw_volume_dir_uncorrected,
-        #     xres=xres, yres=yres,
-        #     value_field=value_field,
-        #     value_field_pos=value_field_pos
-        # )
-        gw_volume_dir = f'{output_gw_dir}GW_Volumes/'
-        makedirs(gw_volume_dir)
-        # fix_gw_raster_values(
-        #     gw_volume_dir_uncorrected,
-        #     gw_volume_dir,
-        #     fix_only_negative=True
-        # )
-        shutil.rmtree(gw_volume_dir_uncorrected, ignore_errors=True)
-        print('Creating GW withdrawal depth (mm) rasters...')
-        create_gw_depth_rasters(
-            gw_volume_dir,
-            irrigated_area_dir,
-            gw_depth_dir,
-            irr_prefix=irr_prefix
+        makedirs(gw_volume_dir_uncorrected)
+        vops.shps2rasters(
+            input_gw_dir,
+            gw_volume_dir_uncorrected,
+            xres=xres, yres=yres,
+            value_field=value_field,
+            value_field_pos=value_field_pos
         )
+        makedirs(output_gw_dir)
+        fix_gw_raster_values(
+            gw_volume_dir_uncorrected,
+            output_gw_dir,
+            fix_only_negative=True
+        )
+        shutil.rmtree(gw_volume_dir_uncorrected, ignore_errors=True)
     else:
-        print('GW  pumping rasters already created')
-    return gw_depth_dir
+        print('GW  pumping volume rasters already created')
 
 
+def create_gw_depth_rasters(
+        gw_volume_dir: str,
+        output_gw_dir: str,
+        gw_pattern: str = '*.tif',
+        already_created: bool = False,
+) -> None:
+    """
+    Create GW withdrawal depth rasters.
+
+    Args:
+        gw_volume_dir (str): Input GW volume (acreft) directory.
+        output_gw_dir (str): Output raster directory containing the GW depth rasters (mm).
+        gw_pattern (str): File extension for the GW withdrawal rasters.
+        already_created (bool): Set False to re-compute GW pumping depth rasters.
+
+    Returns:
+        None.
+    """
+
+    if not already_created:
+        makedirs(output_gw_dir)
+        nodata = 0
+        for gw_volume_file in glob(gw_volume_dir + gw_pattern):
+            gw_depth_file = f'{output_gw_dir}{gw_volume_file[gw_volume_file.rfind(os.sep) + 1:]}'
+            gw_vol_arr, gw_vol_ref = rops.read_raster_as_arr(gw_volume_file)
+            xres, yres = gw_vol_ref.res
+            gw_depth_arr = gw_vol_arr * 1.233 / abs(xres * yres * 1e-6)
+            rops.write_raster(
+                gw_depth_arr, gw_vol_ref, transform_=gw_vol_ref.transform,
+                outfile_path=gw_depth_file, no_data_value=nodata
+            )
+    else:
+        print('GW pumping depth rasters already created...')
 
 
