@@ -64,6 +64,22 @@ if __name__ == '__main__':
         ref_file=ref_gw_file,
         already_reprojected=load_files
     )
+    load_files = False
+    dataops.resample_gee_tiles(
+        gee_data_dir,
+        data_band_names,
+        resampled_tile_dir,
+        xres,
+        num_workers,
+        load_files
+    )
+    dataops.mosaic_tiles(
+        resampled_tile_dir,
+        gee_mosaic_data_dir,
+        start_year,
+        end_year,
+        already_mosaicked=load_files
+    )
     irr_tile_dir = dataops.create_irrigation_tiles(
         gee_data_dir,
         output_dir,
@@ -79,22 +95,6 @@ if __name__ == '__main__':
         start_year,
         end_year,
         output_prefix=irr_output_prefix,
-        already_mosaicked=load_files
-    )
-    load_files = False
-    dataops.resample_gee_tiles(
-        gee_data_dir,
-        data_band_names,
-        resampled_tile_dir,
-        xres,
-        num_workers,
-        load_files
-    )
-    dataops.mosaic_tiles(
-        resampled_tile_dir,
-        gee_mosaic_data_dir,
-        start_year,
-        end_year,
         already_mosaicked=load_files
     )
     gwops.create_gw_volume_rasters(
