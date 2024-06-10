@@ -699,7 +699,8 @@ def create_irrigation_tiles(
                         irr_raster_file_30m,
                         irr_raster_file_resampled,
                         resampling_factor=resampling_factor,
-                        resampling_func='sum'
+                        resampling_func='sum',
+                        output_dtype='int32'
                     )
                 except Exception as e:
                     print('Error occured while processing', tile, '\n', e)

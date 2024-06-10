@@ -29,8 +29,8 @@ if __name__ == '__main__':
     skip_download = True
     tile_size = 10000
     num_workers = 32
-    xres = 1000
-    yres = 1000
+    xres = 500
+    yres = 500
     fill_attr = 'AF Pumped'
     resampled_gee_mosaic_dir = f'{output_dir}GEE_Mosaics_{xres}m/'
     resampled_tile_dir = f'{output_dir}GEE_Tiles_{xres}m/'
@@ -118,12 +118,6 @@ if __name__ == '__main__':
     )
     dataops.reproject_gee_mosaics(
         gee_mosaic_data_dir,
-        pred_data_dir,
-        gw_cropped_raster_dir,
-        already_reprojected=load_files
-    )
-    dataops.reproject_gee_mosaics(
-        irr_tile_dir,
         pred_data_dir,
         gw_cropped_raster_dir,
         already_reprojected=load_files
