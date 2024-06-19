@@ -20,18 +20,30 @@ from sysops import az_nodata
 from shapely.geometry import Point
 
 
-def reproject_vector(input_vector_file, outfile_path, ref_file, crs='epsg:4326', crs_from_file=True, raster=True):
+def reproject_vector(
+        input_vector_file: str,
+        outfile_path: str,
+        ref_file: str,
+        crs: str = 'epsg:4326',
+        crs_from_file: bool = True,
+        raster: bool = True
+) -> None:
     """
-    Reproject a vector file
-    :param input_vector_file: Input vector file path
-    :param outfile_path: Output vector file path
-    :param crs: Target CRS
-    :param ref_file: Reference file (raster or vector) for obtaining target CRS
-    :param crs_from_file: If true (default) read CRS from file (raster or vector)
-    :param raster: If true (default) read CRS from raster else vector
-    :return: Reprojected vector file in GeoPandas format
+    Reproject a vector file.
+
+    Args:
+        input_vector_file (str): Input vector file path.
+        outfile_path (str): Output vector file path.
+        crs (str): Target CRS.
+        ref_file (str): Reference file (raster or vector) for obtaining target CRS.
+        crs_from_file (bool): If true (default) read CRS from file (raster or vector).
+        raster (bool): If true (default) read CRS from raster else vector.
+
+    Returns:
+        None.
     """
 
+    print('Reprojecting', input_vector_file)
     input_vector_file = gpd.read_file(input_vector_file)
     if crs_from_file:
         if raster:
@@ -43,20 +55,30 @@ def reproject_vector(input_vector_file, outfile_path, ref_file, crs='epsg:4326',
         crs = {'init': crs}
     output_vector_file = input_vector_file.to_crs(crs)
     output_vector_file.to_file(outfile_path)
-    return output_vector_file
 
 
-def csv2shp(input_csv_file, outfile_path, delim=',', source_crs='epsg:4326', target_crs='epsg:4326',
-            long_lat_pos=(7, 8)):
+def csv2shp(
+        input_csv_file: str,
+        outfile_path: str,
+        delim: str = ',',
+        source_crs: str = 'epsg:4326',
+        target_crs: str = 'epsg:4326',
+        long_lat_pos: tuple[int, int] = (7, 8)
+) -> None:
     """
-    Convert CSV to Shapefile
-    :param input_csv_file: Input CSV file path
-    :param outfile_path: Output file path
-    :param delim: CSV file delimeter
-    :param source_crs: CRS of the source file
-    :param target_crs: Target CRS
-    :param long_lat_pos: Tuple containing positions of longitude and latitude columns respectively (zero indexing)
-    :return: None
+    Convert CSV to Shapefile.
+
+    Args:
+        input_csv_file (str): Input CSV file path.
+        outfile_path (str): Output file path.
+        delim (str): CSV file delimiter.
+        source_crs (str): CRS of the source file.
+        target_crs (str): Target CRS.
+        long_lat_pos (tuple (int, int)): Tuple containing positions of longitude and latitude columns,
+                                         respectively (zero indexing).
+
+    Returns:
+        None.
     """
 
     input_df = pd.read_csv(input_csv_file, delimiter=delim)
@@ -66,16 +88,28 @@ def csv2shp(input_csv_file, outfile_path, delim=',', source_crs='epsg:4326', tar
     gdf2shp(input_df, geometry, source_crs, target_crs, outfile_path)
 
 
-def csvs2shps(input_dir, output_dir, pattern='*.csv', target_crs='EPSG:4326', delim=',', long_lat_pos=(7, 8)):
+def csvs2shps(
+        input_dir: str,
+        output_dir: str,
+        pattern: str = '*.csv',
+        target_crs: str = 'EPSG:4326',
+        delim: str = ',',
+        long_lat_pos: tuple[int, int] = (7, 8)
+) -> None:
     """
-    Convert all CSV files present in a folder to corresponding Shapefiles
-    :param input_dir: Input directory containing csv files which are named as <Layer_Name>_<Year>.[csv|txt]
-    :param output_dir: Output directory
-    :param pattern: CSV  file pattern
-    :param target_crs: Target CRS
-    :param delim: CSV file delimeter
-    :param long_lat_pos: Tuple containing positions of longitude and latitude columns respectively (zero indexing)
-    :return: None
+    Convert all CSV files present in a folder to corresponding Shapefiles.
+
+    Args:
+        input_dir (str): Input directory containing csv files which are named as <Layer_Name>_<Year>.[csv|txt].
+        output_dir (str): Output directory.
+        pattern (str): CSV  file pattern.
+        target_crs (str): Target CRS.
+        delim (str): CSV file delimiter.
+        long_lat_pos (tuple (int, int)): Tuple containing positions of longitude and latitude columns,
+                                         respectively (zero indexing).
+
+    Returns:
+        None.
     """
 
     for file in glob(input_dir + pattern):

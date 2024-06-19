@@ -20,7 +20,7 @@ if __name__ == '__main__':
     well_reg_file = f'{vector_dir}Well_Registry/Well_Registry.shp'
     az_gw_basin = f'{vector_dir}/Groundwater_Basin.geojson'
     ama_ina_file = f'{vector_dir}AMA_and_INA.geojson'
-    az_canal = f'{vector_dir}Canals_NHD_Buffer.geojson'
+    az_canal = f'{vector_dir}Canals/canals_az.shp'
     gw_csv_dir = f'{vector_dir}Meter Data/'
     gcloud_project = 'azhydro'
     gcloud_bucket = 'azhydro'
@@ -58,13 +58,6 @@ if __name__ == '__main__':
         use_only_ama_ina=False,
         already_preprocessed=load_files
     )
-    gwops.reproject_vectors(
-        vector_dir,
-        vector_reproj_dir,
-        ref_file=ref_gw_file,
-        already_reprojected=load_files
-    )
-    load_files = False
     dataops.resample_gee_tiles(
         gee_data_dir,
         data_band_names,
@@ -80,6 +73,7 @@ if __name__ == '__main__':
         end_year,
         already_mosaicked=load_files
     )
+    load_files = True
     irr_tile_dir = dataops.create_irrigation_tiles(
         gee_data_dir,
         output_dir,
@@ -116,9 +110,36 @@ if __name__ == '__main__':
         az_state_file=f'{vector_reproj_dir}AZ.geojson',
         already_cropped=load_files
     )
+    gwops.reproject_vectors(
+        f'{vector_dir}Canals/',
+        vector_reproj_dir,
+        ref_file=ref_gw_file,
+        pattern='*.shp',
+        already_reprojected=load_files
+    )
+    gwops.reproject_vectors(
+        vector_dir,
+        vector_reproj_dir,
+        ref_file=ref_gw_file,
+        already_reprojected=load_files
+    )
+    gw_basin_proj = f'{vector_reproj_dir}Groundwater_Basin.geojson'
+    az_canal_proj = f'{vector_reproj_dir}canals_az.shp'
+    gwops.create_gw_basin_streamflow_rasters(
+        gw_basin_proj,
+        az_canal_proj,
+        gee_mosaic_data_dir,
+        xres,
+        yres,
+        start_year,
+        end_year,
+        load_files
+    )
     dataops.reproject_gee_mosaics(
         gee_mosaic_data_dir,
         pred_data_dir,
         gw_cropped_raster_dir,
         already_reprojected=load_files
     )
+
+

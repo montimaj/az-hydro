@@ -10,9 +10,13 @@ import vectorops as vops
 import os
 import shutil
 import numpy as np
+import geopandas as gpd
+import pandas as pd
+import dataretrieval.nwis as nwis
 
-from sysops import makedirs
+from sysops import makedirs, copy_file
 from glob import glob
+from copy import deepcopy
 
 
 def reproject_vectors(
@@ -250,3 +254,97 @@ def create_gw_depth_rasters(
         print('GW pumping depth rasters already created...')
 
 
+def create_gw_basin_streamflow_rasters(
+        gw_basin_vector: str,
+        canal_vector: str,
+        output_dir: str,
+        xres: float = 500,
+        yres: float = 500,
+        start_year: int = 1985,
+        end_year: int = 2023,
+        already_created: bool = False
+) -> None:
+    """
+    Create GW basin and Colorado river streamflow rasters for Arizona.
+
+    Args:
+        gw_basin_vector (str): GW Basin shapefile or geojson for Arizona.
+        canal_vector (str): Canal shapefile or geojson for Arizona.
+        output_dir (str): Output directory.
+        xres (float): X-Resolution (m).
+        yres (float): Y-Resolution (m).
+        start_year (int): Start year in YYYY.
+        end_year (int): End year in YYYY.
+        already_created (bool): Set True if raster already exists.
+
+    Returns:
+        None
+    """
+
+    if not already_created:
+        year_list = range(start_year + 1, end_year + 1)
+        makedirs(output_dir)
+        az_gw_basin_sy_tif = f'{output_dir}GW_Basin_{start_year}.tif'
+        vops.shp2raster(
+            gw_basin_vector,
+            az_gw_basin_sy_tif,
+            xres=xres, yres=yres,
+            value_field='OBJECTID',
+            add_value=False
+        )
+        for year in year_list:
+            az_gw_basin_tif = f'{output_dir}GW_Basin_{year}.tif'
+            copy_file(
+                az_gw_basin_sy_tif,
+                az_gw_basin_tif
+            )
+        canal_dir = f'{output_dir}Canal/'
+        makedirs(canal_dir)
+        canal_gdf_az = gpd.read_file(canal_vector)
+        co_attr = 'ColoRiver'
+        co_river_flt = canal_gdf_az[co_attr] == 1
+        canal_gdf_az.loc[~co_river_flt, co_attr] = 0
+        canal_az_shp = f'{canal_dir}Canal_AZ.shp'
+        canal_gdf_az.to_file(canal_az_shp)
+        az_canal_tif = f'{canal_dir}Canal_AZ.tif'
+        vops.shp2raster(
+            canal_az_shp, az_canal_tif,
+            xres=xres, yres=yres,
+            value_field=co_attr,
+            add_value=False
+        )
+        year_list = range(start_year, end_year + 1)
+        canal_raster_arr, canal_raster_file = rops.read_raster_as_arr(az_canal_tif)
+        flow_attr = 'dv_ft3_sec'
+        for year in year_list:
+            streamflow_tif = f'{output_dir}Streamflow_{year}.tif'
+            dv_df = nwis.get_record(
+                sites='09427520',
+                service='dv',
+                start=f'{year}-1-1',
+                end=f'{year}-12-31',
+                parameterCd='00060'
+            ).rename(columns={'00060_Mean': flow_attr}).reset_index()
+            dv_df[flow_attr] = dv_df[flow_attr].astype(float)
+            dv_df_monthly = dv_df.groupby(
+                pd.Grouper(key='datetime', freq='ME')
+            ).agg({flow_attr: 'mean'}).reset_index()
+            dv_df_annual = dv_df_monthly.groupby(
+                pd.Grouper(key='datetime', freq='YE')
+            ).agg({flow_attr: 'mean'}).reset_index()
+            dv_df_annual.datetime = dv_df_annual.datetime.dt.year
+            dv_df_annual[flow_attr] *= 0.0283168
+            flow_attr = 'dv_m3_sec'
+            dv_df_annual.columns = ['Year', flow_attr]
+            canal_arr = deepcopy(canal_raster_arr)
+            canal_arr[canal_arr == 1] *= dv_df_annual[dv_df_annual.Year == year][flow_attr].values[0]
+            canal_arr[np.isnan(canal_arr)] = 0
+            rops.write_raster(
+                canal_arr,
+                canal_raster_file,
+                transform_=canal_raster_file.transform,
+                outfile_path=streamflow_tif,
+                no_data_value=0
+            )
+
+    print('GW Basin and Streamflow rasters created...')

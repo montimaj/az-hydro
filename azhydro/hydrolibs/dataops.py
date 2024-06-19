@@ -292,18 +292,18 @@ def download_gee_tile(
             terraclimate_ro = terraclimate_ic.select('ro') \
                 .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
                 .sum()
+            daymet_precip = daymet_ic.select('prcp') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .sum()
+            daymet_tmmx = daymet_ic.select('tmax') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .median() \
+                .add(273.15)
+            daymet_tmmn = daymet_ic.select('tmin') \
+                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                .median() \
+                .add(273.15)
             if year < 2023:
-                daymet_precip = daymet_ic.select('prcp') \
-                    .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
-                    .sum()
-                daymet_tmmx = daymet_ic.select('tmax') \
-                    .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
-                    .median() \
-                    .add(273.15)
-                daymet_tmmn = daymet_ic.select('tmin') \
-                    .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
-                    .median() \
-                    .add(273.15)
                 conus404_precip = conus404_ic.select('PREC_ACC_NC') \
                     .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
                     .sum()
@@ -322,9 +322,6 @@ def download_gee_tile(
                     .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
                     .sum()
             else:
-                daymet_precip = gridmet_precip
-                daymet_tmmx = gridmet_tmmx
-                daymet_tmmn = gridmet_tmmn
                 conus404_precip = gridmet_precip
                 conus404_tmmx = gridmet_tmmx
                 conus404_tmmn = gridmet_tmmn
@@ -774,3 +771,4 @@ def reproject_gee_mosaics(
                 gee_mosaic_reproj,
                 from_raster=gw_ref
             )
+

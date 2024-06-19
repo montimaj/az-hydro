@@ -99,15 +99,25 @@ def copy_files(
         shutil.copyfile(f, outfile)
 
 
-def copy_file(input_file, output_file, suffix='', ext='.tif', verbose=True):
+def copy_file(
+        input_file: str,
+        output_file: str,
+        suffix: str = '',
+        ext: str = '',
+        verbose: bool = True
+) -> None:
     """
-    Copy a single file
-    :param input_file: Input file name
-    :param output_file: Output file name (should not contain extension)
-    :param suffix: Suffix string to append to output_file
-    :param ext: Extension of output file
-    :param verbose: Set True to get info on copy
-    :return: None
+    Copy a single file.
+
+    Args:
+        input_file (str): Input file name.
+        output_file (str): Output file name (should not contain extension) if either suffix or ext is set.
+        suffix (str): Suffix string to append to output_file. Should be empty if output_file contains file extension.
+        ext (str): Extension of output file. Should be empty if output_file contains file extension.
+        verbose (bool): Set True to get info on copy.
+
+    Returns:
+        None.
     """
 
     if suffix or ext:
