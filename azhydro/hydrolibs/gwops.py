@@ -240,7 +240,7 @@ def create_gw_depth_rasters(
 
     if not already_created:
         makedirs(output_gw_dir)
-        nodata = 0
+        nodata = rops.az_nodata()
         for gw_volume_file in glob(gw_volume_dir + gw_pattern):
             gw_depth_file = f'{output_gw_dir}{gw_volume_file[gw_volume_file.rfind(os.sep) + 1:]}'
             gw_vol_arr, gw_vol_ref = rops.read_raster_as_arr(gw_volume_file)

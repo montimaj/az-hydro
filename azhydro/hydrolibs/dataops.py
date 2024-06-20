@@ -94,6 +94,8 @@ def download_gee_tile(
         year_list: list,
         data_band_names: list[str, ...],
         gcloud_project: str = 'azhydro',
+        gee_scale: int = 30,
+        irrigated_tiles: bool = True,
         verbose: bool = False
 ):
     """
@@ -105,6 +107,8 @@ def download_gee_tile(
     year_list (list): List of years in YYYY format.
     data_band_names (list (str, ...)): List of data bands as strings.
     gcloud_project (str): GCloud project name.
+    gee_scale (int): GEE data download scale in m.
+    irrigated_tiles (bool): Set False to download all tiles regardless of irrigation.
     verbose (bool): Set True to see extra details on file downloads.
 
     Returns:
@@ -190,21 +194,22 @@ def download_gee_tile(
             .max()
         mask = irr.eq(0)
         irr_mask = irr.updateMask(mask).remap([0], [1])
-        tile_irr_sum = irr_mask.reduceRegion(
-            reducer=ee.Reducer.sum(),
-            scale=30,
-            geometry=ee_geom
-        )
-        retry_irr_mask = True
         valid_tile = True
-        while retry_irr_mask:
-            try:
-                valid_tile = tile_irr_sum.getInfo()['remapped'] > 0
-                retry_irr_mask = False
-            except (ee.EEException, requests.exceptions.RequestException, requests.exceptions.ConnectionError) as e:
-                print('Error:', e, '.Retrying...')
-                retry_irr_mask = True
-                time.sleep(5)
+        if irrigated_tiles:
+            tile_irr_sum = irr_mask.reduceRegion(
+                reducer=ee.Reducer.sum(),
+                scale=30,
+                geometry=ee_geom
+            )
+            retry_irr_mask = True
+            while retry_irr_mask:
+                try:
+                    valid_tile = tile_irr_sum.getInfo()['remapped'] > 0
+                    retry_irr_mask = False
+                except (ee.EEException, requests.exceptions.RequestException, requests.exceptions.ConnectionError) as e:
+                    print('Error:', e, '.Retrying...')
+                    retry_irr_mask = True
+                    time.sleep(5)
         if valid_tile:
             openet_idx = 0
             if year < 2016:
@@ -400,12 +405,11 @@ def download_gee_tile(
                     ]).mean()
                 band = band.rename(band_name)
                 data_img = data_img.addBands(band, overwrite=True)
-            data_img = data_img.multiply(irr_mask)
             retry_download = True
             while retry_download:
                 try:
                     gee_url = data_img.getDownloadUrl({
-                        'scale': 30,
+                        'scale': gee_scale,
                         'region': ee_geom,
                         'format': 'GEO_TIFF',
                         'crs': 'EPSG:4326'
@@ -439,7 +443,10 @@ def download_gee_data(
         end_year: int = 2023,
         skip_download: bool = False,
         tile_size: int = 10000,
-        num_workers: int = 32
+        num_workers: int = 32,
+        worker_memory='0.5G',
+        gee_scale: int = 30,
+        irrigated_tiles: bool = True,
 ) -> tuple[str, list[str, ...]]:
     """
     Download multiple GEE datasets as rasters at 100 m spatial resolution.
@@ -455,13 +462,15 @@ def download_gee_data(
     tile_size (int): Tile size for downloading GEE Data. Default is 10000 m.
     num_workers (int): Number of tiles to parallely download. Note that both tile_size and num_workers have quotas for
     free GEE users.
+    gee_scale (int): GEE data download scale in m.
+    irrigated_tiles (bool): Set False to download all tiles regardless of irrigation.
 
     Returns:
         tuple (str, list (str, ...)): Tuple containing the directory path containing all the downloaded GEE tiles and
         the ordered list of band names for each tile.
     """
 
-    data_dir = f'{download_dir}GEE_Data/GEE_Tiles/'
+    data_dir = f'{download_dir}GEE_Data/GEE_Tiles_{gee_scale}m/'
     data_band_names = [
         'annual_et_ensemble_mm',
         'annual_et_ssebop_mm',
@@ -558,7 +567,7 @@ def download_gee_data(
         tile_chunks = generate_chunks(tile_val_list, num_workers)
         itr = 1
         num_chunks = int(np.ceil(fishnet_gdf.shape[0] / num_workers))
-        dask_cluster = LocalCluster(n_workers=num_workers, memory_limit='0.5G')
+        dask_cluster = LocalCluster(n_workers=num_workers, memory_limit=worker_memory)
         dask_cluster.scale(num_workers)
         dask_client = Client(dask_cluster)
         dask_client.wait_for_workers(1)
@@ -569,6 +578,7 @@ def download_gee_data(
                 delayed(download_gee_tile)(
                     tile_vals, data_dir, year_list,
                     data_band_names, gcloud_project,
+                    gee_scale, irrigated_tiles,
                     verbose=False
                 )
                 for tile_vals in tile_chunk
@@ -587,6 +597,7 @@ def resample_gee_rasters(
         num_workers: int = 32,
         already_resampled: bool = False,
         use_tile_format: bool = True,
+        irr_data_only: bool = False
 ) -> None:
     """
     Resample 30-m GEE tiles to a higher scale.
@@ -601,6 +612,8 @@ def resample_gee_rasters(
         num_workers (int): Number of dask workers to use to resample GEE rasters.
         already_resampled (bool): Set True to skip resampling.
         use_tile_format (bool): Set False to resample GEE mosaics instead of tiles.
+        irr_data_only (bool): Set True to resample only the irrigated area raster.
+                              Works only if use_tile_format is False.
 
     Returns:
         None.
@@ -656,15 +669,7 @@ def resample_gee_rasters(
             for gee_raster in gee_rasters:
                 gee_file = gee_raster[gee_raster.rfind(os.sep) + 1:]
                 gee_resampled_raster = f'{output_dir}{gee_file}'
-                if 'Predictor' in gee_file:
-                    reproject_raster_gdal(
-                        gee_raster,
-                        gee_resampled_raster,
-                        resampling_factor=resampling_factor,
-                        src_band_dict=data_band_dict,
-                        dst_raster_dir=output_dir
-                    )
-                else:
+                if 'IRR' in gee_file:
                     reproject_raster_gdal(
                         gee_raster,
                         gee_resampled_raster,
@@ -672,6 +677,15 @@ def resample_gee_rasters(
                         output_dtype='int16',
                         resampling_func='sum'
                     )
+                elif 'Predictor' in gee_file and not irr_data_only:
+                    reproject_raster_gdal(
+                        gee_raster,
+                        gee_resampled_raster,
+                        resampling_factor=resampling_factor,
+                        src_band_dict=data_band_dict,
+                        dst_raster_dir=output_dir
+                    )
+
         print('All rasters/tiles resampled...')
     else:
         print('GEE tiles already resampled...')
@@ -868,19 +882,17 @@ def create_az_data_csv(
                         else:
                             df[var_name] = raster_arr
                 gw_file = f'{gw_data_dir}GW_{year}.tif'
-                gw_arr = read_raster_as_arr(gw_file, get_file=False).ravel()
-                gw_arr[np.isnan(gw_arr)] = 0
-                df['gw_pumping_mm'] = gw_arr
+                df['gw_pumping_mm'] = read_raster_as_arr(gw_file, get_file=False).ravel()
                 df['Year'] = year
                 data_df = pd.concat([data_df, df])
-        data_df = data_df[data_df.irr_area_km2 > 0]
-        data_df = data_df[data_df.gw_pumping_mm > 0].reset_index(drop=True)
+        data_df = data_df[~np.isnan(data_df.gw_pumping_mm)].reset_index(drop=True)
         gw_basin_gdf = gpd.read_file(gw_basin_vector)
         gw_basin_dict = {}
         for gw_basin in gw_basin_gdf.OBJECTID:
             gw_basin_dict[gw_basin] = gw_basin_gdf[gw_basin_gdf.OBJECTID == gw_basin].BASIN_NAME.values[0]
         gw_basin_dict[0] = 'OUTSIDE AZ'
-        data_df.GW_Basin = data_df.GW_Basin.swifter.apply(lambda x: gw_basin_dict[x])
+        data_df.GW_Basin = data_df.GW_Basin.swifter.apply(
+            lambda x: gw_basin_dict[x] if not np.isnan(x) else 'OUTSIDE AZ')
         data_df.to_csv(data_csv, index=False)
     else:
         data_df = pd.read_csv(data_csv)
@@ -1238,6 +1250,7 @@ def create_train_test_data(
             crop_flag = True
         if year_col in drop_attr:
             drop_attr.remove(year_col)
+        drop_attr.remove(gw_basin_col)
         input_df = input_df.drop(columns=drop_attr)
         input_df = input_df.replace([np.inf, -np.inf], np.nan).dropna(axis=1)
         if year_list and year_col in input_df.columns:
@@ -1256,8 +1269,8 @@ def create_train_test_data(
         )
         year_train = x_train[year_col].copy().to_frame()
         year_test = x_test[year_col].copy().to_frame()
-        x_train = x_train.drop(columns=[year_col, pred_attr])
-        x_test = x_test.drop(columns=[year_col, pred_attr])
+        x_train = x_train.drop(columns=[year_col, gw_basin_col, pred_attr])
+        x_test = x_test.drop(columns=[year_col, gw_basin_col, pred_attr])
         crop_train = x_train[crop_col].copy().to_frame()
         crop_test = x_test[crop_col].copy().to_frame()
         # if crop_flag:

@@ -29,7 +29,6 @@ if __name__ == '__main__':
     end_year = 2023
     skip_download = True
     tile_size = 10000
-    num_workers = 32
     tile_raster_res = 500
     fill_attr = 'AF Pumped'
     resampled_tile_dir = f'{output_dir}GEE_Tiles_{tile_raster_res}m/'
@@ -38,7 +37,7 @@ if __name__ == '__main__':
     irr_output_prefix = 'IRR'
     load_files = True
 
-    gee_data_dir, data_band_names = dataops.download_gee_data(
+    gee_data_dir_30m, _ = dataops.download_gee_data(
         az_state,
         gcloud_project,
         gcloud_bucket,
@@ -47,7 +46,24 @@ if __name__ == '__main__':
         end_year,
         skip_download,
         tile_size,
-        num_workers
+        num_workers=32,
+        gee_scale=30,
+        irrigated_tiles=True
+    )
+    skip_download = False
+    gee_data_dir_1km, data_band_names = dataops.download_gee_data(
+        az_state,
+        gcloud_project,
+        gcloud_bucket,
+        input_dir,
+        start_year,
+        end_year,
+        skip_download,
+        tile_size=200000,
+        num_workers=12,
+        worker_memory='2G',
+        gee_scale=1000,
+        irrigated_tiles=False
     )
     ref_gw_file = gwops.preprocess_gw_csv(
         well_reg_file,
@@ -57,23 +73,18 @@ if __name__ == '__main__':
         use_only_ama_ina=False,
         already_preprocessed=load_files
     )
-    dataops.resample_gee_rasters(
-        gee_data_dir,
-        data_band_names,
-        resampled_tile_dir,
-        target_raster_res=tile_raster_res,
-        num_workers=num_workers,
-        already_resampled=load_files
-    )
+    load_files = False
+    mosaic_raster_res = 1000
+    resampled_gee_mosaic_dir = f'{output_dir}GEE_Mosaics_{mosaic_raster_res}m/'
     dataops.mosaic_tiles(
-        resampled_tile_dir,
-        gee_mosaic_data_dir,
+        gee_data_dir_1km,
+        resampled_gee_mosaic_dir,
         start_year,
         end_year,
         already_mosaicked=load_files
     )
     irr_tile_dir = dataops.create_irrigation_tiles(
-        gee_data_dir,
+        gee_data_dir_30m,
         output_dir,
         start_year,
         end_year,
@@ -89,8 +100,6 @@ if __name__ == '__main__':
         output_prefix=irr_output_prefix,
         already_mosaicked=load_files
     )
-    mosaic_raster_res = 1000
-    resampled_gee_mosaic_dir = f'{output_dir}GEE_Mosaics_{mosaic_raster_res}m/'
     dataops.resample_gee_rasters(
         gee_mosaic_data_dir,
         data_band_names,
@@ -98,7 +107,8 @@ if __name__ == '__main__':
         original_raster_res=tile_raster_res,
         target_raster_res=mosaic_raster_res,
         already_resampled=load_files,
-        use_tile_format=False
+        use_tile_format=False,
+        irr_data_only=True
     )
     gwops.create_gw_volume_rasters(
         output_gw_vector_dir,
@@ -133,6 +143,7 @@ if __name__ == '__main__':
         ref_file=ref_gw_file,
         already_reprojected=load_files
     )
+    load_files = False
     gw_basin_proj = f'{vector_reproj_dir}Groundwater_Basin.geojson'
     az_canal_proj = f'{vector_reproj_dir}canals_az.shp'
     gwops.create_gw_basin_streamflow_rasters(
@@ -162,7 +173,8 @@ if __name__ == '__main__':
         load_csv=load_files
     )
     year_list = list(range(start_year, end_year + 1))
-    test_years = tuple(list(range(2019, 2024)))
+    test_years = tuple(range(2019, 2023))
+    # test_years = (1990,)
     model_dir = f'{output_dir}ML_Model/'
     ml_model = 'RF'
     random_state = 1234
@@ -170,11 +182,13 @@ if __name__ == '__main__':
     fold_count = 5
     repeats = 1
     randomized_search = True
+    load_files = False
 
     ret_vals = dataops.create_train_test_data(
         az_df, output_dir,
         drop_attr=('Year', 'GW_Basin'),
         random_state=random_state,
+        test_gw_basins=('HARQUAHALA INA',),
         scaling=False, already_created=load_files,
         year_list=year_list, split_strategy=1,
         test_year=test_years, outlier_op=3,
@@ -192,6 +206,6 @@ if __name__ == '__main__':
         y_train, y_test, x_scaler,
         y_scaler, year_train,
         year_test, model_dir,
-        ml_model, crop_train, crop_test
+        ml_model, crop_train=crop_train, crop_test=crop_test
     )
     mlops.calc_train_test_metrics(pred_df)

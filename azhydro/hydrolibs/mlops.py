@@ -55,8 +55,8 @@ def get_model_param_dict(
             verbosity=-1
         ),
         'DRF': LGBMRegressor(
-            boosting_type='rf', tree_learner='feature',
-            subsample_freq=1, random_state=random_state,
+            boosting_type='rf',
+            random_state=random_state,
             deterministic=True, force_row_wise=True,
             verbosity=-1
         ),
@@ -216,10 +216,11 @@ def build_ml_model(
                 scoring=scoring_metrics, n_jobs=-1, cv=cv, refit=scoring_metrics[1],
                 return_train_score=True
             )
-        model_grid.fit(x_train, y_train)
-        get_grid_search_stats(model_grid, y_scaler)
-        model = model_grid.best_estimator_
-        print('Best params: ', model_grid.best_params_)
+        model.fit(x_train, y_train)
+        print('Train score:', model.score(x_train, y_train))
+        # get_grid_search_stats(model_grid, y_scaler)
+        # model = model_grid.best_estimator_
+        # print('Best params: ', model_grid.best_params_)
         pickle.dump(model, open(model_file, mode='wb+'))
         if dask_client:
             dask_client.close()
@@ -261,29 +262,29 @@ def calc_train_test_metrics(
     print('***Overall stats***\n')
     print('Train + Validation results...')
     r2, mae, rmse = get_prediction_stats(train_actual, train_pred)
-    print('R2:', r2, 'RMSE:', rmse, 'MAE:', mae)
+    print('R2:', r2, 'RMSE:', rmse, '% MAE:', mae, '%')
     print('\nTest results...')
     r2, mae, rmse = get_prediction_stats(test_actual, test_pred)
-    print('R2:', r2, 'RMSE:', rmse, 'MAE:', mae)
-    cols = [col for col in pred_df.columns if col.startswith(crop_col)] + [year_col]
-    for col in cols:
-        print('\n***{} specific stats***\n'.format(col))
-        if col != year_col:
-            col_val_list = [1]
-        else:
-            col_val_list = np.unique(np.append(train_data[col].unique(), test_data[col].unique()))
-        for val in sorted(col_val_list):
-            print('\n{} type: {}'.format(col, val))
-            train_actual = train_data[train_data[col] == val]['Actual_GW'].to_numpy().ravel()
-            train_pred = train_data[train_data[col] == val]['Pred_GW'].to_numpy().ravel()
-            test_actual = test_data[test_data[col] == val]['Actual_GW'].to_numpy().ravel()
-            test_pred = test_data[test_data[col] == val]['Pred_GW'].to_numpy().ravel()
-            print('Train + Validation results...')
-            r2, mae, rmse = get_prediction_stats(train_actual, train_pred)
-            print('R2:', r2, 'RMSE:', rmse, 'MAE:', mae)
-            print('\nTest results...')
-            r2, mae, rmse = get_prediction_stats(test_actual, test_pred)
-            print('R2:', r2, 'RMSE:', rmse, 'MAE:', mae)
+    print('R2:', r2, 'RMSE:', rmse, '% MAE:', mae, '%')
+    # cols = [col for col in pred_df.columns if col.startswith(crop_col)] + [year_col]
+    # for col in cols:
+    #     print('\n***{} specific stats***\n'.format(col))
+    #     if col != year_col:
+    #         col_val_list = [1]
+    #     else:
+    #         col_val_list = np.unique(np.append(train_data[col].unique(), test_data[col].unique()))
+    #     for val in sorted(col_val_list):
+    #         print('\n{} type: {}'.format(col, val))
+    #         train_actual = train_data[train_data[col] == val]['Actual_GW'].to_numpy().ravel()
+    #         train_pred = train_data[train_data[col] == val]['Pred_GW'].to_numpy().ravel()
+    #         test_actual = test_data[test_data[col] == val]['Actual_GW'].to_numpy().ravel()
+    #         test_pred = test_data[test_data[col] == val]['Pred_GW'].to_numpy().ravel()
+    #         print('Train + Validation results...')
+    #         r2, mae, rmse = get_prediction_stats(train_actual, train_pred)
+    #         print('R2:', r2, 'RMSE:', rmse, 'MAE:', mae)
+    #         print('\nTest results...')
+    #         r2, mae, rmse = get_prediction_stats(test_actual, test_pred)
+    #         print('R2:', r2, 'RMSE:', rmse, 'MAE:', mae)
 
 
 def get_grid_search_stats(gs_model: Any, y_scaler: MinMaxScaler | None = None) -> None:
@@ -333,8 +334,8 @@ def get_prediction_stats(
     r2, mae, rmse = (np.nan,) * 3
     if actual_values.size and pred_values.size:
         r2 = np.round(r2_score(actual_values, pred_values), precision)
-        mae = np.round(mean_absolute_error(actual_values, pred_values), precision)
-        rmse = np.round(mean_squared_error(actual_values, pred_values, squared=False), precision)
+        mae = np.round(mean_absolute_error(actual_values, pred_values) * 100 / np.std(actual_values), precision)
+        rmse = np.round(mean_squared_error(actual_values, pred_values, squared=False) * 100 / np.std(actual_values), precision)
     return r2, mae, rmse
 
 
