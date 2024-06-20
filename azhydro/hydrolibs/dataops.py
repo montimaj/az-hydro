@@ -15,6 +15,10 @@ import numpy as np
 import geopandas as gpd
 import rasterio as rio
 import swifter
+import pickle
+import sklearn.utils as sk
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
 
 from sysops import makedirs
 from rasterops import reproject_raster_gdal, read_raster_as_arr, write_raster
@@ -812,7 +816,7 @@ def create_az_data_csv(
         end_year: int = 2023,
         exclude_years: list[int, ...] | None = None,
         load_csv: bool = False
-) -> str:
+) -> pd.DataFrame:
     """
     Create Arizona predictor data CSV.
 
@@ -828,7 +832,7 @@ def create_az_data_csv(
         load_csv (bool): Set True to load existing CSV.
 
     Returns:
-        str: Output CSV file path.
+        pd.DataFrame: Output dataframe.
     """
 
     data_csv = f'{output_dir}AZ_Data.csv'
@@ -878,4 +882,423 @@ def create_az_data_csv(
         gw_basin_dict[0] = 'OUTSIDE AZ'
         data_df.GW_Basin = data_df.GW_Basin.swifter.apply(lambda x: gw_basin_dict[x])
         data_df.to_csv(data_csv, index=False)
-    return data_csv
+    else:
+        data_df = pd.read_csv(data_csv)
+    return data_df
+
+
+def split_data_train_test(
+        input_df: pd.DataFrame,
+        pred_attr: str = 'gw_pumping_mm',
+        shuffle: bool = True,
+        random_state: int = 0,
+        test_size: float = 0.2,
+        test_year: tuple[int, ...] | bool = True,
+        test_gw_basins: tuple[str, ...] = (),
+        year_col: str = 'Year',
+        gw_basin_col: str = 'GW_Basin',
+        split_strategy: int = 1
+) -> tuple[pd.DataFrame, ...]:
+    """Split data yearly, randomly, or based on train-test percentage based on year or crop. For the last option,
+    by default test_size amount of data is kept from each year for testing.
+
+    Args:
+        input_df (pd.DataFrame): Input pandas DataFrame object.
+        pred_attr (str): Prediction attribute name.
+        shuffle (bool): Default True for shuffling.
+        random_state (int): Random state used during train test split.
+        test_size (float): Test data size (0<=test_size<=1).
+        test_year (tuple(int, ...) or bool): If split_strategy = 1, then this needs to be a tuple of years in YYYY
+                                             format, i.e., (2014, 2015), and the test data is created from these years.
+                                             For split_strategy=2, set this to True if the test data needs to be created
+                                             based on year_col.
+        test_gw_basins (tuple (str, ...)): Build test data from only these tuple of groundwater basins.
+        year_col (str): Name of the year column.
+        gw_basin_col (str): Name of the GW basin column.
+        split_strategy (int): If 1, Split train test data based on year_col. If 2, then test_size amount of data from
+                              year_col are kept for testing and rest for training;
+                              for this option, test-year should have a tuple of integers or a True value. If 3, then
+                              test_gw_basins are used for spatial holdouts. For any other value of split-strategy,
+                              the data are randomly split.
+
+    Returns:
+        tuple[pd.DataFrame, ...]: A tuple of X_train, X_test, y_train, y_test data frames.
+    """
+    if split_strategy == 1:
+        x_train, x_test, y_train, y_test = split_data_yearly(
+            input_df, pred_attr=pred_attr, year_col=year_col,
+            test_years=test_year, shuffle=shuffle,
+            random_state=random_state
+        )
+    elif split_strategy == 2:
+        x_train, x_test, y_train, y_test = split_data_train_test_ratio(
+            input_df, pred_attr=pred_attr,
+            test_size=test_size, random_state=random_state,
+            shuffle=shuffle, test_year=test_year,
+            year_col=year_col
+        )
+    elif split_strategy == 3:
+        x_train, x_test, y_train, y_test = split_spatial(
+            input_df, pred_attr=pred_attr, gw_basin_col=gw_basin_col,
+            test_gw_basins=test_gw_basins, shuffle=shuffle,
+            random_state=random_state
+        )
+    else:
+        x_train, x_test, y_train, y_test = train_test_split(
+            input_df, input_df[pred_attr].to_frame(),
+            shuffle=shuffle, random_state=random_state,
+            test_size=test_size
+        )
+    return x_train, x_test, y_train, y_test
+
+
+def split_data_train_test_ratio(
+        input_df: pd.DataFrame,
+        pred_attr: str = 'gw_pumping_mm',
+        shuffle: bool = True,
+        random_state: int = 0,
+        test_size: float = 0.2,
+        test_year: bool = True,
+        year_col: str = 'Year',
+        crop_col: str | None = None
+) -> tuple[pd.DataFrame, ...]:
+    """Split data based on train-test percentage based on year or crop. By default test_size amount of data is kept from
+    each year for testing.
+
+    Args:
+        input_df (pd.DataFrame): Input pandas DataFrame object.
+        pred_attr (str): Prediction attribute name.
+        shuffle (bool): Default True for shuffling.
+        random_state (int): Random state used during train test split.
+        test_size (float): Test data size (0<=test_size<=1).
+        test_year (bool): If True, build test data from the year_col. Otherwise, use crop_col.
+        year_col (str): Name of the year column.
+        crop_col (str or None): Name of the crop column. By default it's None.
+
+    Returns:
+        tuple[pd.DataFrame, ...]: A tuple of X_train, X_test, y_train, y_test data frames.
+    """
+    selection_var = input_df[year_col].unique()
+    selection_label = year_col
+    if not test_year:
+        selection_var = input_df[crop_col].unique()
+        selection_label = crop_col
+    x_train_df = pd.DataFrame()
+    x_test_df = pd.DataFrame()
+    y_train_df = pd.DataFrame()
+    y_test_df = pd.DataFrame()
+    for svar in selection_var:
+        selected_data = input_df.loc[input_df[selection_label] == svar]
+        y = selected_data[pred_attr].to_frame()
+        x_train, x_test, y_train, y_test = train_test_split(
+            selected_data, y, shuffle=shuffle,
+            random_state=random_state, test_size=test_size
+        )
+        x_train_df = pd.concat([x_train_df, x_train])
+        x_test_df = pd.concat([x_test_df, x_test])
+        y_train_df = pd.concat([y_train_df, y_train])
+        y_test_df = pd.concat([y_test_df, y_test])
+    return x_train_df, x_test_df, y_train_df, y_test_df
+
+
+def split_data_yearly(
+        input_df: pd.DataFrame,
+        pred_attr: str = 'gw_pumping_mm',
+        test_years: tuple[int, ...] = (2016,),
+        year_col: str = 'Year',
+        shuffle: bool = True,
+        random_state: int = 0
+) -> tuple[pd.DataFrame, ...]:
+    """Split data based on a particular year.
+
+    Args:
+        input_df (pd.DataFrame): Input pandas DataFrame object.
+        pred_attr (str): Prediction attribute name.
+        test_years (tuple (int, ...)): Build test data from only these tuple of years, i.e., (2014, 2015).
+        year_col (str): Name of the year column.
+        shuffle (bool): Set False to stop data shuffling.
+        random_state (int): Random state used during train test split.
+
+    Returns:
+        tuple[pd.DataFrame, ...]: A tuple of X_train, X_test, y_train, y_test data frames.
+    """
+    years = input_df[year_col].unique()
+    x_train_df = pd.DataFrame()
+    x_test_df = pd.DataFrame()
+    for year in years:
+        selected_data = input_df.loc[input_df[year_col] == year]
+        x_t = selected_data
+        if year not in test_years:
+            x_train_df = pd.concat([x_train_df, x_t])
+        else:
+            x_test_df = pd.concat([x_test_df, x_t])
+    y_train_df = x_train_df[pred_attr].to_frame()
+    y_test_df = x_test_df[pred_attr].to_frame()
+    if shuffle:
+        x_train_df = sk.shuffle(x_train_df, random_state=random_state)
+        y_train_df = sk.shuffle(y_train_df, random_state=random_state)
+        x_test_df = sk.shuffle(x_test_df, random_state=random_state)
+        y_test_df = sk.shuffle(y_test_df, random_state=random_state)
+    return x_train_df, x_test_df, y_train_df, y_test_df
+
+
+def split_spatial(
+        input_df: pd.DataFrame,
+        pred_attr: str = 'gw_pumping_mm',
+        test_gw_basins: tuple[str, ...] = ('HARQUAHALA INA',),
+        gw_basin_col: str = 'GW_Basin',
+        shuffle: bool = True,
+        random_state: int = 0
+) -> tuple[pd.DataFrame, ...]:
+    """Split data spatially by holding out entire groundwater basins.
+
+    Args:
+        input_df (pd.DataFrame): Input pandas DataFrame object.
+        pred_attr (str): Prediction attribute name.
+        test_gw_basins (tuple (str, ...)): Build test data from only these tuple of groundwater basins.
+        gw_basin_col (str): Name of the GW basin column.
+        shuffle (bool): Set False to stop data shuffling.
+        random_state (int): Random state used during train test split.
+
+    Returns:
+        tuple[pd.DataFrame, ...]: A tuple of X_train, X_test, y_train, y_test data frames.
+    """
+    gw_basins = input_df[gw_basin_col].unique()
+    x_train_df = pd.DataFrame()
+    x_test_df = pd.DataFrame()
+    for gw_basin in gw_basins:
+        selected_data = input_df.loc[input_df[gw_basin_col] == gw_basin]
+        x_t = selected_data
+        if gw_basin not in test_gw_basins:
+            x_train_df = pd.concat([x_train_df, x_t])
+        else:
+            x_test_df = pd.concat([x_test_df, x_t])
+    y_train_df = x_train_df[pred_attr].to_frame()
+    y_test_df = x_test_df[pred_attr].to_frame()
+    if shuffle:
+        x_train_df = sk.shuffle(x_train_df, random_state=random_state)
+        y_train_df = sk.shuffle(y_train_df, random_state=random_state)
+        x_test_df = sk.shuffle(x_test_df, random_state=random_state)
+        y_test_df = sk.shuffle(y_test_df, random_state=random_state)
+    return x_train_df, x_test_df, y_train_df, y_test_df
+
+
+def reindex_df(
+        df: pd.DataFrame,
+        column_names: tuple[str, ...] | None,
+        ordering: bool = False
+) -> pd.DataFrame:
+    """Reindex dataframe columns.
+
+    Args:
+        df (pd.DataFrame): Input pandas DataFrame object.
+        column_names (tuple (str, ...)): Data frame column names, these must be df headers.
+        ordering (bool): Set True to sort df by column_names.
+
+    Returns:
+        pd.DataFrame: Reindexed pandas DataFrame object.
+    """
+    if column_names is None:
+        column_names = df.columns
+        ordering = True
+    if ordering:
+        column_names = sorted(column_names)
+    return df.reindex(column_names, axis=1)
+
+
+def process_outliers(
+        input_df: pd.DataFrame,
+        target_attr: str,
+        crop_col: str,
+        year_col: str,
+        operation: int = 3
+) -> pd.DataFrame:
+    """Remove outliers from a dataframe based on target_attr.
+
+    Args:
+        input_df (pd.DataFrame): Input pandas DataFrame object.
+        target_attr (str): Target attribute based on which outlier removal will occur.
+        crop_col (str): Name of the crop column.
+        year_col (str): Name of the year column.
+        operation (int): Outlier operation to perform. Set to 1 for removing outlier directly, 2 for removing outliers
+                         by each crop, 3 for removing outliers by each year.
+
+    Returns:
+        pd.DataFrame: Outlier removed input_df.
+    """
+    input_df = input_df.copy(deep=True)
+    init_rows = input_df.shape[0]
+    num_outliers = 0
+    if operation == 1:
+        target_vals = input_df[target_attr].to_numpy().ravel()
+        q3, q1 = np.percentile(target_vals, [75, 25])
+        iqr = q3 - q1
+        upper_limit = q3 + 1.5 * iqr
+        invalid_idx = input_df[target_attr] > upper_limit
+        num_outliers = invalid_idx.sum()
+        input_df.loc[invalid_idx, target_attr] = np.nan
+    elif operation >= 2:
+        selection_vals = input_df[crop_col].unique()
+        selection_col = crop_col
+        if operation == 3:
+            selection_vals = input_df[year_col].unique()
+            selection_col = year_col
+        for val in selection_vals:
+            selection = input_df[selection_col] == val
+            selected_data = input_df[selection]
+            target_vals = selected_data[target_attr].to_numpy().ravel()
+            q3, q1 = np.percentile(target_vals, [75, 25])
+            iqr = q3 - q1
+            upper_limit = q3 + 1.5 * iqr
+            invalid_idx = selected_data[target_attr] > upper_limit
+            outliers = invalid_idx.sum()
+            print(f'{selection_col} {val} outliers: {outliers}')
+            num_outliers += outliers
+            input_df.loc[selection, 'Outlier'] = invalid_idx
+        input_df = input_df[input_df['Outlier'] == False]
+        input_df = input_df.drop(columns='Outlier')
+    input_df = input_df.dropna()
+    print('Old DF rows = {}, New DF rows = {}'.format(init_rows, input_df.shape[0]))
+    print(f'{num_outliers} outliers removed...')
+    return input_df
+
+
+def create_train_test_data(
+        input_df: pd.DataFrame,
+        output_dir: str,
+        pred_attr: str = 'gw_pumping_mm',
+        drop_attr: tuple[str, ...] = ('Year',),
+        test_size: float = 0.2,
+        test_year: tuple[int, ...] | bool = True,
+        test_gw_basins: tuple[str, ...] = (),
+        year_col: str = 'Year',
+        random_state: int = 42,
+        already_created: bool = False,
+        scaling: bool = False,
+        year_list: list[int, ...] = (1985,),
+        crop_col: str = 'crop_cdl',
+        gw_basin_col: str = 'GW_Basin',
+        split_strategy: int = 3,
+        outlier_op: int | None = 3,
+        shuffle: bool = True
+) -> tuple:
+    """Create train and test data.
+
+    Args:
+        input_df (pd.DataFrame): Input pandas DataFrame.
+        output_dir (str): Output directory.
+        pred_attr (str): Attribute to be predicted.
+        drop_attr (tuple (str, ...)): Tuple of attributes to drop from model training.
+        test_size (float): Test size between (0, 1).
+        test_year (tuple (int, ...) or bool): If split_strategy = 1, then this needs to be a tuple of years in YYYY
+                                             format, i.e., (2014, 2015), and the test data is created from these years.
+                                             For split_strategy=2, set this to True if the test data needs to be created
+                                             based on year_col. Otherwise, if split_strategy=2 and test_year=False then
+                                             the test data is created using crop_col.
+        test_gw_basins (tuple (str, ...)): Build test data from only these tuple of groundwater basins.
+        year_col (str): Name of the year column.
+        random_state (int): Random state used during train test split.
+        already_created (bool): Set True to load existing train and test data.
+        scaling (bool): Set True to perform minmax scaling.
+        year_list (list (int,...)): List of years in YYYY format, i.e., (1985, ..., 2023) to build the data set.
+        crop_col (str): Name of the crop column to create dummy variables.
+        gw_basin_col (str): Name of the GW basin column.
+        split_strategy (int): If 1, Split train test data based on year_col. If 2, then test_size amount of data from
+                              year_col are kept for testing and rest for training;
+                              for this option, test-year should have a tuple of integers or a True value. If 3, then
+                              test_gw_basins are used for spatial holdouts. For any other value of split-strategy,
+                              the data are randomly split.
+        outlier_op (int): Outlier operation to perform. Set to 1 for removing outlier directly, 2 for removing outliers
+                          by each crop, or 3 for removing outliers by each year.
+        shuffle (bool): Set False to stop data shuffling.
+
+    Returns:
+        tuple: A tuple containing X_train, X_test as pandas data frames, y_train, y_test as numpy arrays.
+        If scaling=True, then x_scaler and y_scaler are also returned. Year_train, Year_test, Crop_train, and Crop_test
+        are returned as well for future analyses.
+    """
+    makedirs(output_dir)
+    x_train_file = output_dir + 'X_train.csv'
+    x_test_file = output_dir + 'X_test.csv'
+    y_train_file = output_dir + 'y_train.csv'
+    y_test_file = output_dir + 'y_test.csv'
+    year_train_file = output_dir + 'Year_train.csv'
+    year_test_file = output_dir + 'Year_test.csv'
+    crop_train_file = output_dir + 'Crop_train.csv'
+    crop_test_file = output_dir + 'Crop_test.csv'
+    x_scaler_file, x_scaler, y_scaler_file, y_scaler = [None] * 4
+    if scaling:
+        x_scaler_file = output_dir + 'x_scaler'
+        y_scaler_file = output_dir + 'y_scaler'
+    if not already_created:
+        drop_attr = [attr for attr in drop_attr]
+        crop_flag = False
+        if crop_col in drop_attr:
+            drop_attr.remove(crop_col)
+            crop_flag = True
+        if year_col in drop_attr:
+            drop_attr.remove(year_col)
+        input_df = input_df.drop(columns=drop_attr)
+        input_df = input_df.replace([np.inf, -np.inf], np.nan).dropna(axis=1)
+        if year_list and year_col in input_df.columns:
+            input_df = input_df[input_df[year_col].isin(year_list)]
+        if outlier_op is not None:
+            input_df = process_outliers(input_df, pred_attr, crop_col, year_col, outlier_op)
+        input_df[crop_col] = input_df[crop_col].astype(int)
+        input_df.to_csv(output_dir + 'Cleaned_AZ_GW_Data.csv', index=False)
+        x_train, x_test, y_train, y_test = split_data_train_test(
+            input_df, pred_attr=pred_attr,
+            test_size=test_size,
+            random_state=random_state, shuffle=shuffle,
+            test_year=test_year, gw_basin_col=gw_basin_col,
+            test_gw_basins=test_gw_basins,
+            split_strategy=split_strategy, year_col=year_col
+        )
+        year_train = x_train[year_col].copy().to_frame()
+        year_test = x_test[year_col].copy().to_frame()
+        x_train = x_train.drop(columns=[year_col, pred_attr])
+        x_test = x_test.drop(columns=[year_col, pred_attr])
+        crop_train = x_train[crop_col].copy().to_frame()
+        crop_test = x_test[crop_col].copy().to_frame()
+        # if crop_flag:
+        #     x_train = x_train.drop(columns=[crop_col])
+        #     x_test = x_test.drop(columns=[crop_col])
+        # x_train = pd.get_dummies(x_train, columns=[crop_col])
+        # x_test = pd.get_dummies(x_test, columns=[crop_col])
+        x_train = reindex_df(x_train, column_names=None)
+        x_test = reindex_df(x_test, column_names=None)
+        if scaling:
+            x_scaler, y_scaler = MinMaxScaler(), MinMaxScaler()
+            x_train = pd.DataFrame(x_scaler.fit_transform(x_train), columns=x_train.columns)
+            x_test = pd.DataFrame(x_scaler.transform(x_test), columns=x_test.columns)
+            y_train = pd.DataFrame(y_scaler.fit_transform(y_train), columns=y_train.columns)
+            y_test = pd.DataFrame(y_scaler.transform(y_test), columns=y_test.columns)
+        x_train.to_csv(x_train_file, index=False)
+        x_test.to_csv(x_test_file, index=False)
+        y_train.to_csv(y_train_file, index=False)
+        y_test.to_csv(y_test_file, index=False)
+        year_train.to_csv(year_train_file, index=False)
+        year_test.to_csv(year_test_file, index=False)
+        crop_train.to_csv(crop_train_file, index=False)
+        crop_test.to_csv(crop_test_file, index=False)
+        if scaling:
+            pickle.dump(x_scaler, open(x_scaler_file, mode='wb'))
+            pickle.dump(y_scaler, open(y_scaler_file, mode='wb'))
+    else:
+        x_train = pd.read_csv(x_train_file)
+        x_test = pd.read_csv(x_test_file)
+        y_train = pd.read_csv(y_train_file)
+        y_test = pd.read_csv(y_test_file)
+        year_train = pd.read_csv(year_train_file)
+        year_test = pd.read_csv(year_test_file)
+        crop_train = pd.read_csv(crop_train_file)
+        crop_test = pd.read_csv(crop_test_file)
+        if scaling:
+            x_scaler = pickle.load(open(x_scaler_file, mode='rb'))
+            y_scaler = pickle.load(open(y_scaler_file, mode='rb'))
+    ret_vals = (
+        x_train, x_test, y_train.to_numpy().ravel(), y_test.to_numpy().ravel(),
+        x_scaler, y_scaler, year_train, year_test, crop_train, crop_test
+    )
+
+    return ret_vals

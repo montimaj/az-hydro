@@ -7,6 +7,7 @@ Main driver file for running the project.
 
 import hydrolibs.gwops as gwops
 import hydrolibs.dataops as dataops
+import hydrolibs.mlops as mlops
 
 if __name__ == '__main__':
     input_dir = '../Data/Inputs/'
@@ -150,8 +151,7 @@ if __name__ == '__main__':
         gw_cropped_raster_dir,
         already_reprojected=load_files
     )
-    load_files = False
-    az_csv = dataops.create_az_data_csv(
+    az_df = dataops.create_az_data_csv(
         pred_data_dir,
         gw_cropped_raster_dir,
         output_dir,
@@ -161,3 +161,37 @@ if __name__ == '__main__':
         end_year,
         load_csv=load_files
     )
+    year_list = list(range(start_year, end_year + 1))
+    test_years = tuple(list(range(2019, 2024)))
+    model_dir = f'{output_dir}ML_Model/'
+    ml_model = 'RF'
+    random_state = 1234
+    load_model = False
+    fold_count = 5
+    repeats = 1
+    randomized_search = True
+
+    ret_vals = dataops.create_train_test_data(
+        az_df, output_dir,
+        drop_attr=('Year', 'GW_Basin'),
+        random_state=random_state,
+        scaling=False, already_created=load_files,
+        year_list=year_list, split_strategy=1,
+        test_year=test_years, outlier_op=3,
+    )
+    x_train, x_test, y_train, y_test, x_scaler, y_scaler, year_train, year_test, crop_train, crop_test = ret_vals
+    model = mlops.build_ml_model(
+        x_train, y_train, model_dir,
+        ml_model, random_state,
+        load_model, fold_count,
+        repeats, y_scaler,
+        randomized_search
+    )
+    pred_df = mlops.get_prediction_results(
+        model, x_train, x_test,
+        y_train, y_test, x_scaler,
+        y_scaler, year_train,
+        year_test, model_dir,
+        ml_model, crop_train, crop_test
+    )
+    mlops.calc_train_test_metrics(pred_df)
