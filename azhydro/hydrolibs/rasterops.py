@@ -261,13 +261,15 @@ def reproject_raster_gdal(
         dst_yres: float | None = None,
         output_dtype: str = 'float32',
         src_band_dict: dict[str, tuple[int, str, str]] | None = None,
-        dst_tile_dir: str or None = None
+        dst_raster_dir: str or None = None
 ) -> None:
     """Reproject raster using GDALWarp Python API.
 
     Args:
         input_raster_file (str): Input raster file. This should follow Tile_<tile_number>_<year>.tif naming convention
-                                 if src_band_dict is specified.
+                                 if src_band_dict is specified and outfile_path is None. If src_band_dict is
+                                 specified and outfile_path is not None, i.e., input_raster_file is a multi-band
+                                 mosaicked raster, then the file name should follow <file_name>_<year>.tif.
         outfile_path (str): Output file path. Set to None if src_band_dict is used.
         resampling_factor (float or None): Resampling factor (default 1).
         resampling_func (str): Resampling function. Valid names include 'near', 'bilinear', 'cubic', 'cubicspline',
@@ -284,8 +286,8 @@ def reproject_raster_gdal(
                                                                    By default, this is set to None. If not None, then
                                                                    the number of key, value pairs should match the
                                                                    number of bands in input_raster_file.
-        dst_tile_dir (str): If src_band_dict is used, the dst_tile_dir must be specified to write all the output tiles
-                            as TIF files.
+        dst_raster_dir (str): If src_band_dict is used, the dst_raster_dir must be specified to
+                              write all the output tiles or rasters as TIF files.
 
     Returns:
         None
@@ -339,13 +341,19 @@ def reproject_raster_gdal(
             gdal.Warp(outfile_path, input_raster_file, options=warp_options)
         else:
             year = input_raster_file[input_raster_file.rfind('_') + 1: input_raster_file.rfind('.')]
-            tile_num = input_raster_file[input_raster_file.rfind('Tile'): input_raster_file.find(year) - 1]
-            dst_tile_dir_year = f'{dst_tile_dir}{year}/'
-            makedirs(dst_tile_dir_year)
+            tile_num = ''
+            dst_raster_dir_year = f'{dst_raster_dir}{year}/'
+            makedirs(dst_raster_dir_year)
+            use_tile_format = outfile_path is None
+            if use_tile_format:
+                tile_num = input_raster_file[input_raster_file.rfind('Tile'): input_raster_file.find(year) - 1]
             output_bands = []
             for band_name in src_band_dict.keys():
                 band_num, resampling_func, output_dtype = src_band_dict[band_name]
-                outfile_path = f'{dst_tile_dir_year}{tile_num}_B{band_num}.tif'
+                if use_tile_format:
+                    outband_path = f'{dst_raster_dir_year}{tile_num}_B{band_num}.tif'
+                else:
+                    outband_path = f'{dst_raster_dir_year}B{band_num}.tif'
                 warp_options = gdal.WarpOptions(
                     srcBands=[band_num],
                     dstBands=[1],
@@ -358,11 +366,12 @@ def reproject_raster_gdal(
                     format='GTiff',
                     options=['-overwrite']
                 )
-                gdal.Warp(outfile_path, input_raster_file, options=warp_options)
-                output_bands.append(outfile_path)
-            output_tile = f'{dst_tile_dir}{tile_num}_{year}.tif'
+                gdal.Warp(outband_path, input_raster_file, options=warp_options)
+                output_bands.append(outband_path)
+            if use_tile_format:
+                outfile_path = f'{dst_raster_dir}{tile_num}_{year}.tif'
             output_bands = ' '.join(output_bands)
-            gdal_sys_call = f'{os.environ["CONDA_PREFIX"]}/bin/gdal_merge.py -separate {output_bands} -o {output_tile}'
+            gdal_sys_call = f'{os.environ["CONDA_PREFIX"]}/bin/gdal_merge.py -separate {output_bands} -o {outfile_path}'
             subprocess.call(
                 gdal_sys_call,
                 shell=True,

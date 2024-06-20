@@ -8,11 +8,13 @@ Contains codes for handling Google Earth Engine datasets
 import ee
 import os
 import time
+import pandas as pd
 import requests
 import subprocess
 import numpy as np
 import geopandas as gpd
 import rasterio as rio
+import swifter
 
 from sysops import makedirs
 from rasterops import reproject_raster_gdal, read_raster_as_arr, write_raster
@@ -86,7 +88,7 @@ def download_gee_tile(
         tile_values: tuple[int, float, float, float],
         download_dir: str,
         year_list: list,
-        data_band_names: list,
+        data_band_names: list[str, ...],
         gcloud_project: str = 'azhydro',
         verbose: bool = False
 ):
@@ -97,7 +99,7 @@ def download_gee_tile(
     tile_values (tuple (int, float, float, float)): Tile values as a tuple of (FID, xmin, ymin, xmax, ymax)
     download_dir (str): Download directory path.
     year_list (list): List of years in YYYY format.
-    data_band_names (list): List of data bands as strings.
+    data_band_names (list (str, ...)): List of data bands as strings.
     gcloud_project (str): GCloud project name.
     verbose (bool): Set True to see extra details on file downloads.
 
@@ -572,30 +574,36 @@ def download_gee_data(
     return data_dir, data_band_names
 
 
-def resample_gee_tiles(
-        gee_tile_dir: str,
+def resample_gee_rasters(
+        gee_raster_dir: str,
         data_band_names: list[str, ...],
         output_dir: str,
-        raster_res: float = 1000,
+        original_raster_res: float = 30,
+        target_raster_res: float = 1000,
         num_workers: int = 32,
-        already_resampled: bool = False
+        already_resampled: bool = False,
+        use_tile_format: bool = True,
 ) -> None:
     """
     Resample 30-m GEE tiles to a higher scale.
 
     Args:
-        gee_tile_dir (str): GEE tile directory containing the 30-m multi-band rasters.
+        gee_raster_dir (str): GEE raster directory containing the 30-m multi-band rasters.
+                              These can be tiles or mosaics. If these are tiles, then use_tile_format must be True
         data_band_names (str): List of data band names.
         output_dir (str): Output directory.
-        raster_res (float): Raster resolution in m.
-        num_workers (int): Number of dask workers to use to resample GEE tiles.
+        original_raster_res (float): Original raster resolution in m.
+        target_raster_res (float): Target raster resolution in m.
+        num_workers (int): Number of dask workers to use to resample GEE rasters.
         already_resampled (bool): Set True to skip resampling.
+        use_tile_format (bool): Set False to resample GEE mosaics instead of tiles.
 
     Returns:
         None.
     """
 
     if not already_resampled:
+        makedirs(output_dir)
         data_band_dict = {}
         categorical_bands = [
             'annual_gridmet_spi1y',
@@ -614,32 +622,53 @@ def resample_gee_tiles(
                     gdal_dtype = 'byte'
                 val = (band_num + 1, 'mode', gdal_dtype)
             data_band_dict[data_band_name] = val
-        gee_tiles = sorted(glob(gee_tile_dir + '*.tif'))
-        itr = 1
-        gee_tiles = gee_tiles[(itr - 1) * num_workers:]
-        num_chunks = int(np.ceil(len(gee_tiles) / num_workers))
-        tile_chunks = generate_chunks(gee_tiles, num_workers)
-        dask_cluster = LocalCluster(n_workers=num_workers, memory_limit='1.5G')
-        dask_cluster.scale(num_workers)
-        dask_client = Client(dask_cluster)
-        dask_client.wait_for_workers(1)
-        print(f'Using {num_workers} local workers...')
-        resampling_factor = raster_res / 30
-        for tile_chunk in tile_chunks:
-            print(f'Working on tile chunk {itr} / {num_chunks} ...')
-            compute(
-                delayed(reproject_raster_gdal)(
-                    tile, None, resampling_factor,
-                    'average', True,
-                    None, None, None,
-                    'float32', data_band_dict,
-                    output_dir
+        gee_rasters = sorted(glob(gee_raster_dir + '*.tif'))
+        resampling_factor = target_raster_res / original_raster_res
+        if use_tile_format:
+            itr = 1
+            gee_tiles = gee_rasters[(itr - 1) * num_workers:]
+            num_chunks = int(np.ceil(len(gee_tiles) / num_workers))
+            tile_chunks = generate_chunks(gee_tiles, num_workers)
+            dask_cluster = LocalCluster(n_workers=num_workers, memory_limit='1.5G')
+            dask_cluster.scale(num_workers)
+            dask_client = Client(dask_cluster)
+            dask_client.wait_for_workers(1)
+            print(f'Using {num_workers} local workers...')
+            for tile_chunk in tile_chunks:
+                print(f'Working on tile chunk {itr} / {num_chunks} ...')
+                compute(
+                    delayed(reproject_raster_gdal)(
+                        tile, None, resampling_factor,
+                        'average', True,
+                        None, None, None,
+                        'float32', data_band_dict,
+                        output_dir
+                    )
+                    for tile in tile_chunk
                 )
-                for tile in tile_chunk
-            )
-            itr += 1
-        dask_client.close()
-        print('All tiles resampled...')
+                itr += 1
+            dask_client.close()
+        else:
+            for gee_raster in gee_rasters:
+                gee_file = gee_raster[gee_raster.rfind(os.sep) + 1:]
+                gee_resampled_raster = f'{output_dir}{gee_file}'
+                if 'Predictor' in gee_file:
+                    reproject_raster_gdal(
+                        gee_raster,
+                        gee_resampled_raster,
+                        resampling_factor=resampling_factor,
+                        src_band_dict=data_band_dict,
+                        dst_raster_dir=output_dir
+                    )
+                else:
+                    reproject_raster_gdal(
+                        gee_raster,
+                        gee_resampled_raster,
+                        resampling_factor=resampling_factor,
+                        output_dtype='int16',
+                        resampling_func='sum'
+                    )
+        print('All rasters/tiles resampled...')
     else:
         print('GEE tiles already resampled...')
 
@@ -772,3 +801,81 @@ def reproject_gee_mosaics(
                 from_raster=gw_ref
             )
 
+
+def create_az_data_csv(
+        input_file_dir: str,
+        gw_data_dir: str,
+        output_dir: str,
+        data_band_names: list[str, ...],
+        gw_basin_vector: str,
+        start_year: int = 1985,
+        end_year: int = 2023,
+        exclude_years: list[int, ...] | None = None,
+        load_csv: bool = False
+) -> str:
+    """
+    Create Arizona predictor data CSV.
+
+    Args:
+        input_file_dir (str): Input directory where the file names follow <Variable>_<Year>, e.g, Predictor_2015.tif.
+        gw_data_dir (str): Path to the GW pumping depth rasters with GW_<Year>.tif as the file name format.
+        output_dir (str): Output directory.
+        data_band_names (list (str, ...)): List of data bands as strings.
+        gw_basin_vector (str): Path to the Arizona GW basin shapefile or geojson.
+        start_year (int): Start year in YYYY.
+        end_year (int): End year in YYYY.
+        exclude_years (list(int, ...) or None): Exclude these years from the dataframe.
+        load_csv (bool): Set True to load existing CSV.
+
+    Returns:
+        str: Output CSV file path.
+    """
+
+    data_csv = f'{output_dir}AZ_Data.csv'
+    if not load_csv:
+        if exclude_years is None:
+            exclude_years = []
+        data_df = pd.DataFrame()
+        var_names = [
+            'IRR',
+            'GW_Basin',
+            'Streamflow',
+            'Predictor'
+        ]
+        for year in range(start_year, end_year + 1):
+            df = pd.DataFrame()
+            if year not in exclude_years:
+                for var_name in var_names:
+                    raster_file = f'{input_file_dir}{var_name}_{year}.tif'
+                    if var_name == 'Predictor':
+                        for band_num, band_name in enumerate(data_band_names):
+                            df[band_name] = read_raster_as_arr(
+                                raster_file,
+                                band=band_num + 1,
+                                get_file=False
+                            ).ravel()
+                    else:
+                        raster_arr = read_raster_as_arr(raster_file, get_file=False).ravel()
+                        if var_name == 'IRR':
+                            df['irr_area_km2'] = raster_arr * 0.0009
+                        elif var_name == 'Streamflow':
+                            raster_arr[np.isnan(raster_arr)] = 0
+                            df['streamflow_m3s'] = raster_arr
+                        else:
+                            df[var_name] = raster_arr
+                gw_file = f'{gw_data_dir}GW_{year}.tif'
+                gw_arr = read_raster_as_arr(gw_file, get_file=False).ravel()
+                gw_arr[np.isnan(gw_arr)] = 0
+                df['gw_pumping_mm'] = gw_arr
+                df['Year'] = year
+                data_df = pd.concat([data_df, df])
+        data_df = data_df[data_df.irr_area_km2 > 0]
+        data_df = data_df[data_df.gw_pumping_mm > 0].reset_index(drop=True)
+        gw_basin_gdf = gpd.read_file(gw_basin_vector)
+        gw_basin_dict = {}
+        for gw_basin in gw_basin_gdf.OBJECTID:
+            gw_basin_dict[gw_basin] = gw_basin_gdf[gw_basin_gdf.OBJECTID == gw_basin].BASIN_NAME.values[0]
+        gw_basin_dict[0] = 'OUTSIDE AZ'
+        data_df.GW_Basin = data_df.GW_Basin.swifter.apply(lambda x: gw_basin_dict[x])
+        data_df.to_csv(data_csv, index=False)
+    return data_csv

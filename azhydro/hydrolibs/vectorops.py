@@ -23,7 +23,7 @@ from shapely.geometry import Point
 def reproject_vector(
         input_vector_file: str,
         outfile_path: str,
-        ref_file: str,
+        ref_file: str | None = None,
         crs: str = 'epsg:4326',
         crs_from_file: bool = True,
         raster: bool = True
@@ -35,7 +35,7 @@ def reproject_vector(
         input_vector_file (str): Input vector file path.
         outfile_path (str): Output vector file path.
         crs (str): Target CRS.
-        ref_file (str): Reference file (raster or vector) for obtaining target CRS.
+        ref_file (str or None): Reference file (raster or vector) for obtaining target CRS.
         crs_from_file (bool): If true (default) read CRS from file (raster or vector).
         raster (bool): If true (default) read CRS from raster else vector.
 

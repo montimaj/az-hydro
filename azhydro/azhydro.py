@@ -29,11 +29,9 @@ if __name__ == '__main__':
     skip_download = True
     tile_size = 10000
     num_workers = 32
-    xres = 500
-    yres = 500
+    tile_raster_res = 500
     fill_attr = 'AF Pumped'
-    resampled_gee_mosaic_dir = f'{output_dir}GEE_Mosaics_{xres}m/'
-    resampled_tile_dir = f'{output_dir}GEE_Tiles_{xres}m/'
+    resampled_tile_dir = f'{output_dir}GEE_Tiles_{tile_raster_res}m/'
     gee_mosaic_data_dir = f'{output_dir}GEE_Mosaics/'
     pred_data_dir = f'{output_dir}Predictor_Data/'
     irr_output_prefix = 'IRR'
@@ -58,13 +56,13 @@ if __name__ == '__main__':
         use_only_ama_ina=False,
         already_preprocessed=load_files
     )
-    dataops.resample_gee_tiles(
+    dataops.resample_gee_rasters(
         gee_data_dir,
         data_band_names,
         resampled_tile_dir,
-        xres,
-        num_workers,
-        load_files
+        target_raster_res=tile_raster_res,
+        num_workers=num_workers,
+        already_resampled=load_files
     )
     dataops.mosaic_tiles(
         resampled_tile_dir,
@@ -73,13 +71,12 @@ if __name__ == '__main__':
         end_year,
         already_mosaicked=load_files
     )
-    load_files = True
     irr_tile_dir = dataops.create_irrigation_tiles(
         gee_data_dir,
         output_dir,
         start_year,
         end_year,
-        xres,
+        tile_raster_res,
         output_prefix=irr_output_prefix,
         already_created=load_files
     )
@@ -91,12 +88,23 @@ if __name__ == '__main__':
         output_prefix=irr_output_prefix,
         already_mosaicked=load_files
     )
+    mosaic_raster_res = 1000
+    resampled_gee_mosaic_dir = f'{output_dir}GEE_Mosaics_{mosaic_raster_res}m/'
+    dataops.resample_gee_rasters(
+        gee_mosaic_data_dir,
+        data_band_names,
+        resampled_gee_mosaic_dir,
+        original_raster_res=tile_raster_res,
+        target_raster_res=mosaic_raster_res,
+        already_resampled=load_files,
+        use_tile_format=False
+    )
     gwops.create_gw_volume_rasters(
         output_gw_vector_dir,
         output_gw_volume_raster_dir,
         value_field=fill_attr,
-        xres=xres,
-        yres=yres,
+        xres=mosaic_raster_res,
+        yres=mosaic_raster_res,
         already_created=load_files
     )
     gwops.create_gw_depth_rasters(
@@ -110,6 +118,7 @@ if __name__ == '__main__':
         az_state_file=f'{vector_reproj_dir}AZ.geojson',
         already_cropped=load_files
     )
+    load_files = True
     gwops.reproject_vectors(
         f'{vector_dir}Canals/',
         vector_reproj_dir,
@@ -128,18 +137,27 @@ if __name__ == '__main__':
     gwops.create_gw_basin_streamflow_rasters(
         gw_basin_proj,
         az_canal_proj,
-        gee_mosaic_data_dir,
-        xres,
-        yres,
+        resampled_gee_mosaic_dir,
+        mosaic_raster_res,
+        mosaic_raster_res,
         start_year,
         end_year,
         load_files
     )
     dataops.reproject_gee_mosaics(
-        gee_mosaic_data_dir,
+        resampled_gee_mosaic_dir,
         pred_data_dir,
         gw_cropped_raster_dir,
         already_reprojected=load_files
     )
-
-
+    load_files = False
+    az_csv = dataops.create_az_data_csv(
+        pred_data_dir,
+        gw_cropped_raster_dir,
+        output_dir,
+        data_band_names,
+        gw_basin_proj,
+        start_year,
+        end_year,
+        load_csv=load_files
+    )
