@@ -15,18 +15,22 @@ import numpy as np
 import geopandas as gpd
 import rasterio as rio
 import swifter
+import joblib
+import multiprocessing
 import pickle
 import sklearn.utils as sk
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 
 from sysops import makedirs
+from gwops import create_land_use_data
 from rasterops import reproject_raster_gdal, read_raster_as_arr, write_raster
 from google.cloud import storage
 from shapely.geometry import Polygon
 from glob import glob
 from dask import delayed, compute
 from dask.distributed import Client, LocalCluster
+from http.client import RemoteDisconnected
 
 
 def create_fishnet(
@@ -206,13 +210,16 @@ def download_gee_tile(
                 try:
                     valid_tile = tile_irr_sum.getInfo()['remapped'] > 0
                     retry_irr_mask = False
-                except (ee.EEException, requests.exceptions.RequestException, requests.exceptions.ConnectionError) as e:
+                except (
+                        ee.EEException, requests.exceptions.RequestException,
+                        requests.exceptions.ConnectionError, RemoteDisconnected
+                ) as e:
                     print('Error:', e, '.Retrying...')
                     retry_irr_mask = True
                     time.sleep(5)
         if valid_tile:
             openet_idx = 0
-            if year < 2016:
+            if year < 2013:
                 openet_idx = 1
             openet_ensemble = openet_ic[openet_idx].select('et_ensemble_mad') \
                 .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
@@ -405,6 +412,8 @@ def download_gee_tile(
                     ]).mean()
                 band = band.rename(band_name)
                 data_img = data_img.addBands(band, overwrite=True)
+            if gee_scale == 30:
+                data_img = data_img.multiply(irr_mask)
             retry_download = True
             while retry_download:
                 try:
@@ -426,7 +435,10 @@ def download_gee_tile(
                         for chunk in r.iter_content(chunk_size=1024):
                             fd.write(chunk)
                     retry_download = False
-                except (ee.EEException, requests.exceptions.RequestException, requests.exceptions.ConnectionError) as e:
+                except (
+                        ee.EEException, requests.exceptions.RequestException,
+                        requests.exceptions.ConnectionError, RemoteDisconnected
+                ) as e:
                     print('Error', e, 'during', local_file_name, 'download!')
                     print('Retrying download...')
                     retry_download = True
@@ -691,6 +703,57 @@ def resample_gee_rasters(
         print('GEE tiles already resampled...')
 
 
+def create_irrigation_tiles_parallel(
+        year: int,
+        gee_tile_dir: str,
+        irr_30m_dir: str,
+        output_prefix: str,
+        irr_resampled_dir: str,
+        resampling_factor: float
+) -> None:
+    """
+    Parallely create yearly irrigated area tiles at 30 m and resampled resolutions.
+
+    Args:
+        year (int): Year in YYYY format.
+        gee_tile_dir (str): Directory containing the yearly tiles.
+        irr_30m_dir (str): 30-m irrigated area raster directory.
+        output_prefix (str): Output prefix for irrigated area files.
+        irr_resampled_dir (str): Resampled irrigated area raster directory.
+        resampling_factor (float): Tile resampling factor.
+
+    Returns:
+        None.
+    """
+    print('Creating irrigation rasters for', year, '...')
+    gee_yearly_tiles = glob(f'{gee_tile_dir}*{year}.tif')
+    for tile in gee_yearly_tiles:
+        tile_file = tile[tile.rfind(os.sep) + 1:]
+        try:
+            tile_arr, tile_obj = read_raster_as_arr(tile)
+            tile_arr[tile_arr > 0] = 1
+            irr_raster_file_30m = f'{irr_30m_dir}{output_prefix}_{tile_file}'
+            write_raster(
+                tile_arr,
+                tile_obj,
+                transform_=tile_obj.transform,
+                outfile_path=irr_raster_file_30m,
+                no_data_value=0,
+                num_bands=1
+            )
+            irr_raster_file_resampled = f'{irr_resampled_dir}{output_prefix}_{tile_file}'
+            reproject_raster_gdal(
+                irr_raster_file_30m,
+                irr_raster_file_resampled,
+                resampling_factor=resampling_factor,
+                resampling_func='sum',
+                output_dtype='int32'
+            )
+        except Exception as e:
+            print('Error occured while processing', tile, '\n', e)
+            continue
+
+
 def create_irrigation_tiles(
         gee_tile_dir: str,
         output_dir: str,
@@ -722,33 +785,11 @@ def create_irrigation_tiles(
         irr_30m_dir = f'{output_dir}Irrigation_30m/'
         makedirs((irr_30m_dir, irr_resampled_dir))
         resampling_factor = raster_res / 30
-        for year in range(start_year, end_year + 1):
-            gee_yearly_tiles = glob(f'{gee_tile_dir}*{year}.tif')
-            for tile in gee_yearly_tiles:
-                tile_file = tile[tile.rfind(os.sep) + 1:]
-                try:
-                    tile_arr, tile_obj = read_raster_as_arr(tile)
-                    tile_arr[tile_arr > 0] = 1
-                    irr_raster_file_30m = f'{irr_30m_dir}{output_prefix}_{tile_file}'
-                    write_raster(
-                        tile_arr,
-                        tile_obj,
-                        transform_=tile_obj.transform,
-                        outfile_path=irr_raster_file_30m,
-                        no_data_value=0,
-                        num_bands=1
-                    )
-                    irr_raster_file_resampled = f'{irr_resampled_dir}{output_prefix}_{tile_file}'
-                    reproject_raster_gdal(
-                        irr_raster_file_30m,
-                        irr_raster_file_resampled,
-                        resampling_factor=resampling_factor,
-                        resampling_func='sum',
-                        output_dtype='int32'
-                    )
-                except Exception as e:
-                    print('Error occured while processing', tile, '\n', e)
-                    continue
+        num_cores = multiprocessing.cpu_count() - 1
+        joblib.Parallel(n_jobs=num_cores)(joblib.delayed(create_irrigation_tiles_parallel)(
+            year, gee_tile_dir, irr_30m_dir, output_prefix,
+            irr_resampled_dir, resampling_factor
+        ) for year in range(start_year, end_year + 1))
     return irr_resampled_dir
 
 
@@ -777,6 +818,7 @@ def mosaic_tiles(
 
     if not already_mosaicked:
         makedirs(output_dir)
+        print('Mosaicking tiles...')
         for year in range(start_year, end_year + 1):
             tiles = ' '.join(glob(f'{input_tile_dir}*{year}.tif'))
             merged_tif = f'{output_dir}{output_prefix}_{year}.tif'
@@ -829,6 +871,7 @@ def create_az_data_csv(
         start_year: int = 1985,
         end_year: int = 2023,
         exclude_years: list[int, ...] | None = None,
+        lu_smoothing: int = 3,
         load_csv: bool = False
 ) -> pd.DataFrame:
     """
@@ -843,23 +886,26 @@ def create_az_data_csv(
         start_year (int): Start year in YYYY.
         end_year (int): End year in YYYY.
         exclude_years (list(int, ...) or None): Exclude these years from the dataframe.
+        lu_smoothing (int): Gaussian smoothing window size for land use rasters obtained from CDL.
         load_csv (bool): Set True to load existing CSV.
 
     Returns:
         pd.DataFrame: Output dataframe.
     """
 
-    data_csv = f'{output_dir}AZ_Data.csv'
+    data_parquet = f'{output_dir}AZ_Data.parquet'
     if not load_csv:
         if exclude_years is None:
             exclude_years = []
         data_df = pd.DataFrame()
         var_names = [
-            'IRR',
+            'Predictor',
             'GW_Basin',
+            'IRR',
             'Streamflow',
-            'Predictor'
+            'GW_Basin_CAP_SRP_Total'
         ]
+        nan_str = 'OUTSIDE AZ'
         for year in range(start_year, end_year + 1):
             df = pd.DataFrame()
             if year not in exclude_years:
@@ -867,11 +913,22 @@ def create_az_data_csv(
                     raster_file = f'{input_file_dir}{var_name}_{year}.tif'
                     if var_name == 'Predictor':
                         for band_num, band_name in enumerate(data_band_names):
-                            df[band_name] = read_raster_as_arr(
-                                raster_file,
-                                band=band_num + 1,
-                                get_file=False
-                            ).ravel()
+                            try:
+                                raster_arr = read_raster_as_arr(
+                                    raster_file,
+                                    band=band_num + 1,
+                                    get_file=False
+                                )
+                                if band_name == 'crop_cdl':
+                                    df = create_land_use_data(
+                                        df, raster_arr,
+                                        smoothing=lu_smoothing
+                                    )
+                                else:
+                                    df[band_name] = raster_arr.ravel()
+                            except IndexError:
+                                print('IndexError for', raster_file)
+                                df[band_name] = 0
                     else:
                         raster_arr = read_raster_as_arr(raster_file, get_file=False).ravel()
                         if var_name == 'IRR':
@@ -879,6 +936,10 @@ def create_az_data_csv(
                         elif var_name == 'Streamflow':
                             raster_arr[np.isnan(raster_arr)] = 0
                             df['streamflow_m3s'] = raster_arr
+                        elif var_name == 'GW_Basin_CAP_SRP_Total':
+                            df['cap_srp_delivery_m3'] = raster_arr * 1233.48
+                        elif var_name == 'GW':
+                            raster_arr[np.isnan(raster_arr)] = 0
                         else:
                             df[var_name] = raster_arr
                 gw_file = f'{gw_data_dir}GW_{year}.tif'
@@ -890,12 +951,13 @@ def create_az_data_csv(
         gw_basin_dict = {}
         for gw_basin in gw_basin_gdf.OBJECTID:
             gw_basin_dict[gw_basin] = gw_basin_gdf[gw_basin_gdf.OBJECTID == gw_basin].BASIN_NAME.values[0]
-        gw_basin_dict[0] = 'OUTSIDE AZ'
+        gw_basin_dict[0] = nan_str
         data_df.GW_Basin = data_df.GW_Basin.swifter.apply(
-            lambda x: gw_basin_dict[x] if not np.isnan(x) else 'OUTSIDE AZ')
-        data_df.to_csv(data_csv, index=False)
+            lambda x: gw_basin_dict[x] if not np.isnan(x) else nan_str)
+        data_df = data_df[data_df.GW_Basin != nan_str]
+        data_df.to_parquet(data_parquet, index=False)
     else:
-        data_df = pd.read_csv(data_csv)
+        data_df = pd.read_parquet(data_parquet)
     return data_df
 
 
@@ -1121,7 +1183,6 @@ def reindex_df(
 def process_outliers(
         input_df: pd.DataFrame,
         target_attr: str,
-        crop_col: str,
         year_col: str,
         operation: int = 3
 ) -> pd.DataFrame:
@@ -1130,10 +1191,9 @@ def process_outliers(
     Args:
         input_df (pd.DataFrame): Input pandas DataFrame object.
         target_attr (str): Target attribute based on which outlier removal will occur.
-        crop_col (str): Name of the crop column.
         year_col (str): Name of the year column.
-        operation (int): Outlier operation to perform. Set to 1 for removing outlier directly, 2 for removing outliers
-                         by each crop, 3 for removing outliers by each year.
+        operation (int): Outlier operation to perform. Set to 1 for removing outlier directly or 3 for removing outliers
+                         by each year.
 
     Returns:
         pd.DataFrame: Outlier removed input_df.
@@ -1149,12 +1209,9 @@ def process_outliers(
         invalid_idx = input_df[target_attr] > upper_limit
         num_outliers = invalid_idx.sum()
         input_df.loc[invalid_idx, target_attr] = np.nan
-    elif operation >= 2:
-        selection_vals = input_df[crop_col].unique()
-        selection_col = crop_col
-        if operation == 3:
-            selection_vals = input_df[year_col].unique()
-            selection_col = year_col
+    else:
+        selection_vals = input_df[year_col].unique()
+        selection_col = year_col
         for val in selection_vals:
             selection = input_df[selection_col] == val
             selected_data = input_df[selection]
@@ -1188,8 +1245,8 @@ def create_train_test_data(
         already_created: bool = False,
         scaling: bool = False,
         year_list: list[int, ...] = (1985,),
-        crop_col: str = 'crop_cdl',
         gw_basin_col: str = 'GW_Basin',
+        irr_area_col: str = 'irr_area_km2',
         split_strategy: int = 3,
         outlier_op: int | None = 3,
         shuffle: bool = True
@@ -1205,60 +1262,69 @@ def create_train_test_data(
         test_year (tuple (int, ...) or bool): If split_strategy = 1, then this needs to be a tuple of years in YYYY
                                              format, i.e., (2014, 2015), and the test data is created from these years.
                                              For split_strategy=2, set this to True if the test data needs to be created
-                                             based on year_col. Otherwise, if split_strategy=2 and test_year=False then
-                                             the test data is created using crop_col.
+                                             based on year_col.
         test_gw_basins (tuple (str, ...)): Build test data from only these tuple of groundwater basins.
         year_col (str): Name of the year column.
         random_state (int): Random state used during train test split.
         already_created (bool): Set True to load existing train and test data.
         scaling (bool): Set True to perform minmax scaling.
         year_list (list (int,...)): List of years in YYYY format, i.e., (1985, ..., 2023) to build the data set.
-        crop_col (str): Name of the crop column to create dummy variables.
         gw_basin_col (str): Name of the GW basin column.
+        irr_area_col (str): Name of the irrigated area column.
         split_strategy (int): If 1, Split train test data based on year_col. If 2, then test_size amount of data from
                               year_col are kept for testing and rest for training;
                               for this option, test-year should have a tuple of integers or a True value. If 3, then
                               test_gw_basins are used for spatial holdouts. For any other value of split-strategy,
                               the data are randomly split.
-        outlier_op (int): Outlier operation to perform. Set to 1 for removing outlier directly, 2 for removing outliers
-                          by each crop, or 3 for removing outliers by each year.
+        outlier_op (int): Outlier operation to perform. Set to 1 for removing outlier directly or 2 for removing
+                          outliers by each year.
         shuffle (bool): Set False to stop data shuffling.
 
     Returns:
         tuple: A tuple containing X_train, X_test as pandas data frames, y_train, y_test as numpy arrays.
-        If scaling=True, then x_scaler and y_scaler are also returned. Year_train, Year_test, Crop_train, and Crop_test
-        are returned as well for future analyses.
+        If scaling=True, then x_scaler and y_scaler are also returned. Year_train, Year_test, GW_Basin_Train, and
+        GW_Basin_Test are returned as well
+        for future analyses.
     """
     makedirs(output_dir)
-    x_train_file = output_dir + 'X_train.csv'
-    x_test_file = output_dir + 'X_test.csv'
-    y_train_file = output_dir + 'y_train.csv'
-    y_test_file = output_dir + 'y_test.csv'
-    year_train_file = output_dir + 'Year_train.csv'
-    year_test_file = output_dir + 'Year_test.csv'
-    crop_train_file = output_dir + 'Crop_train.csv'
-    crop_test_file = output_dir + 'Crop_test.csv'
+    x_train_file = output_dir + 'X_train.parquet'
+    x_test_file = output_dir + 'X_test.parquet'
+    y_train_file = output_dir + 'y_train.parquet'
+    y_test_file = output_dir + 'y_test.parquet'
+    year_train_file = output_dir + 'Year_train.parquet'
+    year_test_file = output_dir + 'Year_test.parquet'
+    gw_basin_train_file = output_dir + 'GW_Basin_train.parquet'
+    gw_basin_test_file = output_dir + 'GW_Basin_test.parquet'
     x_scaler_file, x_scaler, y_scaler_file, y_scaler = [None] * 4
     if scaling:
         x_scaler_file = output_dir + 'x_scaler'
         y_scaler_file = output_dir + 'y_scaler'
     if not already_created:
         drop_attr = [attr for attr in drop_attr]
-        crop_flag = False
-        if crop_col in drop_attr:
-            drop_attr.remove(crop_col)
-            crop_flag = True
-        if year_col in drop_attr:
-            drop_attr.remove(year_col)
-        drop_attr.remove(gw_basin_col)
-        input_df = input_df.drop(columns=drop_attr)
         input_df = input_df.replace([np.inf, -np.inf], np.nan).dropna(axis=1)
+        no_irr = input_df[input_df[irr_area_col] == 0].shape[0]
+        no_irr_no_gw = input_df[(input_df[irr_area_col] == 0) & (input_df[pred_attr] == 0)].shape[0]
+        irr_no_gw = input_df[(input_df[irr_area_col] > 0) & (input_df[pred_attr] == 0)].shape[0]
+        no_irr_gw = input_df[(input_df[irr_area_col] == 0) & (input_df[pred_attr] > 0)].shape[0]
+        print('Non-irrigated pixels:', no_irr)
+        print('Non-irrigated and non-GW pixels:', no_irr_no_gw)
+        print('Irrigated and non-GW pixels:', irr_no_gw)
+        print('Non-Irrigated and GW pixels:', no_irr_gw)
+        # input_df.loc[input_df[irr_area_col] == 0, pred_attr] = 0
+        input_df = input_df[input_df[pred_attr] > 0]
         if year_list and year_col in input_df.columns:
             input_df = input_df[input_df[year_col].isin(year_list)]
         if outlier_op is not None:
-            input_df = process_outliers(input_df, pred_attr, crop_col, year_col, outlier_op)
-        input_df[crop_col] = input_df[crop_col].astype(int)
-        input_df.to_csv(output_dir + 'Cleaned_AZ_GW_Data.csv', index=False)
+            input_df = process_outliers(
+                input_df, pred_attr,
+                year_col, outlier_op
+            )
+        if year_col in drop_attr:
+            drop_attr.remove(year_col)
+        if gw_basin_col in drop_attr:
+            drop_attr.remove(gw_basin_col)
+        input_df = input_df.drop(columns=drop_attr)
+        input_df.to_parquet(output_dir + 'Cleaned_AZ_GW_Data.parquet', index=False)
         x_train, x_test, y_train, y_test = split_data_train_test(
             input_df, pred_attr=pred_attr,
             test_size=test_size,
@@ -1269,15 +1335,10 @@ def create_train_test_data(
         )
         year_train = x_train[year_col].copy().to_frame()
         year_test = x_test[year_col].copy().to_frame()
+        gw_basin_train = x_train[gw_basin_col].copy().to_frame()
+        gw_basin_test = x_test[gw_basin_col].copy().to_frame()
         x_train = x_train.drop(columns=[year_col, gw_basin_col, pred_attr])
         x_test = x_test.drop(columns=[year_col, gw_basin_col, pred_attr])
-        crop_train = x_train[crop_col].copy().to_frame()
-        crop_test = x_test[crop_col].copy().to_frame()
-        # if crop_flag:
-        #     x_train = x_train.drop(columns=[crop_col])
-        #     x_test = x_test.drop(columns=[crop_col])
-        # x_train = pd.get_dummies(x_train, columns=[crop_col])
-        # x_test = pd.get_dummies(x_test, columns=[crop_col])
         x_train = reindex_df(x_train, column_names=None)
         x_test = reindex_df(x_test, column_names=None)
         if scaling:
@@ -1286,32 +1347,32 @@ def create_train_test_data(
             x_test = pd.DataFrame(x_scaler.transform(x_test), columns=x_test.columns)
             y_train = pd.DataFrame(y_scaler.fit_transform(y_train), columns=y_train.columns)
             y_test = pd.DataFrame(y_scaler.transform(y_test), columns=y_test.columns)
-        x_train.to_csv(x_train_file, index=False)
-        x_test.to_csv(x_test_file, index=False)
-        y_train.to_csv(y_train_file, index=False)
-        y_test.to_csv(y_test_file, index=False)
-        year_train.to_csv(year_train_file, index=False)
-        year_test.to_csv(year_test_file, index=False)
-        crop_train.to_csv(crop_train_file, index=False)
-        crop_test.to_csv(crop_test_file, index=False)
+        x_train.to_parquet(x_train_file, index=False)
+        x_test.to_parquet(x_test_file, index=False)
+        y_train.to_parquet(y_train_file, index=False)
+        y_test.to_parquet(y_test_file, index=False)
+        year_train.to_parquet(year_train_file, index=False)
+        year_test.to_parquet(year_test_file, index=False)
+        gw_basin_train.to_parquet(gw_basin_train_file, index=False)
+        gw_basin_test.to_parquet(gw_basin_test_file, index=False)
         if scaling:
             pickle.dump(x_scaler, open(x_scaler_file, mode='wb'))
             pickle.dump(y_scaler, open(y_scaler_file, mode='wb'))
     else:
-        x_train = pd.read_csv(x_train_file)
-        x_test = pd.read_csv(x_test_file)
-        y_train = pd.read_csv(y_train_file)
-        y_test = pd.read_csv(y_test_file)
-        year_train = pd.read_csv(year_train_file)
-        year_test = pd.read_csv(year_test_file)
-        crop_train = pd.read_csv(crop_train_file)
-        crop_test = pd.read_csv(crop_test_file)
+        x_train = pd.read_parquet(x_train_file)
+        x_test = pd.read_parquet(x_test_file)
+        y_train = pd.read_parquet(y_train_file)
+        y_test = pd.read_parquet(y_test_file)
+        year_train = pd.read_parquet(year_train_file)
+        year_test = pd.read_parquet(year_test_file)
+        gw_basin_train = pd.read_parquet(gw_basin_train_file)
+        gw_basin_test = pd.read_parquet(gw_basin_test_file)
         if scaling:
             x_scaler = pickle.load(open(x_scaler_file, mode='rb'))
             y_scaler = pickle.load(open(y_scaler_file, mode='rb'))
     ret_vals = (
         x_train, x_test, y_train.to_numpy().ravel(), y_test.to_numpy().ravel(),
-        x_scaler, y_scaler, year_train, year_test, crop_train, crop_test
+        x_scaler, y_scaler, year_train, year_test, gw_basin_train, gw_basin_test
     )
 
     return ret_vals

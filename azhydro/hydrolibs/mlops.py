@@ -11,6 +11,7 @@ import numpy as np
 import pickle
 from typing import Any
 from lightgbm import LGBMRegressor
+from xgboost import XGBRegressor
 from dask.distributed import Client
 from dask_ml.model_selection import GridSearchCV as DaskGCV
 from dask_ml.model_selection import RandomizedSearchCV as DaskRCV
@@ -49,10 +50,15 @@ def get_model_param_dict(
     if use_dask:
         n_jobs = 1
     model_dict = {
+        'XGB': XGBRegressor(
+            n_jobs=-1,
+            seed=random_state,
+            n_estimators=300
+        ),
         'LGBM': LGBMRegressor(
             tree_learner='feature', random_state=random_state,
             deterministic=True, force_row_wise=True,
-            verbosity=-1
+            verbosity=-1, n_estimators=300, max_depth=16, num_leaves=63
         ),
         'DRF': LGBMRegressor(
             boosting_type='rf',
@@ -60,7 +66,15 @@ def get_model_param_dict(
             deterministic=True, force_row_wise=True,
             verbosity=-1
         ),
-        'RF': RandomForestRegressor(random_state=random_state, n_jobs=n_jobs),
+        'RF': RandomForestRegressor(
+            n_jobs=-2, oob_score=False,
+            n_estimators=100, max_features=5,
+            random_state=random_state, max_depth=None,
+            # max_samples=None, min_samples_leaf=1,
+            # min_samples_split=2, max_leaf_nodes=None,
+            # min_impurity_decrease=0., min_weight_fraction_leaf=0.,
+            # ccp_alpha=0.
+        ),
         'ETR': ExtraTreesRegressor(random_state=random_state, n_jobs=n_jobs, bootstrap=True),
         'DT': DecisionTreeRegressor(random_state=random_state),
         'BT': BaggingRegressor(random_state=random_state, n_jobs=n_jobs),
@@ -70,16 +84,18 @@ def get_model_param_dict(
         'LR': LinearRegression(n_jobs=n_jobs)
     }
 
-    param_dict = {'LGBM': {
-        'n_estimators': [300, 400, 500],
-        'max_depth': [16, 20, -1],
-        'learning_rate': [0.01, 0.05],
-        'subsample': [1, 0.9],
-        'colsample_bytree': [1, 0.9],
-        'colsample_bynode': [1, 0.9],
-        'path_smooth': [0.1, 0.2],
-        'num_leaves': [31, 32],
-        'min_child_samples': [30, 40]
+    param_dict = {'XGB': {
+
+    }, 'LGBM': {
+        # 'n_estimators': [300, 400, 500],
+        # 'max_depth': [16, 20, -1],
+        # 'learning_rate': [0.01, 0.05],
+        # 'subsample': [1, 0.9],
+        # 'colsample_bytree': [1, 0.9],
+        # 'colsample_bynode': [1, 0.9],
+        # 'path_smooth': [0.1, 0.2],
+        # 'num_leaves': [31, 32],
+        # 'min_child_samples': [30, 40]
     }, 'DRF': {
         'n_estimators': [400, 500, 600],
         'max_depth': [16, 20, 32, -1],
@@ -91,18 +107,18 @@ def get_model_param_dict(
         'num_leaves': [100, 150, 200],
         'min_child_samples': [25, 28, 30],
     }, 'RF': {
-        'n_estimators': [300, 400, 500],
-        'max_features': [None, 10, 30],
-        'max_depth': [None],
-        'max_leaf_nodes': [None],
-        'max_samples': [None],
-        'min_samples_leaf': [1, 2]
+        # 'n_estimators': [300, 400, 500],
+        # 'max_features': [None, 10, 30],
+        # 'max_depth': [None],
+        # 'max_leaf_nodes': [None],
+        # 'max_samples': [None],
+        # 'min_samples_leaf': [1, 2]
     }, 'ETR': {
-        'n_estimators': [300, 400, 500],
-        'max_features': [5, 6, 7],
-        'max_depth': [6, 10, None],
-        'max_samples': [None, 0.9, 0.8, 0.7],
-        'min_samples_leaf': [1, 5e-4, 1e-5]
+        # 'n_estimators': [300, 400, 500],
+        # 'max_features': [5, 6, 7],
+        # 'max_depth': [6, 10, None],
+        # 'max_samples': [None, 0.9, 0.8, 0.7],
+        # 'min_samples_leaf': [1, 5e-4, 1e-5]
     }, 'DT': {
         'max_features': [5, 6, 7],
         'max_depth': [6, 10, 20, None],
@@ -142,6 +158,7 @@ def build_ml_model(
         randomized_search: bool = False,
         stratified_kfold: bool = False,
         use_dask: bool = False,
+        split_strategy: int = 1,
         **kwargs: Any
 ) -> Any:
     """Build an ML model.
@@ -159,6 +176,9 @@ def build_ml_model(
         randomized_search (bool): Set True to use the more computationally efficient RandomizedSearchCV.
         stratified_kfold (bool): Set True to use RepeatedStratifiedKFold based on the crop type.
         use_dask (bool): Flag for using dask.
+        split_strategy (int): If 1, Split train test data based on year_col. If 2, then test_size amount of data from
+                              year_col are kept for testing and rest for training. If 3, then test_gw_basins are used
+                              for spatial holdouts. For any other value of split-strategy, the data are randomly split.
         kwargs (dict (str, str)): Pass the 'crop_train' or 'year_train' Pandas dataframe if stratified_kfold is True.
 
     Returns:
@@ -188,45 +208,45 @@ def build_ml_model(
             dask_client.wait_for_workers(1)
             cv_lib = 'dask_ml'
         model_dict, param_dict = get_model_param_dict(random_state, use_dask)
-        cv = RepeatedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
-        if stratified_kfold:
-            stratify_labels = kwargs['stratify_labels'].to_numpy().ravel()
-            cv = RepeatedStratifiedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
-            cv = cv.split(x_train, stratify_labels)
-        makedirs(make_proper_dir_name(model_dir))
-        print('\nSearching best params for {}...'.format(model_name))
-        if '_' in model_name:
-            model_name = model_name[: model_name.find('_')]
         model = model_dict[model_name]
-        scoring_metrics = ['r2', 'neg_root_mean_squared_error', 'neg_mean_absolute_error']
-        cv_func_dict = {
-            'dask_ml': {1: DaskRCV, 0: DaskGCV},
-            'sklearn': {1: RandomizedSearchCV, 0: GridSearchCV}
-        }
-        cv_func = cv_func_dict[cv_lib][int(randomized_search)]
-        if randomized_search:
-            model_grid = cv_func(
-                estimator=model, param_distributions=param_dict[model_name],
-                scoring=scoring_metrics, n_jobs=-1, cv=cv, refit=scoring_metrics[1],
-                return_train_score=True, random_state=random_state
-            )
+        if split_strategy not in [1, 3]:
+            cv = RepeatedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
+            if stratified_kfold:
+                stratify_labels = kwargs['stratify_labels'].to_numpy().ravel()
+                cv = RepeatedStratifiedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
+                cv = cv.split(x_train, stratify_labels)
+            makedirs(make_proper_dir_name(model_dir))
+            print('\nSearching best params for {}...'.format(model_name))
+            scoring_metrics = ['r2', 'neg_root_mean_squared_error', 'neg_mean_absolute_error']
+            cv_func_dict = {
+                'dask_ml': {1: DaskRCV, 0: DaskGCV},
+                'sklearn': {1: RandomizedSearchCV, 0: GridSearchCV}
+            }
+            cv_func = cv_func_dict[cv_lib][int(randomized_search)]
+            if randomized_search:
+                model_grid = cv_func(
+                    estimator=model, param_distributions=param_dict[model_name],
+                    scoring=scoring_metrics, n_jobs=-1, cv=cv, refit=scoring_metrics[1],
+                    return_train_score=True, random_state=random_state
+                )
+            else:
+                model_grid = cv_func(
+                    estimator=model, param_grid=param_dict[model_name],
+                    scoring=scoring_metrics, n_jobs=-1, cv=cv, refit=scoring_metrics[1],
+                    return_train_score=True
+                )
+            model_grid.fit(x_train, y_train)
+            get_grid_search_stats(model_grid, y_scaler)
+            print('Best params: ', model_grid.best_params_)
+            model = model_grid.best_estimator_
         else:
-            model_grid = cv_func(
-                estimator=model, param_grid=param_dict[model_name],
-                scoring=scoring_metrics, n_jobs=-1, cv=cv, refit=scoring_metrics[1],
-                return_train_score=True
-            )
-        model.fit(x_train, y_train)
-        print('Train score:', model.score(x_train, y_train))
-        # get_grid_search_stats(model_grid, y_scaler)
-        # model = model_grid.best_estimator_
-        # print('Best params: ', model_grid.best_params_)
+            model.fit(x_train, y_train)
         pickle.dump(model, open(model_file, mode='wb+'))
         if dask_client:
             dask_client.close()
     else:
         model = pickle.load(open(model_file, mode='rb'))
-    if model_name in ['RF', 'ETR', 'LGBM', 'DRF']:
+    if model_name in ['RF', 'ETR', 'LGBM', 'DRF', 'XGB']:
         imp_dict = {'Features': list(x_train.columns)}
         f_imp = np.array(model.feature_importances_).astype(float)
         if model_name in ['LGBM', 'DRF']:
@@ -240,25 +260,28 @@ def build_ml_model(
 
 def calc_train_test_metrics(
         pred_df: pd.DataFrame,
-        crop_col: str = 'crop_cdl',
-        year_col: str = 'Year'
+        use_ama_ina: bool = True,
+        gw_basin_col: str = 'GW_Basin'
 ) -> None:
     """Calculate train and test metrics from the prediction data frames.
 
     Args:
         pred_df (pd.DataFrame): Prediction data frame.
-        crop_col (str): Name of the crop column.
-        year_col (str): Name of the year column.
+        use_ama_ina (bool): Set False to calculate error metrics over entire AZ.
+        gw_basin_col (str): Name of the GW basin column.
 
     Returns
         None
     """
+    if use_ama_ina:
+        pred_df = pred_df[(pred_df[gw_basin_col].str.contains('AMA')) | (pred_df[gw_basin_col].str.contains('INA'))]
+        print(pred_df[gw_basin_col].unique())
     train_data = pred_df[pred_df.DATA == 'TRAIN']
     test_data = pred_df[pred_df.DATA == 'TEST']
-    train_actual = train_data.Actual_GW.to_numpy().ravel()
-    train_pred = train_data.Pred_GW.to_numpy().ravel()
-    test_actual = test_data.Actual_GW.to_numpy().ravel()
-    test_pred = test_data.Pred_GW.to_numpy().ravel()
+    train_actual = train_data.Actual_GW_mm.to_numpy().ravel()
+    train_pred = train_data.Pred_GW_mm.to_numpy().ravel()
+    test_actual = test_data.Actual_GW_mm.to_numpy().ravel()
+    test_pred = test_data.Pred_GW_mm.to_numpy().ravel()
     print('***Overall stats***\n')
     print('Train + Validation results...')
     r2, mae, rmse = get_prediction_stats(train_actual, train_pred)
@@ -266,25 +289,6 @@ def calc_train_test_metrics(
     print('\nTest results...')
     r2, mae, rmse = get_prediction_stats(test_actual, test_pred)
     print('R2:', r2, 'RMSE:', rmse, '% MAE:', mae, '%')
-    # cols = [col for col in pred_df.columns if col.startswith(crop_col)] + [year_col]
-    # for col in cols:
-    #     print('\n***{} specific stats***\n'.format(col))
-    #     if col != year_col:
-    #         col_val_list = [1]
-    #     else:
-    #         col_val_list = np.unique(np.append(train_data[col].unique(), test_data[col].unique()))
-    #     for val in sorted(col_val_list):
-    #         print('\n{} type: {}'.format(col, val))
-    #         train_actual = train_data[train_data[col] == val]['Actual_GW'].to_numpy().ravel()
-    #         train_pred = train_data[train_data[col] == val]['Pred_GW'].to_numpy().ravel()
-    #         test_actual = test_data[test_data[col] == val]['Actual_GW'].to_numpy().ravel()
-    #         test_pred = test_data[test_data[col] == val]['Pred_GW'].to_numpy().ravel()
-    #         print('Train + Validation results...')
-    #         r2, mae, rmse = get_prediction_stats(train_actual, train_pred)
-    #         print('R2:', r2, 'RMSE:', rmse, 'MAE:', mae)
-    #         print('\nTest results...')
-    #         r2, mae, rmse = get_prediction_stats(test_actual, test_pred)
-    #         print('R2:', r2, 'RMSE:', rmse, 'MAE:', mae)
 
 
 def get_grid_search_stats(gs_model: Any, y_scaler: MinMaxScaler | None = None) -> None:
@@ -333,9 +337,21 @@ def get_prediction_stats(
     """
     r2, mae, rmse = (np.nan,) * 3
     if actual_values.size and pred_values.size:
-        r2 = np.round(r2_score(actual_values, pred_values), precision)
-        mae = np.round(mean_absolute_error(actual_values, pred_values) * 100 / np.std(actual_values), precision)
-        rmse = np.round(mean_squared_error(actual_values, pred_values, squared=False) * 100 / np.std(actual_values), precision)
+        r2 = np.round(
+            r2_score(
+                actual_values, pred_values
+            ), precision
+        )
+        mae = np.round(
+            mean_absolute_error(
+                actual_values, pred_values
+            ) * 100 / np.mean(actual_values), precision
+        )
+        rmse = np.round(
+            mean_squared_error(
+                actual_values, pred_values, squared=False
+            ) * 100 / np.mean(actual_values), precision
+        )
     return r2, mae, rmse
 
 
@@ -349,12 +365,12 @@ def get_prediction_results(
         y_scaler: MinMaxScaler | None,
         year_train: pd.DataFrame,
         year_test: pd.DataFrame,
+        gw_basin_train: pd.DataFrame,
+        gw_basin_test: pd.DataFrame,
         model_dir: str,
         model_name: str = 'DRF',
         year_col: str = 'Year',
-        crop_col: str = 'crop_cdl',
-        crop_train: pd.DataFrame | None = None,
-        crop_test: pd.DataFrame | None = None
+        gw_basin_col: str = 'GW_Basin'
 ) -> pd.DataFrame:
     """Get model prediction results.
 
@@ -368,12 +384,12 @@ def get_prediction_results(
         y_scaler (MinMaxScaler or None): y scaler object.
         year_train (pd.DataFrame): Year train data frame to append to train data.
         year_test (pd.DataFrame): Year test data frame to append to test data.
+        gw_basin_train (pd.DataFrame): GW basin train data frame to append to train data.
+        gw_basin_test (pd.DataFrame): GW basin test data frame to append to test data.
         model_dir (str): Model directory to store/load results.
         model_name (str): Model name.
         year_col (str): Name of the year column.
-        crop_col (str): Name of the crop column.
-        crop_train (pd.DataFrame or None): Crop train data frame to append to train data.
-        crop_test (pd.DataFrame or None): Crop test data frame to append to test data.
+        gw_basin_col (str): Name of the GW basin column.
 
     Returns:
         pd.DataFrame: Modified prediction data frame.
@@ -390,24 +406,19 @@ def get_prediction_results(
         y_pred_test = y_scaler.inverse_transform(y_pred_test.reshape(-1, 1)).ravel()
     train_df = x_train.copy()
     train_df[year_col] = year_train[year_col].to_numpy().ravel()
+    train_df[gw_basin_col] = gw_basin_train[gw_basin_col].to_numpy().ravel()
     test_df = x_test.copy()
     test_df[year_col] = year_test[year_col].to_numpy().ravel()
-    crop_models = '_' in model_name
-    if (not crop_models) and (crop_col not in train_df.columns):
-        train_df[crop_col] = crop_train[crop_col].to_numpy().ravel()
-        test_df[crop_col] = crop_test[crop_col].to_numpy().ravel()
+    test_df[gw_basin_col] = gw_basin_test[gw_basin_col].to_numpy().ravel()
     train_df['DATA'] = ['TRAIN'] * train_df.shape[0]
-    train_df['Pred_GW'] = y_pred_train
-    train_df['Actual_GW'] = y_train
+    train_df['Pred_GW_mm'] = y_pred_train
+    train_df['Actual_GW_mm'] = y_train
     test_df['DATA'] = ['TEST'] * test_df.shape[0]
-    test_df['Pred_GW'] = y_pred_test
-    test_df['Actual_GW'] = y_test
+    test_df['Pred_GW_mm'] = y_pred_test
+    test_df['Actual_GW_mm'] = y_test
     pred_df = pd.concat([train_df, test_df])
-    pred_df['Error_GW'] = pred_df['Actual_GW'] - pred_df['Pred_GW']
-    if crop_models:
-        crop = model_name[model_name.find('_') + 1:]
-        pred_df[crop_col] = [crop] * pred_df['Error_GW'].size
-    pred_df.to_csv(f'{model_dir}Predictions_{model_name}.csv', index=False)
+    pred_df['Error_GW_mm'] = pred_df['Actual_GW_mm'] - pred_df['Pred_GW_mm']
+    pred_df.to_parquet(f'{model_dir}Predictions_{model_name}.parquet', index=False)
     return pred_df
 
 

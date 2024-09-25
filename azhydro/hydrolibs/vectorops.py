@@ -152,7 +152,8 @@ def add_attribute_well_reg(
         use_only_ama_ina (bool): Set True to use only AMA/INA for model training
         kwargs (dict (str, str)): Additional variables, which include csv_well_id='Well Id',
                                   csv_mov_id='Movement Type', csv_water_id='Water Type', movement_type='WITHDRAWAL',
-                                  water_type='GROUNDWATER', and shp_well_id='REGISTRY_I' as defaults.
+                                  water_type='GROUNDWATER', water_use='IRRIGATION', and shp_well_id='REGISTRY_I'
+                                  as defaults.
 
     Returns:
         None.
@@ -163,14 +164,18 @@ def add_attribute_well_reg(
     csv_well_id = 'Well Id'
     csv_mov_id = 'Movement Type'
     csv_water_id = 'Water Type'
+    shp_water_use_id = 'WATER_USE'
     movement_type = 'WITHDRAWAL'
     water_type = 'GROUNDWATER'
     shp_well_id = 'REGISTRY_I'
+    water_use = 'IRRIGATION'
     if kwargs:
         csv_well_id = kwargs['csv_well_id']
         movement_type = kwargs['movement_type']
         water_type = kwargs['water_type']
         shp_well_id = kwargs['shp_well_id']
+        water_use = kwargs['water_use']
+    well_reg_gdf = well_reg_gdf[well_reg_gdf[shp_water_use_id] == water_use]
     if filter_attr:
         well_reg_gdf = well_reg_gdf[well_reg_gdf[filter_attr] != filter_attr_value]
     for csv_id in set(gw_df[csv_well_id]):
@@ -198,17 +203,17 @@ def add_attribute_well_reg(
 
 
 def add_attribute_well_reg_multiple(
-        input_well_reg_file,
-        input_gw_csv_dir,
-        out_gw_shp_dir,
-        fill_attr='AF Pumped',
-        filter_attr='AMA',
-        filter_attr_value='OUTSIDE OF AMA OR INA',
-        use_only_ama_ina=False,
-        **kwargs
+        input_well_reg_file: str,
+        input_gw_csv_dir: str,
+        out_gw_shp_dir: str,
+        fill_attr: str = 'AF Pumped',
+        filter_attr: str = 'AMA',
+        filter_attr_value: str = 'OUTSIDE OF AMA OR INA',
+        use_only_ama_ina: bool = False,
+        **kwargs: dict[str, str]
 ) -> None:
     """
-    Parallilzation based on multiple groundwater pumping CSV files.
+    Parallelization based on multiple groundwater pumping CSV files.
     Add an attribute present in the GW csv file to the Well Registry shape file based on matching ids given in kwargs.
     By default, the GW withdrawal is added. The csv ids must include: csv_well_id, csv_mov_id, csv_water_id,
     movement_type, water_type, The shp id must include shp_well_id. For the Arizona datasets, csv_well_id='Well Id',
@@ -225,7 +230,8 @@ def add_attribute_well_reg_multiple(
         use_only_ama_ina (bool): Set True to use only AMA/INA for model training
         kwargs (dict (str, str)): Additional variables, which include csv_well_id='Well Id',
                                   csv_mov_id='Movement Type', csv_water_id='Water Type', movement_type='WITHDRAWAL',
-                                  water_type='GROUNDWATER', and shp_well_id='REGISTRY_I' as defaults.
+                                  water_type='GROUNDWATER', water_use = 'IRRIGATION', and shp_well_id='REGISTRY_I'
+                                  as defaults.
 
     Returns:
         None.
@@ -245,9 +251,16 @@ def add_attribute_well_reg_multiple(
     ) for input_gw_csv_file in glob(input_gw_csv_dir + '*.csv'))
 
 
-def parallel_add_attribute_well_reg(input_well_reg_file, input_gw_csv_file, out_gw_shp_dir, fill_attr='AF Pumped',
-                                    filter_attr='AMA', filter_attr_value='OUTSIDE OF AMA OR INA',
-                                    use_only_ama_ina=False, **kwargs):
+def parallel_add_attribute_well_reg(
+        input_well_reg_file: str,
+        input_gw_csv_file: str,
+        out_gw_shp_dir: str,
+        fill_attr: str = 'AF Pumped',
+        filter_attr: str = 'AMA',
+        filter_attr_value: str = 'OUTSIDE OF AMA OR INA',
+        use_only_ama_ina:bool = False,
+        **kwargs: dict[str, str]
+):
     """
     Add an attribute present in the GW csv file to the Well Registry shape files (yearwise) based on matching ids given
     in kwargs. By default, the GW withdrawal is added. The csv ids must include: csv_well_id, csv_mov_id, csv_water_id,
@@ -255,14 +268,22 @@ def parallel_add_attribute_well_reg(input_well_reg_file, input_gw_csv_file, out_
     csv_mov_id='Movement Type', csv_water_id='Water Type', movement_type='WITHDRAWAL', water_type='GROUNDWATER', and
     shp_well_id='REGISTRY_I' by default. For changing, pass appropriate kwargs. This function should be called from
     #add_attribute_well_reg_multiple(...)
-    :param input_well_reg_file: Input well registry shapefile
-    :param input_gw_csv_file: Input GW csv file
-    :param out_gw_shp_dir: Output GW geojson directory having GW withdrawal data
-    :param fill_attr: Attribute present in the CSV file to add to Well Registry
-    :param filter_attr: Remove specific wells based on this attribute. Set None to disable filtering.
-    :param use_only_ama_ina: Set True to use only AMA/INA for model training
-    :param filter_attr_value: Value for filter_attr
-    :return: None
+
+    Args:
+        input_well_reg_file (str): Input well registry shapefile.
+        input_gw_csv_file (str): Input GW csv file.
+        out_gw_shp_dir (str): Output GW geojson directory having GW withdrawal data.
+        fill_attr (str): Attribute present in the CSV file to add to Well Registry.
+        filter_attr (str): Remove specific wells based on this attribute. Set None to disable filtering.
+        use_only_ama_ina (bool): Set True to use only AMA/INA for model training.
+        filter_attr_value (str): Value for filter_attr.
+        kwargs (dict (str, str)): Additional variables, which include csv_well_id='Well Id',
+                                  csv_mov_id='Movement Type', csv_water_id='Water Type', movement_type='WITHDRAWAL',
+                                  water_type='GROUNDWATER', water_use = 'IRRIGATION', and shp_well_id='REGISTRY_I'
+                                  as defaults.
+
+    Returns:
+        None.
     """
 
     out_well_reg_file = out_gw_shp_dir + input_gw_csv_file[
@@ -280,15 +301,25 @@ def parallel_add_attribute_well_reg(input_well_reg_file, input_gw_csv_file, out_
     )
 
 
-def gdf2shp(input_df, geometry, source_crs, target_crs, outfile_path):
+def gdf2shp(
+        input_df: pd.DataFrame,
+        geometry: list[Point],
+        source_crs: str,
+        target_crs: str,
+        outfile_path: str
+) -> None:
     """
-    Convert Geodatafarme to SHP
-    :param input_df: Input geodataframe
-    :param geometry: Geometry (Point) list
-    :param source_crs: CRS of the source file
-    :param target_crs: Target CRS
-    :param outfile_path: Output file path
-    :return:
+    Convert pandas dataframe containing location information to SHP.
+
+    Args:
+        input_df (pd.DataFrame): Input pandas dataframe.
+        geometry (list (Point)): Geometry (Point) list.
+        source_crs (str): CRS of the source file.
+        target_crs (str): Target CRS.
+        outfile_path (str): Output file path.
+
+    Returns:
+        None.
     """
 
     crs = {'init': source_crs}

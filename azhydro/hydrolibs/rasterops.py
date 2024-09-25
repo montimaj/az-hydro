@@ -6,7 +6,6 @@ Handle various raster operations.
 # Email: sayantan.majumdar@dri.edu
 
 import matplotlib.pyplot as plt
-import rasterio as rio
 import geopandas as gpd
 import numpy as np
 import os
@@ -14,6 +13,7 @@ import multiprocessing
 import subprocess
 
 from osgeo import gdal
+gdal.PushErrorHandler('CPLQuietErrorHandler')
 from joblib import Parallel, delayed
 from rasterio.plot import plotting_extent
 from rasterio.mask import mask
@@ -22,6 +22,7 @@ from shapely.geometry import Point
 from glob import glob
 from fiona import transform
 from sysops import az_nodata, makedirs
+import rasterio as rio
 
 
 def read_raster_as_arr(
@@ -334,7 +335,6 @@ def reproject_raster_gdal(
                 resampleAlg=resampling_dict[resampling_func],
                 xRes=xres, yRes=yres,
                 outputType=output_dtype_dict[output_dtype],
-                multithread=True,
                 format='GTiff',
                 options=['-overwrite']
             )

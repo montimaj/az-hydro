@@ -13,6 +13,9 @@ import numpy as np
 import geopandas as gpd
 import pandas as pd
 import dataretrieval.nwis as nwis
+import scipy.ndimage.filters as flt
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 from sysops import makedirs, copy_file
 from glob import glob
@@ -162,10 +165,9 @@ def fix_gw_raster_values(
         no_data = rops.az_nodata()
         raster_arr[np.isnan(raster_arr)] = no_data
         raster_arr[np.logical_and(raster_arr > 0, raster_arr < 1e-8)] = 0.
-        if fix_only_negative:
-            raster_arr[raster_arr < 0] = no_data
-        else:
+        if not fix_only_negative:
             raster_arr[raster_arr >= max_threshold] = no_data
+        raster_arr[raster_arr < 0] = no_data
         rops.write_raster(
             raster_arr, raster_file, transform_=raster_file.transform,
             outfile_path=out_raster, no_data_value=no_data
@@ -209,10 +211,12 @@ def create_gw_volume_rasters(
             value_field_pos=value_field_pos
         )
         makedirs(output_gw_dir)
+        max_gw = 3000 * xres * yres / 1.233e+6
         fix_gw_raster_values(
             gw_volume_dir_uncorrected,
             output_gw_dir,
-            fix_only_negative=True
+            fix_only_negative=False,
+            max_threshold=max_gw
         )
         shutil.rmtree(gw_volume_dir_uncorrected, ignore_errors=True)
     else:
@@ -348,3 +352,188 @@ def create_gw_basin_streamflow_rasters(
             )
 
     print('GW Basin and Streamflow rasters created...')
+
+
+def create_gw_basin_sw_delivery_rasters(
+        gw_basin_vector: str,
+        cap_delivery_xls: str,
+        srp_delivery_xls: str,
+        output_dir: str,
+        xres: float = 500,
+        yres: float = 500,
+        start_year: int = 1985,
+        end_year: int = 2023,
+        already_created: bool = False
+) -> None:
+    """
+    Create CAP and SRP surface water delivery data for Arizona.
+
+    Args:
+        gw_basin_vector (str): GW Basin shapefile or geojson for Arizona.
+        canal_vector (str): Canal shapefile or geojson for Arizona.
+        output_dir (str): Output directory.
+        cap_delivery_xls (str): XLS filepath for the CAP annual surface water delivery data in acre-feet.
+        srp_delivery_xls (str): XLS filepath for the SRP annual surface water delivery data in acre-feet.
+        xres (float): X-Resolution (m).
+        yres (float): Y-Resolution (m).
+        start_year (int): Start year in YYYY.
+        end_year (int): End year in YYYY.
+        already_created (bool): Set True if raster already exists.
+
+    Returns:
+        None
+    """
+
+    if not already_created:
+        year_list = range(start_year, end_year + 1)
+        makedirs(output_dir)
+        gw_basin_gdf = gpd.read_file(gw_basin_vector)
+        cap_df = pd.read_excel(cap_delivery_xls)[['Year', 'AMA', 'Delivery AF']]
+        cap_df = cap_df[cap_df.Year.isin(year_list)]
+        year_col = 'Year'
+        basin_col = 'BASIN_NAME'
+        delivery_col = 'AF'
+        cap_df.columns = [year_col, basin_col, delivery_col]
+        cap_df[basin_col] = cap_df[basin_col].str.upper()
+        srp_df = pd.read_excel(srp_delivery_xls)[['Water Move Year', 'AMA', 'SUM_WATER_QTY', 'Water Type', 'Water Use']]
+        srp_df.columns = [year_col, basin_col, delivery_col, 'WT', 'WU']
+        srp_df = srp_df[
+            (srp_df.Year.isin(year_list)) &
+            (srp_df.WT.str.contains('SURFACE WATER')) &
+            (srp_df.WU.str.contains('EXEMPT IRRIGATION DELIVERY'))
+        ].drop(columns=['WT', 'WU']).groupby([year_col, basin_col]).sum().reset_index()
+        srp_missing_data = pd.DataFrame({
+            year_col: [2023],
+            basin_col: ['Phoenix AMA'],
+            delivery_col: [
+                srp_df[srp_df.Year == 2022][delivery_col].values[0]
+            ]
+        })
+        srp_df = pd.concat([srp_df, srp_missing_data])
+        srp_df[basin_col] = srp_df[basin_col].str.upper()
+        for year in year_list:
+            cap_df[(cap_df[basin_col] == 'PHOENIX AMA') & (cap_df[year_col] == year)][delivery_col] += \
+                srp_df[srp_df[year_col] == year][delivery_col]
+        gw_basin_cap_srp_gdf = gw_basin_gdf.merge(cap_df, on=basin_col)[[year_col, basin_col, delivery_col, 'geometry']]
+        for year in year_list:
+            basin_gdf = gw_basin_gdf.copy(deep=True)[[basin_col, 'geometry']]
+            gw_basin_shp = f'{output_dir}GW_Basin_CAP_SRP_Total_{year}.shp'
+            for gw_basin in basin_gdf[basin_col]:
+                delivery_vals = gw_basin_cap_srp_gdf[
+                    (gw_basin_cap_srp_gdf[basin_col] == gw_basin) &
+                    (gw_basin_cap_srp_gdf[year_col] == year) &
+                    (gw_basin_cap_srp_gdf[delivery_col] > 0)
+                ][delivery_col].values
+                if not delivery_vals.size:
+                    delivery_data = 0
+                else:
+                    delivery_data = delivery_vals[0]
+                basin_gdf.loc[basin_gdf[basin_col] == gw_basin, delivery_col] = delivery_data
+            basin_gdf.to_file(gw_basin_shp)
+            gw_basin_tif = f'{output_dir}GW_Basin_CAP_SRP_Total_{year}.tif'
+            vops.shp2raster(
+                gw_basin_shp,
+                gw_basin_tif,
+                xres=xres, yres=yres,
+                value_field=delivery_col,
+                add_value=False
+            )
+    print('GW Basin surface water delivery rasters created...')
+
+
+def create_land_use_data(
+        input_df: pd.DataFrame,
+        cdl_arr: np.array,
+        smoothing: int = 3
+) -> pd.DataFrame:
+    """
+    Create Gaussian-filtered land use array.
+
+    Args:
+        input_df (pd.DataFrame): Dataframe used to store the Guassian-filtered reclassified CDL arrays, where
+                                 1 = Agriculture, 2 = Surface Water, and 3 = Urban.
+        cdl_arr (np.array): CDL array.
+        smoothing (int): Smoothing window size for the Gaussian filter.
+
+    Returns:
+        pd.DataFrame: input_df updated with the Gaussian-filtered reclassified CDL arrays.
+    """
+
+    cdl_reclass_dict = {
+        (0, 59.5): 1,
+        (66.5, 77.5): 1,
+        (203.5, 255): 1,
+        (110.5, 111.5): 2,
+        (111.5, 112.5): 0,
+        (120.5, 124.5): 3,
+        (59.5, 61.5): 0,
+        (130.5, 195.5): 0
+    }
+    cdl_labels = ('AGRI', 'SW', 'URBAN')
+    for key in cdl_reclass_dict.keys():
+        cdl_arr[np.logical_and(cdl_arr > key[0], cdl_arr <= key[1])] = cdl_reclass_dict[key]
+    cdl_arr = cdl_arr.astype(np.float32)
+    for idx, cdl_label in enumerate(cdl_labels):
+        lu_arr = np.full_like(cdl_arr, fill_value=0.)
+        lu_arr[cdl_arr == idx + 1] = 1
+        gaussian_lu_arr = flt.gaussian_filter(lu_arr, sigma=smoothing, order=0)
+        gaussian_lu_arr = np.abs(gaussian_lu_arr)
+        gaussian_lu_arr -= np.min(gaussian_lu_arr)
+        gaussian_lu_arr /= np.ptp(gaussian_lu_arr)
+        input_df[cdl_label] = gaussian_lu_arr.ravel()
+    return input_df
+
+
+def make_time_series_plots(
+        input_df: pd.DataFrame,
+        output_dir: str,
+        year_col: str = 'Year',
+        gw_basin_col: str = 'GW_Basin',
+) -> None:
+    """
+    Make time series plots for individual groundwater basins.
+
+    Args:
+        input_df (pd.DataFrame): Input dataframe containing the ML-predicted and actual pumping data.
+        output_dir (str): Output directory.
+        year_col (str): Name of the year column.
+        gw_basin_col (str): Name of the GW basin column.
+
+    Returns:
+        None.
+    """
+
+    for gw_basin in input_df[gw_basin_col].unique():
+        plot_dir = f'{output_dir}{gw_basin}/'
+        makedirs(plot_dir)
+        basin_df = input_df[input_df[gw_basin_col] == gw_basin]
+        plt.figure(figsize=(20, 10))
+        plt.rcParams.update({'font.size': 20})
+        basin_df['Actual_GW_af'] = basin_df['Actual_GW_mm'] * 4 * 247.105 / (304.8 * 1000)
+        basin_df['Pred_GW_af'] = basin_df['Pred_GW_mm'] * 4 * 247.105 / (304.8 * 1000)
+        min_yr = basin_df[year_col].min()
+        max_yr = basin_df[year_col].max()
+        ax = sns.lineplot(
+            basin_df,
+            x=year_col,
+            y='Actual_GW_af',
+            estimator='sum',
+            errorbar=None,
+            legend=False,
+            color='black'
+        )
+        sns.lineplot(
+            basin_df,
+            x=year_col,
+            y='Pred_GW_af',
+            estimator='sum',
+            ax=ax,
+            errorbar=None,
+            legend=False,
+            color='blue'
+        )
+        plt.legend(['Actual', 'Predicted'])
+        plt.ylabel('Groundwater Withdrawals (1000s of acre-ft)')
+        plt.tight_layout()
+        plt.xticks(range(min_yr, max_yr + 1, 5))
+        plt.savefig(f'{plot_dir}TS.png', dpi=300)
