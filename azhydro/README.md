@@ -8,7 +8,9 @@ Maintainers: [Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majumdar
 Note: This software has been successfully tested on [Alienware M17R1 2020](https://www.dell.com/en-us/gaming/alienware) (Windows 10 Home) and the [Apple MacBook Pro 2023](https://www.apple.com/macbook-pro/) (macOS Sonoma 14.3.1).
 
 ## Citations
-Majumdar, S., Smith, R., Conway, B. D., & Lakshmi, V. (2022). Advancing remote sensing and machine learning‐driven frameworks for groundwater withdrawal estimation in Arizona: Linking land subsidence to groundwater withdrawals. Hydrological Processes, 36(11), e14757. https://doi.org/10.1002/hyp.14757
+Majumdar, S., Smith, R.G., Hasan, M.F., Wogenstahl, C., & Conway, B.D. (2025). A long-term database of groundwater pumping, consumptive use, effective precipitation, and irrigation efficiencies in Arizona derived from remote sensing and machine learning. _In prep. for Nature Scientific Data_.
+
+Majumdar, S., Smith, R., Conway, B. D., & Lakshmi, V. (2022). Advancing remote sensing and machine learning‐driven frameworks for groundwater withdrawal estimation in Arizona: Linking land subsidence to groundwater withdrawals. _Hydrological Processes, 36_(11), e14757. https://doi.org/10.1002/hyp.14757
 
 
 ## Running the project

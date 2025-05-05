@@ -23,7 +23,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 
 from sysops import makedirs
-from gwops import create_land_use_data
+from gwops import create_land_use_data, get_ama_ina_basin_names
 from rasterops import reproject_raster_gdal, read_raster_as_arr, write_raster
 from google.cloud import storage
 from shapely.geometry import Polygon
@@ -96,7 +96,7 @@ def download_gee_tile(
         tile_values: tuple[int, float, float, float],
         download_dir: str,
         year_list: list,
-        data_band_names: list[str, ...],
+        data_band_names: list[str],
         gcloud_project: str = 'azhydro',
         gee_scale: int = 30,
         irrigated_tiles: bool = True,
@@ -219,7 +219,7 @@ def download_gee_tile(
                     time.sleep(5)
         if valid_tile:
             openet_idx = 0
-            if year < 2013:
+            if year < 2000:
                 openet_idx = 1
             openet_ensemble = openet_ic[openet_idx].select('et_ensemble_mad') \
                 .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
@@ -310,17 +310,22 @@ def download_gee_tile(
             terraclimate_ro = terraclimate_ic.select('ro') \
                 .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
                 .sum()
-            daymet_precip = daymet_ic.select('prcp') \
-                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
-                .sum()
-            daymet_tmmx = daymet_ic.select('tmax') \
-                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
-                .median() \
-                .add(273.15)
-            daymet_tmmn = daymet_ic.select('tmin') \
-                .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
-                .median() \
-                .add(273.15)
+            if year < 2024:
+                daymet_precip = daymet_ic.select('prcp') \
+                    .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                    .sum()
+                daymet_tmmx = daymet_ic.select('tmax') \
+                    .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                    .median() \
+                    .add(273.15)
+                daymet_tmmn = daymet_ic.select('tmin') \
+                    .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                    .median() \
+                    .add(273.15)
+            else:
+                daymet_precip = gridmet_precip
+                daymet_tmmx = gridmet_tmmx
+                daymet_tmmn = gridmet_tmmn
             if year < 2023:
                 conus404_precip = conus404_ic.select('PREC_ACC_NC') \
                     .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
@@ -452,14 +457,14 @@ def download_gee_data(
         gcloud_bucket: str = 'azhydro',
         download_dir: str = '../../Data/Inputs/GEE_Data/',
         start_year: int = 1985,
-        end_year: int = 2023,
+        end_year: int = 2024,
         skip_download: bool = False,
         tile_size: int = 10000,
         num_workers: int = 32,
         worker_memory='0.5G',
         gee_scale: int = 30,
         irrigated_tiles: bool = True,
-) -> tuple[str, list[str, ...]]:
+) -> tuple[str, list[str]]:
     """
     Download multiple GEE datasets as rasters at 100 m spatial resolution.
 
@@ -602,7 +607,7 @@ def download_gee_data(
 
 def resample_gee_rasters(
         gee_raster_dir: str,
-        data_band_names: list[str, ...],
+        data_band_names: list[str],
         output_dir: str,
         original_raster_res: float = 30,
         target_raster_res: float = 1000,
@@ -651,7 +656,7 @@ def resample_gee_rasters(
                     gdal_dtype = 'byte'
                 val = (band_num + 1, 'mode', gdal_dtype)
             data_band_dict[data_band_name] = val
-        gee_rasters = sorted(glob(gee_raster_dir + '*.tif'))
+        gee_rasters = sorted(glob(f'{gee_raster_dir}*.tif'))
         resampling_factor = target_raster_res / original_raster_res
         if use_tile_format:
             itr = 1
@@ -758,7 +763,7 @@ def create_irrigation_tiles(
         gee_tile_dir: str,
         output_dir: str,
         start_year: int = 1985,
-        end_year: int = 2023,
+        end_year: int = 2024,
         raster_res: float = 1000,
         output_prefix: str = 'IRR',
         already_created: bool = False
@@ -797,7 +802,7 @@ def mosaic_tiles(
         input_tile_dir: str,
         output_dir: str,
         start_year: int = 1985,
-        end_year: int = 2023,
+        end_year: int = 2024,
         output_prefix: str = 'Predictor',
         already_mosaicked: bool = False,
 ) -> None:
@@ -866,11 +871,11 @@ def create_az_data_csv(
         input_file_dir: str,
         gw_data_dir: str,
         output_dir: str,
-        data_band_names: list[str, ...],
+        data_band_names: list[str],
         gw_basin_vector: str,
         start_year: int = 1985,
         end_year: int = 2023,
-        exclude_years: list[int, ...] | None = None,
+        exclude_years: list[int] | None = None,
         lu_smoothing: int = 3,
         load_csv: bool = False
 ) -> pd.DataFrame:
@@ -903,7 +908,8 @@ def create_az_data_csv(
             'GW_Basin',
             'IRR',
             'Streamflow',
-            'GW_Basin_CAP_SRP_Total'
+            'GW_Basin_CAP_SRP_Total',
+            'Peff'
         ]
         nan_str = 'OUTSIDE AZ'
         for year in range(start_year, end_year + 1):
@@ -940,6 +946,9 @@ def create_az_data_csv(
                             df['cap_srp_delivery_m3'] = raster_arr * 1233.48
                         elif var_name == 'GW':
                             raster_arr[np.isnan(raster_arr)] = 0
+                        elif var_name == 'Peff':
+                            raster_arr[np.isnan(raster_arr)] = 0
+                            df['annual_peff_mm'] = raster_arr
                         else:
                             df[var_name] = raster_arr
                 gw_file = f'{gw_data_dir}GW_{year}.tif'
@@ -955,6 +964,13 @@ def create_az_data_csv(
         data_df.GW_Basin = data_df.GW_Basin.swifter.apply(
             lambda x: gw_basin_dict[x] if not np.isnan(x) else nan_str)
         data_df = data_df[data_df.GW_Basin != nan_str]
+        ama_ina_basins = get_ama_ina_basin_names()
+        ama_basins = ama_ina_basins[:7]
+        ina_basins = ama_ina_basins[7:]
+        data_df = data_df.reset_index(drop=True)
+        data_df['GW_Basin_Type'] = data_df.GW_Basin.swifter.apply(
+            lambda x: 0 if x in ama_basins else 1 if x in ina_basins else 2
+        )
         data_df.to_parquet(data_parquet, index=False)
     else:
         data_df = pd.read_parquet(data_parquet)
@@ -1184,7 +1200,8 @@ def process_outliers(
         input_df: pd.DataFrame,
         target_attr: str,
         year_col: str,
-        operation: int = 3
+        gw_basin_col: str,
+        operation: int = 2
 ) -> pd.DataFrame:
     """Remove outliers from a dataframe based on target_attr.
 
@@ -1192,8 +1209,8 @@ def process_outliers(
         input_df (pd.DataFrame): Input pandas DataFrame object.
         target_attr (str): Target attribute based on which outlier removal will occur.
         year_col (str): Name of the year column.
-        operation (int): Outlier operation to perform. Set to 1 for removing outlier directly or 3 for removing outliers
-                         by each year.
+        operation (int): Outlier operation to perform. Set to 1 for removing outlier directly or 2 for removing outliers
+                         by each basin and each year.
 
     Returns:
         pd.DataFrame: Outlier removed input_df.
@@ -1210,20 +1227,23 @@ def process_outliers(
         num_outliers = invalid_idx.sum()
         input_df.loc[invalid_idx, target_attr] = np.nan
     else:
-        selection_vals = input_df[year_col].unique()
-        selection_col = year_col
-        for val in selection_vals:
-            selection = input_df[selection_col] == val
-            selected_data = input_df[selection]
-            target_vals = selected_data[target_attr].to_numpy().ravel()
-            q3, q1 = np.percentile(target_vals, [75, 25])
-            iqr = q3 - q1
-            upper_limit = q3 + 1.5 * iqr
-            invalid_idx = selected_data[target_attr] > upper_limit
-            outliers = invalid_idx.sum()
-            print(f'{selection_col} {val} outliers: {outliers}')
-            num_outliers += outliers
-            input_df.loc[selection, 'Outlier'] = invalid_idx
+        year_list = input_df[year_col].unique()
+        gw_basins = input_df[gw_basin_col].unique()
+        for gw_basin in gw_basins:
+            for year in year_list:
+                selection = (input_df[gw_basin_col] == gw_basin) & (input_df[year_col] == year)
+                selected_data = input_df[selection]
+                target_vals = selected_data[target_attr].to_numpy().ravel()
+                if target_vals.size == 0:
+                    continue
+                q3, q1 = np.percentile(target_vals, [75, 25])
+                iqr = q3 - q1
+                upper_limit = q3 + 1.5 * iqr
+                invalid_idx = selected_data[target_attr] > upper_limit
+                outliers = invalid_idx.sum()
+                print(f'{gw_basin} {year} outliers: {outliers}')
+                num_outliers += outliers
+                input_df.loc[selection, 'Outlier'] = invalid_idx
         input_df = input_df[input_df['Outlier'] == False]
         input_df = input_df.drop(columns='Outlier')
     input_df = input_df.dropna()
@@ -1244,12 +1264,13 @@ def create_train_test_data(
         random_state: int = 42,
         already_created: bool = False,
         scaling: bool = False,
-        year_list: list[int, ...] = (1985,),
+        year_list: list[int] = (1985,),
         gw_basin_col: str = 'GW_Basin',
         irr_area_col: str = 'irr_area_km2',
-        split_strategy: int = 3,
-        outlier_op: int | None = 3,
-        shuffle: bool = True
+        split_strategy: int = 1,
+        outlier_op: int | None = 2,
+        shuffle: bool = True,
+        use_ama_ina: bool = False,
 ) -> tuple:
     """Create train and test data.
 
@@ -1268,7 +1289,7 @@ def create_train_test_data(
         random_state (int): Random state used during train test split.
         already_created (bool): Set True to load existing train and test data.
         scaling (bool): Set True to perform minmax scaling.
-        year_list (list (int,...)): List of years in YYYY format, i.e., (1985, ..., 2023) to build the data set.
+        year_list (list (int,...)): List of years in YYYY format, i.e., (1985, ..., 2024) to build the data set.
         gw_basin_col (str): Name of the GW basin column.
         irr_area_col (str): Name of the irrigated area column.
         split_strategy (int): If 1, Split train test data based on year_col. If 2, then test_size amount of data from
@@ -1279,6 +1300,7 @@ def create_train_test_data(
         outlier_op (int): Outlier operation to perform. Set to 1 for removing outlier directly or 2 for removing
                           outliers by each year.
         shuffle (bool): Set False to stop data shuffling.
+        use_ama_ina (bool): Set True to use AMA-INA basins.
 
     Returns:
         tuple: A tuple containing X_train, X_test as pandas data frames, y_train, y_test as numpy arrays.
@@ -1300,6 +1322,9 @@ def create_train_test_data(
         x_scaler_file = output_dir + 'x_scaler'
         y_scaler_file = output_dir + 'y_scaler'
     if not already_created:
+        if use_ama_ina:
+            ama_ina_basins = get_ama_ina_basin_names()
+            input_df = input_df[input_df[gw_basin_col].isin(ama_ina_basins)]
         drop_attr = [attr for attr in drop_attr]
         input_df = input_df.replace([np.inf, -np.inf], np.nan).dropna(axis=1)
         no_irr = input_df[input_df[irr_area_col] == 0].shape[0]
@@ -1317,12 +1342,14 @@ def create_train_test_data(
         if outlier_op is not None:
             input_df = process_outliers(
                 input_df, pred_attr,
-                year_col, outlier_op
+                year_col, gw_basin_col,
+                outlier_op
             )
         if year_col in drop_attr:
             drop_attr.remove(year_col)
         if gw_basin_col in drop_attr:
             drop_attr.remove(gw_basin_col)
+        drop_attr = set(drop_attr).intersection(input_df.columns.tolist())
         input_df = input_df.drop(columns=drop_attr)
         input_df.to_parquet(output_dir + 'Cleaned_AZ_GW_Data.parquet', index=False)
         x_train, x_test, y_train, y_test = split_data_train_test(

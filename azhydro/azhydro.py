@@ -23,6 +23,7 @@ if __name__ == '__main__':
     gw_csv_dir = f'{vector_dir}Meter Data/'
     cap_delivery_xls = f'{vector_dir}CAP/CAP Delivery Data DRI Request.xlsx'
     srp_delivery_xls = f'{vector_dir}SRP/SRP WATER DELVS HISTORY.xlsx'
+    monthly_eff_precip_dir = f'{vector_dir}Effective_precip_prediction_WestUS/v19_monthly_scaled/'
     gcloud_project = 'azhydro'
     gcloud_bucket = 'azhydro'
     start_year = 1985
@@ -31,7 +32,7 @@ if __name__ == '__main__':
     tile_size = 10000
     tile_raster_res = 30
     fill_attr = 'AF Pumped'
-    mosaic_raster_res = 2000
+    mosaic_raster_res = 800
     gee_mosaic_data_dir = f'{output_dir}GEE_Mosaics_{mosaic_raster_res}m/'
     gee_resampled_tile_dir = f'{output_dir}GEE_Tiles_{mosaic_raster_res}m/'
     output_gw_volume_raster_dir = f'{output_dir}GW/Rasters/GW_Volumes_{mosaic_raster_res}m/'
@@ -140,6 +141,7 @@ if __name__ == '__main__':
         end_year,
         load_files
     )
+    load_files = False
     gwops.create_gw_basin_sw_delivery_rasters(
         gw_basin_proj,
         cap_delivery_xls,
@@ -147,6 +149,13 @@ if __name__ == '__main__':
         gee_mosaic_data_dir,
         mosaic_raster_res,
         mosaic_raster_res,
+        start_year,
+        end_year,
+        load_files
+    )
+    gwops.create_annual_eff_precip_rasters(
+        monthly_eff_precip_dir,
+        gee_mosaic_data_dir,
         start_year,
         end_year,
         load_files
@@ -170,22 +179,27 @@ if __name__ == '__main__':
     )
     year_list = list(range(1985, 2024))
     test_years = tuple(range(2014, 2024))
-    # test_years = (1990,)
-    model_dir = f'{output_dir}ML_Model/'
-    ml_model = 'RF'
+    model_dir = f'{output_dir}ML_Model_{mosaic_raster_res}m/'
+    ml_model = 'XGB'
     random_state = 42
     load_model = False
     fold_count = 5
     repeats = 1
-    split_strategy = 3 # 1: temporal, 2: random stratified based on year_col, 3: spatial, 4: random
-    randomized_search = False
+    split_strategy = 1 # 1: temporal, 2: random stratified based on year_col, 3: spatial, 4: random
+    randomized_search = True
     load_files = False
+    perm_imp = True
 
     drop_attrs = (
         'Year',
         'GW_Basin',
         # 'AGRI',
+        # 'URBAN',
+        'SW',
+        'GW_Basin_Type',
+        # 'annual_peff_mm',
         # 'annual_et_ensemble_mm',
+        # 'irr_area_km2',
         'annual_et_ssebop_mm',
         'annual_et_sims_mm',
         'annual_et_pt_jpl_mm',
@@ -207,7 +221,7 @@ if __name__ == '__main__':
         'annual_gridmet_eddi1y',
         'annual_gridmet_spei1y',
         'annual_gridmet_pdsi',
-        #'annual_prism_precip_mm',
+        # 'annual_prism_precip_mm',
         'annual_prism_tmmx_K',
         'annual_prism_tmmn_K',
         'annual_conus404_precip_mm',
@@ -221,20 +235,25 @@ if __name__ == '__main__':
         'annual_daymet_precip_mm',
         'annual_daymet_tmmn_K',
         'annual_daymet_tmmx_K',
+        # 'streamflow_m3s',
         # 'soil_depth_mm',
         # 'ksat_mean_micromps',
         # 'elevation_m',
         # 'slope'
         # 'cap_srp_delivery_m3'
     )
+    use_ama_ina = True
+    test_gw_basins = ('HARQUAHALA INA',)
+    outlier_op = 2
     ret_vals = dataops.create_train_test_data(
         az_df, output_dir,
         drop_attr=drop_attrs,
         random_state=random_state,
         scaling=False, already_created=load_files,
         year_list=year_list, split_strategy=split_strategy,
-        test_year=test_years, outlier_op=None,
-        test_gw_basins=('HARQUAHALA INA',)
+        test_year=test_years, outlier_op=outlier_op,
+        test_gw_basins=test_gw_basins,
+        use_ama_ina=use_ama_ina
     )
     x_train, x_test, y_train, y_test, x_scaler, y_scaler, year_train, year_test, basin_train, basin_test = ret_vals
     model = mlops.build_ml_model(
@@ -242,24 +261,51 @@ if __name__ == '__main__':
         ml_model, random_state,
         load_model, fold_count,
         repeats, y_scaler,
-        randomized_search
+        randomized_search,
+        tune_params=True
     )
+    bias_corr_type = 1 if split_strategy == 3 else 2
     pred_df = mlops.get_prediction_results(
         model, x_train, x_test,
         y_train, y_test, x_scaler,
         y_scaler, year_train,
         year_test, basin_train,
         basin_test, model_dir,
-        ml_model
+        ml_model,
+        apply_bias_correction=bias_corr_type
     )
     mlops.calc_train_test_metrics(
-        pred_df, use_ama_ina=True
+        pred_df,
+        use_ama_ina=use_ama_ina
     )
+    if perm_imp:
+        mlops.compute_perm_imp(
+            model_name=ml_model,
+            x_train=x_train,
+            x_test=x_test,
+            y_train=y_train,
+            y_test=y_test,
+            model=model,
+            y_scaler=y_scaler,
+            output_dir=model_dir,
+            scoring_metric='normalized_rmse',
+            random_state=random_state,
+            create_plots=True
+        )
+    plot_dir_path = f'Plots_{mosaic_raster_res}m/'
     plot_dir_dict = {
-        1: f'{output_dir}Plots/Temporal/',
-        2: f'{output_dir}Plots/Random_Stratified/',
-        3: f'{output_dir}Plots/Spatial/',
-        4: f'{output_dir}Plots/Random/'
+        1: f'{plot_dir_path}Temporal/',
+        2: f'{plot_dir_path}Random_Stratified/',
+        3: f'{plot_dir_path}Spatial/',
+        4: f'{plot_dir_path}Random/'
     }
     plot_dir = plot_dir_dict[split_strategy]
-    gwops.make_time_series_plots(pred_df, plot_dir)
+    gwops.make_time_series_plots(
+        az_df, model,
+        x_train.columns.tolist(),
+        plot_dir,
+        test_start_year=test_years[0],
+        test_end_year=test_years[-1],
+        split_strategy=split_strategy,
+        test_gw_basins=test_gw_basins
+    )

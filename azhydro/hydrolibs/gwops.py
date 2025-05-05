@@ -15,8 +15,12 @@ import pandas as pd
 import dataretrieval.nwis as nwis
 import scipy.ndimage.filters as flt
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import seaborn as sns
+import warnings
+warnings.filterwarnings('ignore', category=RuntimeWarning)
 
+from typing import Any
 from sysops import makedirs, copy_file
 from glob import glob
 from copy import deepcopy
@@ -181,7 +185,8 @@ def create_gw_volume_rasters(
         yres: float = 1000.,
         value_field: str | None = None,
         value_field_pos: int = 0,
-        already_created: bool = True
+        already_created: bool = True,
+        max_gw: int | None = None
 ) -> None:
     """
     Create GW pumping volume rasters from shapefiles.
@@ -194,6 +199,7 @@ def create_gw_volume_rasters(
         value_field (str or None): Name of the value attribute. Set None to use value_field_pos.
         value_field_pos (int): Value field position (zero indexing).
         already_created (bool): Set False to re-compute GW pumping volume rasters.
+        max_gw (int or None): Maximum groundwater pumping depth in mm. Values beyond this will be ignored.
 
     Returns:
         str: Output raster directory path containing the GW pumping volume rasters (acreft).
@@ -211,7 +217,10 @@ def create_gw_volume_rasters(
             value_field_pos=value_field_pos
         )
         makedirs(output_gw_dir)
-        max_gw = 3000 * xres * yres / 1.233e+6
+        if max_gw:
+            max_gw *= xres * yres / 1.233e+6
+        else:
+            max_gw = np.inf
         fix_gw_raster_values(
             gw_volume_dir_uncorrected,
             output_gw_dir,
@@ -354,6 +363,68 @@ def create_gw_basin_streamflow_rasters(
     print('GW Basin and Streamflow rasters created...')
 
 
+def create_annual_eff_precip_rasters(
+        monthly_eff_precip_dir: str,
+        output_dir: str,
+        start_year: int = 1985,
+        end_year: int = 2023,
+        start_month: int = 1,
+        end_month: int = 12,
+        already_created: bool = False
+) -> None:
+    """
+    Create annual effective precipitation rasters from monthly effective precipitation rasters.
+
+    Args:
+        monthly_eff_precip_dir (str): Monthly effective precipitation raster directory.
+        output_dir (str): Output directory.
+        start_year (int): Start year in YYYY.
+        end_year (int): End year in YYYY.
+        start_month (int): Start month in MM.
+        end_month (int): End month in MM.
+        already_created (bool): Set True if raster already exists.
+
+    Returns:
+        None
+    """
+
+    if not already_created:
+        year_list = range(start_year, end_year + 1)
+        makedirs(output_dir)
+        # copy months 1 to 9 from second year to first year
+        for month in range(1, 10):
+            annual_eff_precip_file = f'{monthly_eff_precip_dir}effective_precip_{start_year}_{month}.tif'
+            if not os.path.exists(annual_eff_precip_file):
+                monthly_eff_precip_file = f'{monthly_eff_precip_dir}effective_precip_{start_year + 1}_{month}.tif'
+                if os.path.exists(monthly_eff_precip_file):
+                    copy_file(
+                        monthly_eff_precip_file,
+                        annual_eff_precip_file
+                    )
+        monthly_eff_precip_rio = None
+        for year in year_list:
+            annual_eff_precip_arr = None
+            for month in range(start_month, end_month + 1):
+                monthly_eff_precip_file = f'{monthly_eff_precip_dir}effective_precip_{year}_{month}.tif'
+                if os.path.exists(monthly_eff_precip_file):
+                    monthly_eff_precip_arr, monthly_eff_precip_rio = rops.read_raster_as_arr(monthly_eff_precip_file)
+                    if annual_eff_precip_arr is None:
+                        annual_eff_precip_arr = monthly_eff_precip_arr
+                    else:
+                        annual_eff_precip_arr += monthly_eff_precip_arr
+            if annual_eff_precip_arr is not None:
+                annual_eff_precip_file = f'{output_dir}Peff_{year}.tif'
+                rops.write_raster(
+                    annual_eff_precip_arr,
+                    monthly_eff_precip_rio,
+                    transform_=monthly_eff_precip_rio.transform,
+                    outfile_path=annual_eff_precip_file,
+                    no_data_value=monthly_eff_precip_rio.nodata
+                )
+    print('Annual effective precipitation rasters created...')
+
+
+
 def create_gw_basin_sw_delivery_rasters(
         gw_basin_vector: str,
         cap_delivery_xls: str,
@@ -412,8 +483,9 @@ def create_gw_basin_sw_delivery_rasters(
         srp_df = pd.concat([srp_df, srp_missing_data])
         srp_df[basin_col] = srp_df[basin_col].str.upper()
         for year in year_list:
-            cap_df[(cap_df[basin_col] == 'PHOENIX AMA') & (cap_df[year_col] == year)][delivery_col] += \
-                srp_df[srp_df[year_col] == year][delivery_col]
+            select_rows = (cap_df[basin_col] == 'PHOENIX AMA') & (cap_df[year_col] == year)
+            cap_srp_delivery = cap_df[select_rows][delivery_col] + srp_df[srp_df[year_col] == year][delivery_col]
+            cap_df.loc[select_rows, delivery_col] = cap_srp_delivery.copy()
         gw_basin_cap_srp_gdf = gw_basin_gdf.merge(cap_df, on=basin_col)[[year_col, basin_col, delivery_col, 'geometry']]
         for year in year_list:
             basin_gdf = gw_basin_gdf.copy(deep=True)[[basin_col, 'geometry']]
@@ -479,61 +551,138 @@ def create_land_use_data(
         gaussian_lu_arr = flt.gaussian_filter(lu_arr, sigma=smoothing, order=0)
         gaussian_lu_arr = np.abs(gaussian_lu_arr)
         gaussian_lu_arr -= np.min(gaussian_lu_arr)
+        ptp = np.ptp(gaussian_lu_arr)
         gaussian_lu_arr /= np.ptp(gaussian_lu_arr)
         input_df[cdl_label] = gaussian_lu_arr.ravel()
     return input_df
 
 
+def get_ama_ina_basin_names() -> list[str]:
+    """
+    Get the names of AMA and INA basins.
+
+    Returns:
+        list: List of AMA and INA basin names.
+    """
+
+    ama_ina_basins = [
+        'SANTA CRUZ AMA',
+        'PRESCOTT AMA',
+        'TUCSON AMA',
+        'PINAL AMA',
+        'PHOENIX AMA',
+        'DOUGLAS',
+        'DOUGLAS INA',
+        'JOSEPH CITY INA',
+        'HARQUAHALA INA',
+        'HUALAPAI VALLEY'
+    ]
+    return ama_ina_basins
+
+
 def make_time_series_plots(
         input_df: pd.DataFrame,
+        model: Any,
+        features: list[str],
         output_dir: str,
         year_col: str = 'Year',
         gw_basin_col: str = 'GW_Basin',
+        test_start_year: int = 2014,
+        test_end_year: int = 2023,
+        pred_attr: str = 'gw_pumping_mm',
+        split_strategy: int = 1,
+        test_gw_basins: tuple[str] = ('HARQUAHALA INA',)
 ) -> None:
     """
     Make time series plots for individual groundwater basins.
 
     Args:
         input_df (pd.DataFrame): Input dataframe containing the ML-predicted and actual pumping data.
+        model (Any): ML model used for predictions.
+        features (list[str]): List of features used in the model.
         output_dir (str): Output directory.
         year_col (str): Name of the year column.
         gw_basin_col (str): Name of the GW basin column.
+        test_start_year (int): Start year for the test data.
+        test_end_year (int): End year for the test data.
+        pred_attr (str): Name of the actual GW pumping attribute.
+        split_strategy (int): Split strategy used for the model. 1 = Temporal, 2 = Random Stratified, 3 = Spatial,
+                            4 = Random.
+        test_gw_basins (tuple[str]): Tuple of GW basins to be used for testing. Only used if split_strategy is 3.
 
     Returns:
         None.
     """
 
-    for gw_basin in input_df[gw_basin_col].unique():
-        plot_dir = f'{output_dir}{gw_basin}/'
+    print('Creating time series plots...')
+    ama_ina_basins = get_ama_ina_basin_names()
+    gw_basins = [ama_ina_basins] + input_df[gw_basin_col].unique().tolist()
+    test_years = list(range(test_start_year, test_end_year + 1))
+    actual_gw_col = 'Actual_GW_mm'
+    pred_gw_col = 'Pred_GW_mm'
+    input_df = input_df.rename(columns={pred_attr: actual_gw_col})
+    input_df[pred_gw_col] = np.abs(model.predict(input_df[features]))
+    for idx, gw_basin in enumerate(gw_basins):
+        if idx == 0:
+            gw_basin_name = 'AMA_INA'
+            basin_df = input_df[input_df[gw_basin_col].isin(gw_basin)].copy()
+            gw_basin_type = 'AMA/INA'
+        else:
+            gw_basin_name = gw_basin
+            basin_df = input_df[input_df[gw_basin_col] == gw_basin].copy()
+            gw_basin_type = 'AMA/INA' if gw_basin in ama_ina_basins else 'Other'
+        plot_dir = f'{output_dir}{gw_basin_name}/'
         makedirs(plot_dir)
-        basin_df = input_df[input_df[gw_basin_col] == gw_basin]
-        plt.figure(figsize=(20, 10))
-        plt.rcParams.update({'font.size': 20})
         basin_df['Actual_GW_af'] = basin_df['Actual_GW_mm'] * 4 * 247.105 / (304.8 * 1000)
         basin_df['Pred_GW_af'] = basin_df['Pred_GW_mm'] * 4 * 247.105 / (304.8 * 1000)
+        basin_df['Actual_GW_m3'] = basin_df['Actual_GW_mm'] * 4e-3
+        basin_df['Pred_GW_m3'] = basin_df['Pred_GW_mm'] * 4e-3
         min_yr = basin_df[year_col].min()
         max_yr = basin_df[year_col].max()
-        ax = sns.lineplot(
-            basin_df,
-            x=year_col,
-            y='Actual_GW_af',
-            estimator='sum',
-            errorbar=None,
-            legend=False,
-            color='black'
-        )
-        sns.lineplot(
-            basin_df,
-            x=year_col,
-            y='Pred_GW_af',
-            estimator='sum',
-            ax=ax,
-            errorbar=None,
-            legend=False,
-            color='blue'
-        )
-        plt.legend(['Actual', 'Predicted'])
-        plt.ylabel('Groundwater Withdrawals (1000s of acre-ft)')
-        plt.tight_layout()
-        plt.xticks(range(min_yr, max_yr + 1, 5))
-        plt.savefig(f'{plot_dir}TS.png', dpi=300)
+        if gw_basin_type != 'Other':
+            ty_start = test_years[0]
+            ty_end = test_years[-1]
+            basin_df = basin_df[basin_df[actual_gw_col] > 0]
+        else:
+            ty_start = min_yr
+            ty_end = max_yr
+        for unit in ['af', 'm3']:
+            plt.figure(figsize=(20, 10))
+            plt.rcParams.update({'font.size': 20})
+            ax = sns.lineplot(
+                basin_df,
+                x=year_col,
+                y=f'Pred_GW_{unit}',
+                estimator='sum',
+                errorbar='ci',
+                color='black',
+                marker='o',
+                err_style='bars'
+            )
+            if gw_basin_type != 'Other':
+                sns.lineplot(
+                    basin_df,
+                    x=year_col,
+                    y=f'Actual_GW_{unit}',
+                    estimator='sum',
+                    errorbar='ci',
+                    color='orange',
+                    marker='o',
+                    err_style='bars',
+                    ax=ax
+                )
+            ax.xaxis.set_major_formatter(ticker.StrMethodFormatter('{x:.0f}'))  # Format ticks as integers
+            plt.legend(
+                ['Predicted', 'Metered', '95% CI', '95% CI'] if gw_basin_type != 'Other'
+                else ['Predicted', '95% CI'], ncol=2
+            )
+            if split_strategy != 3:
+                ax.axvspan(ty_start, ty_end, color='lightblue', alpha=0.3)
+            elif split_strategy == 3 and gw_basin in test_gw_basins:
+                ax.axvspan(min_yr, max_yr, color='lightblue', alpha=0.3)
+            unit_str = f'(1000s of acre-ft)' if unit == 'af' else f'(1e6 m$^3$)'
+            plt.ylabel(f'Agricultural Groundwater Withdrawals {unit_str}')
+            plt.tight_layout()
+            plt.xticks(range(min_yr, max_yr + 1, 5))
+            plt.savefig(f'{plot_dir}TS_{unit}.png', dpi=300)
+            plt.close()

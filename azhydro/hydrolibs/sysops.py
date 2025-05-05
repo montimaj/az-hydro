@@ -33,8 +33,7 @@ def makedirs(directory_list: tuple[str, ...] | str) -> None:
         directory_list = [directory_list]
     for directory_name in directory_list:
         if directory_name is not None:
-            if not os.path.exists(directory_name):
-                os.makedirs(directory_name)
+            os.makedirs(directory_name, exist_ok=True)
 
 
 def make_proper_dir_name(dir_str: str) -> str | None:

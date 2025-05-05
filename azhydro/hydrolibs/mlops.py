@@ -1,6 +1,7 @@
 """
 Provides methods for machine learning (ML) operations required.
 """
+import os
 
 # Author: Sayantan Majumdar
 # Email: sayantan.majumdar@dri.edu
@@ -9,6 +10,8 @@ Provides methods for machine learning (ML) operations required.
 import pandas as pd
 import numpy as np
 import pickle
+import matplotlib.pyplot as plt
+import seaborn as sns
 from typing import Any
 from lightgbm import LGBMRegressor
 from xgboost import XGBRegressor
@@ -25,9 +28,11 @@ from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import AdaBoostRegressor
 from sklearn.ensemble import BaggingRegressor
 from sklearn.model_selection import RepeatedStratifiedKFold, RepeatedKFold, GridSearchCV, RandomizedSearchCV
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.metrics import r2_score, root_mean_squared_error, mean_absolute_error, make_scorer
 from sklearn.inspection import PartialDependenceDisplay as PDisp
+from sklearn.inspection import permutation_importance
 from sysops import makedirs, make_proper_dir_name
+from gwops import get_ama_ina_basin_names
 
 
 def get_model_param_dict(
@@ -51,9 +56,12 @@ def get_model_param_dict(
         n_jobs = 1
     model_dict = {
         'XGB': XGBRegressor(
-            n_jobs=-1,
+            n_jobs=-2,
             seed=random_state,
-            n_estimators=300
+        ),
+        'XGBRF': XGBRegressor(
+            n_jobs=-2,
+            seed=random_state,
         ),
         'LGBM': LGBMRegressor(
             tree_learner='feature', random_state=random_state,
@@ -85,17 +93,42 @@ def get_model_param_dict(
     }
 
     param_dict = {'XGB': {
-
+        'eta': [0.01],
+        'max_depth': [0],
+        'grow_policy': ['depthwise', 'lossguide'],
+        'subsample': [0.8, 0.9, 1],
+        'colsample_bytree': [0.8, 0.9, 1],
+        'colsample_bynode': [0.8, 0.9, 1],
+        'colsample_bylevel': [0.8, 0.9, 1],
+        'reg_lambda': [0, 0.1, 0.5, 1],
+        'reg_alpha': [0, 0.1, 0.5, 1],
+        'gamma': [0, 0.1, 0.5, 1],
+        'num_parallel_tree': [1],
+        'min_child_weight': [30, 40],
+        'n_estimators': [300],
+    }, 'XGBRF': {
+        'eta': [0.01],
+        'max_depth': [0],
+        'grow_policy': ['depthwise', 'lossguide'],
+        'subsample': [0.8, 0.9, 1],
+        'colsample_bytree': [0.8, 0.9, 1],
+        'colsample_bynode': [0.8, 0.9, 1],
+        'colsample_bylevel': [0.8, 0.9, 1],
+        'reg_lambda': [0, 0.1, 0.5, 1],
+        'reg_alpha': [0, 0.1, 0.5, 1],
+        'gamma': [0, 0.1, 0.5, 1],
+        'num_parallel_tree': [100, 200, 300],
+        'min_child_weight': [30, 40]
     }, 'LGBM': {
-        # 'n_estimators': [300, 400, 500],
-        # 'max_depth': [16, 20, -1],
-        # 'learning_rate': [0.01, 0.05],
-        # 'subsample': [1, 0.9],
-        # 'colsample_bytree': [1, 0.9],
-        # 'colsample_bynode': [1, 0.9],
-        # 'path_smooth': [0.1, 0.2],
-        # 'num_leaves': [31, 32],
-        # 'min_child_samples': [30, 40]
+        'n_estimators': [300, 400, 500],
+        'max_depth': [16, 20, -1],
+        'learning_rate': [0.01, 0.05],
+        'subsample': [1, 0.9],
+        'colsample_bytree': [1, 0.9],
+        'colsample_bynode': [1, 0.9],
+        'path_smooth': [0.1, 0.2],
+        'num_leaves': [31, 32],
+        'min_child_samples': [30, 40]
     }, 'DRF': {
         'n_estimators': [400, 500, 600],
         'max_depth': [16, 20, 32, -1],
@@ -107,18 +140,18 @@ def get_model_param_dict(
         'num_leaves': [100, 150, 200],
         'min_child_samples': [25, 28, 30],
     }, 'RF': {
-        # 'n_estimators': [300, 400, 500],
-        # 'max_features': [None, 10, 30],
-        # 'max_depth': [None],
-        # 'max_leaf_nodes': [None],
-        # 'max_samples': [None],
-        # 'min_samples_leaf': [1, 2]
+        'n_estimators': [300, 400, 500],
+        'max_features': [None, 10, 30],
+        'max_depth': [None],
+        'max_leaf_nodes': [None],
+        'max_samples': [None],
+        'min_samples_leaf': [1, 2]
     }, 'ETR': {
-        # 'n_estimators': [300, 400, 500],
-        # 'max_features': [5, 6, 7],
-        # 'max_depth': [6, 10, None],
-        # 'max_samples': [None, 0.9, 0.8, 0.7],
-        # 'min_samples_leaf': [1, 5e-4, 1e-5]
+        'n_estimators': [300, 400, 500],
+        'max_features': [5, 6, 7],
+        'max_depth': [6, 10, None],
+        'max_samples': [None, 0.9, 0.8, 0.7],
+        'min_samples_leaf': [1, 5e-4, 1e-5]
     }, 'DT': {
         'max_features': [5, 6, 7],
         'max_depth': [6, 10, 20, None],
@@ -144,6 +177,166 @@ def get_model_param_dict(
     }}
     return model_dict, param_dict
 
+def normalized_rmse(
+        y: np.array,
+        y_pred: np.array
+) -> float:
+    """
+    Normalized RMSE using mean.
+
+    Args:
+        y (np.array): Actual values.
+        y_pred (np.array): Predicted values.
+
+    Returns:
+        float: Normalized RMSE using mean.
+    """
+
+    mean_y = np.mean(y)
+    if mean_y == 0:
+        return np.nan
+    nrmse = root_mean_squared_error(y, y_pred) * 100 / mean_y
+    return nrmse
+
+
+def normalized_mae(
+        y: np.array,
+        y_pred: np.array
+) -> float:
+    """
+    Normalized MAE using mean.
+
+    Args:
+        y (np.array): Actual values.
+        y_pred (np.array): Predicted values.
+
+    Returns:
+        float: Normalized MAE using standard mean.
+    """
+    mean_y = np.mean(y)
+    if mean_y == 0:
+        return np.nan
+    nmae = mean_absolute_error(y, y_pred) * 100 / mean_y
+    return nmae
+
+
+def normalized_mbe(
+        y: np.array,
+        y_pred: np.array
+) -> float:
+    """
+    Normalized MBE using mean.
+
+    Args:
+        y (np.array): Actual values.
+        y_pred (np.array): Predicted values.
+
+    Returns:
+        float: Normalized MAE using standard mean.
+    """
+    mean_y = np.mean(y)
+    if mean_y == 0:
+        return np.nan
+    nmbe = np.mean(y - y_pred) * 100 / mean_y
+    return nmbe
+
+
+def compute_perm_imp(
+        model_name: str,
+        x_train: pd.DataFrame,
+        x_test: pd.DataFrame,
+        y_train: np.array,
+        y_test: np.array,
+        model: Any,
+        y_scaler: MinMaxScaler | None,
+        output_dir: str,
+        scoring_metric: str,
+        random_state: int,
+        create_plots: bool = False
+) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    """
+    Compute permutation importances.
+
+    Args:
+        model_name (str): Name of the ML model. Has to be one of 'RF', 'ETR', 'LGBM', or 'DRF.'
+        x_train (pd.DataFrame): Training dataframe containing the predictor data.
+        x_test (pd.DataFrame): Test dataframe containing the predictor data.
+        y_train (np.array): Training labels containing the observed streamflow.
+        y_test (np.array): Test labels containing the observed streamflow.
+        model (Any): Fitted model object.
+        y_scaler (MinMaxScaler or None): y scaler object.
+        output_dir (str): Output directory.
+        scoring_metric (str): Name of the scoring metric. Has to one of 'r2', 'normalized_rmse', or 'normalized_mae.'
+        random_state (int): Random seed.
+        create_plots (bool): Set True to create permutation importance plots.
+
+    Returns:
+        Tuple of training and test importance dataframes or
+        None if model_name is not one of 'RF', 'ETR', 'LGBM', or 'DRF.'
+    """
+    if model_name in ['RF', 'ETR', 'LGBM', 'DRF', 'XGB', 'XGBRF']:
+        print('Computing permutation importance...')
+        scoring_metrics = {
+            'r2': 'r2',
+            'normalized_rmse': make_scorer(normalized_rmse, greater_is_better=False),
+            'normalized_mae': make_scorer(normalized_mae, greater_is_better=False)
+        }
+        if create_plots:
+            imp_dict = {'Features': list(x_train.columns)}
+            f_imp = np.array(model.feature_importances_).astype(float)
+            if model_name in ['LGBM', 'DRF']:
+                f_imp /= np.sum(f_imp)
+            imp_dict['F_IMP'] = np.round(f_imp, 5)
+            imp_df = pd.DataFrame(data=imp_dict).sort_values(by='F_IMP', ascending=False)
+            plt.rcParams.update({'font.size': 30})
+            plt.figure(figsize=(30, 15))
+            sns.barplot(
+                data=imp_df,
+                y='Features',
+                x='F_IMP'
+            )
+            plt.xlabel(f'{model_name} Feature Importance')
+            plt.tight_layout()
+            plt.savefig(f'{output_dir}F_IMP_{model_name}.png', dpi=300)
+            imp_df.to_csv(f'{output_dir}F_IMP_{model_name}.csv', index=False)
+        perm_scorer = scoring_metrics[scoring_metric]
+        train_result = permutation_importance(
+            model, x_train.to_numpy(), y_train, n_repeats=10, random_state=random_state, n_jobs=-1, scoring=perm_scorer
+        )
+        test_results = permutation_importance(
+            model, x_test.to_numpy(), y_test, n_repeats=10, random_state=random_state, n_jobs=-1, scoring=perm_scorer
+        )
+        sorted_importances_idx = train_result.importances_mean.argsort()
+        train_importances = pd.DataFrame(
+            train_result.importances[sorted_importances_idx].T,
+            columns=x_train.columns[sorted_importances_idx],
+        )
+        test_importances = pd.DataFrame(
+            test_results.importances[sorted_importances_idx].T,
+            columns=x_train.columns[sorted_importances_idx],
+        )
+        if y_scaler:
+            train_importances = pd.DataFrame(
+                y_scaler.inverse_transform(train_importances.to_numpy()),
+                columns=train_importances.columns
+            )
+            test_importances = pd.DataFrame(
+                y_scaler.inverse_transform(test_importances.to_numpy()),
+                columns=test_importances.columns
+            )
+        if create_plots:
+            for name, importances in zip(["train", "test"], [train_importances, test_importances]):
+                plt.figure(figsize=(10, 6))
+                plt.rcParams.update({'font.size': 12})
+                ax = importances.plot.box(vert=False, whis=10)
+                ax.set_xlabel("Increase in RMSE (%)")
+                ax.axvline(x=0, color="k", linestyle="--")
+                ax.figure.tight_layout()
+                plt.savefig(f'{output_dir}{model_name}_{name}_PI.png', dpi=300)
+                plt.clf()
+        return train_importances, test_importances
+    return None
+
 
 def build_ml_model(
         x_train: np.ndarray | pd.DataFrame,
@@ -158,7 +351,7 @@ def build_ml_model(
         randomized_search: bool = False,
         stratified_kfold: bool = False,
         use_dask: bool = False,
-        split_strategy: int = 1,
+        tune_params: bool = True,
         **kwargs: Any
 ) -> Any:
     """Build an ML model.
@@ -176,17 +369,13 @@ def build_ml_model(
         randomized_search (bool): Set True to use the more computationally efficient RandomizedSearchCV.
         stratified_kfold (bool): Set True to use RepeatedStratifiedKFold based on the crop type.
         use_dask (bool): Flag for using dask.
-        split_strategy (int): If 1, Split train test data based on year_col. If 2, then test_size amount of data from
-                              year_col are kept for testing and rest for training. If 3, then test_gw_basins are used
-                              for spatial holdouts. For any other value of split-strategy, the data are randomly split.
-        kwargs (dict (str, str)): Pass the 'crop_train' or 'year_train' Pandas dataframe if stratified_kfold is True.
+        tune_params (bool): Set True to tune hyperparameters.
+        kwargs (dict (str, str)): Pass the 'year_train' Pandas dataframe if stratified_kfold is True.
 
     Returns:
         Trained model object.
     """
     model_file = model_dir + model_name
-    if model_name == 'DRF':
-        model_file = f'{model_dir}{model_name}_AIWUM2'
     if not load_model:
         dask_client = None
         cv_lib = 'sklearn'
@@ -208,60 +397,57 @@ def build_ml_model(
             dask_client.wait_for_workers(1)
             cv_lib = 'dask_ml'
         model_dict, param_dict = get_model_param_dict(random_state, use_dask)
+        if not tune_params:
+            param_dict = {model_name: {}}
         model = model_dict[model_name]
-        if split_strategy not in [1, 3]:
-            cv = RepeatedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
-            if stratified_kfold:
-                stratify_labels = kwargs['stratify_labels'].to_numpy().ravel()
-                cv = RepeatedStratifiedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
-                cv = cv.split(x_train, stratify_labels)
-            makedirs(make_proper_dir_name(model_dir))
-            print('\nSearching best params for {}...'.format(model_name))
-            scoring_metrics = ['r2', 'neg_root_mean_squared_error', 'neg_mean_absolute_error']
-            cv_func_dict = {
-                'dask_ml': {1: DaskRCV, 0: DaskGCV},
-                'sklearn': {1: RandomizedSearchCV, 0: GridSearchCV}
-            }
-            cv_func = cv_func_dict[cv_lib][int(randomized_search)]
-            if randomized_search:
-                model_grid = cv_func(
-                    estimator=model, param_distributions=param_dict[model_name],
-                    scoring=scoring_metrics, n_jobs=-1, cv=cv, refit=scoring_metrics[1],
-                    return_train_score=True, random_state=random_state
-                )
-            else:
-                model_grid = cv_func(
-                    estimator=model, param_grid=param_dict[model_name],
-                    scoring=scoring_metrics, n_jobs=-1, cv=cv, refit=scoring_metrics[1],
-                    return_train_score=True
-                )
-            model_grid.fit(x_train, y_train)
-            get_grid_search_stats(model_grid, y_scaler)
-            print('Best params: ', model_grid.best_params_)
-            model = model_grid.best_estimator_
+        cv = RepeatedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
+        if stratified_kfold:
+            stratify_labels = kwargs['stratify_labels'].to_numpy().ravel()
+            cv = RepeatedStratifiedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
+            cv = cv.split(x_train, stratify_labels)
+        makedirs(make_proper_dir_name(model_dir))
+        print('\nSearching best params for {}...'.format(model_name))
+        scoring_metrics = {
+            'r2': 'r2',
+            'normalized_rmse': make_scorer(normalized_rmse, greater_is_better=False),
+            'normalized_mae': make_scorer(normalized_mae, greater_is_better=False),
+            'normalized_mbe': make_scorer(normalized_mbe, greater_is_better=False)
+        }
+        main_scorer = 'normalized_rmse'
+        cv_func_dict = {
+            'dask_ml': {1: DaskRCV, 0: DaskGCV},
+            'sklearn': {1: RandomizedSearchCV, 0: GridSearchCV}
+        }
+        cv_func = cv_func_dict[cv_lib][int(randomized_search)]
+        if randomized_search:
+            model_grid = cv_func(
+                estimator=model, param_distributions=param_dict[model_name],
+                scoring=scoring_metrics, n_jobs=-1, cv=cv, refit=main_scorer,
+                return_train_score=True, random_state=random_state
+            )
         else:
-            model.fit(x_train, y_train)
+            model_grid = cv_func(
+                estimator=model, param_grid=param_dict[model_name],
+                scoring=scoring_metrics, n_jobs=-1, cv=cv, refit=main_scorer,
+                return_train_score=True
+            )
+        model_grid.fit(x_train, y_train)
+        get_grid_search_stats(model_grid, y_scaler)
+        print('Best params: ', model_grid.best_params_)
+        model = model_grid.best_estimator_
         pickle.dump(model, open(model_file, mode='wb+'))
         if dask_client:
             dask_client.close()
     else:
         model = pickle.load(open(model_file, mode='rb'))
-    if model_name in ['RF', 'ETR', 'LGBM', 'DRF', 'XGB']:
-        imp_dict = {'Features': list(x_train.columns)}
-        f_imp = np.array(model.feature_importances_).astype(float)
-        if model_name in ['LGBM', 'DRF']:
-            f_imp /= np.sum(f_imp)
-        imp_dict['F_IMP'] = np.round(f_imp, 5)
-        imp_df = pd.DataFrame(data=imp_dict).sort_values(by='F_IMP', ascending=False)
-        print(imp_df)
-        imp_df.to_csv(model_dir + 'F_IMP.csv', index=False)
     return model
 
 
 def calc_train_test_metrics(
         pred_df: pd.DataFrame,
         use_ama_ina: bool = True,
-        gw_basin_col: str = 'GW_Basin'
+        gw_basin_col: str = 'GW_Basin',
+        precision: int = 2
 ) -> None:
     """Calculate train and test metrics from the prediction data frames.
 
@@ -269,90 +455,228 @@ def calc_train_test_metrics(
         pred_df (pd.DataFrame): Prediction data frame.
         use_ama_ina (bool): Set False to calculate error metrics over entire AZ.
         gw_basin_col (str): Name of the GW basin column.
+        precision (int): Floating point precision to use.
 
     Returns
         None
     """
     if use_ama_ina:
-        pred_df = pred_df[(pred_df[gw_basin_col].str.contains('AMA')) | (pred_df[gw_basin_col].str.contains('INA'))]
-        print(pred_df[gw_basin_col].unique())
+        ama_ina_basins = get_ama_ina_basin_names()
+        pred_df = pred_df[pred_df[gw_basin_col].isin(ama_ina_basins)]
+    print('Calculating train and test metrics for:')
+    print(pred_df[gw_basin_col].unique())
     train_data = pred_df[pred_df.DATA == 'TRAIN']
     test_data = pred_df[pred_df.DATA == 'TEST']
     train_actual = train_data.Actual_GW_mm.to_numpy().ravel()
     train_pred = train_data.Pred_GW_mm.to_numpy().ravel()
     test_actual = test_data.Actual_GW_mm.to_numpy().ravel()
     test_pred = test_data.Pred_GW_mm.to_numpy().ravel()
-    print('***Overall stats***\n')
+    print('\n***Overall stats***\n')
     print('Train + Validation results...')
-    r2, mae, rmse = get_prediction_stats(train_actual, train_pred)
-    print('R2:', r2, 'RMSE:', rmse, '% MAE:', mae, '%')
+    r2 = np.round(r2_score(train_actual, train_pred), precision)
+    mae = np.round(normalized_mae(train_actual, train_pred), precision)
+    rmse = np.round(normalized_rmse(train_actual, train_pred), precision)
+    mbe = np.round(normalized_mbe(train_actual, train_pred), precision)
+    print('R2:', r2, 'RMSE (%):', rmse, 'MAE (%):', mae, 'MBE (%):', mbe)
     print('\nTest results...')
-    r2, mae, rmse = get_prediction_stats(test_actual, test_pred)
-    print('R2:', r2, 'RMSE:', rmse, '% MAE:', mae, '%')
+    r2 = np.round(r2_score(test_actual, test_pred), precision)
+    mae = np.round(normalized_mae(test_actual, test_pred), precision)
+    rmse = np.round(normalized_rmse(test_actual, test_pred), precision)
+    mbe = np.round(normalized_mbe(test_actual, test_pred), precision)
+    print('R2:', r2, 'RMSE (%):', rmse, 'MAE (%):', mae, 'MBE (%):', mbe)
 
 
-def get_grid_search_stats(gs_model: Any, y_scaler: MinMaxScaler | None = None) -> None:
+
+def get_grid_search_stats(
+        gs_model: Any,
+        y_scaler: MinMaxScaler | None = None,
+        precision: int = 2
+) -> None:
     """Get GridSearchCV stats.
 
     Args:
         gs_model: Fitted GridSearchCV/RandomizedSearchCV (can be Dask variants also) object.
         y_scaler (MinMaxScaler or None):y scaler object.
+        precision (int): Floating point precision to use.
 
     Returns:
         None
     """
     scores = gs_model.cv_results_
-    print('Train Results...')
-    r2 = scores['mean_train_r2'].mean()
-    rmse = -scores['mean_train_neg_root_mean_squared_error'].mean()
-    mae = -scores['mean_train_neg_mean_absolute_error'].mean()
+    print('Annual CV train Results...')
+    r2 = np.round(scores['mean_train_r2'].mean(), precision)
+    rmse = -np.round(scores['mean_train_normalized_rmse'].mean(), precision)
+    mae = -np.round(scores['mean_train_normalized_mae'].mean(), precision)
+    mbe = np.round(scores['mean_train_normalized_mbe'].mean(), precision)
     if y_scaler:
         rmse = y_scaler.inverse_transform(np.array([rmse]).reshape(1, -1)).ravel()[0]
         mae = y_scaler.inverse_transform(np.array([mae]).reshape(1, -1)).ravel()[0]
-    print('R2:', r2, 'RMSE:', rmse, 'MAE:', mae)
-    print('Validation Results...')
-    r2 = scores['mean_test_r2'].mean()
-    rmse = -scores['mean_test_neg_root_mean_squared_error'].mean()
-    mae = -scores['mean_test_neg_mean_absolute_error'].mean()
+        mbe = y_scaler.inverse_transform(np.array([mbe]).reshape(1, -1)).ravel()[0]
+    print('R2:', r2, 'RMSE (%):', rmse, 'MAE (%):', mae, 'MBE (%):', mbe)
+    print('Annual CV Validation Results...')
+    r2 = np.round(scores['mean_test_r2'].mean(), precision)
+    rmse = -np.round(scores['mean_test_normalized_rmse'].mean(), precision)
+    mae = -np.round(scores['mean_test_normalized_mae'].mean(), precision)
+    mbe = np.round(scores['mean_test_normalized_mbe'].mean(), precision)
     if y_scaler:
         rmse = y_scaler.inverse_transform(np.array([rmse]).reshape(1, -1)).ravel()[0]
         mae = y_scaler.inverse_transform(np.array([mae]).reshape(1, -1)).ravel()[0]
-    print('R2:', r2, 'RMSE:', rmse, 'MAE:', mae)
+        mbe = y_scaler.inverse_transform(np.array([mbe]).reshape(1, -1)).ravel()[0]
+    print('R2:', r2, 'RMSE (%):', rmse, 'MAE (%):', mae, 'MBE (%):', mbe)
 
 
-def get_prediction_stats(
-        actual_values: np.array,
-        pred_values: np.array,
-        precision: int = 3
-) -> tuple[float, float, float]:
-    """Get prediction statistics R^2, MAE, RMSE.
+def perform_bias_correction(
+        train_df: pd.DataFrame,
+        test_df: pd.DataFrame,
+        model_name: str,
+        output_dir: str,
+        error_gw_col: str = 'Error_GW_mm',
+) -> tuple[float, float] | tuple[np.array, np.array]:
+    """
+    Apply bias correction to the model predictions.
 
     Args:
-        actual_values (np.array): Numpy array of actual values.
-        pred_values (np.array): Numpy array of predicted values.
-        precision (int): Floating point precision to use.
+        train_df (pd.DataFrame): Training dataframe containing the model predictions and actual values.
+        test_df (pd.DataFrame): Test dataframe containing the model predictions and actual values.
+        model_name (str): Name of the ML model.
+        output_dir (str): Output directory to save the files.
+        error_gw_col (str): Name of the column containing the error in groundwater predictions.
 
     Returns:
-        A tuple of R^2, MAE, and RMSE.
+        Tuple of floats representing the slope and bias of the regression line if linear regression-based
+        bias correction is better than that of ML. Else, the predicted training and test residuals.
     """
-    r2, mae, rmse = (np.nan,) * 3
-    if actual_values.size and pred_values.size:
-        r2 = np.round(
-            r2_score(
-                actual_values, pred_values
-            ), precision
-        )
-        mae = np.round(
-            mean_absolute_error(
-                actual_values, pred_values
-            ) * 100 / np.mean(actual_values), precision
-        )
-        rmse = np.round(
-            mean_squared_error(
-                actual_values, pred_values, squared=False
-            ) * 100 / np.mean(actual_values), precision
-        )
-    return r2, mae, rmse
+
+    train_data_ecdf = train_df.copy(deep=True).drop(columns=[error_gw_col])
+    test_data_ecdf = test_df.copy(deep=True).drop(columns=[error_gw_col])
+    m_roe = np.cov(
+        train_data_ecdf.Pred_GW_mm, train_data_ecdf.Actual_GW_mm
+    )[0, 1] / np.var(train_data_ecdf.Pred_GW_mm)
+    b_roe = np.mean(train_data_ecdf.Actual_GW_mm) - m_roe * np.mean(train_data_ecdf.Pred_GW_mm)
+    train_data_ecdf['BC_GW_mm'] = np.abs(m_roe * train_data_ecdf.Pred_GW_mm + b_roe)
+    train_r2_ecdf = r2_score(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm)
+    train_r2 = r2_score(train_data_ecdf.Actual_GW_mm, train_data_ecdf.Pred_GW_mm)
+    train_rmse_ecdf = normalized_rmse(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm)
+    train_rmse = normalized_rmse(train_data_ecdf.Actual_GW_mm, train_data_ecdf.Pred_GW_mm)
+    train_mae_ecdf = normalized_mae(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm)
+    train_mae = normalized_mae(train_data_ecdf.Actual_GW_mm, train_data_ecdf.Pred_GW_mm)
+    train_mbe_ecdf = normalized_mbe(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm)
+    train_mbe = normalized_mbe(train_data_ecdf.Actual_GW_mm, train_data_ecdf.Pred_GW_mm)
+    plt.rcParams.update({'font.size': 16})
+    plot_ecdf_train_df = train_data_ecdf.filter(like="_GW", axis="columns")
+    hue_order = plot_ecdf_train_df.columns
+    sns.ecdfplot(data=plot_ecdf_train_df, hue_order=hue_order)
+    plt.legend(labels=[f'BC{model_name}', model_name, 'Metered'], loc='lower right')
+    plt.ylim(0, 1.1)
+    plt.ylabel('ECDF')
+    plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
+    plt.tight_layout()
+    plt.savefig(output_dir + 'ECDF_Train.png', dpi=300)
+    plt.clf()
+    test_data_ecdf['BC_GW_mm'] = np.abs(m_roe * test_data_ecdf.Pred_GW_mm + b_roe)
+    plot_ecdf_test_df = test_data_ecdf.filter(like="_GW", axis="columns")
+    sns.ecdfplot(data=plot_ecdf_test_df, hue_order=hue_order)
+    plt.legend(labels=[f'BC{model_name}', model_name, 'Metered'], loc='lower right')
+    plt.ylabel('ECDF')
+    plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
+    plt.ylim(0, 1.1)
+    plt.savefig(output_dir + 'ECDF_Test.png', dpi=300)
+    plt.close()
+    test_r2_ecdf = r2_score(test_data_ecdf.Actual_GW_mm, test_data_ecdf.BC_GW_mm)
+    test_r2 = r2_score(test_data_ecdf.Actual_GW_mm, test_data_ecdf.Pred_GW_mm)
+    test_rmse_ecdf = normalized_rmse(test_data_ecdf.Actual_GW_mm, test_data_ecdf.BC_GW_mm)
+    test_rmse = normalized_rmse(test_data_ecdf.Actual_GW_mm, test_data_ecdf.Pred_GW_mm)
+    test_mae_ecdf = normalized_mae(test_data_ecdf.Actual_GW_mm, test_data_ecdf.BC_GW_mm)
+    test_mae = normalized_mae(test_data_ecdf.Actual_GW_mm, test_data_ecdf.Pred_GW_mm)
+    test_mbe_ecdf = normalized_mbe(test_data_ecdf.Actual_GW_mm, test_data_ecdf.BC_GW_mm)
+    test_mbe = normalized_mbe(test_data_ecdf.Actual_GW_mm, test_data_ecdf.Pred_GW_mm)
+    metrics_df_train_linear = pd.DataFrame(
+        data={
+            'Model': [model_name, f'BC{model_name}'],
+            'Train R2': [train_r2, train_r2_ecdf],
+            'Train RMSE (%)': [train_rmse, train_rmse_ecdf],
+            'Train MAE (%)': [train_mae, train_mae_ecdf],
+            'Train MBE (%)': [train_mbe, train_mbe_ecdf],
+        }
+    ).round(2)
+    metrics_df_train_linear.to_csv(output_dir + 'Train_Metrics_Linear.csv', index=False)
+    metrics_df_test_linear = pd.DataFrame(
+        data={
+            'Model': [model_name, f'BC{model_name}'],
+            'Test R2': [test_r2, test_r2_ecdf],
+            'Test RMSE (%)': [test_rmse, test_rmse_ecdf],
+            'Test MAE (%)': [test_mae, test_mae_ecdf],
+            'Test MBE (%)': [test_mbe, test_mbe_ecdf],
+        }
+    ).round(2)
+    metrics_df_test_linear.to_csv(output_dir + 'Test_Metrics_Linear.csv', index=False)
+    model_dict, _ = get_model_param_dict(random_state=42, use_dask=False)
+    model = model_dict[model_name]
+    drop_cols = ['Year', 'DATA', 'Actual_GW_mm', 'Pred_GW_mm'] + [error_gw_col]
+    train_data_ecdf_ml = train_df.copy(deep=True).drop(columns=[error_gw_col])
+    test_data_ecdf_ml = test_df.copy(deep=True).drop(columns=[error_gw_col])
+    x_train_data = train_df.drop(columns=drop_cols)
+    x_test_data = test_df.drop(columns=drop_cols)
+    y_train_data = train_df[error_gw_col].to_numpy().ravel()
+    model.fit(x_train_data, y_train_data)
+    residuals_pred_train = model.predict(x_train_data)
+    residuals_pred_test = model.predict(x_test_data)
+    train_data_ecdf_ml['BC_GW_mm'] = np.abs(train_data_ecdf_ml.Pred_GW_mm + residuals_pred_train)
+    test_data_ecdf_ml['BC_GW_mm'] = np.abs(test_data_ecdf_ml.Pred_GW_mm + residuals_pred_test)
+    train_r2_ml = r2_score(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
+    train_rmse_ml = normalized_rmse(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
+    train_mae_ml = normalized_mae(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
+    train_mbe_ml = normalized_mbe(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
+    test_r2_ml = r2_score(test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm)
+    test_rmse_ml = normalized_rmse(test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm)
+    test_mae_ml = normalized_mae(test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm)
+    test_mbe_ml = normalized_mbe(test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm)
+
+    plt.rcParams.update({'font.size': 16})
+    plot_ecdf_train_df_ml = train_data_ecdf_ml.filter(like="_GW", axis="columns")
+    sns.ecdfplot(data=plot_ecdf_train_df_ml, hue_order=hue_order)
+    plt.legend(labels=[f'BC{model_name}', model_name, 'Metered'], loc='lower right')
+    plt.ylim(0, 1.1)
+    plt.ylabel('ECDF')
+    plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
+    plt.tight_layout()
+    plt.savefig(output_dir + 'ECDF_Train_ML.png', dpi=300)
+    plt.clf()
+    plot_ecdf_test_df_ml = test_data_ecdf_ml.filter(like="_GW", axis="columns")
+    sns.ecdfplot(data=plot_ecdf_test_df_ml, hue_order=hue_order)
+    plt.legend(labels=[f'BC{model_name}', model_name, 'Metered'], loc='lower right')
+    plt.ylabel('ECDF')
+    plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
+    plt.ylim(0, 1.1)
+    plt.savefig(output_dir + 'ECDF_Test_ML.png', dpi=300)
+    plt.clf()
+
+    metric_df_train_ml = pd.DataFrame(
+        data={
+            'Model': [model_name, f'BC{model_name}'],
+            'Train R2': [train_r2, train_r2_ml],
+            'Train RMSE (%)': [train_rmse, train_rmse_ml],
+            'Train MAE (%)': [train_mae, train_mae_ml],
+            'Train MBE (%)': [train_mbe, train_mbe_ml],
+        }
+    ).round(2)
+    metric_df_train_ml.to_csv(output_dir + 'Train_Metrics_ML.csv', index=False)
+    metric_df_test_ml = pd.DataFrame(
+        data={
+            'Model': [model_name, f'BC{model_name}'],
+            'Test R2': [test_r2, test_r2_ml],
+            'Test RMSE (%)': [test_rmse, test_rmse_ml],
+            'Test MAE (%)': [test_mae, test_mae_ml],
+            'Test MBE (%)': [test_mbe, test_mbe_ml],
+        }
+    ).round(2)
+    metric_df_test_ml.to_csv(output_dir + 'Test_Metrics_ML.csv', index=False)
+    if test_rmse < test_rmse_ecdf and test_rmse < test_rmse_ml:
+        return 1, 0
+    if test_rmse_ecdf < test_rmse_ml:
+        return m_roe, b_roe
+    else:
+        return residuals_pred_train, residuals_pred_test
 
 
 def get_prediction_results(
@@ -370,7 +694,9 @@ def get_prediction_results(
         model_dir: str,
         model_name: str = 'DRF',
         year_col: str = 'Year',
-        gw_basin_col: str = 'GW_Basin'
+        gw_basin_col: str = 'GW_Basin',
+        apply_bias_correction: int = 0
+
 ) -> pd.DataFrame:
     """Get model prediction results.
 
@@ -390,6 +716,8 @@ def get_prediction_results(
         model_name (str): Model name.
         year_col (str): Name of the year column.
         gw_basin_col (str): Name of the GW basin column.
+        apply_bias_correction (int): Type of bias correction to apply. 0 for no bias correction, 1 for global
+        training data-based correction, 2 for basin-wise correction.
 
     Returns:
         pd.DataFrame: Modified prediction data frame.
@@ -413,12 +741,57 @@ def get_prediction_results(
     train_df['DATA'] = ['TRAIN'] * train_df.shape[0]
     train_df['Pred_GW_mm'] = y_pred_train
     train_df['Actual_GW_mm'] = y_train
+    train_df['Error_GW_mm'] = train_df['Actual_GW_mm'] - train_df['Pred_GW_mm']
     test_df['DATA'] = ['TEST'] * test_df.shape[0]
     test_df['Pred_GW_mm'] = y_pred_test
     test_df['Actual_GW_mm'] = y_test
+    test_df['Error_GW_mm'] = test_df['Actual_GW_mm'] - test_df['Pred_GW_mm']
     pred_df = pd.concat([train_df, test_df])
-    pred_df['Error_GW_mm'] = pred_df['Actual_GW_mm'] - pred_df['Pred_GW_mm']
     pred_df.to_parquet(f'{model_dir}Predictions_{model_name}.parquet', index=False)
+    if apply_bias_correction == 0:
+        return pred_df
+    elif apply_bias_correction == 1:
+        print('Applying global bias correction...')
+        output_dir = f'{model_dir}Global_Bias_Correction/'
+        makedirs(make_proper_dir_name(output_dir))
+        train_df = train_df.drop(columns=[gw_basin_col])
+        test_df = test_df.drop(columns=[gw_basin_col])
+        val1, val2 = perform_bias_correction(
+            train_df, test_df, model_name, output_dir
+        )
+        if isinstance(val1, float):
+            pred_df.Pred_GW_mm = np.abs(val1 * pred_df.Pred_GW_mm + val2)
+        else:
+            pred_df.loc[pred_df.DATA == 'TRAIN', 'Pred_GW_mm'] += val1
+            pred_df.loc[pred_df.DATA == 'TEST', 'Pred_GW_mm'] += val2
+        pred_df.Error_GW_mm = pred_df.Actual_GW_mm - pred_df.Pred_GW_mm
+    else:
+        print('Applying basin-wise bias correction...')
+        gw_pred_df = pd.DataFrame()
+        output_dir = f'{model_dir}Basin_Bias_Correction/'
+        makedirs(output_dir)
+        for gw_basin in pred_df[gw_basin_col].unique():
+            bias_dir = f'{output_dir}{gw_basin}/'
+            makedirs(bias_dir)
+            basin_df = pred_df[pred_df[gw_basin_col] == gw_basin].copy(deep=True)
+            basin_df_train = basin_df[basin_df.DATA == 'TRAIN'].copy(deep=True)
+            basin_df_test = basin_df[basin_df.DATA == 'TEST'].copy(deep=True)
+            val1, val2 = perform_bias_correction(
+                basin_df_train.drop(columns=[gw_basin_col]),
+                basin_df_test.drop(columns=[gw_basin_col]),
+                model_name,
+                bias_dir
+            )
+            if isinstance(val1, float):
+                basin_df.Pred_GW_mm = np.abs(val1 * basin_df.Pred_GW_mm + val2)
+            else:
+                basin_df.loc[basin_df.DATA == 'TRAIN', 'Pred_GW_mm'] += val1
+                basin_df.loc[basin_df.DATA == 'TEST', 'Pred_GW_mm'] += val2
+            basin_df['Pred_GW_mm'] = np.abs(basin_df['Pred_GW_mm'])
+            basin_df.Error_GW_mm = basin_df.Actual_GW_mm - basin_df.Pred_GW_mm
+            gw_pred_df = pd.concat([gw_pred_df, basin_df])
+        pred_df = gw_pred_df.copy()
+    pred_df.to_parquet(f'{model_dir}Predictions_{model_name}_BC.parquet', index=False)
     return pred_df
 
 
