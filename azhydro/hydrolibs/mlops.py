@@ -12,6 +12,7 @@ import numpy as np
 import pickle
 import matplotlib.pyplot as plt
 import seaborn as sns
+
 from typing import Any
 from lightgbm import LGBMRegressor
 from xgboost import XGBRegressor
@@ -177,6 +178,26 @@ def get_model_param_dict(
     }}
     return model_dict, param_dict
 
+
+def adjusted_r2(y: np.array, y_pred: np.array, p: int) -> float:
+  """
+  Calculates the adjusted R-squared.
+
+  Args:
+    y (np.array): Actual values.
+    y_pred (np.array): Predicted values.
+    p: Number of predictors.
+
+  Returns:
+    Adjusted R-squared value.
+  """
+  r2 = r2_score(y, y_pred)
+  n = y.size
+  adj_r2 = 1 - ((1 - r2) * (n - 1) / (n - p - 1))
+  return adj_r2
+
+
+
 def normalized_rmse(
         y: np.array,
         y_pred: np.array
@@ -311,6 +332,7 @@ def compute_perm_imp(
             train_result.importances[sorted_importances_idx].T,
             columns=x_train.columns[sorted_importances_idx],
         )
+        sorted_importances_idx = test_results.importances_mean.argsort()
         test_importances = pd.DataFrame(
             test_results.importances[sorted_importances_idx].T,
             columns=x_train.columns[sorted_importances_idx],
@@ -409,6 +431,7 @@ def build_ml_model(
         print('\nSearching best params for {}...'.format(model_name))
         scoring_metrics = {
             'r2': 'r2',
+            'adjusted_r2': make_scorer(adjusted_r2, p=x_train.shape[1], greater_is_better=True),
             'normalized_rmse': make_scorer(normalized_rmse, greater_is_better=False),
             'normalized_mae': make_scorer(normalized_mae, greater_is_better=False),
             'normalized_mbe': make_scorer(normalized_mbe, greater_is_better=False)
@@ -474,16 +497,18 @@ def calc_train_test_metrics(
     print('\n***Overall stats***\n')
     print('Train + Validation results...')
     r2 = np.round(r2_score(train_actual, train_pred), precision)
+    adj_r2 = np.round(adjusted_r2(train_actual, train_pred, train_data.shape[1]), precision)
     mae = np.round(normalized_mae(train_actual, train_pred), precision)
     rmse = np.round(normalized_rmse(train_actual, train_pred), precision)
     mbe = np.round(normalized_mbe(train_actual, train_pred), precision)
-    print('R2:', r2, 'RMSE (%):', rmse, 'MAE (%):', mae, 'MBE (%):', mbe)
+    print('R2:', r2, 'Adjusted R2:', adj_r2, 'RMSE (%):', rmse, 'MAE (%):', mae, 'MBE (%):', mbe)
     print('\nTest results...')
     r2 = np.round(r2_score(test_actual, test_pred), precision)
+    adj_r2 = np.round(adjusted_r2(test_actual, test_pred, test_data.shape[1]), precision)
     mae = np.round(normalized_mae(test_actual, test_pred), precision)
     rmse = np.round(normalized_rmse(test_actual, test_pred), precision)
     mbe = np.round(normalized_mbe(test_actual, test_pred), precision)
-    print('R2:', r2, 'RMSE (%):', rmse, 'MAE (%):', mae, 'MBE (%):', mbe)
+    print('R2:', r2, 'Adjusted R2:', adj_r2, 'RMSE (%):', rmse, 'MAE (%):', mae, 'MBE (%):', mbe)
 
 
 
@@ -505,6 +530,7 @@ def get_grid_search_stats(
     scores = gs_model.cv_results_
     print('Annual CV train Results...')
     r2 = np.round(scores['mean_train_r2'].mean(), precision)
+    adj_r2 = np.round(scores['mean_train_adjusted_r2'].mean(), precision)
     rmse = -np.round(scores['mean_train_normalized_rmse'].mean(), precision)
     mae = -np.round(scores['mean_train_normalized_mae'].mean(), precision)
     mbe = np.round(scores['mean_train_normalized_mbe'].mean(), precision)
@@ -512,9 +538,10 @@ def get_grid_search_stats(
         rmse = y_scaler.inverse_transform(np.array([rmse]).reshape(1, -1)).ravel()[0]
         mae = y_scaler.inverse_transform(np.array([mae]).reshape(1, -1)).ravel()[0]
         mbe = y_scaler.inverse_transform(np.array([mbe]).reshape(1, -1)).ravel()[0]
-    print('R2:', r2, 'RMSE (%):', rmse, 'MAE (%):', mae, 'MBE (%):', mbe)
+    print('R2:', r2, 'Adjusted R2:', adj_r2, 'RMSE (%):', rmse, 'MAE (%):', mae, 'MBE (%):', mbe)
     print('Annual CV Validation Results...')
     r2 = np.round(scores['mean_test_r2'].mean(), precision)
+    adj_r2 = np.round(scores['mean_test_adjusted_r2'].mean(), precision)
     rmse = -np.round(scores['mean_test_normalized_rmse'].mean(), precision)
     mae = -np.round(scores['mean_test_normalized_mae'].mean(), precision)
     mbe = np.round(scores['mean_test_normalized_mbe'].mean(), precision)
@@ -522,7 +549,7 @@ def get_grid_search_stats(
         rmse = y_scaler.inverse_transform(np.array([rmse]).reshape(1, -1)).ravel()[0]
         mae = y_scaler.inverse_transform(np.array([mae]).reshape(1, -1)).ravel()[0]
         mbe = y_scaler.inverse_transform(np.array([mbe]).reshape(1, -1)).ravel()[0]
-    print('R2:', r2, 'RMSE (%):', rmse, 'MAE (%):', mae, 'MBE (%):', mbe)
+    print('R2:', r2, 'Adjusted R2:', adj_r2, 'RMSE (%):', rmse, 'MAE (%):', mae, 'MBE (%):', mbe)
 
 
 def perform_bias_correction(
@@ -555,7 +582,9 @@ def perform_bias_correction(
     b_roe = np.mean(train_data_ecdf.Actual_GW_mm) - m_roe * np.mean(train_data_ecdf.Pred_GW_mm)
     train_data_ecdf['BC_GW_mm'] = np.abs(m_roe * train_data_ecdf.Pred_GW_mm + b_roe)
     train_r2_ecdf = r2_score(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm)
+    train_adj_r2_ecdf = adjusted_r2(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm, train_data_ecdf.shape[1])
     train_r2 = r2_score(train_data_ecdf.Actual_GW_mm, train_data_ecdf.Pred_GW_mm)
+    train_adj_r2 = adjusted_r2(train_data_ecdf.Actual_GW_mm, train_data_ecdf.Pred_GW_mm, train_data_ecdf.shape[1])
     train_rmse_ecdf = normalized_rmse(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm)
     train_rmse = normalized_rmse(train_data_ecdf.Actual_GW_mm, train_data_ecdf.Pred_GW_mm)
     train_mae_ecdf = normalized_mae(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm)
@@ -583,7 +612,9 @@ def perform_bias_correction(
     plt.savefig(output_dir + 'ECDF_Test.png', dpi=300)
     plt.close()
     test_r2_ecdf = r2_score(test_data_ecdf.Actual_GW_mm, test_data_ecdf.BC_GW_mm)
+    test_adj_r2_ecdf = adjusted_r2(test_data_ecdf.Actual_GW_mm, test_data_ecdf.BC_GW_mm, test_data_ecdf.shape[1])
     test_r2 = r2_score(test_data_ecdf.Actual_GW_mm, test_data_ecdf.Pred_GW_mm)
+    test_adj_r2 = adjusted_r2(test_data_ecdf.Actual_GW_mm, test_data_ecdf.Pred_GW_mm, test_data_ecdf.shape[1])
     test_rmse_ecdf = normalized_rmse(test_data_ecdf.Actual_GW_mm, test_data_ecdf.BC_GW_mm)
     test_rmse = normalized_rmse(test_data_ecdf.Actual_GW_mm, test_data_ecdf.Pred_GW_mm)
     test_mae_ecdf = normalized_mae(test_data_ecdf.Actual_GW_mm, test_data_ecdf.BC_GW_mm)
@@ -594,6 +625,7 @@ def perform_bias_correction(
         data={
             'Model': [model_name, f'BC{model_name}'],
             'Train R2': [train_r2, train_r2_ecdf],
+            'Train Adjusted R2': [train_adj_r2, train_adj_r2_ecdf],
             'Train RMSE (%)': [train_rmse, train_rmse_ecdf],
             'Train MAE (%)': [train_mae, train_mae_ecdf],
             'Train MBE (%)': [train_mbe, train_mbe_ecdf],
@@ -604,6 +636,7 @@ def perform_bias_correction(
         data={
             'Model': [model_name, f'BC{model_name}'],
             'Test R2': [test_r2, test_r2_ecdf],
+            'Test Adjusted R2': [test_adj_r2, test_adj_r2_ecdf],
             'Test RMSE (%)': [test_rmse, test_rmse_ecdf],
             'Test MAE (%)': [test_mae, test_mae_ecdf],
             'Test MBE (%)': [test_mbe, test_mbe_ecdf],
@@ -624,10 +657,16 @@ def perform_bias_correction(
     train_data_ecdf_ml['BC_GW_mm'] = np.abs(train_data_ecdf_ml.Pred_GW_mm + residuals_pred_train)
     test_data_ecdf_ml['BC_GW_mm'] = np.abs(test_data_ecdf_ml.Pred_GW_mm + residuals_pred_test)
     train_r2_ml = r2_score(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
+    train_adj_r2_ml = adjusted_r2(
+        train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm, train_data_ecdf_ml.shape[1]
+    )
     train_rmse_ml = normalized_rmse(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
     train_mae_ml = normalized_mae(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
     train_mbe_ml = normalized_mbe(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
     test_r2_ml = r2_score(test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm)
+    test_adj_r2_ml = adjusted_r2(
+        test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm, test_data_ecdf_ml.shape[1]
+    )
     test_rmse_ml = normalized_rmse(test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm)
     test_mae_ml = normalized_mae(test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm)
     test_mbe_ml = normalized_mbe(test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm)
@@ -655,6 +694,7 @@ def perform_bias_correction(
         data={
             'Model': [model_name, f'BC{model_name}'],
             'Train R2': [train_r2, train_r2_ml],
+            'Train Adjusted R2': [train_adj_r2, train_adj_r2_ml],
             'Train RMSE (%)': [train_rmse, train_rmse_ml],
             'Train MAE (%)': [train_mae, train_mae_ml],
             'Train MBE (%)': [train_mbe, train_mbe_ml],
@@ -665,6 +705,7 @@ def perform_bias_correction(
         data={
             'Model': [model_name, f'BC{model_name}'],
             'Test R2': [test_r2, test_r2_ml],
+            'Test Adjusted R2': [test_adj_r2, test_adj_r2_ml],
             'Test RMSE (%)': [test_rmse, test_rmse_ml],
             'Test MAE (%)': [test_mae, test_mae_ml],
             'Test MBE (%)': [test_mbe, test_mbe_ml],
@@ -774,14 +815,19 @@ def get_prediction_results(
             bias_dir = f'{output_dir}{gw_basin}/'
             makedirs(bias_dir)
             basin_df = pred_df[pred_df[gw_basin_col] == gw_basin].copy(deep=True)
-            basin_df_train = basin_df[basin_df.DATA == 'TRAIN'].copy(deep=True)
-            basin_df_test = basin_df[basin_df.DATA == 'TEST'].copy(deep=True)
-            val1, val2 = perform_bias_correction(
-                basin_df_train.drop(columns=[gw_basin_col]),
-                basin_df_test.drop(columns=[gw_basin_col]),
-                model_name,
-                bias_dir
-            )
+            basin_df_train = basin_df[basin_df.DATA == 'TRAIN'].copy(deep=True).dropna()
+            basin_df_test = basin_df[basin_df.DATA == 'TEST'].copy(deep=True).dropna()
+            if basin_df_train.shape[0] == 0 or basin_df_test.shape[0] == 0:
+                print(f'No data for {gw_basin} in train/test data. Skipping bias correction.')
+                val1 = 1
+                val2 = 0
+            else:
+                val1, val2 = perform_bias_correction(
+                    basin_df_train.drop(columns=[gw_basin_col]),
+                    basin_df_test.drop(columns=[gw_basin_col]),
+                    model_name,
+                    bias_dir
+                )
             if isinstance(val1, float):
                 basin_df.Pred_GW_mm = np.abs(val1 * basin_df.Pred_GW_mm + val2)
             else:

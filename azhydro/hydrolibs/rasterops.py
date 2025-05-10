@@ -9,11 +9,9 @@ import matplotlib.pyplot as plt
 import geopandas as gpd
 import numpy as np
 import os
-import multiprocessing
 import subprocess
 
 from osgeo import gdal
-gdal.PushErrorHandler('CPLQuietErrorHandler')
 from joblib import Parallel, delayed
 from rasterio.plot import plotting_extent
 from rasterio.mask import mask
@@ -23,6 +21,8 @@ from glob import glob
 from fiona import transform
 from sysops import az_nodata, makedirs
 import rasterio as rio
+gdal.PushErrorHandler('CPLQuietErrorHandler')
+gdal.UseExceptions()
 
 
 def read_raster_as_arr(
@@ -93,7 +93,6 @@ def write_raster(
         crs = out_crs
     if num_bands is None:
         num_bands = raster_file.count
-    gdal.UseExceptions()
     with rio.open(
             outfile_path,
             'w',
@@ -406,10 +405,13 @@ def crop_rasters(
         None.
     """
 
-    num_cores = multiprocessing.cpu_count() - 1
-    Parallel(n_jobs=num_cores)(delayed(parallel_crop_rasters)(raster_file, input_mask_file, outdir, ext_mask,
-                                                              multi_poly, verbose)
-                               for raster_file in glob(input_raster_dir + pattern))
+    Parallel(n_jobs=-1)(
+        delayed(parallel_crop_rasters)(
+            raster_file, input_mask_file,
+            outdir, ext_mask,
+            multi_poly, verbose
+        ) for raster_file in glob(input_raster_dir + pattern)
+    )
 
 
 def parallel_crop_rasters(
@@ -437,3 +439,27 @@ def parallel_crop_rasters(
         out_raster, ext_mask=ext_mask,
         multi_poly=multi_poly
     )
+
+def get_xy_grids_from_raster(
+        input_raster_file: str
+) -> tuple[np.array, np.array]:
+    """Get longitude (x) and latitude (y) grids from a raster file.
+
+    Args:
+        input_raster_file (str): Input raster file path.
+
+    Returns:
+        tuple (np.array, np.array): A tuple of longitude (x) and latitude (y) as numpy arrays.
+    """
+
+    raster_file = rio.open(input_raster_file)
+    transform_ = raster_file.transform
+    xres, yres = transform_[1], transform_[5]
+    cols, rows = raster_file.width, raster_file.height
+    lon_min, lat_max = transform_[0], transform_[3]
+    lon_max, lat_min = lon_min + (cols * xres), lat_max + (rows * yres)
+    lon_vals = np.linspace(lon_min, lon_max, cols)
+    lat_vals = np.linspace(lat_min, lat_max, rows)
+    lon_grid, lat_grid = np.meshgrid(lon_vals, lat_vals)
+    return lon_grid, lat_grid
+

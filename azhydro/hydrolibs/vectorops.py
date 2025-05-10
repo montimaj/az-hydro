@@ -14,6 +14,8 @@ import os
 import multiprocessing
 
 from osgeo import gdal
+gdal.PushErrorHandler('CPLQuietErrorHandler')
+gdal.UseExceptions()
 from joblib import Parallel, delayed
 from glob import glob
 from sysops import az_nodata

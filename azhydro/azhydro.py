@@ -5,9 +5,12 @@ Main driver file for running the project.
 # Author: Dr. Sayantan Majumdar
 # Email: sayantan.majumdar@dri.edu
 
+import warnings
+warnings.filterwarnings("ignore")
 import hydrolibs.gwops as gwops
 import hydrolibs.dataops as dataops
 import hydrolibs.mlops as mlops
+
 
 if __name__ == '__main__':
     input_dir = '../Data/Inputs/'
@@ -29,19 +32,18 @@ if __name__ == '__main__':
     start_year = 1985
     end_year = 2023
     skip_download = True
-    tile_size = 10000
-    tile_raster_res = 30
+    tile_raster_res = 2000
+    tile_size = 10000 if tile_raster_res == 30 else 80000
     fill_attr = 'AF Pumped'
-    mosaic_raster_res = 800
+    mosaic_raster_res = tile_raster_res
     gee_mosaic_data_dir = f'{output_dir}GEE_Mosaics_{mosaic_raster_res}m/'
     gee_resampled_tile_dir = f'{output_dir}GEE_Tiles_{mosaic_raster_res}m/'
     output_gw_volume_raster_dir = f'{output_dir}GW/Rasters/GW_Volumes_{mosaic_raster_res}m/'
     output_gw_depth_raster_dir = f'{output_dir}GW/Rasters/GW_Depths_{mosaic_raster_res}m/'
     pred_data_dir = f'{output_dir}Predictor_Data_{mosaic_raster_res}m/'
-    irr_output_prefix = 'IRR'
     load_files = True
-
-    gee_data_dir_30m, data_band_names = dataops.download_gee_data(
+    multiply_irr_mask = False
+    gee_data_dir, data_band_names = dataops.download_gee_data(
         az_state,
         gcloud_project,
         gcloud_bucket,
@@ -51,44 +53,19 @@ if __name__ == '__main__':
         skip_download,
         tile_size,
         num_workers=32,
-        gee_scale=30,
-        irrigated_tiles=True
-    )
-
-    dataops.resample_gee_rasters(
-        gee_data_dir_30m,
-        data_band_names,
-        gee_resampled_tile_dir,
-        original_raster_res=tile_raster_res,
-        target_raster_res=mosaic_raster_res,
-        already_resampled=load_files,
-        use_tile_format=True,
-        irr_data_only=False
+        worker_memory='1.5G',
+        gee_scale=tile_raster_res,
+        irrigated_tiles=True,
+        multiply_irr_mask=multiply_irr_mask
     )
     dataops.mosaic_tiles(
-        gee_resampled_tile_dir,
+        gee_data_dir,
         gee_mosaic_data_dir,
         start_year,
         end_year,
         already_mosaicked=load_files
     )
-    irr_tile_dir = dataops.create_irrigation_tiles(
-        gee_data_dir_30m,
-        output_dir,
-        start_year,
-        end_year,
-        mosaic_raster_res,
-        output_prefix=irr_output_prefix,
-        already_created=load_files
-    )
-    dataops.mosaic_tiles(
-        irr_tile_dir,
-        gee_mosaic_data_dir,
-        start_year,
-        end_year,
-        output_prefix=irr_output_prefix,
-        already_mosaicked=load_files
-    )
+    load_files = True
     ref_gw_file = gwops.preprocess_gw_csv(
         well_reg_file,
         gw_csv_dir,
@@ -110,13 +87,15 @@ if __name__ == '__main__':
         ref_file=ref_gw_file,
         already_reprojected=load_files
     )
+    load_files = True
     gwops.create_gw_volume_rasters(
         output_gw_vector_dir,
         output_gw_volume_raster_dir,
         value_field=fill_attr,
         xres=mosaic_raster_res,
         yres=mosaic_raster_res,
-        already_created=load_files
+        already_created=load_files,
+        max_gw=3000, # capped at ~10 ft like Majumdar et al. 2022
     )
     gwops.create_gw_depth_rasters(
         output_gw_volume_raster_dir,
@@ -139,9 +118,9 @@ if __name__ == '__main__':
         mosaic_raster_res,
         start_year,
         end_year,
-        load_files
+        water_year_agg=False,
+        already_created=load_files
     )
-    load_files = False
     gwops.create_gw_basin_sw_delivery_rasters(
         gw_basin_proj,
         cap_delivery_xls,
@@ -178,14 +157,20 @@ if __name__ == '__main__':
         lu_smoothing=3,
     )
     year_list = list(range(1985, 2024))
-    test_years = tuple(range(2014, 2024))
+    # test_year_limits = ((1990, 1992), (2005, 2007), (2021, 2023))
+    test_year_limits = ((2014, 2023),)
+    # test_year_limits = ((1985, 1989), (2019, 2023))
+    test_years = []
+    for test_year_limit in test_year_limits:
+        test_years.extend(list(range(test_year_limit[0], test_year_limit[1] + 1)))
+    test_years = tuple(test_years)
     model_dir = f'{output_dir}ML_Model_{mosaic_raster_res}m/'
     ml_model = 'XGB'
     random_state = 42
     load_model = False
     fold_count = 5
     repeats = 1
-    split_strategy = 1 # 1: temporal, 2: random stratified based on year_col, 3: spatial, 4: random
+    split_strategy = 3 # 1: temporal, 2: random stratified based on year_col, 3: spatial, 4: random
     randomized_search = True
     load_files = False
     perm_imp = True
@@ -195,11 +180,13 @@ if __name__ == '__main__':
         'GW_Basin',
         # 'AGRI',
         # 'URBAN',
-        'SW',
+        'lon_deg',
+        'lat_deg',
+        # 'SW',
         'GW_Basin_Type',
         # 'annual_peff_mm',
         # 'annual_et_ensemble_mm',
-        # 'irr_area_km2',
+        # 'annual_irrmapper_fraction',
         'annual_et_ssebop_mm',
         'annual_et_sims_mm',
         'annual_et_pt_jpl_mm',
@@ -211,8 +198,6 @@ if __name__ == '__main__':
         'annual_gridmet_tmmn_K',
         'annual_gridmet_eto_mm',
         'annual_gridmet_etr_mm',
-        'annual_gridmet_bc_eto_mm',
-        'annual_gridmet_bc_etr_mm',
         'annual_gridmet_vpd_kPa',
         'annual_gridmet_vs_mps',
         'annual_gridmet_rmax',
@@ -224,27 +209,54 @@ if __name__ == '__main__':
         # 'annual_prism_precip_mm',
         'annual_prism_tmmx_K',
         'annual_prism_tmmn_K',
-        'annual_conus404_precip_mm',
-        'annual_conus404_tmmx_K',
-        'annual_conus404_tmmn_K',
-        'annual_conus404_eto_mm',
-        'annual_conus404_etr_mm',
         'annual_terraclimate_sm_change_mm',
         'annual_terraclimate_ro_mm',
         'HSG',
         'annual_daymet_precip_mm',
         'annual_daymet_tmmn_K',
         'annual_daymet_tmmx_K',
+        'wy_era5land_snowfall_m',
+        'annual_era5land_swe_m',
+        'annual_era5land_snowmelt_m',
+        'annual_era5land_runoff_m',
+        'annual_era5land_sub_surface_runoff_m',
+        'annual_era5land_surface_runoff_m',
+        # 'annual_era5land_volumetric_soil_water_layer_1',
+        'annual_era5land_volumetric_soil_water_layer_2',
+        'annual_era5land_volumetric_soil_water_layer_3',
+        'annual_era5land_volumetric_soil_water_layer_4',
+        'annual_npp_mm4',
         # 'streamflow_m3s',
-        # 'soil_depth_mm',
-        # 'ksat_mean_micromps',
+        'soil_depth_mm',
+        'ksat_mean_micromps',
         # 'elevation_m',
-        # 'slope'
-        # 'cap_srp_delivery_m3'
+        # 'slope',
+        # 'cap_srp_delivery_m3',
+        'bulk_density_gcm3',
+        'clay_percent',
+        'ksat_log10cmhr1',
+        'pore_size_dist',
+        'organic_matter_log10percent',
+        'soil_ph',
+        'sand_percent',
+        'silt_percent',
+        'residual_swc',
+        'saturated_swc',
+        'pore_size_index',
+        'soil_bubbling_pressure_log10kPa',
+        'polaris_scale_log10kPa1',
     )
     use_ama_ina = True
-    test_gw_basins = ('HARQUAHALA INA',)
-    outlier_op = 2
+    test_gw_basins = (
+        'HARQUAHALA INA',
+        'SANTA CRUZ AMA',
+        # 'DOUGLAS AMA_INA',
+        'JOSEPH CITY INA',
+        # 'PINAL AMA',
+        # 'TUCSON AMA',
+        # 'PRESCOTT AMA',
+    )
+    outlier_op = None
     ret_vals = dataops.create_train_test_data(
         az_df, output_dir,
         drop_attr=drop_attrs,
@@ -292,7 +304,7 @@ if __name__ == '__main__':
             random_state=random_state,
             create_plots=True
         )
-    plot_dir_path = f'Plots_{mosaic_raster_res}m/'
+    plot_dir_path = f'{output_dir}Plots_{mosaic_raster_res}m/'
     plot_dir_dict = {
         1: f'{plot_dir_path}Temporal/',
         2: f'{plot_dir_path}Random_Stratified/',
@@ -300,12 +312,13 @@ if __name__ == '__main__':
         4: f'{plot_dir_path}Random/'
     }
     plot_dir = plot_dir_dict[split_strategy]
+    az_df = az_df[az_df.Year.isin(year_list)]
     gwops.make_time_series_plots(
         az_df, model,
         x_train.columns.tolist(),
         plot_dir,
-        test_start_year=test_years[0],
-        test_end_year=test_years[-1],
+        test_year_limits=test_year_limits,
         split_strategy=split_strategy,
-        test_gw_basins=test_gw_basins
+        test_gw_basins=test_gw_basins,
+        raster_res=mosaic_raster_res
     )
