@@ -156,6 +156,16 @@ Data/Inputs/GW_Data/Well_Registry
 Data/Inputs/GEE_Data/
 Data/Inputs/USGS\ WU
 
-Effective_precip_prediction_WestUS\ 1.zip
+Data/Inputs/GW_Data/Effective_precip_prediction_WestUS
+Data/Inputs/GW_Data/SW_GW_consumptive
+Data/Inputs/GW_Data/Predicted_Rasters
+Data/Inputs/GW_Data/GW_Sub_Basins
+AZ_Polygons*
 
 .DS_Store
+
+Data/Outputs/GW*/
+Data/Outputs/ML_Model*
+Data/Outputs/*.parquet
+Data/Outputs/GEE_Mosaics_804m
+*.xml
