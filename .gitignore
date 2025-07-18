@@ -168,4 +168,5 @@ Data/Outputs/GW*/
 Data/Outputs/ML_Model*
 Data/Outputs/*.parquet
 Data/Outputs/GEE_Mosaics_804m
+Data/Outputs/Predictor_Data_804m
 *.xml
