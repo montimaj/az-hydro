@@ -193,6 +193,8 @@ def adjusted_r2(y: np.array, y_pred: np.array, p: int) -> float:
   """
   r2 = r2_score(y, y_pred)
   n = y.size
+  if n == p + 1:
+      return np.nan
   adj_r2 = 1 - ((1 - r2) * (n - 1) / (n - p - 1))
   return adj_r2
 
@@ -515,7 +517,7 @@ def calc_train_test_metrics(
 def get_grid_search_stats(
         gs_model: Any,
         y_scaler: MinMaxScaler | None = None,
-        precision: int = 2
+        precision: int = 5
 ) -> None:
     """Get GridSearchCV stats.
 

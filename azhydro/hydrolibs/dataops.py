@@ -13,15 +13,19 @@ import requests
 import subprocess
 import numpy as np
 import geopandas as gpd
-from osgeo import gdal
 import rasterio as rio
-gdal.PushErrorHandler('CPLQuietErrorHandler')
-gdal.UseExceptions()
+import warnings
 import swifter
 import joblib
 import pickle
 import sklearn.utils as sk
 
+from osgeo import gdal
+# Suppress GDAL TIFFReadDirectory warnings
+os.environ['CPL_LOG'] = '/dev/null'
+gdal.PushErrorHandler('CPLQuietErrorHandler')
+gdal.UseExceptions()
+warnings.filterwarnings('ignore')
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 from sysops import makedirs
@@ -100,7 +104,7 @@ def download_gee_tile(
         year_list: list,
         data_band_names: list[str],
         gcloud_project: str = 'azhydro',
-        gee_scale: int = 30,
+        gee_scale: float = 30,
         irrigated_tiles: bool = True,
         multiply_irr_mask: bool = True,
         verbose: bool = False,
@@ -115,7 +119,7 @@ def download_gee_tile(
     year_list (list): List of years in YYYY format.
     data_band_names (list (str, ...)): List of data bands as strings.
     gcloud_project (str): GCloud project name.
-    gee_scale (int): GEE data download scale in m.
+    gee_scale (float): GEE data download scale in m.
     irrigated_tiles (bool): Set False to download all tiles regardless of irrigation.
     multiply_irr_mask (bool): Set False to skip multiplying image bands by the irrigation mask.
     verbose (bool): Set True to see extra details on file downloads.
@@ -169,7 +173,7 @@ def download_gee_tile(
     ]
     gridmet_ic = ee.ImageCollection("IDAHO_EPSCOR/GRIDMET")
     gridmet_drought_ic = ee.ImageCollection("GRIDMET/DROUGHT")
-    prism_ic = ee.ImageCollection('OREGONSTATE/PRISM/AN81m')
+    prism_ic = ee.ImageCollection('projects/sat-io/open-datasets/OREGONSTATE/PRISM_800_MONTHLY')
     daymet_ic = ee.ImageCollection('NASA/ORNL/DAYMET_V4')
     terraclimate_ic = ee.ImageCollection('IDAHO_EPSCOR/TERRACLIMATE')
     era5land_ic = ee.ImageCollection('ECMWF/ERA5_LAND/MONTHLY_AGGR')
@@ -286,6 +290,36 @@ def download_gee_tile(
             disalexi_et = disalexi_ic[openet_idx].select('et') \
                 .filterDate(start_year_gee, end_year_gee) \
                 .sum()
+            # Oct-Dec 1999 is in the public domain, Jan-Dec 1999 is in the provisional domain
+            if year == 1999:
+                openet_ensemble_public = openet_ic[0].select('et_ensemble_mad') \
+                .filterDate(start_year_gee, end_year_gee) \
+                .sum()
+                openet_ensemble = openet_ensemble.add(openet_ensemble_public)
+                ssebop_et_public = ssebop_ic[0].select('et') \
+                .filterDate(start_year_gee, end_year_gee) \
+                .sum()
+                ssebop_et = ssebop_et.add(ssebop_et_public)
+                eemetric_et_public = eemetric_ic[0].select('et') \
+                .filterDate(start_year_gee, end_year_gee) \
+                .sum()
+                eemetric_et = eemetric_et.add(eemetric_et_public)
+                sims_et_public = sims_ic[0].select('et') \
+                .filterDate(start_year_gee, end_year_gee) \
+                .sum()
+                sims_et = sims_et.add(sims_et_public)
+                pt_jpl_et_public = pt_jpl_ic[0].select('et') \
+                .filterDate(start_year_gee, end_year_gee) \
+                .sum()
+                pt_jpl_et = pt_jpl_et.add(pt_jpl_et_public)
+                geesebal_et_public = geesebal_ic[0].select('et') \
+                .filterDate(start_year_gee, end_year_gee) \
+                .sum()
+                geesebal_et = geesebal_et.add(geesebal_et_public)
+                disalexi_et_public = disalexi_ic[0].select('et') \
+                .filterDate(start_year_gee, end_year_gee) \
+                .sum()
+                disalexi_et = disalexi_et.add(disalexi_et_public)
             gridmet_precip = gridmet_ic.select('pr') \
                 .filterDate(start_year_gee, end_year_gee) \
                 .sum()
@@ -578,7 +612,7 @@ def download_gee_data(
         tile_size: int = 10000,
         num_workers: int = 32,
         worker_memory='0.5G',
-        gee_scale: int = 30,
+        gee_scale: float = 30,
         irrigated_tiles: bool = True,
         multiply_irr_mask: bool = True
 ) -> tuple[str, list[str]]:
@@ -596,7 +630,7 @@ def download_gee_data(
     tile_size (int): Tile size for downloading GEE Data. Default is 10000 m.
     num_workers (int): Number of tiles to parallely download. Note that both tile_size and num_workers have quotas for
     free GEE users.
-    gee_scale (int): GEE data download scale in m.
+    gee_scale (float): GEE data download scale in m.
     irrigated_tiles (bool): Set False to download all tiles regardless of irrigation.
     multiply_irr_mask (bool): Set False to skip multiplying image bands by the irrigation mask.
 
@@ -605,7 +639,7 @@ def download_gee_data(
         the ordered list of band names for each tile.
     """
 
-    data_dir = f'{download_dir}GEE_Data/GEE_Tiles_{gee_scale}m_IrrMaskMul_{multiply_irr_mask}/'
+    data_dir = f'{download_dir}GEE_Data/GEE_Tiles_{int(gee_scale)}m_IrrMaskMul_{multiply_irr_mask}/'
     data_band_names = [
         'annual_et_ensemble_mm',
         'annual_et_ssebop_mm',
@@ -941,7 +975,8 @@ def mosaic_tiles_parallel(
         input_tile_dir: str,
         output_dir: str,
         year: int,
-        output_prefix: str = 'Predictor'
+        output_prefix: str = 'Predictor',
+        gdal_merge_path: str = '/usr/bin/gdal_merge.py'
 ) -> None:
     """
     Mosaic all tiles based on the start and end years.
@@ -951,6 +986,7 @@ def mosaic_tiles_parallel(
         output_dir (str): Output directory.
         year (int): Year in YYYY.
         output_prefix (str): Output prefix name to append to output files.
+        gdal_merge_path (str): Path to the gdal_merge.py script.
 
     Returns:
         None.
@@ -960,10 +996,11 @@ def mosaic_tiles_parallel(
     merged_tif = f'{output_dir}{output_prefix}_{year}.tif'
     if os.path.exists(merged_tif):
         os.remove(merged_tif)
-    gdal_sys_call = f'{os.environ["CONDA_PREFIX"]}/bin/gdal_merge.py -o {merged_tif} -of GTiff -init 0 {tiles}'
+    gdal_sys_call = f'{gdal_merge_path} -o {merged_tif} -of GTiff -init 0 {tiles}'
     subprocess.call(
         gdal_sys_call,
         shell=True,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
@@ -994,12 +1031,14 @@ def mosaic_tiles(
     if not already_mosaicked:
         makedirs(output_dir)
         print('Mosaicking tiles...')
+        gdal_merge_path = f'{os.environ["CONDA_PREFIX"]}/bin/gdal_merge.py'
         joblib.Parallel(n_jobs=-1)(
             joblib.delayed(mosaic_tiles_parallel)(
                 input_tile_dir,
                 output_dir,
                 year,
-                output_prefix
+                output_prefix,
+                gdal_merge_path
             ) for year in range(start_year, end_year + 1)
         )
 
@@ -1140,8 +1179,8 @@ def create_az_data_csv(
             lambda x: gw_basin_dict[x] if not np.isnan(x) else nan_str)
         data_df = data_df[data_df.GW_Basin != nan_str]
 
-        ama_basins = ama_ina_basins[:7]
-        ina_basins = ama_ina_basins[7:]
+        ama_basins = [b for b in ama_ina_basins if 'AMA' in b]
+        ina_basins = [b for b in ama_ina_basins if b not in ama_basins]
         data_df = data_df.reset_index(drop=True)
         data_df['GW_Basin_Type'] = data_df.GW_Basin.swifter.apply(
             lambda x: 0 if x in ama_basins else 1 if x in ina_basins else 2

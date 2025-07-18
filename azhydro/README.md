@@ -38,9 +38,9 @@ Unzip all zipped files.  Several of the input datasets in this repository are zi
 ### 3. Creating the conda environment and installing packages
 Open Linux/Mac terminal or Windows PowerShell and run the following:
 ```
-conda create -y -n azhydro python=3.11
+conda create -y -n azhydro python=3.12
 conda activate azhydro
-conda install -y -c conda-forge rioxarray geopandas lightgbm py-xgboost earthengine-api rasterstats seaborn openpyxl dataretrieval
+conda install -y -c conda-forge gdal rioxarray geopandas lightgbm py-xgboost earthengine-api rasterstats seaborn openpyxl dataretrieval
 conda install -y -c conda-forge dask-ml dask-jobqueue swifter
 ```
 

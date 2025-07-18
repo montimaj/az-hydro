@@ -30,18 +30,18 @@ if __name__ == '__main__':
     gcloud_project = 'azhydro'
     gcloud_bucket = 'azhydro'
     start_year = 1985
-    end_year = 2023
-    skip_download = True
+    end_year = 2024
+    skip_download = False
     tile_raster_res = 2000
     tile_size = 10000 if tile_raster_res == 30 else 80000
     fill_attr = 'AF Pumped'
     mosaic_raster_res = tile_raster_res
-    gee_mosaic_data_dir = f'{output_dir}GEE_Mosaics_{mosaic_raster_res}m/'
-    gee_resampled_tile_dir = f'{output_dir}GEE_Tiles_{mosaic_raster_res}m/'
-    output_gw_volume_raster_dir = f'{output_dir}GW/Rasters/GW_Volumes_{mosaic_raster_res}m/'
-    output_gw_depth_raster_dir = f'{output_dir}GW/Rasters/GW_Depths_{mosaic_raster_res}m/'
-    pred_data_dir = f'{output_dir}Predictor_Data_{mosaic_raster_res}m/'
-    load_files = True
+    gee_mosaic_data_dir = f'{output_dir}GEE_Mosaics_{int(mosaic_raster_res)}m/'
+    gee_resampled_tile_dir = f'{output_dir}GEE_Tiles_{int(mosaic_raster_res)}m/'
+    output_gw_volume_raster_dir = f'{output_dir}GW/Rasters/GW_Volumes_{int(mosaic_raster_res)}m/'
+    output_gw_depth_raster_dir = f'{output_dir}GW/Rasters/GW_Depths_{int(mosaic_raster_res)}m/'
+    pred_data_dir = f'{output_dir}Predictor_Data_{int(mosaic_raster_res)}m/'
+    load_files = False
     multiply_irr_mask = False
     gee_data_dir, data_band_names = dataops.download_gee_data(
         az_state,
@@ -65,7 +65,6 @@ if __name__ == '__main__':
         end_year,
         already_mosaicked=load_files
     )
-    load_files = True
     ref_gw_file = gwops.preprocess_gw_csv(
         well_reg_file,
         gw_csv_dir,
@@ -87,15 +86,14 @@ if __name__ == '__main__':
         ref_file=ref_gw_file,
         already_reprojected=load_files
     )
-    load_files = True
+    # load_files = False
     gwops.create_gw_volume_rasters(
         output_gw_vector_dir,
         output_gw_volume_raster_dir,
         value_field=fill_attr,
         xres=mosaic_raster_res,
         yres=mosaic_raster_res,
-        already_created=load_files,
-        max_gw=3000, # capped at ~10 ft like Majumdar et al. 2022
+        already_created=load_files
     )
     gwops.create_gw_depth_rasters(
         output_gw_volume_raster_dir,
@@ -145,6 +143,7 @@ if __name__ == '__main__':
         gw_cropped_raster_dir,
         already_reprojected=load_files
     )
+    # load_files = False
     az_df = dataops.create_az_data_csv(
         pred_data_dir,
         gw_cropped_raster_dir,
@@ -156,24 +155,25 @@ if __name__ == '__main__':
         load_csv=load_files,
         lu_smoothing=3,
     )
-    year_list = list(range(1985, 2024))
+    year_list = list(range(1985, 2025))
     # test_year_limits = ((1990, 1992), (2005, 2007), (2021, 2023))
-    test_year_limits = ((2014, 2023),)
+    # test_year_limits = ((2007, 2010),)
+    test_year_limits = ((2015, 2024),)
     # test_year_limits = ((1985, 1989), (2019, 2023))
     test_years = []
     for test_year_limit in test_year_limits:
         test_years.extend(list(range(test_year_limit[0], test_year_limit[1] + 1)))
     test_years = tuple(test_years)
-    model_dir = f'{output_dir}ML_Model_{mosaic_raster_res}m/'
+    model_dir = f'{output_dir}ML_Model_{int(mosaic_raster_res)}m/'
     ml_model = 'XGB'
     random_state = 42
     load_model = False
     fold_count = 5
     repeats = 1
-    split_strategy = 3 # 1: temporal, 2: random stratified based on year_col, 3: spatial, 4: random
+    split_strategy = 1 # 1: temporal, 2: random stratified based on year_col, 3: spatial, 4: random
     randomized_search = True
     load_files = False
-    perm_imp = True
+    perm_imp = False
 
     drop_attrs = (
         'Year',
@@ -228,12 +228,12 @@ if __name__ == '__main__':
         'annual_npp_mm4',
         # 'streamflow_m3s',
         'soil_depth_mm',
-        'ksat_mean_micromps',
+        # 'ksat_mean_micromps',
         # 'elevation_m',
         # 'slope',
         # 'cap_srp_delivery_m3',
         'bulk_density_gcm3',
-        'clay_percent',
+        # 'clay_percent',
         'ksat_log10cmhr1',
         'pore_size_dist',
         'organic_matter_log10percent',
@@ -249,14 +249,14 @@ if __name__ == '__main__':
     use_ama_ina = True
     test_gw_basins = (
         'HARQUAHALA INA',
-        'SANTA CRUZ AMA',
+        # 'SANTA CRUZ AMA',
         # 'DOUGLAS AMA_INA',
-        'JOSEPH CITY INA',
+        # 'JOSEPH CITY INA',
         # 'PINAL AMA',
         # 'TUCSON AMA',
         # 'PRESCOTT AMA',
     )
-    outlier_op = None
+    outlier_op = 3
     ret_vals = dataops.create_train_test_data(
         az_df, output_dir,
         drop_attr=drop_attrs,
@@ -265,7 +265,8 @@ if __name__ == '__main__':
         year_list=year_list, split_strategy=split_strategy,
         test_year=test_years, outlier_op=outlier_op,
         test_gw_basins=test_gw_basins,
-        use_ama_ina=use_ama_ina
+        use_ama_ina=use_ama_ina,
+        max_gw_pumping=3000
     )
     x_train, x_test, y_train, y_test, x_scaler, y_scaler, year_train, year_test, basin_train, basin_test = ret_vals
     model = mlops.build_ml_model(
@@ -284,7 +285,7 @@ if __name__ == '__main__':
         year_test, basin_train,
         basin_test, model_dir,
         ml_model,
-        apply_bias_correction=bias_corr_type
+        apply_bias_correction=bias_corr_type,
     )
     mlops.calc_train_test_metrics(
         pred_df,
@@ -304,7 +305,7 @@ if __name__ == '__main__':
             random_state=random_state,
             create_plots=True
         )
-    plot_dir_path = f'{output_dir}Plots_{mosaic_raster_res}m/'
+    plot_dir_path = f'{output_dir}Plots_{int(mosaic_raster_res)}m/'
     plot_dir_dict = {
         1: f'{plot_dir_path}Temporal/',
         2: f'{plot_dir_path}Random_Stratified/',

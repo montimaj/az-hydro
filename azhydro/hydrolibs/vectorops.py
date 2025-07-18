@@ -198,7 +198,7 @@ def add_attribute_well_reg(
         well_reg_schema['properties'][fill_attr] = 'float:24.20'
         well_reg_gdf.loc[well_reg_gdf['AMA'] == filter_attr_value, fill_attr] = -1e-16
         well_reg_gdf.loc[well_reg_gdf[fill_attr] == 0., fill_attr] = 1e-10
-        well_reg_gdf.to_file(out_gw_shp_file, schema=well_reg_schema)
+        well_reg_gdf.to_file(out_gw_shp_file, schema=well_reg_schema, engine='fiona')
     else:
         well_reg_gdf.to_file(out_gw_shp_file)
     print(input_gw_csv_file, ': Matched wells:', well_reg_gdf.count()[shp_well_id])

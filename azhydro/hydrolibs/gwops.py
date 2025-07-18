@@ -18,8 +18,6 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import seaborn as sns
 import multiprocessing
-import warnings
-warnings.filterwarnings('ignore', category=RuntimeWarning)
 
 from typing import Any
 from joblib import Parallel, delayed
@@ -356,6 +354,7 @@ def create_gw_basin_streamflow_rasters(
             end=dv_end_year,
             parameterCd='00060'
         ).rename(columns={'00060_Mean': flow_attr}).reset_index()
+        usgs_site_daily = usgs_site_daily[usgs_site_daily[flow_attr] >= 0]
         usgs_site_daily.datetime = pd.to_datetime(usgs_site_daily.datetime)
         usgs_site_monthly = usgs_site_daily.groupby(
             pd.Grouper(key='datetime', freq='ME')
@@ -374,7 +373,10 @@ def create_gw_basin_streamflow_rasters(
         for year in year_list:
             streamflow_tif = f'{output_dir}Streamflow_{year}.tif'
             canal_arr = deepcopy(canal_raster_arr)
-            canal_arr[canal_arr == 1] *= usgs_site_annual[usgs_site_annual.Year == year][flow_attr].values[0]
+            try:
+                canal_arr[canal_arr == 1] *= usgs_site_annual[usgs_site_annual.Year == year][flow_attr].values[0]
+            except IndexError:
+                canal_arr[canal_arr == 1] *= usgs_site_annual[flow_attr].mean()
             canal_arr[np.isnan(canal_arr)] = 0
             rops.write_raster(
                 canal_arr,
@@ -497,11 +499,9 @@ def create_gw_basin_sw_delivery_rasters(
             (srp_df.WU.str.contains('EXEMPT IRRIGATION DELIVERY'))
         ].drop(columns=['WT', 'WU']).groupby([year_col, basin_col]).sum().reset_index()
         srp_missing_data = pd.DataFrame({
-            year_col: [2023],
-            basin_col: ['Phoenix AMA'],
-            delivery_col: [
-                srp_df[srp_df.Year == 2022][delivery_col].values[0]
-            ]
+            year_col: [2023, 2024],
+            basin_col: ['Phoenix AMA'] * 2,
+            delivery_col: [srp_df[delivery_col].mean()] * 2
         })
         srp_df = pd.concat([srp_df, srp_missing_data])
         srp_df[basin_col] = srp_df[basin_col].str.upper()
@@ -706,7 +706,7 @@ def parallel_make_time_series_plots(
             ylabel_prefix = 'Total' if estimator == 'sum' else 'Mean'
             plt.ylabel(f'{ylabel_prefix} Agricultural Groundwater Withdrawals {unit_str}')
             plt.tight_layout()
-            plt.xticks(range(min_yr, max_yr + 1, 3))
+            plt.xticks(list(range(min_yr, max_yr + 1, 3)) + [max_yr])
             plt.savefig(f'{plot_dir}TS_{ylabel_prefix}_{unit}.png', dpi=300)
             plt.close()
 
