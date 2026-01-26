@@ -152,11 +152,13 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-Data/Inputs/GW_Data/Well_Registry
+Data/Inputs/GW_Data/Well_Registry_2024
 Data/Inputs/GEE_Data/
 Data/Inputs/USGS\ WU
 
 Data/Inputs/GW_Data/Effective_precip_prediction_WestUS
+Data/Inputs/GW_Data/ADWR_Groundwater_Subbasin
+Data/Inputs/GW_Data/Groundwater_Basin
 Data/Inputs/GW_Data/SW_GW_consumptive
 Data/Inputs/GW_Data/Predicted_Rasters
 Data/Inputs/GW_Data/GW_Sub_Basins
@@ -165,8 +167,9 @@ AZ_Polygons*
 .DS_Store
 
 Data/Outputs/GW*/
-Data/Outputs/ML_Model*
 Data/Outputs/*.parquet
 Data/Outputs/GEE_Mosaics_804m
+Data/Outputs/GEE_Mosaics_2000m
 Data/Outputs/Predictor_Data_804m
 *.xml
+Data/Outputs/ML_Model_Irr_Wells_2000m/Model_Evaluation/

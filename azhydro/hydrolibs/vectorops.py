@@ -12,6 +12,7 @@ import numpy as np
 import fiona
 import os
 import multiprocessing
+import warnings
 
 from osgeo import gdal
 gdal.PushErrorHandler('CPLQuietErrorHandler')
@@ -132,8 +133,8 @@ def add_attribute_well_reg(
         input_gw_csv_file: str,
         out_gw_shp_file: str,
         fill_attr: str = 'AF Pumped',
-        filter_attr: str = 'AMA',
-        filter_attr_value: str = 'OUTSIDE OF AMA OR INA',
+        filter_attr: str = 'AMA INA',
+        filter_attr_value: str = 'NOT WITHIN ANY AMA OR INA',
         use_only_ama_ina: bool = False,
         **kwargs: dict[str, str]
 ) -> None:
@@ -154,45 +155,61 @@ def add_attribute_well_reg(
         use_only_ama_ina (bool): Set True to use only AMA/INA for model training
         kwargs (dict (str, str)): Additional variables, which include csv_well_id='Well Id',
                                   csv_mov_id='Movement Type', csv_water_id='Water Type', movement_type='WITHDRAWAL',
-                                  water_type='GROUNDWATER', water_use='IRRIGATION', and shp_well_id='REGISTRY_I'
-                                  as defaults.
+                                  water_type='GROUNDWATER', csv_right_type='Right Type', and shp_well_id='REGISTRY_I'
+                                  as defaults. if water_use is set to 'All', then all water uses will be considered. 
+                                  Default is 'IRRIGATION'.
 
     Returns:
         None.
     """
 
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
     well_reg_gdf = gpd.read_file(input_well_reg_file)
     gw_df = pd.read_csv(input_gw_csv_file)
     csv_well_id = 'Well Id'
+    shp_water_use_id = 'WATER_USE'
     csv_mov_id = 'Movement Type'
     csv_water_id = 'Water Type'
-    shp_water_use_id = 'WATER_USE'
+    csv_right_type = 'Right Type'
     movement_type = 'WITHDRAWAL'
     water_type = 'GROUNDWATER'
     shp_well_id = 'REGISTRY_I'
+    right_type = 'IRRIGATION'
     water_use = 'IRRIGATION'
+    well_reg_gdf[shp_well_id] = well_reg_gdf[shp_well_id].astype(str).apply(
+        lambda x: x.zfill(6) if len(x) == 5 else x
+    )
+    gw_df[csv_well_id] = gw_df[csv_well_id].astype(str).apply(
+        lambda x: x.zfill(6) if len(x) == 5 else x
+    )
     if kwargs:
-        csv_well_id = kwargs['csv_well_id']
-        movement_type = kwargs['movement_type']
-        water_type = kwargs['water_type']
-        shp_well_id = kwargs['shp_well_id']
-        water_use = kwargs['water_use']
-    well_reg_gdf = well_reg_gdf[well_reg_gdf[shp_water_use_id] == water_use]
+        csv_well_id = kwargs.get('csv_well_id', csv_well_id)
+        movement_type = kwargs.get('movement_type', movement_type)
+        water_type = kwargs.get('water_type', water_type)
+        shp_well_id = kwargs.get('shp_well_id', shp_well_id)
+        csv_right_type = kwargs.get('csv_right_type', csv_right_type)
+        water_use = kwargs.get('water_use', water_use)
+        water_use = water_use if water_use in ['IRRIGATION', 'All'] else 'IRRIGATION'
+    if water_use == 'IRRIGATION':
+        well_reg_gdf = well_reg_gdf[well_reg_gdf[shp_water_use_id] == water_use]
     if filter_attr:
         well_reg_gdf = well_reg_gdf[well_reg_gdf[filter_attr] != filter_attr_value]
-    for csv_id in set(gw_df[csv_well_id]):
-        sub_gw_df = gw_df[(gw_df[csv_well_id] == csv_id) & (gw_df[csv_mov_id] == movement_type) &
-                          (gw_df[csv_water_id] == water_type)]
+    well_id_selected = []
+    for well_id in gw_df[csv_well_id].unique():
+        selection_cond = (gw_df[csv_well_id] == well_id) & \
+                         (gw_df[csv_mov_id] == movement_type) & \
+                         (gw_df[csv_water_id] == water_type)
+        if water_use == 'IRRIGATION':
+            selection_cond = selection_cond & (gw_df[csv_right_type].str.startswith(right_type))
+        sub_gw_df = gw_df[selection_cond]
         if not sub_gw_df.empty:
+            well_id_selected.append(well_id)
             fill_value = list(sub_gw_df[fill_attr])
             if len(fill_value) > 1:
                 fill_value = np.sum(fill_value)
             else:
-                fill_value = fill_value[0]
-            csv_id_modified = str(csv_id)
-            if len(csv_id_modified) == 5:
-                csv_id_modified = '0' + csv_id_modified
-            well_reg_gdf.loc[well_reg_gdf[shp_well_id] == csv_id_modified, fill_attr] = fill_value
+                fill_value = fill_value[0]            
+            well_reg_gdf.loc[well_reg_gdf[shp_well_id] == well_id, fill_attr] = fill_value
     if not use_only_ama_ina:
         well_reg_schema = fiona.open(input_well_reg_file).schema
         well_reg_schema['properties'][fill_attr] = 'float:24.20'
@@ -201,7 +218,10 @@ def add_attribute_well_reg(
         well_reg_gdf.to_file(out_gw_shp_file, schema=well_reg_schema, engine='fiona')
     else:
         well_reg_gdf.to_file(out_gw_shp_file)
-    print(input_gw_csv_file, ': Matched wells:', well_reg_gdf.count()[shp_well_id])
+    matched_wells = len(set(well_id_selected).intersection(
+        set(well_reg_gdf[shp_well_id].tolist())
+    ))
+    print(input_gw_csv_file, ': Matched wells:', matched_wells)
 
 
 def add_attribute_well_reg_multiple(
@@ -209,8 +229,8 @@ def add_attribute_well_reg_multiple(
         input_gw_csv_dir: str,
         out_gw_shp_dir: str,
         fill_attr: str = 'AF Pumped',
-        filter_attr: str = 'AMA',
-        filter_attr_value: str = 'OUTSIDE OF AMA OR INA',
+        filter_attr: str = 'AMA INA',
+        filter_attr_value: str = 'NOT WITHIN ANY AMA OR INA',
         use_only_ama_ina: bool = False,
         **kwargs: dict[str, str]
 ) -> None:
@@ -228,12 +248,13 @@ def add_attribute_well_reg_multiple(
         out_gw_shp_dir (str): Output directory to store the GW withdrawal data.
         fill_attr (str): Attribute present in the CSV file to add to Well Registry
         filter_attr (str): Remove specific wells based on this attribute. Set None to disable filtering.
-        filter_attr_value (str): Value for filter_attr
-        use_only_ama_ina (bool): Set True to use only AMA/INA for model training
+        filter_attr_value (str): Value for filter_attr.
+        use_only_ama_ina (bool): Set True to use only AMA/INA for model training.
         kwargs (dict (str, str)): Additional variables, which include csv_well_id='Well Id',
                                   csv_mov_id='Movement Type', csv_water_id='Water Type', movement_type='WITHDRAWAL',
                                   water_type='GROUNDWATER', water_use = 'IRRIGATION', and shp_well_id='REGISTRY_I'
-                                  as defaults.
+                                  as defaults. if water_use is set to 'All', then all water uses will be considered. 
+                                  Default is 'IRRIGATION'.
 
     Returns:
         None.
@@ -258,8 +279,8 @@ def parallel_add_attribute_well_reg(
         input_gw_csv_file: str,
         out_gw_shp_dir: str,
         fill_attr: str = 'AF Pumped',
-        filter_attr: str = 'AMA',
-        filter_attr_value: str = 'OUTSIDE OF AMA OR INA',
+        filter_attr: str = 'AMA INA',
+        filter_attr_value: str = 'NOT WITHIN ANY AMA OR INA',
         use_only_ama_ina:bool = False,
         **kwargs: dict[str, str]
 ):
@@ -282,7 +303,8 @@ def parallel_add_attribute_well_reg(
         kwargs (dict (str, str)): Additional variables, which include csv_well_id='Well Id',
                                   csv_mov_id='Movement Type', csv_water_id='Water Type', movement_type='WITHDRAWAL',
                                   water_type='GROUNDWATER', water_use = 'IRRIGATION', and shp_well_id='REGISTRY_I'
-                                  as defaults.
+                                  as defaults. if water_use is set to 'All', then all water uses will be considered.
+                                  Default is 'IRRIGATION'.
 
     Returns:
         None.

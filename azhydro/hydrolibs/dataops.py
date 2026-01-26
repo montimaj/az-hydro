@@ -26,6 +26,8 @@ os.environ['CPL_LOG'] = '/dev/null'
 gdal.PushErrorHandler('CPLQuietErrorHandler')
 gdal.UseExceptions()
 warnings.filterwarnings('ignore')
+import logging
+logging.getLogger("distributed").setLevel(logging.ERROR)
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 from sysops import makedirs
@@ -146,83 +148,21 @@ def download_gee_tile(
     openet_ic = [
         ee.ImageCollection("OpenET/ENSEMBLE/CONUS/GRIDMET/MONTHLY/v2_0"),
         ee.ImageCollection("projects/openet/assets/ensemble/conus/gridmet/monthly/provisional")
-    ]
-    ssebop_ic = [
-        ee.ImageCollection("OpenET/SSEBOP/CONUS/GRIDMET/MONTHLY/v2_0"),
-        ee.ImageCollection("projects/openet/assets/ssebop/conus/gridmet/monthly/provisional")
-    ]
-    eemetric_ic = [
-        ee.ImageCollection("OpenET/EEMETRIC/CONUS/GRIDMET/MONTHLY/v2_0"),
-        ee.ImageCollection("projects/openet/assets/eemetric/conus/gridmet/monthly/provisional")
-    ]
-    sims_ic = [
-        ee.ImageCollection("OpenET/SIMS/CONUS/GRIDMET/MONTHLY/v2_0"),
-        ee.ImageCollection("projects/openet/assets/sims/conus/gridmet/monthly/provisional")
-    ]
-    pt_jpl_ic = [
-        ee.ImageCollection("OpenET/PTJPL/CONUS/GRIDMET/MONTHLY/v2_0"),
-        ee.ImageCollection("projects/openet/assets/ptjpl/conus/gridmet/monthly/provisional")
-    ]
-    geesebal_ic = [
-        ee.ImageCollection("OpenET/GEESEBAL/CONUS/GRIDMET/MONTHLY/v2_0"),
-        ee.ImageCollection("projects/openet/assets/geesebal/conus/gridmet/monthly/provisional")
-    ]
-    disalexi_ic = [
-        ee.ImageCollection("OpenET/DISALEXI/CONUS/GRIDMET/MONTHLY/v2_0"),
-        ee.ImageCollection("projects/openet/assets/disalexi/conus/gridmet/monthly/provisional")
-    ]
-    gridmet_ic = ee.ImageCollection("IDAHO_EPSCOR/GRIDMET")
-    gridmet_drought_ic = ee.ImageCollection("GRIDMET/DROUGHT")
+    ]    
     prism_ic = ee.ImageCollection('projects/sat-io/open-datasets/OREGONSTATE/PRISM_800_MONTHLY')
-    daymet_ic = ee.ImageCollection('NASA/ORNL/DAYMET_V4')
-    terraclimate_ic = ee.ImageCollection('IDAHO_EPSCOR/TERRACLIMATE')
     era5land_ic = ee.ImageCollection('ECMWF/ERA5_LAND/MONTHLY_AGGR')
-    npp_ic = [
-        ee.ImageCollection('UMT/NTSG/v2/LANDSAT/NPP'),
-        ee.ImageCollection('MODIS/061/MOD17A3HGF')
-    ]
     irrmapper_ic = ee.ImageCollection('projects/ee-dgketchum/assets/IrrMapper/IrrMapperComp')
     cdl_ic = ee.ImageCollection("USDA/NASS/CDL")
     nlcd_ic = ee.ImageCollection('projects/sat-io/open-datasets/USGS/ANNUAL_NLCD/LANDCOVER')
-    hsg = ee.Image(
-        'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/land_use/'
-        'hydrologic_group'
-    ).rename('HSG')
     soil_depth = ee.Image(
         'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/land_use/soil_depth'
-    ).rename('soil_depth_mm')
+    ).rename('soil_depth_cm')
+    awc = ee.Image(
+        'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/physical/water_storage'
+    ).rename('awc_cm')
     ksat_mean = ee.Image(
         'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/physical/ksat_mean'
     ).rename('ksat_mean_micromps')
-    nasa_dem = ee.Image("NASA/NASADEM_HGT/001").select('elevation').rename('nasadem_elevation_m')
-    nasa_dem_slope = ee.Terrain.slope(nasa_dem).rename('nasadem_slope')
-    bd_mean = ee.ImageCollection('projects/sat-io/open-datasets/polaris/bd_mean').first().rename('bulk_density_gcm3')
-    clay_mean = ee.ImageCollection('projects/sat-io/open-datasets/polaris/clay_mean').first().rename('clay_percent')
-    polaris_ksat_mean = ee.ImageCollection(
-        'projects/sat-io/open-datasets/polaris/ksat_mean'
-    ).first().rename('ksat_log10cmhr1')
-    n_mean = ee.ImageCollection('projects/sat-io/open-datasets/polaris/n_mean').first().rename('pore_size_dist')
-    om_mean = ee.ImageCollection(
-        'projects/sat-io/open-datasets/polaris/om_mean'
-    ).first().rename('organic_matter_log10percent')
-    ph_mean = ee.ImageCollection('projects/sat-io/open-datasets/polaris/ph_mean').first().rename('soil_ph')
-    sand_mean = ee.ImageCollection('projects/sat-io/open-datasets/polaris/sand_mean').first().rename('sand_percent')
-    silt_mean = ee.ImageCollection('projects/sat-io/open-datasets/polaris/silt_mean').first().rename('silt_percent')
-    theta_r_mean = ee.ImageCollection(
-        'projects/sat-io/open-datasets/polaris/theta_r_mean'
-    ).first().rename('residual_swc')
-    theta_s_mean = ee.ImageCollection(
-        'projects/sat-io/open-datasets/polaris/theta_s_mean'
-    ).first().rename('saturated_swc')
-    lambda_mean = ee.ImageCollection(
-        'projects/sat-io/open-datasets/polaris/lambda_mean'
-    ).first().rename('pore_size_index')
-    hb_mean = ee.ImageCollection(
-        'projects/sat-io/open-datasets/polaris/hb_mean'
-    ).first().rename('soil_bubbling_pressure_log10kPa')
-    alpha_mean = ee.ImageCollection(
-        'projects/sat-io/open-datasets/polaris/alpha_mean'
-    ).first().rename('polaris_scale_log10kPa1')
     ee_geom = ee.Geometry.Rectangle(tile_values[1:])
     categorical_bands = get_categorical_bands()
     max_pixels = np.ceil((gee_scale / 30) ** 2)
@@ -241,7 +181,8 @@ def download_gee_tile(
             except rio.errors.RasterioIOError:
                 os.remove(local_file_name)
                 print(local_file_name, 'corrupted. Downloading again...')
-        irr = irrmapper_ic.filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+        irrmapper_year = year if year >= 1985 else 1985
+        irr = irrmapper_ic.filterDate(f'{irrmapper_year}-01-01', f'{irrmapper_year + 1}-01-01') \
             .select('classification') \
             .max()
         mask = irr.eq(0)
@@ -269,96 +210,20 @@ def download_gee_tile(
             openet_idx = 1 if year < 2000 else 0
             start_year_gee = f'{year}-01-01'
             end_year_gee = f'{year + 1}-01-01'
+            openet_start_year = start_year_gee
+            openet_end_year = end_year_gee
+            if year < 1990:
+                openet_start_year = '1990-01-01'
+                openet_end_year = '1991-01-01'
             openet_ensemble = openet_ic[openet_idx].select('et_ensemble_mad') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-            ssebop_et = ssebop_ic[openet_idx].select('et') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-            eemetric_et = eemetric_ic[openet_idx].select('et') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-            sims_et = sims_ic[openet_idx].select('et') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-            pt_jpl_et = pt_jpl_ic[openet_idx].select('et') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-            geesebal_et = geesebal_ic[openet_idx].select('et') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-            disalexi_et = disalexi_ic[openet_idx].select('et') \
-                .filterDate(start_year_gee, end_year_gee) \
+                .filterDate(openet_start_year, openet_end_year) \
                 .sum()
             # Oct-Dec 1999 is in the public domain, Jan-Dec 1999 is in the provisional domain
             if year == 1999:
                 openet_ensemble_public = openet_ic[0].select('et_ensemble_mad') \
-                .filterDate(start_year_gee, end_year_gee) \
+                .filterDate(openet_start_year, openet_end_year) \
                 .sum()
                 openet_ensemble = openet_ensemble.add(openet_ensemble_public)
-                ssebop_et_public = ssebop_ic[0].select('et') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-                ssebop_et = ssebop_et.add(ssebop_et_public)
-                eemetric_et_public = eemetric_ic[0].select('et') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-                eemetric_et = eemetric_et.add(eemetric_et_public)
-                sims_et_public = sims_ic[0].select('et') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-                sims_et = sims_et.add(sims_et_public)
-                pt_jpl_et_public = pt_jpl_ic[0].select('et') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-                pt_jpl_et = pt_jpl_et.add(pt_jpl_et_public)
-                geesebal_et_public = geesebal_ic[0].select('et') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-                geesebal_et = geesebal_et.add(geesebal_et_public)
-                disalexi_et_public = disalexi_ic[0].select('et') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-                disalexi_et = disalexi_et.add(disalexi_et_public)
-            gridmet_precip = gridmet_ic.select('pr') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-            gridmet_tmmx = gridmet_ic.select('tmmx') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .median()
-            gridmet_tmmn = gridmet_ic.select('tmmn') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .median()
-            gridmet_eto = gridmet_ic.select('eto') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-            gridmet_etr = gridmet_ic.select('etr') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-            gridmet_vpd = gridmet_ic.select('vpd') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-            gridmet_vs = gridmet_ic.select('vs') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .mean()
-            gridmet_rmax = gridmet_ic.select('rmax') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .median()
-            gridmet_rmin = gridmet_ic.select('rmin') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .median()
-            gridmet_spi1y = gridmet_drought_ic.select('spi1y') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .median()
-            gridmet_eddi1y = gridmet_drought_ic.select('eddi1y') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .median()
-            gridmet_spei1y = gridmet_drought_ic.select('spei1y') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .median()
-            gridmet_pdsi = gridmet_drought_ic.select('pdsi') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .median()
             prism_precip = prism_ic.select('ppt') \
                 .filterDate(start_year_gee, end_year_gee) \
                 .sum()
@@ -370,50 +235,10 @@ def download_gee_tile(
                 .filterDate(start_year_gee, end_year_gee) \
                 .median()\
                 .add(273.15)
-            if year < 2024:
-                daymet_precip = daymet_ic.select('prcp') \
-                    .filterDate(start_year_gee, end_year_gee) \
-                    .sum()
-                daymet_tmmx = daymet_ic.select('tmax') \
-                    .filterDate(start_year_gee, end_year_gee) \
-                    .median() \
-                    .add(273.15)
-                daymet_tmmn = daymet_ic.select('tmin') \
-                    .filterDate(start_year_gee, end_year_gee) \
-                    .median() \
-                    .add(273.15)
-            else:
-                daymet_precip = gridmet_precip
-                daymet_tmmx = gridmet_tmmx
-                daymet_tmmn = gridmet_tmmn
-            terraclimate_sm_first = terraclimate_ic.select('soil') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .first()
-            terraclimate_sm = terraclimate_ic.select('soil') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sort('system:time_start', False) \
-                .first() \
-                .subtract(terraclimate_sm_first) \
-                .multiply(0.1)
-            terraclimate_ro = terraclimate_ic.select('ro') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-            era5land_snowfall = era5land_ic.select('snowfall_sum') \
-                .filterDate(f'{year - 1}-10-01', f'{year}-10-01') \
-                .sum()
             era5land_swe = era5land_ic.select('snow_depth_water_equivalent') \
                 .filterDate(start_year_gee, end_year_gee) \
                 .sum()
-            era5land_snowmelt = era5land_ic.select('snowmelt_sum') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
             era5land_runoff = era5land_ic.select('runoff_sum') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-            era5land_sub_surface_runoff = era5land_ic.select('sub_surface_runoff_sum') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-            era5land_surface_runoff = era5land_ic.select('surface_runoff_sum') \
                 .filterDate(start_year_gee, end_year_gee) \
                 .sum()
             era5land_volumetric_soil_water_layer_1 = era5land_ic.select('volumetric_soil_water_layer_1') \
@@ -428,17 +253,10 @@ def download_gee_tile(
             era5land_volumetric_soil_water_layer_4 = era5land_ic.select('volumetric_soil_water_layer_4') \
                 .filterDate(start_year_gee, end_year_gee) \
                 .median()
-            npp_idx = 0 if year < 2021 else 1
-            npp_band = 'annualNPP' if npp_idx == 0 else 'Npp'
-            npp_start_year = start_year_gee if year >= 1986 else '1986-01-01'
-            npp_end_year = end_year_gee if year >= 1986 else '1987-01-01'
-            npp = npp_ic[npp_idx].select(npp_band) \
-                .filterDate(npp_start_year, npp_end_year) \
-                .sum() \
-                .rename('annual_npp_mm4')
             if year < 2008:
                 # Switch to NLCD for 1985-2007
-                nlcd_year = nlcd_ic.filterDate(f'{year}-01-01', f'{year + 1}-01-01').first()
+                nlcd_year = year if year >= 1985 else 1985
+                nlcd_year = nlcd_ic.filterDate(f'{nlcd_year}-01-01', f'{nlcd_year + 1}-01-01').first()
                 nlcd_mask_1 = nlcd_year.eq(82) # cropland
                 nlcd_mask_2 = nlcd_year.gte(21).And(nlcd_year.lte(24)) # developed
                 nlcd_mask_3 = nlcd_year.eq(11) # open water
@@ -453,63 +271,19 @@ def download_gee_tile(
                     .first()
             data_bands = [
                 openet_ensemble,
-                ssebop_et,
-                eemetric_et,
-                sims_et,
-                pt_jpl_et,
-                geesebal_et,
-                disalexi_et,
-                gridmet_precip,
-                gridmet_tmmx,
-                gridmet_tmmn,
-                gridmet_eto,
-                gridmet_etr,
-                gridmet_vpd,
-                gridmet_vs,
-                gridmet_rmax,
-                gridmet_rmin,
-                gridmet_spi1y,
-                gridmet_eddi1y,
-                gridmet_spei1y,
-                gridmet_pdsi,
                 prism_precip,
                 prism_tmmx,
                 prism_tmmn,
-                daymet_precip,
-                daymet_tmmx,
-                daymet_tmmn,
-                terraclimate_sm,
-                terraclimate_ro,
-                era5land_snowfall,
                 era5land_swe,
-                era5land_snowmelt,
                 era5land_runoff,
-                era5land_sub_surface_runoff,
-                era5land_surface_runoff,
                 era5land_volumetric_soil_water_layer_1,
                 era5land_volumetric_soil_water_layer_2,
                 era5land_volumetric_soil_water_layer_3,
                 era5land_volumetric_soil_water_layer_4,
-                npp,
                 cdl,
-                hsg,
                 soil_depth,
+                awc,
                 ksat_mean,
-                nasa_dem,
-                nasa_dem_slope,
-                bd_mean,
-                clay_mean,
-                polaris_ksat_mean,
-                n_mean,
-                om_mean,
-                ph_mean,
-                sand_mean,
-                silt_mean,
-                theta_r_mean,
-                theta_s_mean,
-                lambda_mean,
-                hb_mean,
-                alpha_mean,
                 irr_mask
             ]
             data_img = openet_ensemble.rename(data_band_names[0])
@@ -522,18 +296,14 @@ def download_gee_tile(
                 maxPixels=max_pixels
             ).reproject(crs, scale=gee_scale)
             for band, band_name in zip(data_bands, data_band_names):
-                if band_name == 'annual_et_disalexi_mm' and year < 2001:
-                    band = ee.ImageCollection([
-                        ssebop_et,
-                        eemetric_et,
-                        sims_et,
-                        pt_jpl_et,
-                        geesebal_et,
-                    ]).mean()
                 if multiply_irr_mask:
                     band = band.multiply(irr_mask)
                 band = band.rename(band_name)
-                band_scale = band.projection().nominalScale().getInfo()
+                try:
+                    band_scale = band.projection().nominalScale().getInfo()
+                except ee.EEException as e:
+                    print('Error getting band scale for', band_name, ':', e)
+                    return
                 if gee_scale > 30:
                     if band_name in categorical_bands:
                         reducer = ee.Reducer.mode(maxRaw=max_pixels)
@@ -642,63 +412,19 @@ def download_gee_data(
     data_dir = f'{download_dir}GEE_Data/GEE_Tiles_{int(gee_scale)}m_IrrMaskMul_{multiply_irr_mask}/'
     data_band_names = [
         'annual_et_ensemble_mm',
-        'annual_et_ssebop_mm',
-        'annual_et_eemetric_mm',
-        'annual_et_sims_mm',
-        'annual_et_pt_jpl_mm',
-        'annual_et_geesebal_mm',
-        'annual_et_disalexi_mm',
-        'annual_gridmet_precip_mm',
-        'annual_gridmet_tmmx_K',
-        'annual_gridmet_tmmn_K',
-        'annual_gridmet_eto_mm',
-        'annual_gridmet_etr_mm',
-        'annual_gridmet_vpd_kPa',
-        'annual_gridmet_vs_mps',
-        'annual_gridmet_rmax',
-        'annual_gridmet_rmin',
-        'annual_gridmet_spi1y',
-        'annual_gridmet_eddi1y',
-        'annual_gridmet_spei1y',
-        'annual_gridmet_pdsi',
         'annual_prism_precip_mm',
         'annual_prism_tmmx_K',
         'annual_prism_tmmn_K',
-        'annual_daymet_precip_mm',
-        'annual_daymet_tmmx_K',
-        'annual_daymet_tmmn_K',
-        'annual_terraclimate_sm_change_mm',
-        'annual_terraclimate_ro_mm',
-        'wy_era5land_snowfall_m',
         'annual_era5land_swe_m',
-        'annual_era5land_snowmelt_m',
         'annual_era5land_runoff_m',
-        'annual_era5land_sub_surface_runoff_m',
-        'annual_era5land_surface_runoff_m',
         'annual_era5land_volumetric_soil_water_layer_1',
         'annual_era5land_volumetric_soil_water_layer_2',
         'annual_era5land_volumetric_soil_water_layer_3',
         'annual_era5land_volumetric_soil_water_layer_4',
-        'annual_npp_mm4',
         'crop_cdl',
-        'HSG',
-        'soil_depth_mm',
+        'soil_depth_cm',
+        'awc_cm',
         'ksat_mean_micromps',
-        'elevation_m',
-        'slope',
-        'bulk_density_gcm3',
-        'clay_percent',
-        'ksat_log10cmhr1',
-        'pore_size_dist',
-        'organic_matter_log10percent',
-        'soil_ph',
-        'sand_percent',
-        'silt_percent',
-        'residual_swc',
-        'saturated_swc',
-        'pore_size_index',
-        'soil_bubbling_pressure_log10kPa',
-        'polaris_scale_log10kPa1',
         'annual_irrmapper_fraction'
     ]
     if not skip_download:
@@ -1108,6 +834,7 @@ def create_az_data_csv(
 
     data_parquet = f'{output_dir}AZ_Data.parquet'
     if not load_csv:
+        makedirs(output_dir)
         if exclude_years is None:
             exclude_years = []
         data_df = pd.DataFrame()
@@ -1118,7 +845,6 @@ def create_az_data_csv(
             'GW_Basin_CAP_SRP_Total',
             'Peff'
         ]
-        nan_str = 'OUTSIDE AZ'
         for year in range(start_year, end_year + 1):
             df = pd.DataFrame()
             if year not in exclude_years:
@@ -1148,7 +874,7 @@ def create_az_data_csv(
                             raster_arr[np.isnan(raster_arr)] = 0
                             df['streamflow_m3s'] = raster_arr
                         elif var_name == 'GW_Basin_CAP_SRP_Total':
-                            df['cap_srp_delivery_m3'] = raster_arr * 1233.48
+                            df['cap_srp_delivery_km3'] = raster_arr * 1.23348e-6 # Convert acre-feet to km3
                         elif var_name == 'GW':
                             raster_arr[np.isnan(raster_arr)] = 0
                         elif var_name == 'Peff':
@@ -1159,21 +885,20 @@ def create_az_data_csv(
                 gw_file = f'{gw_data_dir}GW_{year}.tif'
                 df['gw_pumping_mm'] = read_raster_as_arr(gw_file, get_file=False).ravel()
                 lon_grid, lat_grid = get_xy_grids_from_raster(gw_file)
-                df['lon_deg'] = lon_grid.ravel()
-                df['lat_deg'] = lat_grid.ravel()
+                df['easting_m'] = lon_grid.ravel()
+                df['northing_m'] = lat_grid.ravel()
+                df['awc_mm'] = df.awc_cm * 10
                 df['Year'] = year
+                df = df.drop(columns=['awc_cm'])
                 data_df = pd.concat([data_df, df])
         data_df = data_df[~np.isnan(data_df.gw_pumping_mm)].reset_index(drop=True)
         gw_basin_gdf = gpd.read_file(gw_basin_vector)
         gw_basin_dict = {}
         ama_ina_basins = get_ama_ina_basin_names()
-        # find Douglas basin name in ama_ina_basins
-        douglas_basin_name = [b for b in ama_ina_basins if 'DOUGLAS' in b][0]
         for gw_basin in gw_basin_gdf.OBJECTID:
             gw_basin_name = gw_basin_gdf[gw_basin_gdf.OBJECTID == gw_basin].BASIN_NAME.values[0]
-            if 'DOUGLAS' in gw_basin_name:
-                gw_basin_name = douglas_basin_name
             gw_basin_dict[gw_basin] = gw_basin_name
+        nan_str = 'OUTSIDE AZ'
         gw_basin_dict[0] = nan_str
         data_df.GW_Basin = data_df.GW_Basin.swifter.apply(
             lambda x: gw_basin_dict[x] if not np.isnan(x) else nan_str)
@@ -1184,11 +909,6 @@ def create_az_data_csv(
         data_df = data_df.reset_index(drop=True)
         data_df['GW_Basin_Type'] = data_df.GW_Basin.swifter.apply(
             lambda x: 0 if x in ama_basins else 1 if x in ina_basins else 2
-        ).reset_index(drop=True)
-        data_df['GW_Basin_Type'] = data_df.swifter.apply(
-            lambda x: 0 if (x.Year < 2023) & (x.GW_Basin == douglas_basin_name)
-            else 1 if x.GW_Basin == douglas_basin_name else x.GW_Basin_Type,
-            axis=1
         ).reset_index(drop=True)
         data_df.to_parquet(data_parquet, index=False)
     else:
@@ -1505,13 +1225,14 @@ def create_train_test_data(
         scaling: bool = False,
         year_list: list[int] = (1985,),
         gw_basin_col: str = 'GW_Basin',
-        irrigation_col: str = 'annual_irrmapper_fraction',
         split_strategy: int = 1,
         outlier_op: int | None = 2,
         min_gw_pumping: float = 0,
         max_gw_pumping: float = np.inf,
         shuffle: bool = True,
         use_ama_ina: bool = False,
+        drop_gw_basins: tuple[str, ...] = ('JOSEPH CITY INA', 'WILLCOX AMA', 'HUALAPAI VALLEY INA'),
+        water_use: str = 'IRRIGATION'
 ) -> tuple:
     """Create train and test data.
 
@@ -1532,19 +1253,21 @@ def create_train_test_data(
         scaling (bool): Set True to perform minmax scaling.
         year_list (list (int,...)): List of years in YYYY format, i.e., (1985, ..., 2024) to build the data set.
         gw_basin_col (str): Name of the GW basin column.
-        irrigation_col (str): Name of the irrigation column.
         split_strategy (int): If 1, Split train test data based on year_col. If 2, then test_size amount of data from
                               year_col are kept for testing and rest for training;
                               for this option, test-year should have a tuple of integers or a True value. If 3, then
                               test_gw_basins are used for spatial holdouts. For any other value of split-strategy,
                               the data are randomly split.
         outlier_op (int): Outlier operation to perform. Set to 1 for removing outlier directly or 2 for removing
-                          outliers by each basin and each year. Set to 3 to remove all values less than min_gw_pumping and greater than
-                            max_gw_pumping.
+                          outliers by each basin and each year. Set to 3 to remove all values less than min_gw_pumping 
+                          and greater than max_gw_pumping.
         min_gw_pumping (float): Minimum gw pumping value in mm. Default is 0.
         max_gw_pumping (float): Maximum gw pumping value in mm. Default is np.inf.
         shuffle (bool): Set False to stop data shuffling.
         use_ama_ina (bool): Set True to use AMA-INA basins.
+        drop_gw_basins (tuple (str, ...)): Tuple of GW basins to drop from the data set. Default basins are: 
+        ('JOSEPH CITY INA', 'WILLCOX AMA', 'HUALAPAI VALLEY INA'). These basins have very less data.
+        water_use (str): Type of water use to consider. Default is 'IRRIGATION'. Other option is 'All'.
 
     Returns:
         tuple: A tuple containing X_train, X_test as pandas data frames, y_train, y_test as numpy arrays.
@@ -1568,11 +1291,11 @@ def create_train_test_data(
     if not already_created:
         if use_ama_ina:
             ama_ina_basins = get_ama_ina_basin_names()
+            ama_ina_basins = [b for b in ama_ina_basins if b not in drop_gw_basins]
             input_df = input_df[input_df[gw_basin_col].isin(ama_ina_basins)]
         drop_attr = [attr for attr in drop_attr]
         input_df = input_df.replace([np.inf, -np.inf], np.nan).dropna(axis=1)
-        input_df = input_df[input_df[pred_attr] > 0]
-        # input_df = input_df[input_df[irrigation_col] > 0]
+        input_df = input_df[input_df[pred_attr] > 0] if water_use == 'IRRIGATION' else input_df
         if year_list and year_col in input_df.columns:
             input_df = input_df[input_df[year_col].isin(year_list)]
         if outlier_op is not None:

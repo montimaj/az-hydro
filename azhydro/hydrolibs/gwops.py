@@ -48,7 +48,10 @@ def reproject_vectors(
     """
 
     if not already_reprojected:
-        vector_files = glob(f'{input_dir}{pattern}')
+        if os.path.isfile(input_dir):
+            vector_files = [input_dir]
+        else:
+            vector_files = glob(f'{input_dir}{pattern}')
         makedirs(output_dir)
         for f in vector_files:
             output_f = f"{output_dir}{f[f.rfind(os.sep) + 1:]}"
@@ -100,7 +103,7 @@ def preprocess_gw_csv(
         output_dir: str,
         fill_attr: str = 'AF Pumped',
         filter_attr: str | None = None,
-        filter_attr_value: str = 'OUTSIDE OF AMA OR INA',
+        filter_attr_value: str = 'NOT WITHIN ANY AMA OR INA',
         use_only_ama_ina: bool = False,
         already_preprocessed: bool = False,
         **kwargs: dict[str, str]
@@ -122,6 +125,11 @@ def preprocess_gw_csv(
         filter_attr_value (str): Value for filter_attr
         use_only_ama_ina (bool): Set True to use only AMA/INA for model training.
         already_preprocessed (bool): Set True to disable preprocessing.
+        kwargs (dict (str, str)): Additional variables, which include csv_well_id='Well Id',
+                                  csv_mov_id='Movement Type', csv_water_id='Water Type', movement_type='WITHDRAWAL',
+                                  water_type='GROUNDWATER', water_use = 'IRRIGATION', and shp_well_id='REGISTRY_I'. If
+                                  water_use is set to 'All', then all water uses will be considered. 
+                                  Default is 'IRRIGATION'.
 
     Returns:
         str: File path of the first GW pumping shapefile or geojson.
@@ -447,6 +455,12 @@ def create_annual_eff_precip_rasters(
                     outfile_path=annual_eff_precip_file,
                     no_data_value=monthly_eff_precip_rio.nodata
                 )
+        for year in year_list:
+            if year < 1985:
+                copy_file(
+                    f'{output_dir}Peff_1985.tif',
+                    f'{output_dir}Peff_{year}.tif'
+                )
     print('Annual effective precipitation rasters created...')
 
 
@@ -533,6 +547,12 @@ def create_gw_basin_sw_delivery_rasters(
                 value_field=delivery_col,
                 add_value=False
             )
+        for year in year_list:
+            if year < 1985:
+                copy_file(
+                    f'{output_dir}GW_Basin_CAP_SRP_Total_1985.tif',
+                    f'{output_dir}GW_Basin_CAP_SRP_Total_{year}.tif'
+                )
     print('GW Basin surface water delivery rasters created...')
 
 
@@ -593,10 +613,11 @@ def get_ama_ina_basin_names() -> list[str]:
         'TUCSON AMA',
         'PINAL AMA',
         'PHOENIX AMA',
-        'DOUGLAS AMA_INA',
+        'DOUGLAS AMA',
         'JOSEPH CITY INA',
         'HARQUAHALA INA',
-        'HUALAPAI VALLEY'
+        'HUALAPAI VALLEY INA',
+        'WILLCOX AMA'
     ]
     return ama_ina_basins
 
@@ -609,6 +630,7 @@ def parallel_make_time_series_plots(
         test_year_limits: tuple[tuple[int, int], ...],
         year_col: str,
         actual_gw_col: str,
+        pred_gw_col: str,
         gw_basin_col: str,
         split_strategy: int,
         test_gw_basins: tuple[str],
@@ -625,6 +647,7 @@ def parallel_make_time_series_plots(
         test_year_limits (tuple[tuple[int, int], ...]): Tuple of tuples containing the start and end years for testing.
         year_col (str): Name of the year column.
         actual_gw_col (str): Name of the actual groundwater pumping column.
+        pred_gw_col (str): Name of the predicted groundwater pumping column.
         gw_basin_col (str): Name of the groundwater basin column.
         split_strategy (int): Split strategy used for the model. 1 = Temporal, 2 = Random Stratified, 3 = Spatial.
         test_gw_basins (tuple (str)): Test GW basin names.
@@ -646,24 +669,24 @@ def parallel_make_time_series_plots(
     plot_dir = f'{output_dir}{gw_basin_name}/'
     makedirs(plot_dir)
     area = raster_res ** 2
-    # m2 to acre-ft and mm to ft and then 1000s of acre-ft
-    basin_df['Actual_GW_af'] = basin_df['Actual_GW_mm'] * area / (4047 * 304.8 * 1000)
-    basin_df['Pred_GW_af'] = basin_df['Pred_GW_mm'] * area / (4047 * 304.8 * 1000)
-    # mm to m and then 1e6 m3
-    basin_df['Actual_GW_m3'] = basin_df['Actual_GW_mm'] * area * 1e-9
-    basin_df['Pred_GW_m3'] = basin_df['Pred_GW_mm'] * area * 1e-9
-
-    basin_df['Actual_GW_ft'] = basin_df['Actual_GW_mm'] / 304.8
-    basin_df['Pred_GW_ft'] = basin_df['Pred_GW_mm'] / 304.8
-    min_yr = basin_df[year_col].min()
-    max_yr = basin_df[year_col].max()
     if gw_basin_type != 'Other':
         replace_df = basin_df[basin_df[actual_gw_col] > 0]
         if replace_df.shape[0] > 0:
             basin_df = replace_df
         else:
             gw_basin_type = 'Other'
-    for estimator in ['mean', 'sum']:
+    # m2 to acre-ft and mm to ft and then 1000s of acre-ft
+    basin_df['Actual_GW_af'] = basin_df[actual_gw_col] * area / (4047 * 304.8 * 1000)
+    basin_df['Pred_GW_af'] = basin_df[pred_gw_col] * area / (4047 * 304.8 * 1000)
+    # mm to m and then 1e6 m3
+    basin_df['Actual_GW_m3'] = basin_df[actual_gw_col] * area * 1e-9
+    basin_df['Pred_GW_m3'] = basin_df[pred_gw_col] * area * 1e-9
+
+    basin_df['Actual_GW_ft'] = basin_df[actual_gw_col] / 304.8
+    basin_df['Pred_GW_ft'] = basin_df[pred_gw_col] / 304.8
+    min_yr = basin_df[year_col].min()
+    max_yr = basin_df[year_col].max()
+    for estimator in ['sum']:
         for unit in ['af', 'm3', 'ft', 'mm']:
             plt.figure(figsize=(20, 10))
             plt.rcParams.update({'font.size': 20})
@@ -722,7 +745,9 @@ def make_time_series_plots(
         pred_attr: str = 'gw_pumping_mm',
         split_strategy: int = 1,
         test_gw_basins: tuple[str, ...] = ('HARQUAHALA INA',),
-        raster_res: float = 2000
+        raster_res: float = 2000,
+        x_scaler: Any = None,
+        y_scaler: Any = None
 ) -> None:
     """
     Make time series plots for individual groundwater basins.
@@ -740,6 +765,8 @@ def make_time_series_plots(
                             4 = Random.
         test_gw_basins (tuple[str]): Tuple of GW basins to be used for testing. Only used if split_strategy is 3.
         raster_res (float): Resolution of the raster in meters.
+        x_scaler (Any): Scaler used to scale the features. If None, the model's predict method is used directly.
+        y_scaler (Any): Scaler used to scale the target variable. If None, the model's predict method is used directly.
 
     Returns:
         None.
@@ -750,7 +777,15 @@ def make_time_series_plots(
     actual_gw_col = 'Actual_GW_mm'
     pred_gw_col = 'Pred_GW_mm'
     input_df = input_df.rename(columns={pred_attr: actual_gw_col})
-    input_df[pred_gw_col] = np.abs(model.predict(input_df[features]))
+    if x_scaler:
+        input_df[features] = x_scaler.transform(input_df[features])
+        model_predictions = model.predict(input_df[features])
+    else:
+        model_predictions = model.predict(input_df[features])
+    if not y_scaler:
+        input_df[pred_gw_col] = np.abs(model_predictions)
+    else:
+        input_df[pred_gw_col] = np.abs(y_scaler.inverse_transform(model_predictions.reshape(-1, 1)).ravel())
     num_cores = multiprocessing.cpu_count() - 1
     Parallel(n_jobs=num_cores - 1)(delayed(parallel_make_time_series_plots)(
         idx,
@@ -760,6 +795,7 @@ def make_time_series_plots(
         test_year_limits,
         year_col,
         actual_gw_col,
+        pred_gw_col,
         gw_basin_col,
         split_strategy,
         test_gw_basins,
