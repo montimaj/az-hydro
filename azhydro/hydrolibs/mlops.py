@@ -1,7 +1,16 @@
 """
-Provides methods for machine learning (ML) operations required.
+Handle ML Model Building Operations.
+
+This module provides comprehensive ML model building, hyperparameter optimization,
+and evaluation capabilities for groundwater pumping prediction.
+
+Features:
+- Multiple ensemble tree algorithms (XGB, LGBM, RF, ETR, HGBR, CatBoost, GBR, AdaBoost)
+- Optuna-based hyperparameter optimization with Dask parallelization
+- Model comparison and evaluation utilities
 """
 import os
+import warnings
 
 # Author: Sayantan Majumdar
 # Email: sayantan.majumdar@dri.edu
@@ -14,28 +23,53 @@ import optuna
 import matplotlib.pyplot as plt
 import seaborn as sns
 import skexplain
+import time
 
 from typing import Any
+from functools import partial
 from lightgbm import LGBMRegressor
 from xgboost import XGBRegressor, XGBRFRegressor
-from dask.distributed import Client
+from dask.distributed import Client, LocalCluster
+from dask import delayed, compute
 from dask_ml.model_selection import GridSearchCV as DaskGCV
 from dask_ml.model_selection import RandomizedSearchCV as DaskRCV
 from dask_jobqueue import SLURMCluster
-from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor, HistGradientBoostingRegressor
+from sklearn.ensemble import (
+    RandomForestRegressor, 
+    ExtraTreesRegressor, 
+    HistGradientBoostingRegressor,
+    GradientBoostingRegressor,
+    AdaBoostRegressor,
+    BaggingRegressor
+)
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.base import clone
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import RepeatedStratifiedKFold, RepeatedKFold, GridSearchCV
-from sklearn.model_selection import RandomizedSearchCV, cross_validate
+from sklearn.model_selection import (
+    RepeatedStratifiedKFold, 
+    RepeatedKFold, 
+    GridSearchCV,
+    RandomizedSearchCV, 
+    cross_validate,
+    KFold
+)
 from sklearn.metrics import r2_score, root_mean_squared_error, mean_absolute_error, make_scorer
 from sklearn.inspection import permutation_importance
 from sysops import makedirs, make_proper_dir_name
 from gwops import get_ama_ina_basin_names
+import visualops as vizops  # Journal-quality visualization module
+from catboost import CatBoostRegressor
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore', category=UserWarning)
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
 def get_model_param_dict(
         random_state: int = 0,
         use_dask: bool = False,
-        get_model_names_only: bool = False
+        get_model_names_only: bool = False,
+        include_all_models: bool = False
 ) -> list[str] | tuple[dict[str, Any], dict[str, dict[str, list]]]:
     """Get model object dictionaries and parameter dictionary for different models.
 
@@ -43,6 +77,8 @@ def get_model_param_dict(
         random_state (int): Random state (seed) for some ML algorithms.
         use_dask (bool): Set True if using Dask in a distributed computing environment.
         get_model_names_only (bool): Set True to return only model names.
+        include_all_models (bool): Set True to include additional ensemble models 
+                                   (GBR, AdaBoost, Bagging, CatBoost).
 
     Returns:
         Either a list of model names (if get_model_names_only is True) or a tuple of
@@ -53,95 +89,170 @@ def get_model_param_dict(
     n_jobs = -2
     if use_dask:
         n_jobs = 1
+    
+    # Core models (always available)
     model_dict = {
         'XGB': XGBRegressor(
-            n_jobs=-2,
+            n_jobs=n_jobs,
             seed=random_state,
         ),
         'XGBRF': XGBRFRegressor(
-            n_jobs=-2,
+            n_jobs=n_jobs,
             seed=random_state,
         ),
         'LGBM': LGBMRegressor(
             tree_learner='feature', random_state=random_state,
-            deterministic=True, force_row_wise=True,
-            verbosity=-1, n_estimators=300, max_depth=16, num_leaves=31
+            verbosity=-1, n_estimators=300, max_depth=16, num_leaves=31,
+            n_jobs=n_jobs
         ), 
         'RF': RandomForestRegressor(
-            n_jobs=-2, oob_score=False,
+            n_jobs=n_jobs, oob_score=False,
             n_estimators=300, max_features=None,
             random_state=random_state, max_depth=None
         ),
         'ETR': ExtraTreesRegressor(random_state=random_state, n_jobs=n_jobs, bootstrap=True),
         'HGBR': HistGradientBoostingRegressor(
             max_iter=300, learning_rate=0.1,
-            max_depth=None, random_state=random_state,
-            
+            max_depth=None, random_state=random_state
         )
     }
+    
+    # Additional ensemble models
+    # Note: GBR and ADA don't support n_jobs (sequential only)
+    # CatBoost uses thread_count instead of n_jobs
+    thread_count = -1 if n_jobs == -2 else n_jobs
+    if include_all_models:
+        model_dict.update({
+            'GBR': GradientBoostingRegressor(
+                n_estimators=300, learning_rate=0.1,
+                max_depth=5, random_state=random_state,
+                subsample=0.8
+            ),
+            'ADA': AdaBoostRegressor(
+                estimator=DecisionTreeRegressor(max_depth=10, random_state=random_state),
+                n_estimators=100, random_state=random_state,
+                learning_rate=0.1
+            ),
+            'BAG': BaggingRegressor(
+                estimator=DecisionTreeRegressor(max_depth=None, random_state=random_state),
+                n_estimators=100, random_state=random_state,
+                n_jobs=n_jobs, max_samples=0.8, max_features=0.8                
+            ),
+            'CAT': CatBoostRegressor(
+                iterations=300, learning_rate=0.1,
+                depth=8, random_state=random_state,
+                verbose=False, thread_count=thread_count
+            ),
+        })
+    
     if get_model_names_only:
         return list(model_dict.keys())
 
-    param_dict = {'XGB': {
-        'eta': [0.01],
-        'max_depth': [0],
-        'grow_policy': ['depthwise', 'lossguide'],
-        'subsample': [0.8, 0.9, 1],
-        'colsample_bytree': [0.8, 0.9, 1],
-        'colsample_bynode': [0.8, 0.9, 1],
-        'colsample_bylevel': [0.8, 0.9, 1],
-        'reg_lambda': [0, 0.1, 0.5, 1],
-        'reg_alpha': [0, 0.1, 0.5, 1],
-        'gamma': [0, 0.1, 0.5, 1],
-        'num_parallel_tree': [1],
-        'min_child_weight': [80, 90, 100],
-        'n_estimators': [300, 400, 500],
-    }, 'XGBRF': {
-        'eta': [0.01],
-        'max_depth': [0],
-        'grow_policy': ['depthwise', 'lossguide'],
-        'subsample': [0.8, 0.9, 1],
-        'colsample_bytree': [0.8, 0.9, 1],
-        'colsample_bynode': [0.8, 0.9, 1],
-        'colsample_bylevel': [0.8, 0.9, 1],
-        'reg_lambda': [0, 0.1, 0.5, 1],
-        'reg_alpha': [0, 0.1, 0.5, 1],
-        'gamma': [0, 0.1, 0.5, 1],
-        'num_parallel_tree': [300, 400, 500],
-        'min_child_weight': [30, 40]
-    }, 'LGBM': {
-        'n_estimators': [300, 400, 500],
-        'max_depth': [16, 20, -1],
-        'learning_rate': [0.01, 0.05],
-        'subsample': [1, 0.9],
-        'colsample_bytree': [1, 0.9],
-        'colsample_bynode': [1, 0.9],
-        'path_smooth': [0.1, 0.2],
-        'num_leaves': [31, 32],
-        'min_child_samples': [30, 40]
-    }, 'RF': {
-        'n_estimators': [300, 400, 500],
-        'max_features': [None, 10, 8],
-        'max_depth': [None],
-        'max_leaf_nodes': [None],
-        'max_samples': [None],
-        'min_samples_leaf': [1, 2, 3]
-    }, 'ETR': {
-        'n_estimators': [300, 400, 500],
-        'max_features': [None, 10, 8],
-        'max_depth': [None],
-        'max_leaf_nodes': [None],
-        'max_samples': [None],
-        'min_samples_leaf': [1, 2, 3]
-    }, 'HGBR': {
-        'max_iter': [300, 400, 500],
-        'max_depth': [None, 10, 20],
-        'learning_rate': [0.01, 0.05, 0.1],
-        'max_leaf_nodes': [31, 63, 127],
-        'max_bins': [127, 255],
-        'l2_regularization': [0.0, 0.1, 0.5],
+    # Core model hyperparameters
+    param_dict = {
+        'XGB': {
+            'eta': [0.01],
+            'max_depth': [0],
+            'grow_policy': ['depthwise', 'lossguide'],
+            'subsample': [0.8, 0.9, 1],
+            'colsample_bytree': [0.8, 0.9, 1],
+            'colsample_bynode': [0.8, 0.9, 1],
+            'colsample_bylevel': [0.8, 0.9, 1],
+            'reg_lambda': [0, 0.1, 0.5, 1],
+            'reg_alpha': [0, 0.1, 0.5, 1],
+            'gamma': [0, 0.1, 0.5, 1],
+            'num_parallel_tree': [1],
+            'min_child_weight': [80, 90, 100],
+            'n_estimators': [300, 400, 500],
+        }, 
+        'XGBRF': {
+            'eta': [0.01],
+            'max_depth': [0],
+            'grow_policy': ['depthwise', 'lossguide'],
+            'subsample': [0.8, 0.9, 1],
+            'colsample_bytree': [0.8, 0.9, 1],
+            'colsample_bynode': [0.8, 0.9, 1],
+            'colsample_bylevel': [0.8, 0.9, 1],
+            'reg_lambda': [0, 0.1, 0.5, 1],
+            'reg_alpha': [0, 0.1, 0.5, 1],
+            'gamma': [0, 0.1, 0.5, 1],
+            'num_parallel_tree': [300, 400, 500],
+            'min_child_weight': [30, 40]
+        }, 
+        'LGBM': {
+            'n_estimators': [300, 400, 500],
+            'max_depth': [16, 20, -1],
+            'learning_rate': [0.01, 0.05],
+            'subsample': [1, 0.9],
+            'colsample_bytree': [1, 0.9],
+            'colsample_bynode': [1, 0.9],
+            'path_smooth': [0.1, 0.2],
+            'num_leaves': [31, 32],
+            'min_child_samples': [30, 40]
+        }, 
+        'RF': {
+            'n_estimators': [300, 400, 500],
+            'max_features': [None, 10, 8],
+            'max_depth': [None],
+            'max_leaf_nodes': [None],
+            'max_samples': [None],
+            'min_samples_leaf': [1, 2, 3]
+        }, 
+        'ETR': {
+            'n_estimators': [300, 400, 500],
+            'max_features': [None, 10, 8],
+            'max_depth': [None],
+            'max_leaf_nodes': [None],
+            'max_samples': [None],
+            'min_samples_leaf': [1, 2, 3]
+        }, 
+        'HGBR': {
+            'max_iter': [300, 400, 500],
+            'max_depth': [None, 10, 20],
+            'learning_rate': [0.01, 0.05, 0.1],
+            'max_leaf_nodes': [31, 63, 127],
+            'max_bins': [127, 255],
+            'l2_regularization': [0.0, 0.1, 0.5],
+        }
     }
-    }
+    
+    # Additional model hyperparameters
+    if include_all_models:
+        param_dict.update({
+            'GBR': {
+                'n_estimators': [200, 300, 400],
+                'learning_rate': [0.01, 0.05, 0.1],
+                'max_depth': [3, 5, 7, 10],
+                'min_samples_split': [2, 5, 10],
+                'min_samples_leaf': [1, 2, 4],
+                'subsample': [0.7, 0.8, 0.9],
+                'max_features': ['sqrt', 'log2', None]
+            },
+            'ADA': {
+                'n_estimators': [50, 100, 200],
+                'learning_rate': [0.01, 0.05, 0.1, 0.5, 1.0],
+                'estimator__max_depth': [3, 5, 7, 10],
+                'estimator__min_samples_split': [2, 5, 10],
+                'estimator__min_samples_leaf': [1, 2, 4]
+            },
+            'BAG': {
+                'n_estimators': [50, 100, 200],
+                'max_samples': [0.5, 0.7, 0.8, 1.0],
+                'max_features': [0.5, 0.7, 0.8, 1.0],
+                'estimator__max_depth': [None, 10, 20, 30],
+                'estimator__min_samples_split': [2, 5, 10],
+                'estimator__min_samples_leaf': [1, 2, 4]
+            },
+            'CAT': {
+                'iterations': [200, 300, 500],
+                'learning_rate': [0.01, 0.05, 0.1],
+                'depth': [4, 6, 8, 10],
+                'l2_leaf_reg': [1, 3, 5, 7, 9],
+                'border_count': [32, 64, 128],
+                'bagging_temperature': [0, 0.5, 1]
+            }
+        })
+    
     return model_dict, param_dict
 
 
@@ -316,7 +427,7 @@ def get_feature_dict(get_units: bool = False) -> dict[str, str] | tuple[dict[str
         'streamflow_m3s': 'm$^3$/s',
         'soil_depth_cm': 'cm',
         'awc_mm': 'mm',
-        'ksat_mean_micromps': '$\mu$m/s',
+        'ksat_mean_micromps': r'$\mu$m/s',
         'cap_srp_delivery_km3': 'km$^3$'
     }
     return feature_dict if not get_units else (feature_dict, feature_dict_units)
@@ -379,7 +490,7 @@ def compute_perm_imp(
             )
             plt.xlabel(f'{model_name} Feature Importance')
             plt.tight_layout()
-            plt.savefig(f'{output_dir}F_IMP_{model_name}.png', dpi=300)
+            plt.savefig(f'{output_dir}F_IMP_{model_name}.png', dpi=600)
             imp_df.to_csv(f'{output_dir}F_IMP_{model_name}.csv', index=False)
         perm_scorer = scoring_metrics[scoring_metric]
         train_result = permutation_importance(
@@ -408,7 +519,7 @@ def compute_perm_imp(
                 ax.set_xlabel(f"Increase in {scoring_metric.split('_')[1].upper()} (%)")
                 ax.axvline(x=0, color="k", linestyle="--")
                 ax.figure.tight_layout()
-                plt.savefig(f'{output_dir}{model_name}_{name}_PI.png', dpi=300)
+                plt.savefig(f'{output_dir}{model_name}_{name}_PI.png', dpi=600)
                 plt.clf()
         return train_importances, test_importances
     return None
@@ -855,6 +966,978 @@ def build_ml_model_optuna(
     return model, metric_df
 
 
+def get_optuna_params_for_model(
+        trial: Any,
+        model_name: str
+) -> dict[str, Any]:
+    """
+    Get Optuna hyperparameter suggestions for a specific model.
+    
+    Args:
+        trial (Any): Optuna trial object.
+        model_name (str): Name of the ML model.
+        
+    Returns:
+        dict[str, Any]: Dictionary of suggested hyperparameters.
+    """
+    if model_name == 'XGB':
+        return {
+            'eta': trial.suggest_float('eta', 0.01, 0.1),
+            'max_depth': trial.suggest_categorical('max_depth', [0, 16, 20]),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'colsample_bynode': trial.suggest_float('colsample_bynode', 0.6, 1.0),
+            'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.6, 1.0),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
+            'gamma': trial.suggest_float('gamma', 0.0, 1.0),
+            'min_child_weight': trial.suggest_int('min_child_weight', 10, 100, step=10),
+            'n_estimators': trial.suggest_int('n_estimators', 300, 600, step=100),
+            'grow_policy': trial.suggest_categorical('grow_policy', ['depthwise', 'lossguide'])
+        }
+    elif model_name == 'XGBRF':
+        return {
+            'eta': trial.suggest_float('eta', 0.01, 0.1),
+            'max_depth': trial.suggest_categorical('max_depth', [0, 16, 20, 32, 64]),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'colsample_bynode': trial.suggest_float('colsample_bynode', 0.6, 1.0),
+            'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.6, 1.0),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
+            'gamma': trial.suggest_float('gamma', 0.0, 1.0),
+            'min_child_weight': trial.suggest_int('min_child_weight', 10, 100, step=10),
+            'num_parallel_tree': trial.suggest_int('num_parallel_tree', 300, 600, step=100),
+            'grow_policy': trial.suggest_categorical('grow_policy', ['depthwise', 'lossguide'])
+        }
+    elif model_name == 'LGBM':
+        return {
+            'n_estimators': trial.suggest_int('n_estimators', 300, 600),
+            'max_depth': trial.suggest_categorical('max_depth', [-1, 16, 20, 32, 64]),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'colsample_bynode': trial.suggest_float('colsample_bynode', 0.6, 1.0),
+            'path_smooth': trial.suggest_float('path_smooth', 0.1, 0.5),
+            'num_leaves': trial.suggest_categorical('num_leaves', [31, 32, 63, 127]),
+            'min_child_samples': trial.suggest_int('min_child_samples', 10, 50, step=10)
+        }
+    elif model_name == 'RF':
+        return {
+            'n_estimators': trial.suggest_int('n_estimators', 300, 600),
+            'max_features': trial.suggest_categorical('max_features', [None, 10, 8, 15]),
+            'max_depth': trial.suggest_categorical('max_depth', [None, 16, 20, 32, 64]),
+            'max_samples': trial.suggest_categorical('max_samples', [None, 0.8, 0.9, 1.0]),
+            'max_leaf_nodes': trial.suggest_categorical('max_leaf_nodes', [None, 31, 63, 128]),
+            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 5)
+        }
+    elif model_name == 'ETR':
+        return {
+            'n_estimators': trial.suggest_int('n_estimators', 300, 600),
+            'max_features': trial.suggest_categorical('max_features', [None, 10, 8, 15]),
+            'max_depth': trial.suggest_categorical('max_depth', [None, 16, 20, 32, 64]),
+            'max_samples': trial.suggest_categorical('max_samples', [None, 0.8, 0.9, 1.0]),
+            'max_leaf_nodes': trial.suggest_categorical('max_leaf_nodes', [None, 31, 63, 128]),
+            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 5)
+        }
+    elif model_name == 'HGBR':
+        return {
+            'max_iter': trial.suggest_int('max_iter', 300, 600),
+            'max_depth': trial.suggest_categorical('max_depth', [None, 16, 20, 32, 64]),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1),
+            'max_leaf_nodes': trial.suggest_int('max_leaf_nodes', 31, 128),
+            'max_bins': trial.suggest_categorical('max_bins', [31, 63, 127, 255]),
+            'l2_regularization': trial.suggest_float('l2_regularization', 0.0, 1.0),
+        }
+    elif model_name == 'GBR':
+        return {
+            'n_estimators': trial.suggest_int('n_estimators', 200, 500),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
+            'max_depth': trial.suggest_int('max_depth', 3, 15),
+            'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
+            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', None])
+        }
+    elif model_name == 'ADA':
+        return {
+            'n_estimators': trial.suggest_int('n_estimators', 50, 300),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 1.0, log=True),
+            'estimator__max_depth': trial.suggest_int('estimator__max_depth', 3, 15),
+            'estimator__min_samples_split': trial.suggest_int('estimator__min_samples_split', 2, 20),
+            'estimator__min_samples_leaf': trial.suggest_int('estimator__min_samples_leaf', 1, 10)
+        }
+    elif model_name == 'BAG':
+        return {
+            'n_estimators': trial.suggest_int('n_estimators', 50, 300),
+            'max_samples': trial.suggest_float('max_samples', 0.5, 1.0),
+            'max_features': trial.suggest_float('max_features', 0.5, 1.0),
+            'estimator__max_depth': trial.suggest_categorical('estimator__max_depth', [None, 10, 20, 30]),
+            'estimator__min_samples_split': trial.suggest_int('estimator__min_samples_split', 2, 20),
+            'estimator__min_samples_leaf': trial.suggest_int('estimator__min_samples_leaf', 1, 10)
+        }
+    elif model_name == 'CAT':
+        return {
+            'iterations': trial.suggest_int('iterations', 200, 600),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
+            'depth': trial.suggest_int('depth', 4, 12),
+            'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1, 10),
+            'border_count': trial.suggest_categorical('border_count', [32, 64, 128, 255]),
+            'bagging_temperature': trial.suggest_float('bagging_temperature', 0, 1)
+        }
+    else:
+        raise ValueError(f"Unknown model name: {model_name}")
+
+
+def build_ml_model_optuna_dask(
+        x_train: np.ndarray | pd.DataFrame,
+        y_train: np.array,
+        model_dir: str,
+        model_name: str = 'LGBM',
+        random_state: int = 42,
+        load_model: bool = False,
+        fold_count: int = 5,
+        repeats: int = 3,
+        stratified_kfold: bool = False,
+        n_trials: int = 100,
+        alpha: float = 0.1,
+        n_dask_workers: int = 4,
+        use_dask: bool = True,
+        pruning: bool = True,
+        **kwargs: Any
+) -> tuple[Any, pd.DataFrame]:
+    """
+    Build an ML model using Optuna with Dask parallelization for hyperparameter tuning.
+
+    Args:
+        x_train (np.ndarray or pd.DataFrame): X_train numpy array or pandas dataframe.
+        y_train (np.array): y_train numpy array.
+        model_dir (str): Model directory to store/load model.
+        model_name (str): ML model name. Default is 'LGBM'.
+        random_state (int): Random state (seed). Default is 42.
+        load_model (bool): Set True to load existing model.
+        fold_count (int): Number of folds for KFold. Default is 5.
+        repeats (int): Number of repeats for KFold. Default is 3.
+        stratified_kfold (bool): Set True to use RepeatedStratifiedKFold.
+        n_trials (int): Number of Optuna trials. Default is 100.
+        alpha (float): Weighting factor for overfitting penalty. Default is 0.1.
+        n_dask_workers (int): Number of Dask workers. Default is 4.
+        use_dask (bool): Set True to use Dask parallelization. Default is True.
+        pruning (bool): Set True to enable Optuna pruning. Default is True.
+        kwargs: Additional arguments.
+
+    Returns:
+        tuple[Any, pd.DataFrame]: Trained model object and dataframe containing CV stats.
+    """
+    makedirs(make_proper_dir_name(model_dir))
+    
+    if not load_model:
+        scoring_metrics = {
+            'r2': 'r2',
+            'adjusted_r2': make_scorer(adjusted_r2, p=x_train.shape[1], greater_is_better=True),
+            'normalized_rmse': make_scorer(normalized_rmse, greater_is_better=False),
+            'normalized_mae': make_scorer(normalized_mae, greater_is_better=False),
+            'normalized_mbe': make_scorer(normalized_mbe, greater_is_better=False)
+        }
+        cv = RepeatedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
+        if stratified_kfold:
+            stratify_labels = kwargs['stratify_labels'].to_numpy().ravel()
+            cv = RepeatedStratifiedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
+            cv = cv.split(x_train, stratify_labels)
+        
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        optuna_storage = f'{model_dir}optuna_study_{model_name}.db'
+        
+        # Setup Dask cluster if needed
+        dask_client = None
+        if use_dask and n_dask_workers > 1:
+            dask_cluster = LocalCluster(
+                n_workers=n_dask_workers, 
+                threads_per_worker=2,
+                memory_limit='2GB'
+            )
+            dask_client = Client(dask_cluster)
+            print(f'Dask cluster started with {n_dask_workers} workers')
+        
+        # Create or load study
+        if os.path.isfile(optuna_storage):
+            study = optuna.load_study(
+                study_name=f'Optuna_{model_name}',
+                storage=f'sqlite:///{optuna_storage}'
+            )
+            print(f'Loaded existing study with {len(study.trials)} trials')
+        else:
+            # Create sampler with pruning support
+            sampler = optuna.samplers.TPESampler(
+                seed=random_state,
+                multivariate=True,
+                group=True
+            )
+            
+            # Create pruner if enabled
+            pruner = optuna.pruners.MedianPruner(
+                n_startup_trials=10,
+                n_warmup_steps=5
+            ) if pruning else optuna.pruners.NopPruner()
+            
+            study = optuna.create_study(
+                direction='minimize',
+                storage=f'sqlite:///{optuna_storage}',
+                study_name=f'Optuna_{model_name}',
+                load_if_exists=True,
+                sampler=sampler,
+                pruner=pruner
+            )
+            study.set_metric_names(['NRMSE_with_Overfitting_Penalty'])
+            
+            # Run optimization
+            n_parallel_jobs = n_dask_workers if use_dask else 1
+            study.optimize(
+                lambda trial: objective_with_cv_enhanced(
+                    trial, x_train, y_train, 
+                    model_name, cv, scoring_metrics, 
+                    alpha, random_state, pruning
+                ),
+                n_trials=n_trials,
+                n_jobs=n_parallel_jobs,
+                show_progress_bar=True,
+                gc_after_trial=True
+            )
+        
+        # Cleanup Dask
+        if dask_client:
+            dask_client.close()
+        
+        best_params = study.best_params
+        print(f'Best params for {model_name}: {best_params}')
+        print(f'Best value: {study.best_value:.4f}')
+        
+        # Train final model with best parameters
+        include_all = model_name in ['GBR', 'ADA', 'BAG', 'CAT']
+        model_dict, _ = get_model_param_dict(random_state, include_all_models=include_all)
+        model = model_dict[model_name]
+        model.set_params(**best_params)
+        model.fit(x_train, y_train)
+        
+        model_file = model_dir + model_name
+        pickle.dump(model, open(model_file, mode='wb+'))
+        metric_csv = f'{model_dir}CV_Metrics_{model_name}.csv'
+        metric_df = get_grid_search_stats(study, metric_csv, search_type='optuna')
+    else:
+        model_file = model_dir + model_name
+        model = pickle.load(open(model_file, mode='rb'))
+        metric_csv = f'{model_dir}CV_Metrics_{model_name}.csv'
+        metric_df = pd.read_csv(metric_csv)
+    
+    return model, metric_df
+
+
+def objective_with_cv_enhanced(
+        trial: Any, 
+        x_train: np.ndarray | pd.DataFrame, 
+        y_train: np.ndarray,
+        model_name: str,
+        cv: Any,
+        scoring_metrics: dict[str, Any],
+        alpha: float = 0.1,
+        random_state: int = 42,
+        pruning: bool = True
+) -> float: 
+    """
+    Enhanced objective function for Optuna with pruning support.
+    
+    Args:
+        trial (Any): Optuna trial object.
+        x_train (np.ndarray or pd.DataFrame): Training features.
+        y_train (np.ndarray): Training labels.
+        model_name (str): Name of the ML model.
+        cv (Any): Cross-validation strategy.
+        scoring_metrics (dict): Scoring metrics for cross-validation.
+        alpha (float): Weighting factor for overfitting penalty.
+        random_state (int): Random state.
+        pruning (bool): Whether to enable pruning.
+
+    Returns:
+        float: Objective value (lower is better).
+    """
+    # Get hyperparameters for the model
+    params = get_optuna_params_for_model(trial, model_name)
+    
+    # Get model
+    include_all = model_name in ['GBR', 'ADA', 'BAG', 'CAT']
+    model = get_model_param_dict(random_state, include_all_models=include_all)[0][model_name]
+    model.set_params(**params)
+    
+    # Cross-validation with early stopping for pruning
+    cv_results = cross_validate(
+        estimator=model,
+        X=x_train,
+        y=y_train,
+        cv=cv,
+        n_jobs=-1,
+        scoring=scoring_metrics,
+        return_train_score=True
+    )
+    
+    # Calculate metrics
+    test_mean_rmse = -cv_results['test_normalized_rmse'].mean()
+    test_std_rmse = abs(cv_results['test_normalized_rmse'].std())
+    train_mean_rmse = -cv_results['train_normalized_rmse'].mean()
+    
+    # Store user attributes
+    for data in ['train', 'test']:
+        r2_key = f'{data}_r2'
+        adj_r2_key = f'{data}_adjusted_r2'
+        neg_rmse_key = f'{data}_normalized_rmse'
+        neg_mae_key = f'{data}_normalized_mae'
+        mbe_key = f'{data}_normalized_mbe'
+        
+        trial.set_user_attr(r2_key, cv_results[r2_key].mean())
+        trial.set_user_attr(adj_r2_key, cv_results[adj_r2_key].mean())
+        trial.set_user_attr(neg_rmse_key, -cv_results[neg_rmse_key].mean())
+        trial.set_user_attr(neg_mae_key, -cv_results[neg_mae_key].mean())
+        trial.set_user_attr(mbe_key, cv_results[mbe_key].mean())
+    
+    # Calculate objective with overfitting penalty
+    beta = 0.5 * alpha
+    trial_obj = test_mean_rmse + alpha * abs(train_mean_rmse - test_mean_rmse) + beta * test_std_rmse
+    
+    # Report for pruning
+    if pruning:
+        trial.report(trial_obj, 0)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+    
+    return trial_obj
+
+
+def compare_all_models(
+        x_train: np.ndarray | pd.DataFrame,
+        x_test: np.ndarray | pd.DataFrame,
+        y_train: np.array,
+        y_test: np.array,
+        model_dir: str,
+        model_names: list[str] = None,
+        random_state: int = 42,
+        use_optuna: bool = True,
+        n_trials: int = 50,
+        n_dask_workers: int = 4,
+        use_dask: bool = True,
+        year_train: pd.DataFrame = None,
+        year_test: pd.DataFrame = None,
+        basin_train: pd.DataFrame = None,
+        basin_test: pd.DataFrame = None,
+        x_scaler: Any = None,
+        y_scaler: Any = None,
+        year_col: str = 'Year',
+        gw_basin_col: str = 'GW_Basin',
+        use_ama_ina: bool = True,
+        apply_bias_correction: int = 0
+) -> pd.DataFrame:
+    """
+    Compare all available models with full evaluation.
+    
+    Args:
+        x_train: Training features.
+        x_test: Test features.
+        y_train: Training labels.
+        y_test: Test labels.
+        model_dir: Directory to save results.
+        model_names: List of model names to compare.
+        random_state: Random state.
+        use_optuna: Whether to use Optuna for tuning.
+        n_trials: Number of Optuna trials.
+        n_dask_workers: Number of Dask workers for parallel Optuna trials.
+        use_dask: Whether to use Dask parallelization.
+        year_train: DataFrame with year info for training data.
+        year_test: DataFrame with year info for test data.
+        basin_train: DataFrame with basin info for training data.
+        basin_test: DataFrame with basin info for test data.
+        x_scaler: Feature scaler (for inverse transform).
+        y_scaler: Target scaler (for inverse transform).
+        year_col: Name of year column.
+        gw_basin_col: Name of basin column.
+        use_ama_ina: Whether to filter for AMA/INA basins in metrics.
+        apply_bias_correction: Bias correction type (0=none, 1=global, 2=basin-wise).
+        
+    Returns:
+        DataFrame with comparison results.
+    """
+    makedirs(make_proper_dir_name(model_dir))
+    results = []
+    trained_models = {}  # Store trained models for later use
+    
+    # Check if we have full data for detailed evaluation
+    has_full_data = all([
+        year_train is not None, year_test is not None,
+        basin_train is not None, basin_test is not None
+    ])
+    
+    # Default models
+    if model_names is None:
+        model_names = ['XGB', 'XGBRF', 'LGBM', 'RF', 'ETR', 'HGBR']
+    
+    print('='*60)
+    print('Model Comparison')
+    print('='*60)
+    
+    # Train individual models
+    for model_name in model_names:
+        print(f'\nTraining {model_name}...')
+        model_subdir = f'{model_dir}{model_name}/'
+        
+        if use_optuna:
+            model, cv_metric_df = build_ml_model_optuna_dask(
+                x_train, y_train, model_subdir, model_name,
+                random_state=random_state, n_trials=n_trials,
+                n_dask_workers=n_dask_workers, use_dask=use_dask
+            )
+        else:
+            model_dict, _ = get_model_param_dict(random_state)
+            model = model_dict[model_name]
+            model.fit(x_train, y_train)
+            cv_metric_df = pd.DataFrame()
+        
+        trained_models[model_name] = model
+        
+        # Extract CV validation metrics
+        cv_val_r2 = np.nan
+        cv_val_rmse = np.nan
+        cv_val_mae = np.nan
+        cv_train_r2 = np.nan
+        cv_train_rmse = np.nan
+        
+        if not cv_metric_df.empty and 'Data' in cv_metric_df.columns:
+            val_row = cv_metric_df[cv_metric_df['Data'] == 'VALIDATION']
+            train_row = cv_metric_df[cv_metric_df['Data'] == 'TRAIN']
+            if not val_row.empty:
+                cv_val_r2 = val_row['R2'].values[0]
+                cv_val_rmse = val_row['RMSE (%)'].values[0]
+                cv_val_mae = val_row['MAE (%)'].values[0] if 'MAE (%)' in val_row.columns else np.nan
+            if not train_row.empty:
+                cv_train_r2 = train_row['R2'].values[0]
+                cv_train_rmse = train_row['RMSE (%)'].values[0]
+        
+        # Generate full prediction results if we have the data
+        if has_full_data:
+            pred_df = get_prediction_results(
+                model, x_train, x_test,
+                y_train, y_test, x_scaler,
+                y_scaler, year_train,
+                year_test, basin_train,
+                basin_test, model_subdir,
+                model_name,
+                apply_bias_correction=apply_bias_correction,
+                year_col=year_col,
+                gw_basin_col=gw_basin_col
+            )
+            
+            # Calculate detailed metrics
+            calc_train_test_metrics(
+                pred_df, cv_metric_df, model_subdir,
+                use_ama_ina=use_ama_ina,
+                gw_basin_col=gw_basin_col,
+                year_col=year_col,
+                model_name=model_name
+            )
+            
+            # Use metrics from pred_df for comparison
+            train_pred = pred_df[pred_df['DATA'] == 'TRAIN']
+            test_pred = pred_df[pred_df['DATA'] == 'TEST']
+            
+            train_r2 = r2_score(train_pred['Actual_GW_mm'], train_pred['Pred_GW_mm'])
+            test_r2 = r2_score(test_pred['Actual_GW_mm'], test_pred['Pred_GW_mm'])
+            train_rmse = normalized_rmse(train_pred['Actual_GW_mm'].values, train_pred['Pred_GW_mm'].values)
+            test_rmse = normalized_rmse(test_pred['Actual_GW_mm'].values, test_pred['Pred_GW_mm'].values)
+            train_mae = normalized_mae(train_pred['Actual_GW_mm'].values, train_pred['Pred_GW_mm'].values)
+            test_mae = normalized_mae(test_pred['Actual_GW_mm'].values, test_pred['Pred_GW_mm'].values)
+        else:
+            # Evaluate directly on raw data
+            y_pred_train = model.predict(x_train)
+            y_pred_test = model.predict(x_test)
+            
+            train_r2 = r2_score(y_train, y_pred_train)
+            test_r2 = r2_score(y_test, y_pred_test)
+            train_rmse = normalized_rmse(y_train, y_pred_train)
+            test_rmse = normalized_rmse(y_test, y_pred_test)
+            train_mae = normalized_mae(y_train, y_pred_train)
+            test_mae = normalized_mae(y_test, y_pred_test)
+        
+        # Calculate overfitting indicators
+        overfit_r2 = train_r2 - test_r2
+        overfit_rmse = test_rmse - train_rmse
+        overfit_val_r2 = cv_train_r2 - cv_val_r2 if not np.isnan(cv_val_r2) else np.nan
+        
+        results.append({
+            'Model': model_name,
+            'Train_R2': train_r2,
+            'Val_R2': cv_val_r2,
+            'Test_R2': test_r2,
+            'Train_RMSE': train_rmse,
+            'Val_RMSE': cv_val_rmse,
+            'Test_RMSE': test_rmse,
+            'Train_MAE': train_mae,
+            'Val_MAE': cv_val_mae,
+            'Test_MAE': test_mae,
+            'Overfit_R2': overfit_r2,
+            'Overfit_RMSE': overfit_rmse,
+            'Overfit_Val_R2': overfit_val_r2,
+        })
+        
+        print(f'  Train R2: {train_r2:.4f}, Val R2: {cv_val_r2:.4f}, Test R2: {test_r2:.4f}')
+        print(f'  Train RMSE: {train_rmse:.2f}%, Val RMSE: {cv_val_rmse:.2f}%, Test RMSE: {test_rmse:.2f}%')
+        print(f'  Overfitting (R2 gap): {overfit_r2:.4f}')
+    
+    # Create results dataframe
+    results_df = pd.DataFrame(results)
+    results_df = results_df.sort_values('Test_RMSE')
+    results_df.to_csv(f'{model_dir}Model_Comparison.csv', index=False)
+    
+    # Create comprehensive comparison plots with overfitting analysis
+    _create_model_comparison_plots(results_df, model_dir)
+    
+    print('\n' + '='*60)
+    print('Best Model:', results_df.iloc[0]['Model'])
+    print(f"Test R2: {results_df.iloc[0]['Test_R2']:.4f}")
+    print(f"Test RMSE: {results_df.iloc[0]['Test_RMSE']:.2f}%")
+    print(f"Overfitting (R2 gap): {results_df.iloc[0]['Overfit_R2']:.4f}")
+    print('='*60)
+    
+    return results_df
+
+
+def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> None:
+    """
+    Create comprehensive model comparison plots with overfitting analysis.
+    
+    Args:
+        results_df: DataFrame with model comparison results.
+        model_dir: Directory to save plots.
+    """
+    # Apply journal-quality settings
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.size': 11,
+        'axes.labelsize': 12,
+        'axes.titlesize': 13,
+        'xtick.labelsize': 10,
+        'ytick.labelsize': 10,
+        'legend.fontsize': 9,
+        'figure.dpi': 150,
+    })
+    
+    n_models = len(results_df)
+    x_pos = np.arange(n_models)
+    bar_width = 0.25
+    
+    # =====================================================================
+    # Figure 1: Train/Validation/Test R² Comparison with Overfitting
+    # =====================================================================
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    
+    # Plot 1: R² Score Comparison (Train, Val, Test)
+    ax = axes[0, 0]
+    bars1 = ax.bar(x_pos - bar_width, results_df['Train_R2'], bar_width, 
+                   label='Train', color='#2ecc71', alpha=0.8, edgecolor='black', linewidth=0.5)
+    bars2 = ax.bar(x_pos, results_df['Val_R2'], bar_width, 
+                   label='Validation (CV)', color='#3498db', alpha=0.8, edgecolor='black', linewidth=0.5)
+    bars3 = ax.bar(x_pos + bar_width, results_df['Test_R2'], bar_width, 
+                   label='Test', color='#e74c3c', alpha=0.8, edgecolor='black', linewidth=0.5)
+    
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(results_df['Model'], rotation=45, ha='right')
+    ax.set_ylabel('R² Score')
+    ax.set_title('R² Score: Train vs Validation vs Test', fontweight='bold')
+    ax.legend(loc='lower right')
+    ax.set_ylim(0, 1.05)
+    ax.axhline(y=0.9, color='gray', linestyle='--', alpha=0.5, label='Good fit threshold')
+    ax.grid(axis='y', alpha=0.3)
+    
+    # Add value labels on bars
+    for bars in [bars1, bars3]:
+        for bar in bars:
+            height = bar.get_height()
+            if not np.isnan(height):
+                ax.annotate(f'{height:.2f}', xy=(bar.get_x() + bar.get_width()/2, height),
+                           xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=8)
+    
+    # Plot 2: NRMSE Comparison (Train, Val, Test)
+    ax = axes[0, 1]
+    bars1 = ax.bar(x_pos - bar_width, results_df['Train_RMSE'], bar_width, 
+                   label='Train', color='#2ecc71', alpha=0.8, edgecolor='black', linewidth=0.5)
+    bars2 = ax.bar(x_pos, results_df['Val_RMSE'], bar_width, 
+                   label='Validation (CV)', color='#3498db', alpha=0.8, edgecolor='black', linewidth=0.5)
+    bars3 = ax.bar(x_pos + bar_width, results_df['Test_RMSE'], bar_width, 
+                   label='Test', color='#e74c3c', alpha=0.8, edgecolor='black', linewidth=0.5)
+    
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(results_df['Model'], rotation=45, ha='right')
+    ax.set_ylabel('NRMSE (%)')
+    ax.set_title('NRMSE: Train vs Validation vs Test', fontweight='bold')
+    ax.legend(loc='upper right')
+    ax.grid(axis='y', alpha=0.3)
+    
+    # Plot 3: Overfitting Analysis - R² Gap (Train - Test)
+    # Thresholds adjusted for groundwater pumping (high uncertainty domain)
+    ax = axes[1, 0]
+    colors = ['#e74c3c' if x > 0.15 else '#f39c12' if x > 0.08 else '#2ecc71' 
+              for x in results_df['Overfit_R2']]
+    bars = ax.bar(x_pos, results_df['Overfit_R2'], 0.6, color=colors, 
+                  edgecolor='black', linewidth=0.5)
+    
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(results_df['Model'], rotation=45, ha='right')
+    ax.set_ylabel('R² Gap (Train - Test)')
+    ax.set_title('Overfitting Analysis: R² Gap\n(Higher = More Overfitting)', fontweight='bold')
+    ax.axhline(y=0.08, color='orange', linestyle='--', alpha=0.7, linewidth=2, label='Moderate (0.08)')
+    ax.axhline(y=0.15, color='red', linestyle='--', alpha=0.7, linewidth=2, label='Severe (0.15)')
+    ax.axhline(y=0, color='green', linestyle='-', alpha=0.7, linewidth=2, label='Acceptable')
+    ax.legend(loc='upper right')
+    ax.grid(axis='y', alpha=0.3)
+    
+    # Add value labels
+    for bar, val in zip(bars, results_df['Overfit_R2']):
+        ax.annotate(f'{val:.3f}', xy=(bar.get_x() + bar.get_width()/2, val),
+                   xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=9)
+    
+    # Plot 4: Overfitting Analysis - RMSE Gap (Test - Train)
+    # Thresholds adjusted for groundwater pumping (high uncertainty domain)
+    ax = axes[1, 1]
+    colors = ['#e74c3c' if x > 15 else '#f39c12' if x > 8 else '#2ecc71' 
+              for x in results_df['Overfit_RMSE']]
+    bars = ax.bar(x_pos, results_df['Overfit_RMSE'], 0.6, color=colors,
+                  edgecolor='black', linewidth=0.5)
+    
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(results_df['Model'], rotation=45, ha='right')
+    ax.set_ylabel('NRMSE Gap (Test - Train) %')
+    ax.set_title('Overfitting Analysis: NRMSE Gap\n(Higher = More Overfitting)', fontweight='bold')
+    ax.axhline(y=8, color='orange', linestyle='--', alpha=0.7, linewidth=2, label='Moderate (8%)')
+    ax.axhline(y=15, color='red', linestyle='--', alpha=0.7, linewidth=2, label='Severe (15%)')
+    ax.axhline(y=0, color='green', linestyle='-', alpha=0.7, linewidth=2, label='Acceptable')
+    ax.legend(loc='upper right')
+    ax.grid(axis='y', alpha=0.3)
+    
+    # Add value labels
+    for bar, val in zip(bars, results_df['Overfit_RMSE']):
+        ax.annotate(f'{val:.1f}%', xy=(bar.get_x() + bar.get_width()/2, val),
+                   xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=9)
+    
+    plt.tight_layout()
+    plt.savefig(f'{model_dir}Model_Comparison_TrainValTest.png', dpi=600, bbox_inches='tight')
+    plt.close()
+    
+    # =====================================================================
+    # Figure 2: Heatmap of Overfitting Severity
+    # =====================================================================
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Prepare data for heatmap
+    heatmap_data = results_df[['Model', 'Train_R2', 'Val_R2', 'Test_R2', 
+                                'Overfit_R2', 'Train_RMSE', 'Val_RMSE', 'Test_RMSE', 'Overfit_RMSE']].copy()
+    heatmap_data = heatmap_data.set_index('Model')
+    
+    # Normalize for visualization (different scales)
+    # Thresholds adjusted for groundwater pumping (high uncertainty domain)
+    norm_data = heatmap_data.copy()
+    # For R2: higher is better, scale 0-1
+    for col in ['Train_R2', 'Val_R2', 'Test_R2']:
+        norm_data[col] = heatmap_data[col]  # Already 0-1
+    # For Overfit_R2: lower is better (closer to 0), max 0.25 for GW
+    norm_data['Overfit_R2'] = 1 - np.clip(heatmap_data['Overfit_R2'] / 0.25, 0, 1)
+    # For RMSE: lower is better
+    rmse_max = max(heatmap_data[['Train_RMSE', 'Val_RMSE', 'Test_RMSE']].max().max(), 50)
+    for col in ['Train_RMSE', 'Val_RMSE', 'Test_RMSE']:
+        norm_data[col] = 1 - (heatmap_data[col] / rmse_max)
+    # For Overfit_RMSE: max 25% for GW uncertainty
+    norm_data['Overfit_RMSE'] = 1 - np.clip(heatmap_data['Overfit_RMSE'] / 25, 0, 1)
+    
+    # Create custom colormap
+    cmap = sns.diverging_palette(10, 130, as_cmap=True)
+    
+    # Plot heatmap with original values as annotations
+    sns.heatmap(norm_data.T, annot=heatmap_data.T, fmt='.2f', cmap='RdYlGn',
+                linewidths=0.5, ax=ax, cbar_kws={'label': 'Performance (normalized)'})
+    
+    ax.set_title('Model Performance Heatmap\n(Green = Good, Red = Poor/Overfitting)', fontweight='bold')
+    ax.set_xlabel('Model')
+    ax.set_ylabel('Metric')
+    
+    plt.tight_layout()
+    plt.savefig(f'{model_dir}Model_Comparison_Heatmap.png', dpi=600, bbox_inches='tight')
+    plt.close()
+    
+    # =====================================================================
+    # Figure 3: Line plot showing Train-Val-Test progression
+    # =====================================================================
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # R2 progression
+    ax = axes[0]
+    for idx, row in results_df.iterrows():
+        model = row['Model']
+        values = [row['Train_R2'], row['Val_R2'], row['Test_R2']]
+        x_vals = ['Train', 'Validation', 'Test']
+        
+        # Color based on overfitting severity (adjusted for groundwater uncertainty)
+        if row['Overfit_R2'] > 0.15:
+            color = '#e74c3c'
+            linestyle = '--'
+        elif row['Overfit_R2'] > 0.08:
+            color = '#f39c12'
+            linestyle = '-.'
+        else:
+            color = '#2ecc71'
+            linestyle = '-'
+        
+        ax.plot(x_vals, values, marker='o', label=model, linewidth=2, 
+                markersize=8, linestyle=linestyle, alpha=0.8)
+    
+    ax.set_ylabel('R² Score')
+    ax.set_title('R² Score Progression: Train → Validation → Test\n(Declining trend = Overfitting)', fontweight='bold')
+    ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=9)
+    ax.set_ylim(0, 1.05)
+    ax.grid(True, alpha=0.3)
+    
+    # RMSE progression
+    ax = axes[1]
+    for idx, row in results_df.iterrows():
+        model = row['Model']
+        values = [row['Train_RMSE'], row['Val_RMSE'], row['Test_RMSE']]
+        x_vals = ['Train', 'Validation', 'Test']
+        
+        # Color based on overfitting severity (adjusted for groundwater uncertainty)
+        if row['Overfit_RMSE'] > 15:
+            color = '#e74c3c'
+            linestyle = '--'
+        elif row['Overfit_RMSE'] > 8:
+            color = '#f39c12'
+            linestyle = '-.'
+        else:
+            color = '#2ecc71'
+            linestyle = '-'
+        
+        ax.plot(x_vals, values, marker='s', label=model, linewidth=2,
+                markersize=8, linestyle=linestyle, alpha=0.8)
+    
+    ax.set_ylabel('NRMSE (%)')
+    ax.set_title('NRMSE Progression: Train → Validation → Test\n(Increasing trend = Overfitting)', fontweight='bold')
+    ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=9)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f'{model_dir}Model_Comparison_Progression.png', dpi=600, bbox_inches='tight')
+    plt.close()
+    
+    # =====================================================================
+    # Figure 4: Summary ranking plot
+    # =====================================================================
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Create composite score (lower is better)
+    # Penalize both poor test performance and overfitting
+    # Weights adjusted for groundwater pumping (tolerating higher uncertainty)
+    results_df_sorted = results_df.copy()
+    results_df_sorted['Composite_Score'] = (
+        (1 - results_df_sorted['Test_R2']) * 50 +  # Weight test R2 (primary)
+        results_df_sorted['Test_RMSE'] * 0.4 +     # Weight test RMSE
+        np.abs(results_df_sorted['Overfit_R2']) * 60 +  # Penalize R2 overfitting (reduced for GW)
+        np.abs(results_df_sorted['Overfit_RMSE']) * 1.2  # Penalize RMSE gap (reduced for GW)
+    )
+    results_df_sorted = results_df_sorted.sort_values('Composite_Score')
+    
+    # Create horizontal bar chart with ranking
+    colors = plt.cm.RdYlGn_r(np.linspace(0.2, 0.8, len(results_df_sorted)))
+    y_pos = np.arange(len(results_df_sorted))
+    
+    bars = ax.barh(y_pos, results_df_sorted['Composite_Score'], color=colors, 
+                   edgecolor='black', linewidth=0.5)
+    
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels([f"#{i+1} {m}" for i, m in enumerate(results_df_sorted['Model'])])
+    ax.set_xlabel('Composite Score (Lower = Better)')
+    ax.set_title('Model Ranking: Composite Score\n(Balancing Test Performance & Overfitting)', fontweight='bold')
+    ax.invert_yaxis()
+    
+    # Add annotations
+    for i, (bar, row) in enumerate(zip(bars, results_df_sorted.itertuples())):
+        ax.annotate(f'Test R²: {row.Test_R2:.3f}, R² Gap: {row.Overfit_R2:.3f}, RMSE Gap: {row.Overfit_RMSE:.1f}%',
+                   xy=(bar.get_width(), bar.get_y() + bar.get_height()/2),
+                   xytext=(5, 0), textcoords="offset points",
+                   ha='left', va='center', fontsize=8)
+    
+    ax.grid(axis='x', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f'{model_dir}Model_Ranking.png', dpi=600, bbox_inches='tight')
+    plt.close()
+    
+    # ===============================
+    # Figure 5: Combined Overfitting Analysis (R² vs RMSE)
+    # ===============================
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    
+    # Plot 5a: Scatter plot of R² Gap vs RMSE Gap
+    ax = axes[0]
+    
+    # Color points based on combined overfitting status
+    for i, row in results_df.iterrows():
+        r2_gap = row['Overfit_R2']
+        rmse_gap = row['Overfit_RMSE']
+        
+        # Classify based on both metrics (groundwater-adjusted thresholds)
+        if r2_gap > 0.15 or rmse_gap > 15:
+            color = '#e74c3c'
+            status = 'Severe'
+            marker = 'X'
+            size = 200
+        elif r2_gap > 0.08 or rmse_gap > 8:
+            color = '#f39c12'
+            status = 'Moderate'
+            marker = 's'
+            size = 150
+        else:
+            color = '#2ecc71'
+            status = 'Good'
+            marker = 'o'
+            size = 120
+        
+        ax.scatter(r2_gap, rmse_gap, c=color, marker=marker, s=size, 
+                  edgecolor='black', linewidth=1.5, alpha=0.8)
+        ax.annotate(row['Model'], (r2_gap, rmse_gap), fontsize=8, 
+                   xytext=(5, 5), textcoords='offset points')
+    
+    # Add threshold regions
+    ax.axvline(x=0.08, color='orange', linestyle='--', alpha=0.6, linewidth=2)
+    ax.axvline(x=0.15, color='red', linestyle='--', alpha=0.6, linewidth=2)
+    ax.axhline(y=8, color='orange', linestyle='--', alpha=0.6, linewidth=2)
+    ax.axhline(y=15, color='red', linestyle='--', alpha=0.6, linewidth=2)
+    
+    # Shade regions
+    ax.axvspan(0, 0.08, alpha=0.1, color='green', label='Acceptable R²')
+    ax.axhspan(0, 8, alpha=0.1, color='green', label='Acceptable RMSE')
+    
+    ax.set_xlabel('R² Gap (Train - Test)')
+    ax.set_ylabel('NRMSE Gap (Test - Train) %')
+    ax.set_title('Combined Overfitting Analysis: R² vs RMSE Gap\n(Groundwater Domain Thresholds)', fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    
+    # Custom legend
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#2ecc71', 
+               markersize=12, markeredgecolor='black', label='Good'),
+        Line2D([0], [0], marker='s', color='w', markerfacecolor='#f39c12', 
+               markersize=12, markeredgecolor='black', label='Moderate'),
+        Line2D([0], [0], marker='X', color='w', markerfacecolor='#e74c3c', 
+               markersize=12, markeredgecolor='black', label='Severe')
+    ]
+    ax.legend(handles=legend_elements, loc='upper right', title='Overfitting Status')
+    
+    # Plot 5b: Dual bar chart comparing R² and RMSE overfitting
+    ax = axes[1]
+    
+    x = np.arange(len(results_df))
+    width = 0.35
+    
+    # Normalize both metrics to similar scale for comparison
+    r2_normalized = results_df['Overfit_R2'] * 100  # Convert to percentage-like scale
+    rmse_normalized = results_df['Overfit_RMSE']  # Already in percentage
+    
+    bars1 = ax.bar(x - width/2, r2_normalized, width, label='R² Gap × 100', 
+                   color='#3498db', edgecolor='black', linewidth=0.5)
+    bars2 = ax.bar(x + width/2, rmse_normalized, width, label='NRMSE Gap (%)', 
+                   color='#e67e22', edgecolor='black', linewidth=0.5)
+    
+    ax.set_xticks(x)
+    ax.set_xticklabels(results_df['Model'], rotation=45, ha='right')
+    ax.set_ylabel('Overfitting Gap (normalized)')
+    ax.set_title('R² vs NRMSE Overfitting Comparison\n(Side-by-side)', fontweight='bold')
+    
+    # Add threshold lines
+    ax.axhline(y=8, color='orange', linestyle='--', alpha=0.7, linewidth=2, label='Moderate threshold')
+    ax.axhline(y=15, color='red', linestyle='--', alpha=0.7, linewidth=2, label='Severe threshold')
+    
+    ax.legend(loc='upper right')
+    ax.grid(axis='y', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f'{model_dir}Combined_Overfitting_Analysis.png', dpi=600, bbox_inches='tight')
+    plt.close()
+    
+    # ===============================
+    # Figure 6: Overfitting Summary Table
+    # ===============================
+    fig, ax = plt.subplots(figsize=(16, len(results_df) * 0.5 + 2))
+    ax.axis('off')
+    
+    # Prepare summary data
+    summary_data = []
+    for _, row in results_df.iterrows():
+        r2_gap = row['Overfit_R2']
+        rmse_gap = row['Overfit_RMSE']
+        
+        # Status determination with groundwater thresholds
+        if r2_gap > 0.15 or rmse_gap > 15:
+            status = 'SEVERE'
+        elif r2_gap > 0.08 or rmse_gap > 8:
+            status = 'MODERATE'
+        else:
+            status = 'GOOD'
+        
+        summary_data.append([
+            row['Model'],
+            f"{row['Train_R2']:.3f}",
+            f"{row['Val_R2']:.3f}",
+            f"{row['Test_R2']:.3f}",
+            f"{r2_gap:.3f}",
+            f"{row['Train_RMSE']:.2f}",
+            f"{row['Val_RMSE']:.2f}",
+            f"{row['Test_RMSE']:.2f}",
+            f"{rmse_gap:.1f}%",
+            status
+        ])
+    
+    columns = ['Model', 'Train R²', 'Val R²', 'Test R²', 'R² Gap', 
+               'Train NRMSE(%)', 'Val NRMSE(%)', 'Test NRMSE(%)', 'NRMSE Gap(%)', 'Status']
+    
+    table = ax.table(
+        cellText=summary_data,
+        colLabels=columns,
+        loc='center',
+        cellLoc='center'
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.2, 1.5)
+    
+    # Color cells based on status
+    for i, row_data in enumerate(summary_data):
+        status = row_data[-1]
+        if status == 'SEVERE':
+            color = '#ffcccc'
+        elif status == 'MODERATE':
+            color = '#fff3cd'
+        else:
+            color = '#d4edda'
+        
+        for j in range(len(columns)):
+            table[(i + 1, j)].set_facecolor(color)
+    
+    # Style header
+    for j in range(len(columns)):
+        table[(0, j)].set_facecolor('#4a90d9')
+        table[(0, j)].set_text_props(color='white', fontweight='bold')
+    
+    ax.set_title('Model Overfitting Summary Table\n(Groundwater-adjusted thresholds: R² Gap - Moderate >0.08, Severe >0.15; RMSE Gap - Moderate >8%, Severe >15%)',
+                fontsize=11, fontweight='bold', pad=20)
+    
+    plt.tight_layout()
+    plt.savefig(f'{model_dir}Overfitting_Summary_Table.png', dpi=600, bbox_inches='tight')
+    plt.close()
+    
+    print(f'\nVisualization plots saved to {model_dir}')
+
 
 def calc_train_test_metrics(
         pred_df: pd.DataFrame,
@@ -1023,7 +2106,7 @@ def perform_bias_correction(
     plt.ylabel('ECDF')
     plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
     plt.tight_layout()
-    plt.savefig(output_dir + 'ECDF_Train.png', dpi=300)
+    plt.savefig(output_dir + 'ECDF_Train.png', dpi=600)
     plt.clf()
     test_data_ecdf['BC_GW_mm'] = np.abs(m_roe * test_data_ecdf.Pred_GW_mm + b_roe)
     plot_ecdf_test_df = test_data_ecdf.filter(like="_GW", axis="columns")
@@ -1032,7 +2115,7 @@ def perform_bias_correction(
     plt.ylabel('ECDF')
     plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
     plt.ylim(0, 1.1)
-    plt.savefig(output_dir + 'ECDF_Test.png', dpi=300)
+    plt.savefig(output_dir + 'ECDF_Test.png', dpi=600)
     plt.close()
     test_r2_ecdf = r2_score(test_data_ecdf.Actual_GW_mm, test_data_ecdf.BC_GW_mm)
     test_adj_r2_ecdf = adjusted_r2(test_data_ecdf.Actual_GW_mm, test_data_ecdf.BC_GW_mm, test_data_ecdf.shape[1])
@@ -1102,7 +2185,7 @@ def perform_bias_correction(
     plt.ylabel('ECDF')
     plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
     plt.tight_layout()
-    plt.savefig(output_dir + 'ECDF_Train_ML.png', dpi=300)
+    plt.savefig(output_dir + 'ECDF_Train_ML.png', dpi=600)
     plt.clf()
     plot_ecdf_test_df_ml = test_data_ecdf_ml.filter(like="_GW", axis="columns")
     sns.ecdfplot(data=plot_ecdf_test_df_ml, hue_order=hue_order)
@@ -1110,7 +2193,7 @@ def perform_bias_correction(
     plt.ylabel('ECDF')
     plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
     plt.ylim(0, 1.1)
-    plt.savefig(output_dir + 'ECDF_Test_ML.png', dpi=300)
+    plt.savefig(output_dir + 'ECDF_Test_ML.png', dpi=600)
     plt.clf()
 
     metric_df_train_ml = pd.DataFrame(
@@ -1264,3 +2347,136 @@ def get_prediction_results(
         pred_df = gw_pred_df.copy()
     pred_df.to_parquet(f'{model_dir}Predictions_{model_name}_BC.parquet', index=False)
     return pred_df
+
+
+def generate_model_visualizations(
+        pred_df: pd.DataFrame,
+        output_dir: str,
+        model_name: str,
+        test_case: str,
+        test_year_limits: tuple[tuple[int, int], ...],
+        year_col: str = 'Year',
+        actual_col: str = 'Actual_GW_mm',
+        pred_col: str = 'Pred_GW_mm',
+        gw_basin_col: str = 'GW_Basin',
+        raster_res: float = 2000,
+        use_ama_ina: bool = True,
+        create_basin_plots: bool = True,
+        n_jobs: int = -1
+) -> None:
+    """
+    Generate journal-quality visualizations for a trained model.
+    
+    Creates comprehensive visualization suite including:
+    - Time series plots with training/test period highlighting
+    - Scatter plots of actual vs predicted (train/test)
+    - Residual analysis plots
+    - Individual basin-level time series
+    
+    All figures are saved in both PNG (600 dpi) and PDF formats for publication.
+    
+    Args:
+        pred_df: DataFrame with predictions (must have columns: Year, GW_Basin, 
+                 Actual_GW_mm, Pred_GW_mm, DATA).
+        output_dir: Output directory for visualizations.
+        model_name: Name of the ML model (e.g., 'XGB', 'LGBM').
+        test_case: Test case identifier (e.g., 'T1', 'T2').
+        test_year_limits: Tuple of tuples defining test periods, e.g., ((2019, 2024),).
+        year_col: Name of year column.
+        actual_col: Name of actual values column.
+        pred_col: Name of predicted values column.
+        gw_basin_col: Name of basin column.
+        raster_res: Raster resolution in meters.
+        use_ama_ina: Whether to filter for AMA/INA basins only.
+        create_basin_plots: Whether to create individual basin plots (can be slow).
+        n_jobs: Number of parallel jobs for basin plots (-1 for all cores).
+        
+    Returns:
+        None. Plots are saved to output_dir.
+    
+    Example:
+        >>> generate_model_visualizations(
+        ...     pred_df, 
+        ...     output_dir='./Plots/',
+        ...     model_name='XGB',
+        ...     test_case='T1',
+        ...     test_year_limits=((2019, 2024),)
+        ... )
+    """
+    vizops.create_complete_model_visualization(
+        pred_df=pred_df,
+        output_dir=output_dir,
+        model_name=model_name,
+        test_case=test_case,
+        test_year_limits=test_year_limits,
+        year_col=year_col,
+        actual_col=actual_col,
+        pred_col=pred_col,
+        gw_basin_col=gw_basin_col,
+        raster_res=raster_res,
+        use_ama_ina=use_ama_ina,
+        create_basin_plots=create_basin_plots,
+        n_jobs=n_jobs
+    )
+
+
+def generate_model_comparison_visualization(
+        model_predictions: dict[str, pd.DataFrame],
+        output_dir: str,
+        test_case: str,
+        test_year_limits: tuple[tuple[int, int], ...],
+        year_col: str = 'Year',
+        actual_col: str = 'Actual_GW_mm',
+        pred_col: str = 'Pred_GW_mm',
+        gw_basin_col: str = 'GW_Basin',
+        raster_res: float = 2000,
+        use_ama_ina: bool = True,
+        unit: str = 'af'
+) -> None:
+    """
+    Generate model comparison time series visualization.
+    
+    Creates a single plot comparing multiple models' predictions against observed values.
+    
+    Args:
+        model_predictions: Dictionary mapping model names to their prediction DataFrames.
+        output_dir: Output directory.
+        test_case: Test case identifier.
+        test_year_limits: Test period definitions.
+        year_col: Name of year column.
+        actual_col: Name of actual values column.
+        pred_col: Name of predicted values column.
+        gw_basin_col: Name of basin column.
+        raster_res: Raster resolution.
+        use_ama_ina: Filter for AMA/INA basins.
+        unit: Unit for plotting ('mm', 'af', 'm3', 'ft').
+        
+    Returns:
+        None. Plot saved to output_dir.
+        
+    Example:
+        >>> predictions = {
+        ...     'XGB': xgb_pred_df,
+        ...     'LGBM': lgbm_pred_df,
+        ...     'RF': rf_pred_df
+        ... }
+        >>> generate_model_comparison_visualization(
+        ...     predictions,
+        ...     output_dir='./Comparison/',
+        ...     test_case='T1',
+        ...     test_year_limits=((2019, 2024),)
+        ... )
+    """
+    vizops.create_model_comparison_time_series(
+        model_predictions=model_predictions,
+        output_dir=output_dir,
+        test_case=test_case,
+        test_year_limits=test_year_limits,
+        year_col=year_col,
+        actual_col=actual_col,
+        pred_col=pred_col,
+        gw_basin_col=gw_basin_col,
+        raster_res=raster_res,
+        use_ama_ina=use_ama_ina,
+        unit=unit
+    )

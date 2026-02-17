@@ -124,3 +124,20 @@ def copy_file(
     if verbose:
         print('Copying', input_file, 'to', output_file, '...')
     shutil.copyfile(input_file, output_file)
+
+
+def round_to_n_nonzero(x: float, n: int = 2) -> float:
+    """
+    Round a number to n significant non-zero digits.
+    
+    Args:
+        x (float): Number to round.
+        n (int): Number of significant digits.
+        
+    Returns:
+        float: Rounded number.
+    """
+    import math
+    if x == 0:
+        return 0
+    return round(x, -int(math.floor(math.log10(abs(x)))) + (n - 1))

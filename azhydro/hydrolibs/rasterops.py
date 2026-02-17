@@ -29,7 +29,8 @@ def read_raster_as_arr(
         raster_file: str | rio.DatasetReader,
         band: int = 1,
         get_file: bool = True,
-        change_dtype: bool = True
+        change_dtype: bool = True,
+        file_mode: str = 'r'
 ) -> tuple[np.ndarray, rio.DatasetReader] | np.ndarray:
     """Read a raster band as a numpy array.
 
@@ -39,6 +40,7 @@ def read_raster_as_arr(
         get_file (bool): Get rasterio DatasetReader object file if set to True.
         change_dtype (bool): Change raster data type to float if True. Also, if a no data value exists, then it is set
                              to np.nan if change_dtype is True.
+        file_mode (str): File mode to read raster file. Default is 'r' for read. Set to 'r+' to read and write.
 
     Returns:
         np.ndarray: Raster numpy array (if, get_file is False).
@@ -47,7 +49,7 @@ def read_raster_as_arr(
     """
     rasterio_obj = isinstance(raster_file, rio.DatasetReader)
     if not rasterio_obj:
-        raster_file = rio.open(raster_file)
+        raster_file = rio.open(raster_file, mode=file_mode)
     else:
         get_file = False
     raster_arr = raster_file.read(band)
@@ -106,6 +108,41 @@ def write_raster(
             nodata=no_data_value
     ) as dst:
         dst.write(raster_data, num_bands)
+
+
+def clamp_and_rewrite_raster(
+        raster_file: str,
+        min_val: float = 0,
+        max_val: float | None = None,
+        band_descriptions: list[str] | None = None
+) -> None:
+    """Clamp raster values to a given range and rewrite the file with updated statistics.
+
+    Reads the raster, clamps pixel values to [min_val, max_val], rewrites the file from scratch
+    (discarding stale embedded statistics), and optionally sets band descriptions.
+
+    Args:
+        raster_file (str): Path to the raster file.
+        min_val (float): Minimum allowed pixel value. Defaults to 0.
+        max_val (float or None): Maximum allowed pixel value. If None, no upper clamp is applied.
+        band_descriptions (list[str] or None): List of band description strings. If provided, must
+            have one entry per band.
+
+    Returns:
+        None
+    """
+    with rio.open(raster_file) as src:
+        arr = src.read()
+        profile = src.profile.copy()
+    arr = np.maximum(arr, min_val)
+    if max_val is not None:
+        arr = np.minimum(arr, max_val)
+    os.remove(raster_file)
+    with rio.open(raster_file, 'w', **profile) as dst:
+        dst.write(arr)
+        if band_descriptions is not None:
+            for idx, desc in enumerate(band_descriptions, start=1):
+                dst.set_band_description(idx, desc)
 
 
 def crop_raster(

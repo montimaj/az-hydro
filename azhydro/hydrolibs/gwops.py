@@ -7,6 +7,7 @@ Handle groundwater withdrawal processing codes.
 
 import rasterops as rops
 import vectorops as vops
+import visualops as vizops  # New visualization module
 import os
 import shutil
 import numpy as np
@@ -378,6 +379,8 @@ def create_gw_basin_streamflow_rasters(
         usgs_site_annual[flow_attr] *= 0.0283168
         flow_attr = 'dv_m3_sec'
         usgs_site_annual.columns = ['Year', flow_attr]
+        mean_flow = usgs_site_annual[flow_attr].mean(skipna=True)
+        usgs_site_annual[flow_attr] = usgs_site_annual[flow_attr].fillna(mean_flow)
         for year in year_list:
             streamflow_tif = f'{output_dir}Streamflow_{year}.tif'
             canal_arr = deepcopy(canal_raster_arr)
@@ -602,24 +605,13 @@ def create_land_use_data(
 def get_ama_ina_basin_names() -> list[str]:
     """
     Get the names of AMA and INA basins.
+    
+    Note: This function is now also available in visualops module.
 
     Returns:
         list: List of AMA and INA basin names.
     """
-
-    ama_ina_basins = [
-        'SANTA CRUZ AMA',
-        'PRESCOTT AMA',
-        'TUCSON AMA',
-        'PINAL AMA',
-        'PHOENIX AMA',
-        'DOUGLAS AMA',
-        'JOSEPH CITY INA',
-        'HARQUAHALA INA',
-        'HUALAPAI VALLEY INA',
-        'WILLCOX AMA'
-    ]
-    return ama_ina_basins
+    return vizops.get_ama_ina_basin_names()
 
 
 def parallel_make_time_series_plots(
@@ -638,6 +630,9 @@ def parallel_make_time_series_plots(
 ) -> None:
     """
     Create time series plots for individual groundwater basins.
+    
+    Note: This function now uses journal-quality plotting from visualops.
+    For advanced plotting options, use visualops.create_basin_time_series_plot() directly.
 
     Args:
         idx (int): Index of the groundwater basin.
@@ -656,82 +651,12 @@ def parallel_make_time_series_plots(
     Returns:
         None.
     """
-
-    ama_ina_basins = get_ama_ina_basin_names()
-    if idx == 0:
-        gw_basin_name = 'AMA_INA'
-        basin_df = input_df[input_df[gw_basin_col].isin(gw_basin)].copy()
-        gw_basin_type = 'AMA/INA'
-    else:
-        gw_basin_name = gw_basin
-        basin_df = input_df[input_df[gw_basin_col] == gw_basin].copy()
-        gw_basin_type = 'AMA/INA' if gw_basin in ama_ina_basins else 'Other'
-    plot_dir = f'{output_dir}{gw_basin_name}/'
-    makedirs(plot_dir)
-    area = raster_res ** 2
-    if gw_basin_type != 'Other':
-        replace_df = basin_df[basin_df[actual_gw_col] > 0]
-        if replace_df.shape[0] > 0:
-            basin_df = replace_df
-        else:
-            gw_basin_type = 'Other'
-    # m2 to acre-ft and mm to ft and then 1000s of acre-ft
-    basin_df['Actual_GW_af'] = basin_df[actual_gw_col] * area / (4047 * 304.8 * 1000)
-    basin_df['Pred_GW_af'] = basin_df[pred_gw_col] * area / (4047 * 304.8 * 1000)
-    # mm to m and then 1e6 m3
-    basin_df['Actual_GW_m3'] = basin_df[actual_gw_col] * area * 1e-9
-    basin_df['Pred_GW_m3'] = basin_df[pred_gw_col] * area * 1e-9
-
-    basin_df['Actual_GW_ft'] = basin_df[actual_gw_col] / 304.8
-    basin_df['Pred_GW_ft'] = basin_df[pred_gw_col] / 304.8
-    min_yr = basin_df[year_col].min()
-    max_yr = basin_df[year_col].max()
-    for estimator in ['sum']:
-        for unit in ['af', 'm3', 'ft', 'mm']:
-            plt.figure(figsize=(20, 10))
-            plt.rcParams.update({'font.size': 20})
-            ax = sns.lineplot(
-                basin_df,
-                x=year_col,
-                y=f'Pred_GW_{unit}',
-                estimator=estimator,
-                errorbar='ci',
-                color='black',
-                marker='o',
-                err_style='bars'
-            )
-            if gw_basin_type != 'Other':
-                sns.lineplot(
-                    basin_df,
-                    x=year_col,
-                    y=f'Actual_GW_{unit}',
-                    estimator=estimator,
-                    errorbar='ci',
-                    color='orange',
-                    marker='o',
-                    err_style='bars',
-                    ax=ax
-                )
-            ax.xaxis.set_major_formatter(ticker.StrMethodFormatter('{x:.0f}'))  # Format ticks as integers
-            plt.legend(
-                ['Predicted', 'Metered', '95% CI', '95% CI'] if gw_basin_type != 'Other'
-                else ['Predicted', '95% CI'], ncol=2
-            )
-            if gw_basin_type == 'Other':
-                ax.axvspan(min_yr, max_yr, color='lightblue', alpha=0.3)
-            elif split_strategy < 3:
-                for test_year in test_year_limits:
-                    ax.axvspan(test_year[0], test_year[1], color='lightblue', alpha=0.3)
-            elif split_strategy == 3 and gw_basin in test_gw_basins:
-                ax.axvspan(min_yr, max_yr, color='lightblue', alpha=0.3)
-
-            unit_str = f'(1000s of acre-ft)' if unit == 'af' else f'(1e6 m$^3$)' if unit == 'm3' else f'({unit})'
-            ylabel_prefix = 'Total' if estimator == 'sum' else 'Mean'
-            plt.ylabel(f'{ylabel_prefix} Agricultural Groundwater Withdrawals {unit_str}')
-            plt.tight_layout()
-            plt.xticks(list(range(min_yr, max_yr + 1, 3)) + [max_yr])
-            plt.savefig(f'{plot_dir}TS_{ylabel_prefix}_{unit}.png', dpi=300)
-            plt.close()
+    # Use the new visualops module for journal-quality plots
+    vizops.parallel_make_time_series_plots(
+        idx, gw_basin, input_df, output_dir, test_year_limits,
+        year_col, actual_gw_col, pred_gw_col, gw_basin_col,
+        split_strategy, test_gw_basins, raster_res
+    )
 
 
 def make_time_series_plots(
@@ -751,6 +676,9 @@ def make_time_series_plots(
 ) -> None:
     """
     Make time series plots for individual groundwater basins.
+    
+    Note: This function now uses journal-quality plotting from visualops.
+    For advanced plotting options, use visualops.create_complete_model_visualization() directly.
 
     Args:
         input_df (pd.DataFrame): Input dataframe containing the ML-predicted and actual pumping data.
@@ -771,33 +699,10 @@ def make_time_series_plots(
     Returns:
         None.
     """
-
-    print('Creating time series plots...')
-    gw_basins = [get_ama_ina_basin_names()] + input_df[gw_basin_col].unique().tolist()
-    actual_gw_col = 'Actual_GW_mm'
-    pred_gw_col = 'Pred_GW_mm'
-    input_df = input_df.rename(columns={pred_attr: actual_gw_col})
-    if x_scaler:
-        input_df[features] = x_scaler.transform(input_df[features])
-        model_predictions = model.predict(input_df[features])
-    else:
-        model_predictions = model.predict(input_df[features])
-    if not y_scaler:
-        input_df[pred_gw_col] = np.abs(model_predictions)
-    else:
-        input_df[pred_gw_col] = np.abs(y_scaler.inverse_transform(model_predictions.reshape(-1, 1)).ravel())
-    num_cores = multiprocessing.cpu_count() - 1
-    Parallel(n_jobs=num_cores - 1)(delayed(parallel_make_time_series_plots)(
-        idx,
-        gw_basin,
-        input_df,
-        output_dir,
-        test_year_limits,
-        year_col,
-        actual_gw_col,
-        pred_gw_col,
-        gw_basin_col,
-        split_strategy,
-        test_gw_basins,
-        raster_res
-    ) for idx, gw_basin in enumerate(gw_basins))
+    # Use the new visualops module for journal-quality plots
+    vizops.make_time_series_plots(
+        input_df, model, features, output_dir,
+        year_col, gw_basin_col, test_year_limits,
+        pred_attr, split_strategy, test_gw_basins,
+        raster_res, x_scaler, y_scaler
+    )

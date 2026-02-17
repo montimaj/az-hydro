@@ -27,18 +27,22 @@ gdal.PushErrorHandler('CPLQuietErrorHandler')
 gdal.UseExceptions()
 warnings.filterwarnings('ignore')
 import logging
+logger = logging.getLogger(__name__)
 logging.getLogger("distributed").setLevel(logging.ERROR)
+from openet.refetgee import Daily, calcs
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 from sysops import makedirs
 from gwops import create_land_use_data, get_ama_ina_basin_names
-from rasterops import reproject_raster_gdal, read_raster_as_arr, write_raster, get_xy_grids_from_raster
+from rasterops import reproject_raster_gdal, read_raster_as_arr, get_xy_grids_from_raster, \
+    clamp_and_rewrite_raster
 from google.cloud import storage
 from shapely.geometry import Polygon
 from glob import glob
 from dask import delayed, compute
 from dask.distributed import Client, LocalCluster
 from http.client import RemoteDisconnected
+from tqdm import tqdm
 
 
 def create_fishnet(
@@ -100,6 +104,370 @@ def generate_chunks(input_list: list[...], num_chunks: int):
         yield input_list[idx: idx + num_chunks]
 
 
+def calculate_eto(
+        year: int, 
+        maca_scenario: str | None = None,
+        maca_model: str | None = None,
+        return_monthly: bool = False
+) -> ee.Image | ee.ImageCollection:
+    """
+    Process daily collection to calculate annual or monthly ETo.
+    Author: Peter ReVelle (peter.revelle@dri.edu)
+    Modified by: Dr. Sayantan Majumdar (sayantan.majumdar@dri.edu)
+
+    Args:
+    year (int): Year in YYYY format for which the daily image belongs to. This is required to determine the 
+    climate data source for ETo calculation. Note that since ETo calculation requires daily data, for 1895-1978, we 
+    take the monthly PRISM data and assign the same ETo value for all days in that month. For 1979-2025, 
+    gridMET daily ETo is directly used. For 2026-2100, we use MACA daily data for ETo calculation.
+    maca_scenario (str or None): MACA scenario to use for ETo calculation for 2026-2100. Required only if year > 2025.
+    maca_model (str or None): MACA model to use for ETo calculation for 2026-2100. Required only if year > 2025.
+    return_monthly (bool): If True, return monthly ETo as an ImageCollection. If False (default), return annual ETo sum.
+
+    Returns:
+    ee.Image | ee.ImageCollection: Annual ETo image (if return_monthly=False) or monthly ETo ImageCollection 
+    (if return_monthly=True) for the input year. Band name is 'eto' (in mm).
+    """
+    
+    start_year = f'{year}-01-01'
+    end_year = f'{year + 1}-01-01'
+    lat_img = ee.Image.pixelLonLat().select('latitude')
+    months = ee.List.sequence(1, 12)
+    
+    if year > 2025:
+        # Use MACA for future scenarios
+        if maca_scenario is None or maca_model is None:
+            raise ValueError('maca_scenario and maca_model are required for years > 2025')
+        
+        maca_daily = ee.ImageCollection('IDAHO_EPSCOR/MACAv2_METDATA') \
+            .filterDate(start_year, end_year) \
+            .filterMetadata('model', 'equals', maca_model) \
+            .filterMetadata('scenario', 'equals', maca_scenario)
+        
+        def calc_maca_daily_eto(daily_img):
+            eto = Daily.maca(input_img=daily_img, lat=lat_img).eto
+            return eto.rename('eto').set('system:time_start', daily_img.date().millis())
+        
+        daily_eto = maca_daily.map(calc_maca_daily_eto)
+        monthly_eto = ee.ImageCollection(months.map(lambda m:
+            daily_eto.filter(ee.Filter.calendarRange(m, m, 'month')).sum()
+                .set('system:time_start', ee.Date.fromYMD(year, m, 1).millis())
+                .set('system:time_end', ee.Date.fromYMD(year, ee.Number(m).add(1).mod(12).add(1), 1).millis())
+        ))
+        
+    elif 1895 <= year <= 1978:
+        # Use PRISM for ETo (monthly data converted to monthly ETo using Hargreaves)
+        prism_monthly = ee.ImageCollection('projects/sat-io/open-datasets/OREGONSTATE/PRISM_800_MONTHLY') \
+            .filterDate(start_year, end_year)
+        
+        def calc_prism_monthly_eto(monthly_img):
+            month = ee.Date(monthly_img.get('system:time_start')).get('month')
+            ndays = ee.Number(ee.Date.fromYMD(year, month, 1).advance(1, 'month')
+                .difference(ee.Date.fromYMD(year, month, 1), 'day'))
+            # Get day of year for middle of month
+            doy = ee.Date(monthly_img.get('system:time_start')).getRelative('day', 'year').add(ndays.divide(2).floor())
+            # Get temperature data from PRISM (in Celsius)
+            tmax = monthly_img.select('tmax')
+            tmin = monthly_img.select('tmin')
+            # Use Daily class with minimal inputs for Hargreaves PET
+            # Create dummy images for required parameters (not used in Hargreaves)
+            daily_obj = Daily(
+                tmax=tmax,
+                tmin=tmin,
+                ea=ee.Image.constant(1),  # dummy, not used in Hargreaves
+                rs=ee.Image.constant(1),  # dummy, not used in Hargreaves
+                uz=ee.Image.constant(1),  # dummy, not used in Hargreaves
+                zw=ee.Number(2),
+                elev=ee.Image.constant(0),
+                lat=lat_img,
+                doy=doy
+            )
+            eto = daily_obj.pet_hargreaves.multiply(ndays)
+            return eto.rename('eto') \
+                .set('system:time_start', monthly_img.get('system:time_start')) \
+                .set('system:time_end', monthly_img.get('system:time_end'))
+        
+        monthly_eto = prism_monthly.map(calc_prism_monthly_eto)
+        
+    else:
+        # Use gridMET for 1979-2025 (already monthly)
+        monthly_eto = ee.ImageCollection('projects/openet/assets/reference_et/conus/gridmet/monthly/v1') \
+            .filterDate(start_year, end_year) \
+            .select('eto')
+    
+    if return_monthly:
+        return monthly_eto
+    else:
+        return monthly_eto.sum().rename('annual_eto_mm')
+
+
+def calculate_annual_peff(
+        year: int, 
+        rz_depth_m: list[float] | None = None,
+        mad_factor: float = 0.5,
+        maca_scenario: str | None = None,
+        maca_model: str | None = None
+) -> ee.Image:
+    """
+    Calculate annual effective precipitation using the USDA-SCS method.
+    Author: Christopher Pearson (chris.pearson@dri.edu)
+    Modified by: Dr. Sayantan Majumdar (sayantan.majumdar@dri.edu)
+
+    Args:
+    year (int): Year in YYYY format for which the annual effective precipitation is calculated. This is required to 
+    determine the climate data source for precipitation and ETo. PRISM precipitation is used for 1895-2025.
+    - For 1895-1978: PRISM Hargreaves ETo, PRISM precipitation
+    - For 1979-2025: gridMET ETo, PRISM precipitation
+    - For 2026-2100: MACA ETo, MACA precipitation
+    rz_depth_m (list[float] or None): Monthly root zone depth in meters. Defaults to [1] * 12
+    (1 meter for all months). Should be a list of 12 values for each month.
+    mad_factor (float): Management Allowed Depletion factor. Defaults to 0.5.
+    maca_scenario (str or None): MACA scenario to use for precipitation calculation for 2026-2100. 
+    Required only if year > 2025.
+    maca_model (str or None): MACA model to use for precipitation calculation for 2026-2100. 
+    Required only if year > 2025.
+
+    Returns:
+    ee.Image: Annual effective precipitation image with bands 'annual_peff_mm' (effective precipitation in mm).
+    """
+
+    # Default root zone depth: 1 meter for all months
+    if rz_depth_m is None:
+        rz_depth_m = [1] * 12
+    
+    # Convert root zone depth from meters to inches (1 meter = 39.37 inches)
+    rz_inches = ee.List([rz * 39.37 for rz in rz_depth_m])
+    
+    # AWC (Available Water Capacity) from OpenET soil dataset (already in inches)
+    awc = ee.Image('projects/openet/soil/ssurgo_AWC_WTA_0to152cm_composite')
+    
+    # Define date range for the year
+    start_year = f'{year}-01-01'
+    end_year = f'{year + 1}-01-01'
+    
+    # Get monthly ETo using calculate_eto
+    eto_monthly = calculate_eto(year, maca_scenario, maca_model, return_monthly=True)
+    # Ensure consistent band name 'eto' and add 'month' property for joining
+    eto_monthly = eto_monthly.map(
+        lambda img: img.rename('eto')
+            .set('month', ee.Date(img.get('system:time_start')).get('month'))
+            .copyProperties(img, ['system:time_start', 'system:time_end'])
+    )
+    
+    # Get monthly precipitation
+    if year > 2025:
+        # Use MACA precipitation for future scenarios
+        if maca_scenario is None or maca_model is None:
+            raise ValueError('maca_scenario and maca_model are required for years >= 2025')
+        pr_daily = ee.ImageCollection('IDAHO_EPSCOR/MACAv2_METDATA') \
+            .filterDate(start_year, end_year) \
+            .filterMetadata('model', 'equals', maca_model) \
+            .filterMetadata('scenario', 'equals', maca_scenario) \
+            .select('pr') \
+            .map(lambda img: img.set('month', ee.Date(img.get('system:time_start')).get('month')))
+        # Aggregate daily MACA precipitation to monthly
+        months = ee.List.sequence(1, 12)
+        pr_monthly = ee.ImageCollection(months.map(lambda m: 
+            pr_daily.filter(ee.Filter.eq('month', m)) \
+                .sum() \
+                .rename('pr') \
+                .set('month', m) \
+                .set('system:time_start', ee.Date.fromYMD(year, m, 1).millis()) \
+                .set('system:time_end', ee.Date.fromYMD(year, ee.Number(m).add(1).mod(12).add(1), 1).millis())
+        ))
+    else:
+        # Use PRISM for 1895-2025, rename 'ppt' to 'pr' for consistency
+        pr_monthly = ee.ImageCollection('projects/sat-io/open-datasets/OREGONSTATE/PRISM_800_MONTHLY') \
+            .filterDate(start_year, end_year) \
+            .select(['ppt'], ['pr']) \
+            .map(lambda img: img.set('month', ee.Date(img.get('system:time_start')).get('month')))
+    
+    # Join ETo and precipitation collections on month (avoids timestamp mismatch between different collections)
+    def join_collections(coll_1, coll_2):
+        filter_month_eq = ee.Filter.equals(
+            leftField='month',
+            rightField='month'
+        )
+        joined = ee.Join.inner().apply(coll_1, coll_2, filter_month_eq)
+        return joined.map(lambda feature: 
+            ee.Image.cat(feature.get('primary'), feature.get('secondary'))
+                .copyProperties(ee.Image(feature.get('primary')), ['system:time_start', 'system:time_end', 'month'])
+        )
+    
+    joined = ee.ImageCollection(join_collections(eto_monthly, pr_monthly))
+    
+    # SCS effective precipitation function
+    def calculate_ep(img):
+        # Convert from mm to inches (bands are consistently named 'eto' and 'pr')
+        pr = img.select('pr').divide(25.4).rename('pr')  # mm to inches
+        eto = img.select('eto').divide(25.4).rename('eto')  # mm to inches
+        
+        # Get month value for root zone depth lookup (1-indexed)
+        month = ee.Number.parse(ee.Date(img.get('system:time_start')).format('MM'))
+        
+        # d term for soil storage factor (eq. 2-85)
+        # d = 50% of AWC * root zone depth in inches
+        d = awc.multiply(mad_factor).multiply(ee.Number(rz_inches.get(month.subtract(1))))
+        
+        # Soil storage factor (eq. 2-85)
+        # sf = 0.531747 + 0.295164*d - 0.057697*d^2 + 0.003804*d^3
+        sf = d.multiply(0.295164) \
+            .add(0.531747) \
+            .subtract(d.pow(2).multiply(0.057697)) \
+            .add(d.pow(3).multiply(0.003804)) \
+            .rename('sf')
+        
+        # SCS effective precipitation (eq. 2-84)
+        # ep = sf * (0.70917 * pr^0.82416 - 0.11556) * 10^(0.02426 * eto)
+        ep = sf.multiply(
+            pr.pow(0.82416).multiply(0.70917).subtract(0.11556)
+        ).multiply(
+            ee.Image.constant(10).pow(eto.multiply(0.02426))
+        ).rename('ep')
+        
+        # Limit ep: ep <= pr, ep <= eto, ep >= 0
+        ep_cleaned = ep.where(ep.gte(pr), pr) \
+            .where(ep.gt(eto), eto) \
+            .clamp(0, 10000)
+        
+        return ee.Image(ep_cleaned) \
+            .setDefaultProjection(crs='EPSG:4326', scale=4000) \
+            .copyProperties(img, ['system:time_start', 'system:time_end'])
+    
+    # Build monthly collection with effective precipitation
+    monthly_peff = joined.map(calculate_ep)
+    
+    # Sum monthly values to get annual totals and convert back to mm
+    annual_peff = monthly_peff \
+        .sum().multiply(25.4).set('year', year) \
+        .rename('annual_peff_mm') \
+        .set('system:time_start', ee.Date.fromYMD(year, 1, 1).millis())
+    
+    return annual_peff
+
+
+def download_gee_tif(
+        data_bands: list[ee.Image],
+        data_band_name_list: list[str],
+        local_file_name: str,
+        ee_geom: ee.Geometry,
+        gee_scale: float,
+        crs: str,
+        categorical_bands: list[str],
+        verbose: bool = False
+):
+    """
+    Download multiple GEE data bands as a single GeoTIFF file. 
+    This function handles the download of multiple bands, applies appropriate reducers for categorical and 
+    continuous data, and retries downloads in case of failures.
+
+    Args:
+    data_bands (list[ee.Image]): List of GEE Image bands to download.
+    data_band_name_list (list[str]): List of band names corresponding to the data_bands.
+    local_file_name (str): Local file name (including path) to save the downloaded GeoTIFF.
+    ee_geom (ee.Geometry): Earth Engine geometry defining the region to download.
+    gee_scale (float): Scale in meters for the GEE data download.
+    crs (str): Coordinate reference system for the downloaded data.
+    categorical_bands (list[str]): List of band names that are categorical and require mode reduction.
+    verbose (bool): Set True to see extra details on file downloads.
+
+    Returns:
+        None. The function saves the downloaded data as a GeoTIFF file at the specified local_file_name.
+    """
+    
+    data_img = data_bands[0].rename(data_band_name_list[0])
+    band_scale = data_img.projection().nominalScale().getInfo()
+    max_pixels = max(64, np.ceil((gee_scale / band_scale) ** 2))
+    time.sleep(0.01)
+    data_img = data_img.setDefaultProjection(
+        crs=crs,
+        scale=band_scale
+    ).reduceResolution(
+        reducer=ee.Reducer.mean(),
+        bestEffort=True,
+        maxPixels=max_pixels
+    ).reproject(crs, scale=gee_scale)
+    for band, band_name in zip(data_bands, data_band_name_list):
+        band = band.rename(band_name)
+        try:
+            band_scale = band.projection().nominalScale().getInfo()
+            time.sleep(0.01)
+        except ee.EEException as e:
+            print('Error getting band scale for', band_name, ':', e)
+            return
+        if gee_scale > 30:
+            if band_name in categorical_bands:
+                reducer = ee.Reducer.mode(maxRaw=max_pixels)
+            elif band_name == 'annual_irrmapper_fraction':
+                reducer = ee.Reducer.count()
+            elif band_scale < 1000:
+                reducer = ee.Reducer.mean()
+            else:
+                reducer = None
+            if reducer:
+                max_pixels = max(64, np.ceil((gee_scale / band_scale) ** 2))
+                band = band.setDefaultProjection(
+                    crs=crs,
+                    scale=band_scale
+                ).reduceResolution(
+                    reducer=reducer,
+                    bestEffort=True,
+                    maxPixels=max_pixels
+                ).reproject(crs, scale=gee_scale)
+            else:
+                band = band.setDefaultProjection(
+                    crs=crs,
+                    scale=band_scale
+                ).reproject(crs, scale=gee_scale)
+        if band_name == 'irrigation_status':
+            band = band.where(band.gt(0), 1)
+        data_img = data_img.addBands(band, overwrite=True)
+    retry_download = True
+    while retry_download:
+        try:
+            if verbose:
+                print('Downloading', local_file_name, '...')
+            gee_url = data_img.getDownloadUrl({
+                'scale': gee_scale,
+                'region': ee_geom,
+                'format': 'GEO_TIFF',
+                'crs': crs
+            })
+            r = requests.get(
+                gee_url,
+                allow_redirects=True,
+                timeout=None,
+                stream=True
+            )
+            with open(local_file_name, 'wb') as fd:
+                for chunk in r.iter_content(chunk_size=1024):
+                    fd.write(chunk)
+            # Validate the downloaded file
+            tile_arr, tile_rio = read_raster_as_arr(local_file_name)
+            if tile_arr.size == 0:
+                if verbose:
+                    logger.warning('Downloaded file is empty. Deleting %s', local_file_name)
+                tile_rio.close()
+                os.remove(local_file_name)
+                raise rio.errors.RasterioIOError
+            tile_rio.close()
+            clamp_and_rewrite_raster(
+                local_file_name,
+                min_val=0,
+                band_descriptions=data_band_name_list
+            )                
+            retry_download = False
+        except (
+                ee.EEException, requests.exceptions.RequestException,
+                requests.exceptions.ConnectionError, RemoteDisconnected,
+                rio.errors.RasterioIOError, Exception
+        ) as e:
+            if verbose:
+                logger.warning('Error %s during %s download! Retrying...', e, local_file_name)
+            retry_download = True
+        time.sleep(0.01)
+
+
 def download_gee_tile(
         tile_values: tuple[int, float, float, float],
         download_dir: str,
@@ -107,8 +475,6 @@ def download_gee_tile(
         data_band_names: list[str],
         gcloud_project: str = 'azhydro',
         gee_scale: float = 30,
-        irrigated_tiles: bool = True,
-        multiply_irr_mask: bool = True,
         verbose: bool = False,
         crs: str = 'EPSG:4326'
 ):
@@ -122,8 +488,6 @@ def download_gee_tile(
     data_band_names (list (str, ...)): List of data bands as strings.
     gcloud_project (str): GCloud project name.
     gee_scale (float): GEE data download scale in m.
-    irrigated_tiles (bool): Set False to download all tiles regardless of irrigation.
-    multiply_irr_mask (bool): Set False to skip multiplying image bands by the irrigation mask.
     verbose (bool): Set True to see extra details on file downloads.
     crs (str): Coordinate reference system for the downloaded data. Defaults to 'EPSG:4326'.
 
@@ -131,6 +495,10 @@ def download_gee_tile(
         None.
     """
 
+    if min(year_list) < 1896 or max(year_list) > 2100:
+        raise ValueError('Year list should be between 1896 and 2100')
+    scenario_years = list(range(2026, 2101))
+    historical_years = [year for year in year_list if year not in scenario_years]
     retry_ee_init = True
     while retry_ee_init:
         try:
@@ -142,37 +510,63 @@ def download_gee_tile(
         except (ee.EEException, requests.exceptions.RequestException,
                 requests.exceptions.ConnectionError, Exception
                 ) as e:
-            print('Initialization exception', e)
+            if verbose:
+                logger.warning('Initialization exception: %s', e)
             retry_ee_init = True
             time.sleep(1)
-    openet_ic = [
-        ee.ImageCollection("OpenET/ENSEMBLE/CONUS/GRIDMET/MONTHLY/v2_0"),
-        ee.ImageCollection("projects/openet/assets/ensemble/conus/gridmet/monthly/provisional")
-    ]    
-    prism_ic = ee.ImageCollection('projects/sat-io/open-datasets/OREGONSTATE/PRISM_800_MONTHLY')
-    era5land_ic = ee.ImageCollection('ECMWF/ERA5_LAND/MONTHLY_AGGR')
-    irrmapper_ic = ee.ImageCollection('projects/ee-dgketchum/assets/IrrMapper/IrrMapperComp')
-    cdl_ic = ee.ImageCollection("USDA/NASS/CDL")
+    openet_ic = ee.ImageCollection("OpenET/ENSEMBLE/CONUS/GRIDMET/MONTHLY/v2_0")
+    usgs_ensemble_et_ic = ee.ImageCollection("users/montimajumdar/USGS-Reitz-Ensemble-ET") 
+    prism_ic = ee.ImageCollection('projects/sat-io/open-datasets/OREGONSTATE/PRISM_800_MONTHLY') 
+    irrmapper_ic = ee.ImageCollection('UMT/Climate/IrrMapper_RF/v1_2')
     nlcd_ic = ee.ImageCollection('projects/sat-io/open-datasets/USGS/ANNUAL_NLCD/LANDCOVER')
+    cdl_ic = ee.ImageCollection('USDA/NASS/CDL')
+    usgs_lulc_ic = ee.ImageCollection('users/montimajumdar/USGS-LULC-CONUS')
     soil_depth = ee.Image(
         'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/land_use/soil_depth'
     ).rename('soil_depth_cm')
     awc = ee.Image(
-        'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/physical/water_storage'
-    ).rename('awc_cm')
+        'projects/openet/soil/ssurgo_AWC_WTA_0to152cm_composite'
+    ).rename('awc_in')
     ksat_mean = ee.Image(
         'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/physical/ksat_mean'
     ).rename('ksat_mean_micromps')
     ee_geom = ee.Geometry.Rectangle(tile_values[1:])
     categorical_bands = get_categorical_bands()
-    max_pixels = np.ceil((gee_scale / 30) ** 2)
-    for year in year_list:
-        local_file_name = f'{download_dir}Tile_{tile_values[0]}_{year}.tif'
+    usgs_lulc_scenarios = ['B1', 'B2', 'A1B', 'A2']
+    maca_scenarios = ['rcp45', 'rcp85']
+    maca_models = [
+        'bcc-csm1-1',
+        'bcc-csm1-1-m',
+        'BNU-ESM',
+        'CanESM2',
+        'CCSM4',
+        'CNRM-CM5',
+        'CSIRO-Mk3-6-0',
+        'GFDL-ESM2G',
+        'GFDL-ESM2M',
+        'HadGEM2-CC365',
+        'HadGEM2-ES365',
+        'inmcm4',
+        'IPSL-CM5A-MR',
+        'IPSL-CM5A-LR',
+        'IPSL-CM5B-LR',
+        'MIROC5',
+        'MIROC-ESM',
+        'MIROC-ESM-CHEM',
+        'MRI-CGCM3',
+        'NorESM1-M'
+    ]
+    historical_download_dir = f'{download_dir}historical/'
+    scenario_download_dir = f'{download_dir}scenarios/'
+    makedirs([historical_download_dir, scenario_download_dir])
+    for year in historical_years:
+        local_file_name = f'{historical_download_dir}Tile_{tile_values[0]}_{year}.tif'
         if os.path.exists(local_file_name):
             try:
                 tile_arr, tile_rio = read_raster_as_arr(local_file_name)
                 if tile_arr.size == 0:
-                    print('Downloaded file is empty. Deleting', local_file_name)
+                    if verbose:
+                        logger.warning('Downloaded file is empty. Deleting %s', local_file_name)
                     tile_rio.close()
                     os.remove(local_file_name)
                     raise rio.errors.RasterioIOError
@@ -180,195 +574,166 @@ def download_gee_tile(
                 continue
             except rio.errors.RasterioIOError:
                 os.remove(local_file_name)
-                print(local_file_name, 'corrupted. Downloading again...')
+                if verbose:
+                    logger.warning('Existing file %s is corrupted. Deleted and retrying download...', local_file_name)
         irrmapper_year = year if year >= 1985 else 1985
         irr = irrmapper_ic.filterDate(f'{irrmapper_year}-01-01', f'{irrmapper_year + 1}-01-01') \
             .select('classification') \
             .max()
         mask = irr.eq(0)
         irr_mask = irr.updateMask(mask).remap([0], [1])
-        valid_tile = True
-        if irrigated_tiles:
-            tile_irr_sum = irr_mask.reduceRegion(
-                reducer=ee.Reducer.sum(),
-                scale=30,
-                geometry=ee_geom
-            )
-            retry_irr_mask = True
-            while retry_irr_mask:
-                try:
-                    valid_tile = tile_irr_sum.getInfo()['remapped'] > 0
-                    retry_irr_mask = False
-                except (
-                        ee.EEException, requests.exceptions.RequestException,
-                        requests.exceptions.ConnectionError, RemoteDisconnected
-                ) as e:
-                    print('Error:', e, '.Retrying...')
-                    retry_irr_mask = True
-                    time.sleep(5)
-        if valid_tile:
-            openet_idx = 1 if year < 2000 else 0
-            start_year_gee = f'{year}-01-01'
-            end_year_gee = f'{year + 1}-01-01'
-            openet_start_year = start_year_gee
-            openet_end_year = end_year_gee
-            if year < 1990:
-                openet_start_year = '1990-01-01'
-                openet_end_year = '1991-01-01'
-            openet_ensemble = openet_ic[openet_idx].select('et_ensemble_mad') \
-                .filterDate(openet_start_year, openet_end_year) \
-                .sum()
-            # Oct-Dec 1999 is in the public domain, Jan-Dec 1999 is in the provisional domain
-            if year == 1999:
-                openet_ensemble_public = openet_ic[0].select('et_ensemble_mad') \
-                .filterDate(openet_start_year, openet_end_year) \
-                .sum()
-                openet_ensemble = openet_ensemble.add(openet_ensemble_public)
-            prism_precip = prism_ic.select('ppt') \
+        start_year_gee = f'{year}-01-01'
+        end_year_gee = f'{year + 1}-01-01'
+        if year >= 2000:
+            actual_et = openet_ic.select('et_ensemble_mad') \
                 .filterDate(start_year_gee, end_year_gee) \
                 .sum()
-            prism_tmmx = prism_ic.select('tmax') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .median() \
-                .add(273.15)
-            prism_tmmn = prism_ic.select('tmin') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .median()\
-                .add(273.15)
-            era5land_swe = era5land_ic.select('snow_depth_water_equivalent') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-            era5land_runoff = era5land_ic.select('runoff_sum') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .sum()
-            era5land_volumetric_soil_water_layer_1 = era5land_ic.select('volumetric_soil_water_layer_1') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .median()
-            era5land_volumetric_soil_water_layer_2 = era5land_ic.select('volumetric_soil_water_layer_2') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .median()
-            era5land_volumetric_soil_water_layer_3 = era5land_ic.select('volumetric_soil_water_layer_3') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .median()
-            era5land_volumetric_soil_water_layer_4 = era5land_ic.select('volumetric_soil_water_layer_4') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .median()
-            if year < 2008:
-                # Switch to NLCD for 1985-2007
-                nlcd_year = year if year >= 1985 else 1985
-                nlcd_year = nlcd_ic.filterDate(f'{nlcd_year}-01-01', f'{nlcd_year + 1}-01-01').first()
-                nlcd_mask_1 = nlcd_year.eq(82) # cropland
-                nlcd_mask_2 = nlcd_year.gte(21).And(nlcd_year.lte(24)) # developed
-                nlcd_mask_3 = nlcd_year.eq(11) # open water
-                nlcd_mask = nlcd_mask_1.Or(nlcd_mask_2).Or(nlcd_mask_3)
-                cdl = nlcd_year.updateMask(nlcd_mask).remap(
-                    [82, 21, 22, 23, 24, 11],
-                    [1, 121, 122, 123, 124, 111]
-                ).rename('cropland')
-            else:
-                cdl = cdl_ic.filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
-                    .select('cropland') \
-                    .first()
-            data_bands = [
-                openet_ensemble,
-                prism_precip,
-                prism_tmmx,
-                prism_tmmn,
-                era5land_swe,
-                era5land_runoff,
-                era5land_volumetric_soil_water_layer_1,
-                era5land_volumetric_soil_water_layer_2,
-                era5land_volumetric_soil_water_layer_3,
-                era5land_volumetric_soil_water_layer_4,
-                cdl,
-                soil_depth,
-                awc,
-                ksat_mean,
-                irr_mask
-            ]
-            data_img = openet_ensemble.rename(data_band_names[0])
-            data_img = data_img.setDefaultProjection(
-                crs=crs,
-                scale=30
-            ).reduceResolution(
-                reducer=ee.Reducer.mean(),
-                bestEffort=True,
-                maxPixels=max_pixels
-            ).reproject(crs, scale=gee_scale)
-            for band, band_name in zip(data_bands, data_band_names):
-                if multiply_irr_mask:
-                    band = band.multiply(irr_mask)
-                band = band.rename(band_name)
-                try:
-                    band_scale = band.projection().nominalScale().getInfo()
-                except ee.EEException as e:
-                    print('Error getting band scale for', band_name, ':', e)
-                    return
-                if gee_scale > 30:
-                    if band_name in categorical_bands:
-                        reducer = ee.Reducer.mode(maxRaw=max_pixels)
-                    elif band_name == 'annual_irrmapper_fraction':
-                        reducer = ee.Reducer.count()
-                    elif band_scale < 1000:
-                        reducer = ee.Reducer.mean()
+        else:
+            actual_et = usgs_ensemble_et_ic.filterDate(start_year_gee, end_year_gee) \
+                .sum() \
+                .multiply(30) \
+                .setDefaultProjection(crs=crs, scale=800)
+        eto = calculate_eto(year)
+        precip = prism_ic.select('ppt') \
+            .filterDate(start_year_gee, end_year_gee) \
+            .sum()
+        peff = calculate_annual_peff(year, mad_factor=1, rz_depth_m=[2] * 12) # consistent with UCRB comparisons
+        tmmx = prism_ic.select('tmax') \
+            .filterDate(start_year_gee, end_year_gee) \
+            .mean() \
+            .add(273.15)
+        tmmn = prism_ic.select('tmin') \
+            .filterDate(start_year_gee, end_year_gee) \
+            .mean()\
+            .add(273.15)
+        if year < 1985:
+            # Use historical USGS LULC data from 1938-1984.
+            usgs_lulc_year = year if year >= 1938 else 1938
+            usgs_lulc = usgs_lulc_ic.filterMetadata('scenario', 'equals', 'Historical') \
+                .filterDate(f'{usgs_lulc_year}-01-01', f'{usgs_lulc_year + 1}-01-01') \
+                .first() \
+                .setDefaultProjection(crs=crs, scale=250)
+            usgs_mask_1 = usgs_lulc.eq(13) # cropland
+            usgs_mask_2 = usgs_lulc.eq(2) # developed
+            usgs_mask_3 = usgs_lulc.eq(6) # mining
+            usgs_mask_4 = usgs_lulc.eq(1) # open water
+            usgs_mask = usgs_mask_1.Or(usgs_mask_2).Or(usgs_mask_3).Or(usgs_mask_4)
+            lulc = usgs_lulc.updateMask(usgs_mask).remap(
+                [13, 2, 6, 1],
+                [1, 124, 121, 111]
+            ).rename('lulc')
+        elif 1985 <= year <= 2007:
+            # Switch to NLCD for 1985-2007
+            nlcd_year = nlcd_ic.filterDate(start_year_gee, end_year_gee).first()
+            nlcd_mask_1 = nlcd_year.eq(82) # cropland
+            nlcd_mask_2 = nlcd_year.gte(21).And(nlcd_year.lte(24)) # developed
+            nlcd_mask_3 = nlcd_year.eq(11) # open water
+            nlcd_mask = nlcd_mask_1.Or(nlcd_mask_2).Or(nlcd_mask_3)
+            lulc = nlcd_year.updateMask(nlcd_mask).remap(
+                [82, 21, 22, 23, 24, 11],
+                [1, 121, 122, 123, 124, 111]
+            ).rename('lulc')
+        else:
+            cdl_year = year if year <= 2024 else 2024
+            # Switch to CDL for 2008-2024
+            lulc = cdl_ic.filterDate(f'{cdl_year}-01-01', f'{cdl_year + 1}-01-01') \
+                .select('cropland') \
+                .first() \
+                .rename('lulc')
+        data_bands = [
+            actual_et,
+            eto,
+            precip,
+            peff,
+            tmmx,
+            tmmn,
+            lulc,
+            soil_depth,
+            awc,
+            ksat_mean,
+            irr_mask
+        ]
+        download_gee_tif(
+            data_bands=data_bands,
+            data_band_name_list=data_band_names,
+            local_file_name=local_file_name,
+            ee_geom=ee_geom,
+            gee_scale=gee_scale,
+            crs=crs,
+            categorical_bands=categorical_bands,
+            verbose=verbose
+        )
+        
+    scenario_data_list = ['LULC', 'MACA']
+    # We download LULC and MACA scenario data separately.
+    for scenario_data in scenario_data_list:
+        for scenario in (usgs_lulc_scenarios if scenario_data == 'LULC' else maca_scenarios):
+            for model in (maca_models if scenario_data == 'MACA' else [None]):
+                scenario_suffix = f'{scenario_data}_{scenario}_{model}' if model else f'{scenario_data}_{scenario}'
+                for year in scenario_years:
+                    local_file_name = f'{scenario_download_dir}Tile_{tile_values[0]}_{year}_{scenario_suffix}.tif'
+                    if os.path.exists(local_file_name):
+                        try:
+                            tile_arr, tile_rio = read_raster_as_arr(local_file_name)
+                            if tile_arr.size == 0:
+                                if verbose:
+                                    logger.warning('Downloaded file is empty. Deleting %s', local_file_name)
+                                tile_rio.close()
+                                os.remove(local_file_name)
+                                raise rio.errors.RasterioIOError
+                            tile_rio.close()
+                            continue
+                        except rio.errors.RasterioIOError:
+                            os.remove(local_file_name)
+                            if verbose:
+                                logger.warning('%s corrupted. Downloading again...', local_file_name)
+                    if scenario_data == 'LULC':
+                        lulc = usgs_lulc_ic.filterMetadata('scenario', 'equals', scenario) \
+                            .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                            .first() \
+                            .setDefaultProjection(crs=crs, scale=250)
+                        lulc_mask_1 = lulc.eq(13) # cropland
+                        lulc_mask_2 = lulc.eq(2) # developed
+                        lulc_mask_3 = lulc.eq(6) # mining
+                        lulc_mask_4 = lulc.eq(1) # open water
+                        lulc_mask = lulc_mask_1.Or(lulc_mask_2).Or(lulc_mask_3).Or(lulc_mask_4)
+                        lulc = lulc.updateMask(lulc_mask).remap(
+                            [13, 2, 6, 1],
+                            [1, 124, 121, 111]
+                        ).rename('lulc')
+                        data_bands = [lulc]
+                        data_band_name_list = ['lulc']
                     else:
-                        reducer = None
-                    if reducer:
-                        band = band.setDefaultProjection(
-                            crs=crs,
-                            scale=30
-                        ).reduceResolution(
-                            reducer=reducer,
-                            bestEffort=True,
-                            maxPixels=max_pixels
-                        ).reproject(crs, scale=gee_scale)
-                    else:
-                        band = band.setDefaultProjection(
-                            crs=crs,
-                            scale=30
-                        ).reproject(crs, scale=gee_scale)
-                if band_name == 'annual_irrmapper_fraction':
-                    band = band.multiply(900).divide(gee_scale ** 2)
-                    band = band.where(band.gt(1), 1)
-                data_img = data_img.addBands(band, overwrite=True)
-            retry_download = True
-            while retry_download:
-                try:
-                    gee_url = data_img.getDownloadUrl({
-                        'scale': gee_scale,
-                        'region': ee_geom,
-                        'format': 'GEO_TIFF',
-                        'crs': crs
-                    })
-                    if verbose:
-                        print('Dowloading', local_file_name, '...')
-                    r = requests.get(
-                        gee_url,
-                        allow_redirects=True,
-                        timeout=None,
-                        stream=True
+                        maca_daily = ee.ImageCollection('IDAHO_EPSCOR/MACAv2_METDATA') \
+                            .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+                            .filterMetadata('model', 'equals', model) \
+                            .filterMetadata('scenario', 'equals', scenario)
+                        maca_pr = maca_daily.select('pr').sum().rename('annual_precip_mm')
+                        maca_tmmx = maca_daily.select('tasmax').mean().rename('annual_tmmx_K')
+                        maca_tmmn = maca_daily.select('tasmin').mean().rename('annual_tmmn_K')
+                        maca_eto = calculate_eto(
+                            year, maca_scenario=scenario, 
+                            maca_model=model, return_monthly=False
+                        )
+                        maca_peff = calculate_annual_peff(
+                            year, maca_scenario=scenario,
+                            maca_model=model
+                        )
+                        data_bands = [maca_eto, maca_pr, maca_peff, maca_tmmx, maca_tmmn]
+                        data_band_name_list = [
+                            'annual_eto_mm', 'annual_precip_mm', 
+                            'annual_peff_mm', 'annual_tmmx_K', 'annual_tmmn_K'
+                        ]
+                    download_gee_tif(
+                        data_bands=data_bands,
+                        data_band_name_list=data_band_name_list,
+                        local_file_name=local_file_name,
+                        ee_geom=ee_geom,
+                        gee_scale=gee_scale,
+                        crs=crs,
+                        categorical_bands=categorical_bands,
+                        verbose=verbose
                     )
-                    with open(local_file_name, 'wb') as fd:
-                        for chunk in r.iter_content(chunk_size=1024):
-                            fd.write(chunk)
-                    tile_arr, tile_rio = read_raster_as_arr(local_file_name)
-                    if tile_arr.size == 0:
-                        print('Downloaded file is empty. Deleting', local_file_name)
-                        tile_rio.close()
-                        os.remove(local_file_name)
-                        raise rio.errors.RasterioIOError
-                    tile_rio.close()
-                    retry_download = False
-                except (
-                        ee.EEException, requests.exceptions.RequestException,
-                        requests.exceptions.ConnectionError, RemoteDisconnected,
-                        rio.errors.RasterioIOError
-                ) as e:
-                    print('Error', e, 'during', local_file_name, 'download!')
-                    print('Retrying download...')
-                    retry_download = True
-                time.sleep(0.001)
-    time.sleep(0.001)
 
 
 def download_gee_data(
@@ -383,8 +748,7 @@ def download_gee_data(
         num_workers: int = 32,
         worker_memory='0.5G',
         gee_scale: float = 30,
-        irrigated_tiles: bool = True,
-        multiply_irr_mask: bool = True
+        verbose: bool = False
 ) -> tuple[str, list[str]]:
     """
     Download multiple GEE datasets as rasters at 100 m spatial resolution.
@@ -401,31 +765,26 @@ def download_gee_data(
     num_workers (int): Number of tiles to parallely download. Note that both tile_size and num_workers have quotas for
     free GEE users.
     gee_scale (float): GEE data download scale in m.
-    irrigated_tiles (bool): Set False to download all tiles regardless of irrigation.
-    multiply_irr_mask (bool): Set False to skip multiplying image bands by the irrigation mask.
+    verbose (bool): Set True to see extra details on file downloads.
 
     Returns:
         tuple (str, list (str, ...)): Tuple containing the directory path containing all the downloaded GEE tiles and
         the ordered list of band names for each tile.
     """
 
-    data_dir = f'{download_dir}GEE_Data/GEE_Tiles_{int(gee_scale)}m_IrrMaskMul_{multiply_irr_mask}/'
+    data_dir = f'{download_dir}GEE_Data/GEE_Tiles_{int(gee_scale)}m/'
     data_band_names = [
         'annual_et_ensemble_mm',
-        'annual_prism_precip_mm',
-        'annual_prism_tmmx_K',
-        'annual_prism_tmmn_K',
-        'annual_era5land_swe_m',
-        'annual_era5land_runoff_m',
-        'annual_era5land_volumetric_soil_water_layer_1',
-        'annual_era5land_volumetric_soil_water_layer_2',
-        'annual_era5land_volumetric_soil_water_layer_3',
-        'annual_era5land_volumetric_soil_water_layer_4',
-        'crop_cdl',
+        'annual_eto_mm',
+        'annual_precip_mm',
+        'annual_peff_mm',
+        'annual_tmmx_K',
+        'annual_tmmn_K',
+        'lulc',
         'soil_depth_cm',
-        'awc_cm',
+        'awc_in',
         'ksat_mean_micromps',
-        'annual_irrmapper_fraction'
+        'irrigation_status'
     ]
     if not skip_download:
         makedirs(data_dir)
@@ -478,26 +837,22 @@ def download_gee_data(
             print(band_idx + 1, band_name)
         print('\n')
         tile_chunks = generate_chunks(tile_val_list, num_workers)
-        itr = 1
         num_chunks = int(np.ceil(fishnet_gdf.shape[0] / num_workers))
         dask_cluster = LocalCluster(n_workers=num_workers, memory_limit=worker_memory)
         dask_cluster.scale(num_workers)
         dask_client = Client(dask_cluster)
         dask_client.wait_for_workers(1)
         print(f'Using {num_workers} local workers...')
-        for tile_chunk in tile_chunks:
-            print(f'Working on tile chunk {itr} / {num_chunks} ...')
+        for tile_chunk in tqdm(tile_chunks, desc='Processing tile chunks', total=num_chunks):
             compute(
                 delayed(download_gee_tile)(
                     tile_vals, data_dir, year_list,
                     data_band_names, gcloud_project,
-                    gee_scale, irrigated_tiles,
-                    multiply_irr_mask,
-                    verbose=False
+                    gee_scale,
+                    verbose=verbose
                 )
                 for tile_vals in tile_chunk
             )
-            itr += 1
         dask_client.shutdown()
     return data_dir, data_band_names
 
@@ -509,7 +864,7 @@ def get_categorical_bands() -> list[str]:
     Returns:
         List of categorical band names.
     """
-    return ['crop_cdl', 'HSG']
+    return ['lulc', 'HSG']
 
 
 def resample_gee_rasters(
@@ -552,7 +907,7 @@ def resample_gee_rasters(
                 val = (band_num + 1, 'average', 'float32')
             else:
                 gdal_dtype = 'int16'
-                if data_band_name in ['crop_cdl', 'HSG']:
+                if data_band_name in ['lulc', 'HSG']:
                     gdal_dtype = 'byte'
                 val = (band_num + 1, 'mode', gdal_dtype)
             data_band_dict[data_band_name] = val
@@ -608,93 +963,7 @@ def resample_gee_rasters(
         print('GEE tiles already resampled...')
 
 
-def create_irrigation_tiles_parallel(
-        year: int,
-        gee_tile_dir: str,
-        irr_30m_dir: str,
-        output_prefix: str,
-        irr_resampled_dir: str,
-        resampling_factor: float
-) -> None:
-    """
-    Parallely create yearly irrigated area tiles at 30 m and resampled resolutions.
 
-    Args:
-        year (int): Year in YYYY format.
-        gee_tile_dir (str): Directory containing the yearly tiles.
-        irr_30m_dir (str): 30-m irrigated area raster directory.
-        output_prefix (str): Output prefix for irrigated area files.
-        irr_resampled_dir (str): Resampled irrigated area raster directory.
-        resampling_factor (float): Tile resampling factor.
-
-    Returns:
-        None.
-    """
-    print('Creating irrigation rasters for', year, '...')
-    gee_yearly_tiles = glob(f'{gee_tile_dir}*{year}.tif')
-    for tile in gee_yearly_tiles:
-        tile_file = tile[tile.rfind(os.sep) + 1:]
-        try:
-            tile_arr, tile_obj = read_raster_as_arr(tile)
-            tile_arr[tile_arr > 0] = 1
-            irr_raster_file_30m = f'{irr_30m_dir}{output_prefix}_{tile_file}'
-            write_raster(
-                tile_arr,
-                tile_obj,
-                transform_=tile_obj.transform,
-                outfile_path=irr_raster_file_30m,
-                no_data_value=0,
-                num_bands=1
-            )
-            irr_raster_file_resampled = f'{irr_resampled_dir}{output_prefix}_{tile_file}'
-            reproject_raster_gdal(
-                irr_raster_file_30m,
-                irr_raster_file_resampled,
-                resampling_factor=resampling_factor,
-                resampling_func='sum',
-                output_dtype='int32'
-            )
-        except Exception as e:
-            print('Error occured while processing', tile, '\n', e)
-            continue
-
-
-def create_irrigation_tiles(
-        gee_tile_dir: str,
-        output_dir: str,
-        start_year: int = 1985,
-        end_year: int = 2024,
-        raster_res: float = 1000,
-        output_prefix: str = 'IRR',
-        already_created: bool = False
-) -> str:
-    """
-    Create irrigation tiles by aggregating 30-m GEE tiles which are already masked using IrrMapper.
-
-    Args:
-        gee_tile_dir: GEE tile directory containing the 30-m multi-band rasters.
-        output_dir (str): Output directory.
-        start_year (int): Start year in YYYY.
-        end_year (int): End year in YYYY.
-        raster_res (float): Raster resolution in m.
-        output_prefix (str): Prefix for the output file names.
-        already_created (bool): Set True to skip creating irrigated area rasters.
-
-    Returns:
-        str: Directory path to the resampled irrigation tiles. Each <raster_res> size pixel contains the number of
-             irrigated pixels at the 30-m scale.
-    """
-
-    irr_resampled_dir = f'{output_dir}Irrigation_{raster_res}m/'
-    if not already_created:
-        irr_30m_dir = f'{output_dir}Irrigation_30m/'
-        makedirs((irr_30m_dir, irr_resampled_dir))
-        resampling_factor = raster_res / 30
-        joblib.Parallel(n_jobs=-1)(joblib.delayed(create_irrigation_tiles_parallel)(
-            year, gee_tile_dir, irr_30m_dir, output_prefix,
-            irr_resampled_dir, resampling_factor
-        ) for year in range(start_year, end_year + 1))
-    return irr_resampled_dir
 
 
 def mosaic_tiles_parallel(
@@ -866,7 +1135,7 @@ def create_az_data_csv(
                                 else:
                                     df[band_name] = raster_arr.ravel()
                             except IndexError:
-                                print('IndexError for', raster_file)
+                                logger.warning('IndexError for %s', raster_file)
                                 df[band_name] = 0
                     else:
                         raster_arr = read_raster_as_arr(raster_file, get_file=False).ravel()

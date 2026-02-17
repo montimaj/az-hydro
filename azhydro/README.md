@@ -40,8 +40,8 @@ Open Linux/Mac terminal or Windows PowerShell and run the following:
 ```
 conda create -y -n azhydro python=3.12
 conda activate azhydro
-conda install -y -c conda-forge gdal rioxarray geopandas lightgbm py-xgboost earthengine-api rasterstats seaborn openpyxl dataretrieval optuna optuna-dashboard scikit-explain
-conda install -y -c conda-forge dask-ml dask-jobqueue swifter
+conda install -y -c conda-forge gdal rioxarray geopandas lightgbm py-xgboost earthengine-api rasterstats seaborn openpyxl optuna optuna-dashboard scikit-explain catboost dask-ml dask-jobqueue swifter xee
+pip install openet-refet-gee
 ```
 
 ### 4. Google Earth Engine Authentication
