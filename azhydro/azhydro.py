@@ -37,10 +37,10 @@ if __name__ == '__main__':
     gcloud_project = 'azhydro'
     gcloud_bucket = 'azhydro'
     start_year = 1896
-    end_year = 2100
+    end_year = 2099
     skip_download = False
     tile_raster_res = 2000 # this is the same as Majumdar et al. (2022)
-    tile_size = 10000 if tile_raster_res == 30 else 80000
+    tile_size = 10000 if tile_raster_res == 30 else 70000
     fill_attr = 'AF Pumped'
     mosaic_raster_res = tile_raster_res
     gee_mosaic_data_dir = f'{output_dir}GEE_Mosaics_{int(mosaic_raster_res)}m/'
@@ -62,7 +62,7 @@ if __name__ == '__main__':
         num_workers=32,
         worker_memory='1.5G',
         gee_scale=tile_raster_res,
-        verbose=True
+        verbose=False
     )
     
     # dataops.mosaic_tiles(
