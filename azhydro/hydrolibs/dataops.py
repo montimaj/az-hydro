@@ -28,6 +28,7 @@ gdal.UseExceptions()
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+logging.getLogger('pyogrio').setLevel(logging.ERROR)
 logging.getLogger('rasterio').setLevel(logging.ERROR)
 logging.getLogger('googleapiclient').setLevel(logging.ERROR)
 logging.getLogger('googleapiclient.http').setLevel(logging.ERROR)
@@ -411,11 +412,21 @@ def download_gee_tif(
     """
     
     data_img = data_bands[0].rename(data_band_name_list[0])
-    try:
-        band_scale = data_img.projection().nominalScale().getInfo()
-        time.sleep(0.01)
-    except ee.EEException as e:            
-        logger.error('Error getting band scale for %s: \nLocal file name: %s', e, local_file_name)
+    max_retries = 10
+    itr = 0
+    band_scale = None
+    while itr < max_retries:
+        try:
+            band_scale = data_img.projection().nominalScale().getInfo()
+            time.sleep(0.01)
+            break
+        except ee.EEException as e:
+            if verbose:          
+                logger.warning('Error getting band scale for %s: \nLocal file name: %s', e, local_file_name)
+            itr += 1
+            time.sleep(0.01 * itr)
+    if band_scale is None:
+        logger.error('Failed to get band scale for %s after %d attempts. Aborting download.', local_file_name, max_retries)
         return
     max_pixels = max(64, np.ceil((gee_scale / band_scale) ** 2))
     data_img = data_img.setDefaultProjection(
@@ -428,11 +439,21 @@ def download_gee_tif(
     ).reproject(crs, scale=gee_scale)
     for band, band_name in zip(data_bands, data_band_name_list):
         band = band.rename(band_name)
-        try:
-            band_scale = band.projection().nominalScale().getInfo()
-            time.sleep(0.01)
-        except ee.EEException as e:
-            logger.error('Error getting band scale for %s: \nLocal file name: %s', e, local_file_name)
+        max_retries = 10
+        itr = 0
+        band_scale = None
+        while itr < max_retries:
+            try:
+                band_scale = band.projection().nominalScale().getInfo()
+                time.sleep(0.01)
+                break
+            except ee.EEException as e:            
+                if verbose:
+                    logger.warning('Error getting band scale for %s: \nLocal file name: %s', e, local_file_name)
+                itr += 1
+                time.sleep(0.01 * itr)
+        if band_scale is None:
+            logger.error('Failed to get band scale for %s after %d attempts. Aborting download.', local_file_name, max_retries)
             return
         if gee_scale > 30:
             if band_name in categorical_bands:
@@ -515,7 +536,7 @@ def download_gee_tif(
             with open(local_file_name, 'wb') as fd:
                 fd.write(r.content)
             # Validate the downloaded file
-            tile_arr, tile_rio = read_raster_as_arr(local_file_name)
+            tile_arr, tile_rio = read_raster_as_arr(local_file_name, change_dtype=False)
             if tile_arr.size == 0:
                 if verbose:
                     logger.warning('Downloaded file is empty. Deleting %s', local_file_name)
@@ -598,12 +619,17 @@ def download_gee_tile(
             time.sleep(1)
     openet_ic_v2 = ee.ImageCollection('OpenET/ENSEMBLE/CONUS/GRIDMET/MONTHLY/v2_0')
     openet_ic_v21 = ee.ImageCollection('projects/openet/assets/ensemble/conus/gridmet/monthly/v2_1')
-    usgs_ensemble_et_ic = ee.ImageCollection('users/montimajumdar/USGS-Reitz-Ensemble-ET') 
+    usgs_ensemble_et_ic = ee.ImageCollection('projects/nwi-usgs/assets/USGS-Reitz-Ensemble-ET') 
     prism_ic = ee.ImageCollection('projects/sat-io/open-datasets/OREGONSTATE/PRISM_800_MONTHLY') 
     irrmapper_ic = ee.ImageCollection('UMT/Climate/IrrMapper_RF/v1_2')
+    gw_fraction_img_dict = {
+        '2000': ee.Image("projects/fwhung/assets/CroplandNew60m/Crop_IrrSource_2000"),
+        '2005': ee.Image("projects/fwhung/assets/CroplandNew60m/Crop_IrrSource_2005"),
+        '2010': ee.Image("projects/fwhung/assets/CroplandNew60m/Crop_IrrSource_2010"),
+        '2015': ee.Image("projects/fwhung/assets/CroplandNew60m/Crop_IrrSource_2015")
+    }
     nlcd_ic = ee.ImageCollection('projects/sat-io/open-datasets/USGS/ANNUAL_NLCD/LANDCOVER')
-    cdl_ic = ee.ImageCollection('USDA/NASS/CDL')
-    usgs_lulc_ic = ee.ImageCollection('users/montimajumdar/USGS-LULC-CONUS')
+    usgs_lulc_ic = ee.ImageCollection('projects/nwi-usgs/assets/USGS-LULC-CONUS')
     soil_depth = ee.Image(
         'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/land_use/soil_depth'
     ).rename('soil_depth_cm')
@@ -711,26 +737,29 @@ def download_gee_tile(
             usgs_mask = usgs_mask_1.Or(usgs_mask_2).Or(usgs_mask_3).Or(usgs_mask_4)
             lulc = usgs_lulc.updateMask(usgs_mask).remap(
                 [13, 2, 6, 1],
-                [1, 124, 121, 111]
+                [1, 2, 2, 3] # 1: AGRI, 2: URBAN, 3: SW, 0: other (masked out)
             ).rename('lulc')
-        elif 1985 <= year <= 2007:
-            # Switch to NLCD for 1985-2007
-            nlcd_year = nlcd_ic.filterDate(start_year_gee, end_year_gee).first()
+        else:
+            # Switch to NLCD for 1985-2024. Use 2024 data for 2025.
+            nlcd_year = year if year <= 2024 else 2024
+            nlcd_year = nlcd_ic.filterDate(f'{nlcd_year}-01-01', f'{nlcd_year + 1}-01-01').first()
             nlcd_mask_1 = nlcd_year.eq(82) # cropland
             nlcd_mask_2 = nlcd_year.gte(21).And(nlcd_year.lte(24)) # developed
             nlcd_mask_3 = nlcd_year.eq(11) # open water
             nlcd_mask = nlcd_mask_1.Or(nlcd_mask_2).Or(nlcd_mask_3)
             lulc = nlcd_year.updateMask(nlcd_mask).remap(
                 [82, 21, 22, 23, 24, 11],
-                [1, 121, 122, 123, 124, 111]
+                [1, 2, 2, 2, 2, 3] # 1: AGRI, 2: URBAN, 3: SW, 0: other (masked out)
             ).rename('lulc')
+        if year < 2005:
+            gw_fraction = gw_fraction_img_dict['2000']
+        elif 2005 <= year < 2010:
+            gw_fraction = gw_fraction_img_dict['2005']
+        elif 2010 <= year < 2015:
+            gw_fraction = gw_fraction_img_dict['2010']
         else:
-            cdl_year = year if year <= 2024 else 2024
-            # Switch to CDL for 2008-2025
-            lulc = cdl_ic.filterDate(f'{cdl_year}-01-01', f'{cdl_year + 1}-01-01') \
-                .select('cropland') \
-                .first() \
-                .rename('lulc')
+            gw_fraction = gw_fraction_img_dict['2015']
+        gw_fraction = gw_fraction.select('GWIrrFraction').rename('annual_gw_fraction')
         data_bands = [
             actual_et,
             eto,
@@ -743,6 +772,7 @@ def download_gee_tile(
             soil_depth,
             awc,
             ksat_mean,
+            gw_fraction,
             irr_mask
         ]
         download_gee_tif(
@@ -877,6 +907,7 @@ def download_gee_data(
         'soil_depth_cm',
         'awc_in',
         'ksat_mean_micromps',
+        'annual_gw_fraction',
         'irrigation_status'
     ]
     if not skip_download:
@@ -901,13 +932,13 @@ def download_gee_data(
                 fileFormat='GeoJSON'
             )
             task.start()
-            logger.info(f'Waiting to download the HUC12 polygons over the study area from GCloud...')
+            logger.info('Waiting to download the HUC12 polygons over the study area from GCloud...')
             while task.active():
                 continue
             storage_client = storage.Client()
             storage_bucket = storage_client.bucket(gcloud_bucket)
             gcloud_blob = storage.Blob(bucket=storage_bucket, name=huc12_path)
-            logger.info('Downloading', huc12_path)
+            logger.info(f'Downloading {huc12_path}')
             gcloud_blob.download_to_filename(huc12_local_path)
         year_list = list(range(start_year, end_year + 1))
         logger.info(f'Creating Fishnet with {tile_size} m tile size...')

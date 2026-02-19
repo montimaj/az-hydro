@@ -15,13 +15,8 @@ import geopandas as gpd
 import pandas as pd
 import dataretrieval.nwis as nwis
 import scipy.ndimage.filters as flt
-import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
-import seaborn as sns
-import multiprocessing
 
 from typing import Any
-from joblib import Parallel, delayed
 from sysops import makedirs, copy_file
 from glob import glob
 from copy import deepcopy
