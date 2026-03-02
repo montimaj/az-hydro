@@ -328,6 +328,10 @@ python export_maca_monthly_eto.py --no-wait
 
 All scripts check for existing assets before exporting. If a run is interrupted, simply re-run the same script — it will skip already-exported images and only submit remaining ones.
 
+### Queue Throttling
+
+GEE enforces a 3,000-task queue limit. `export_image()` automatically calls `_wait_for_queue_capacity()` before each submission. If there are already 2,900+ pending/running tasks, it polls every 60 seconds until the queue has room. This means large batch exports (e.g., 2,448 peff images) can be launched without manually splitting runs.
+
 ## Shared Utilities (`config.py`)
 
 | Function | Purpose |
@@ -337,7 +341,7 @@ All scripts check for existing assets before exporting. If a run is interrupted,
 | `create_ic_asset(asset_id)` | Create ImageCollection asset if missing |
 | `list_existing_assets(collection_id)` | Batch-list all assets in a collection (paginated) |
 | `asset_exists(asset_id)` | Check if a single asset exists |
-| `export_image(...)` | Export clipped image to asset (supports `as_int` for categorical data) |
+| `export_image(...)` | Export clipped image to asset (supports `as_int` for categorical data). Auto-throttles near 3k queue limit |
 | `wait_for_tasks(tasks)` | Poll until all tasks complete, report failures |
 | `get_export_parser(description)` | Argparse with `--start-year`, `--end-year`, `--no-wait` |
 | `calc_prism_monthly_eto(img)` | Hargreaves PET from PRISM tmax/tmin |
