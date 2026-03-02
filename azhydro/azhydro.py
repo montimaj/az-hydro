@@ -61,7 +61,7 @@ if __name__ == '__main__':
         num_workers=32,
         worker_memory='1.5G',
         gee_scale=tile_raster_res,
-        verbose=False
+        verbose=True
     )
     
     # dataops.mosaic_tiles(
