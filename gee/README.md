@@ -95,7 +95,7 @@ The export pipeline harmonizes multiple heterogeneous data sources into temporal
     └─────────────────────────────────────────────────────────────┘
 ```
 
-- **1896–1978 (PRISM Hargreaves → gridMET scale):** Daily climate data is unavailable before 1979, so monthly ETo is estimated from PRISM monthly tmax/tmin via the Hargreaves method (`openet.refetgee.Daily` with mid-month DOY). This systematically differs from Penman-Monteith-based gridMET ETo, so a per-pixel, per-month correction ratio is derived from the 1979–2025 overlap (564 paired monthly images) where both Hargreaves and gridMET are available. The corrected ETo is: $\text{ETo}_{\text{corrected}} = \text{Hargreaves PET} \times \frac{\text{gridMET ETo}}{\text{Hargreaves PET}}\bigg|_{\text{1979–2025 mean}}$.
+- **1896–1978 (PRISM Hargreaves → gridMET scale):** Daily climate data is unavailable before 1979, so monthly ETo is estimated from PRISM monthly tmax/tmin via the Hargreaves method (`openet.refetgee.Daily` with mid-month DOY). This systematically differs from Penman-Monteith-based gridMET ETo, so a per-pixel, per-month correction ratio is derived from the 1979–2025 overlap (564 paired monthly images) where both Hargreaves and gridMET are available. The corrected ETo is: $\text{ETo}_{\text{corrected}} = \text{Hargreaves PET} \times \overline{R}$, where $\overline{R} = \text{mean}\left(\frac{\text{gridMET ETo}}{\text{Hargreaves PET}}\right)$ over 1979–2025.
 
 - **1979–2025 (gridMET, native):** gridMET monthly ETo (`projects/openet/assets/reference_et/conus/gridmet/monthly/v1`) is used directly. This is the reference standard to which all other eras are harmonized.
 
