@@ -16,8 +16,8 @@ Usage:
 import ee
 from config import (
     init_ee, get_az_geometry, create_ic_asset, list_existing_assets,
-    export_image, wait_for_tasks, get_export_parser,
-    ASSET_PREFIX, REITZ_SCALE
+    list_pending_task_descriptions, export_image, wait_for_tasks,
+    get_export_parser, ASSET_PREFIX, REITZ_SCALE
 )
 
 
@@ -32,6 +32,7 @@ def build_and_export(start_year, end_year):
     az = get_az_geometry()
     create_ic_asset(ASSET_ID)
     existing = list_existing_assets(ASSET_ID)
+    pending = list_pending_task_descriptions()
 
     # Load pre-exported ratio grids
     ratio_ic = ee.ImageCollection(RATIO_ASSET)
@@ -78,7 +79,8 @@ def build_and_export(start_year, end_year):
             task = export_image(
                 monthly_img, img_asset,
                 f'usgs_et_{img_name}',
-                az, REITZ_SCALE
+                az, REITZ_SCALE,
+                pending_descriptions=pending
             )
             tasks.append(task)
 

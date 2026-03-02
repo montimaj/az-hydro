@@ -12,6 +12,29 @@ Usage:
 import ee
 import time
 import argparse
+from http.client import RemoteDisconnected
+from functools import wraps
+
+
+_RETRYABLE_ERRORS = (ee.EEException, RemoteDisconnected, ConnectionError, TimeoutError, OSError)
+MAX_RETRIES = 10
+
+
+def _retry(func):
+    """Decorator: retry on EE / network errors with exponential backoff."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                return func(*args, **kwargs)
+            except _RETRYABLE_ERRORS as e:
+                if attempt == MAX_RETRIES:
+                    raise
+                wait = min(2 ** attempt, 120)
+                print(f'  [{func.__name__}] {e} (attempt {attempt}/{MAX_RETRIES}). '
+                      f'Retrying in {wait}s...')
+                time.sleep(wait)
+    return wrapper
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -44,6 +67,7 @@ USGS_LULC_SCALE = 250
 
 # ─── Initialization ──────────────────────────────────────────────────────────
 
+@_retry
 def init_ee():
     """Initialize Earth Engine with high-volume endpoint."""
     ee.Initialize(
@@ -60,6 +84,7 @@ def get_az_geometry():
 
 # ─── Asset management ────────────────────────────────────────────────────────
 
+@_retry
 def create_ic_asset(asset_id):
     """Create an ImageCollection asset if it doesn't exist."""
     try:
@@ -78,6 +103,7 @@ def asset_exists(asset_id):
         return False
 
 
+@_retry
 def list_existing_assets(collection_id):
     """List all asset IDs in an ImageCollection. Returns a set for O(1) lookups."""
     existing = set()
@@ -96,10 +122,26 @@ def list_existing_assets(collection_id):
     return existing
 
 
+@_retry
+def list_pending_task_descriptions():
+    """Return a set of descriptions for all PENDING/RUNNING/READY tasks."""
+    pending = set()
+    for op in ee.data.listOperations():
+        meta = op.get('metadata', {})
+        if meta.get('state') in ('PENDING', 'RUNNING', 'READY'):
+            pending.add(meta.get('description', ''))
+    return pending
+
+
 def _wait_for_queue_capacity(max_queue=2900, poll_interval=60):
     """Block until the task queue has room (below max_queue active/ready tasks)."""
     while True:
-        ops = ee.data.listOperations()
+        try:
+            ops = ee.data.listOperations()
+        except _RETRYABLE_ERRORS as e:
+            print(f'  [_wait_for_queue_capacity] {e}. Retrying in {poll_interval}s...')
+            time.sleep(poll_interval)
+            continue
         busy = sum(1 for op in ops
                    if op.get('metadata', {}).get('state') in
                    ('PENDING', 'RUNNING', 'READY'))
@@ -109,15 +151,24 @@ def _wait_for_queue_capacity(max_queue=2900, poll_interval=60):
         time.sleep(poll_interval)
 
 
+@_retry
 def export_image(image, asset_id, description, region, scale, crs='EPSG:4326',
-                 as_int=False):
+                 as_int=False, pending_descriptions=None):
     """Export an ee.Image to a GEE asset, clipped to region.
-    Automatically waits if the task queue is near the 3000-task limit."""
+    Automatically waits if the task queue is near the 3000-task limit.
+    Skips if the asset already exists or a task with the same description is queued."""
+    if asset_exists(asset_id):
+        print(f'  Skipping {description} (asset already exists)')
+        return None
+    desc = description[:100]
+    if pending_descriptions is not None and desc in pending_descriptions:
+        print(f'  Skipping {desc} (task already queued)')
+        return None
     _wait_for_queue_capacity()
     out = image.clip(region).toInt() if as_int else image.clip(region).toFloat()
     task = ee.batch.Export.image.toAsset(
         image=out,
-        description=description[:100],
+        description=desc,
         assetId=asset_id,
         region=region,
         scale=scale,
@@ -130,6 +181,10 @@ def export_image(image, asset_id, description, region, scale, crs='EPSG:4326',
 
 def wait_for_tasks(tasks, check_interval=30):
     """Wait for all export tasks to complete and report status."""
+    tasks = [t for t in tasks if t is not None]
+    if not tasks:
+        print('No tasks to wait for.')
+        return
     print(f'Waiting for {len(tasks)} tasks...')
     while True:
         active = [t for t in tasks if t.active()]

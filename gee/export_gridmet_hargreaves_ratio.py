@@ -15,8 +15,8 @@ Usage:
 import ee
 from config import (
     init_ee, get_az_geometry, create_ic_asset, list_existing_assets,
-    export_image, wait_for_tasks, ASSET_PREFIX, PRISM_SCALE,
-    calc_prism_monthly_eto
+    list_pending_task_descriptions, export_image, wait_for_tasks,
+    ASSET_PREFIX, PRISM_SCALE, calc_prism_monthly_eto
 )
 
 
@@ -28,6 +28,7 @@ def build_and_export():
     az = get_az_geometry()
     create_ic_asset(ASSET_ID)
     existing = list_existing_assets(ASSET_ID)
+    pending = list_pending_task_descriptions()
 
     # gridMET monthly ETo 1979-2025
     gridmet_eto = ee.ImageCollection(
@@ -79,7 +80,8 @@ def build_and_export():
         task = export_image(
             monthly_mean, img_asset,
             f'gridmet_hargreaves_ratio_{img_name}',
-            az, PRISM_SCALE
+            az, PRISM_SCALE,
+            pending_descriptions=pending
         )
         tasks.append(task)
         print(f'  Submitted {img_name}')

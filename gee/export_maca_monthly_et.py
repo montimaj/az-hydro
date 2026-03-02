@@ -18,8 +18,8 @@ Usage:
 import ee
 from config import (
     init_ee, get_az_geometry, create_ic_asset, list_existing_assets,
-    export_image, wait_for_tasks, get_export_parser,
-    ASSET_PREFIX, MACA_SCALE
+    list_pending_task_descriptions, export_image, wait_for_tasks,
+    get_export_parser, ASSET_PREFIX, MACA_SCALE
 )
 
 
@@ -35,6 +35,7 @@ def build_and_export(start_year, end_year):
     az = get_az_geometry()
     create_ic_asset(ASSET_ID)
     existing = list_existing_assets(ASSET_ID)
+    pending = list_pending_task_descriptions()
 
     # Load pre-exported monthly EToF (12 images, one per month)
     etof_ic = ee.ImageCollection(ETOF_ASSET)
@@ -74,7 +75,8 @@ def build_and_export(start_year, end_year):
             task = export_image(
                 img, img_asset,
                 f'maca_et_{img_name}',
-                az, MACA_SCALE
+                az, MACA_SCALE,
+                pending_descriptions=pending
             )
             tasks.append(task)
         print(f'  Submitted year {year} ({len(tasks)} total tasks)')

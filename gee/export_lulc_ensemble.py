@@ -16,8 +16,8 @@ Usage:
 import ee
 from config import (
     init_ee, get_az_geometry, create_ic_asset, list_existing_assets,
-    export_image, wait_for_tasks, get_export_parser,
-    ASSET_PREFIX, USGS_LULC_SCALE, USGS_LULC_SCENARIOS
+    list_pending_task_descriptions, export_image, wait_for_tasks,
+    get_export_parser, ASSET_PREFIX, USGS_LULC_SCALE, USGS_LULC_SCENARIOS
 )
 
 
@@ -56,6 +56,7 @@ def build_and_export(start_year, end_year):
     az = get_az_geometry()
     create_ic_asset(ASSET_ID)
     existing = list_existing_assets(ASSET_ID)
+    pending = list_pending_task_descriptions()
 
     tasks = []
     for year in range(start_year, end_year + 1):
@@ -68,7 +69,8 @@ def build_and_export(start_year, end_year):
             img, img_asset,
             f'lulc_{year}',
             az, USGS_LULC_SCALE,
-            as_int=True
+            as_int=True,
+            pending_descriptions=pending
         )
         tasks.append(task)
         if len(tasks) % 10 == 0:

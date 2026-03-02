@@ -15,8 +15,8 @@ Usage:
 import ee
 from config import (
     init_ee, get_az_geometry, create_ic_asset, list_existing_assets,
-    export_image, wait_for_tasks, ASSET_PREFIX, GRIDMET_SCALE,
-    build_openet_monthly_et_ic
+    list_pending_task_descriptions, export_image, wait_for_tasks,
+    ASSET_PREFIX, GRIDMET_SCALE, build_openet_monthly_et_ic
 )
 
 
@@ -28,6 +28,7 @@ def build_and_export():
     az = get_az_geometry()
     create_ic_asset(ASSET_ID)
     existing = list_existing_assets(ASSET_ID)
+    pending = list_pending_task_descriptions()
 
     # OpenET monthly ET 2000-2025
     openet_ic = build_openet_monthly_et_ic()
@@ -72,7 +73,8 @@ def build_and_export():
         task = export_image(
             monthly_mean, img_asset,
             f'monthly_etof_{img_name}',
-            az, GRIDMET_SCALE
+            az, GRIDMET_SCALE,
+            pending_descriptions=pending
         )
         tasks.append(task)
         print(f'  Submitted {img_name}')
