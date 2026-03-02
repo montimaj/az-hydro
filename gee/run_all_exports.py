@@ -3,12 +3,12 @@ Master script to run all GEE asset exports in dependency order.
 
 Dependency graph:
   Level 1 (no dependencies):
-    - export_hargreaves_gridmet_ratio.py
+    - export_gridmet_hargreaves_ratio.py
     - export_openet_reitz_ratio.py
     - export_monthly_etof.py
     - export_lulc_ensemble.py
   Level 2 (depends on Level 1 ratios):
-    - export_prism_hargreaves_eto.py  (needs hargreaves_gridmet ratio)
+    - export_prism_hargreaves_eto.py  (needs gridmet_hargreaves ratio)
     - export_usgs_adjusted_et.py      (needs openet_reitz ratio)
     - export_maca_monthly_eto.py      (no custom dep, uses gridMET ratios)
   Level 3 (depends on Level 2):
@@ -27,7 +27,7 @@ import sys
 
 LEVELS = {
     1: [
-        ('export_hargreaves_gridmet_ratio.py', 'Hargreaves/gridMET ETo ratio (12 images)'),
+        ('export_gridmet_hargreaves_ratio.py', 'gridMET/Hargreaves ETo ratio (12 images)'),
         ('export_openet_reitz_ratio.py', 'OpenET/Reitz ET ratio (12 images)'),
         ('export_monthly_etof.py', 'Monthly EToF (12 images)'),
         ('export_lulc_ensemble.py', 'LULC projection ensemble (74 images)'),

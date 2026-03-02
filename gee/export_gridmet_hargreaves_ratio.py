@@ -1,15 +1,15 @@
-"""
-Export monthly Hargreaves/gridMET ETo ratio grids (12 images) as a GEE asset.
+""""
+Export monthly gridMET/Hargreaves ETo ratio grids (12 images) as a GEE asset.
 
 Computes the ratio of gridMET ETo to PRISM Hargreaves ETo for each month,
 averaged across 1979-2025. This is used to bias-correct Hargreaves ETo
 for 1896-1978 when daily data is unavailable.
 
-Asset: projects/azhydro/assets/hargreaves_gridmet_eto_ratio/ (12 images: month_01 .. month_12)
+Asset: projects/azhydro/assets/gridmet_hargreaves_eto_ratio/ (12 images: month_01 .. month_12)
 
 Usage:
     conda activate azhydro
-    python export_hargreaves_gridmet_ratio.py [--no-wait]
+    python export_gridmet_hargreaves_ratio.py [--no-wait]
 """
 
 import ee
@@ -20,7 +20,7 @@ from config import (
 )
 
 
-ASSET_ID = f'{ASSET_PREFIX}/hargreaves_gridmet_eto_ratio'
+ASSET_ID = f'{ASSET_PREFIX}/gridmet_hargreaves_eto_ratio'
 
 
 def build_and_export():
@@ -78,7 +78,7 @@ def build_and_export():
             .set('system:time_start', ee.Date.fromYMD(2000, m, 1).millis())
         task = export_image(
             monthly_mean, img_asset,
-            f'hargreaves_gridmet_ratio_{img_name}',
+            f'gridmet_hargreaves_ratio_{img_name}',
             az, PRISM_SCALE
         )
         tasks.append(task)
@@ -89,11 +89,11 @@ def build_and_export():
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description='Export Hargreaves/gridMET ETo ratio')
+    parser = argparse.ArgumentParser(description='Export gridMET/Hargreaves ETo ratio')
     parser.add_argument('--no-wait', action='store_true')
     args = parser.parse_args()
 
-    print('Exporting Hargreaves/gridMET ETo ratio (12 monthly grids)...')
+    print('Exporting gridMET/Hargreaves ETo ratio (12 monthly grids)...')
     tasks = build_and_export()
     if tasks and not args.no_wait:
         wait_for_tasks(tasks)

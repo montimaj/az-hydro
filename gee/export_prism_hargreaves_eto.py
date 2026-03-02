@@ -4,7 +4,7 @@ Export bias-corrected PRISM Hargreaves ETo as monthly GEE assets for 1896-1978.
 For each year, computes Hargreaves ETo from PRISM monthly tmax/tmin, then
 applies the pre-exported Hargreaves/gridMET ratio to bias-correct it.
 
-Dependency: Run export_hargreaves_gridmet_ratio.py first.
+Dependency: Run export_gridmet_hargreaves_ratio.py first.
 
 Asset: projects/azhydro/assets/prism_hargreaves_eto/ (83 years × 12 months = 996 images)
 
@@ -22,7 +22,7 @@ from config import (
 
 
 ASSET_ID = f'{ASSET_PREFIX}/prism_hargreaves_eto'
-RATIO_ASSET = f'{ASSET_PREFIX}/hargreaves_gridmet_eto_ratio'
+RATIO_ASSET = f'{ASSET_PREFIX}/gridmet_hargreaves_eto_ratio'
 DEFAULT_START = 1896
 DEFAULT_END = 1978
 

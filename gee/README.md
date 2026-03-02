@@ -14,7 +14,7 @@ The scripts use the GEE high-volume endpoint (`https://earthengine-highvolume.go
 
 | Asset Collection | Images | Years | Band | Scale (m) | Source Script |
 |---|---|---|---|---|---|
-| `hargreaves_gridmet_eto_ratio` | 12 | — (monthly climatology) | `ratio` | 4638.3 | `export_hargreaves_gridmet_ratio.py` |
+| `gridmet_hargreaves_eto_ratio` | 12 | — (monthly climatology) | `ratio` | 4638.3 | `export_gridmet_hargreaves_ratio.py` |
 | `openet_reitz_et_ratio` | 12 | — (monthly climatology) | `ratio` | 800 | `export_openet_reitz_ratio.py` |
 | `monthly_etof` | 12 | — (monthly climatology) | `etof` | 4638.3 | `export_monthly_etof.py` |
 | `prism_hargreaves_eto` | 996 | 1896–1978 | `eto` | 4638.3 | `export_prism_hargreaves_eto.py` |
@@ -30,13 +30,13 @@ Exports must run in dependency order. Use `run_all_exports.py` to orchestrate au
 
 ```
 Level 1 (no dependencies — can run in parallel):
-  ├── export_hargreaves_gridmet_ratio.py
+  ├── export_gridmet_hargreaves_ratio.py
   ├── export_openet_reitz_ratio.py
   ├── export_monthly_etof.py
   └── export_lulc_ensemble.py
 
 Level 2 (depends on Level 1):
-  ├── export_prism_hargreaves_eto.py    ← needs hargreaves_gridmet_eto_ratio
+  ├── export_prism_hargreaves_eto.py    ← needs gridmet_hargreaves_eto_ratio
   ├── export_usgs_adjusted_et.py        ← needs openet_reitz_et_ratio
   └── export_maca_monthly_eto.py        ← no custom dep (uses gridMET ratios)
 
@@ -135,7 +135,7 @@ GEE handles on-the-fly reprojection when these assets are combined at tile-downl
 
 ## Detailed Export Logic
 
-### 1. Hargreaves/gridMET ETo Ratio (`hargreaves_gridmet_eto_ratio`)
+### 1. gridMET/Hargreaves ETo Ratio (`gridmet_hargreaves_eto_ratio`)
 
 **Purpose:** Bias-correct PRISM Hargreaves ETo (1896–1978) to be consistent with gridMET ETo (1979–2025).
 
@@ -182,7 +182,7 @@ GEE handles on-the-fly reprojection when these assets are combined at tile-downl
 
 ### 4. PRISM Hargreaves ETo (`prism_hargreaves_eto`)
 
-**Dependency:** `hargreaves_gridmet_eto_ratio`
+**Dependency:** `gridmet_hargreaves_eto_ratio`
 
 **Purpose:** Monthly ETo for the historical period 1896–1978, bias-corrected to match gridMET.
 
@@ -308,7 +308,7 @@ python run_all_exports.py --no-wait          # Submit all and exit immediately
 
 ```bash
 # Ratio/climatology exports (Level 1)
-python export_hargreaves_gridmet_ratio.py
+python export_gridmet_hargreaves_ratio.py
 python export_openet_reitz_ratio.py
 python export_monthly_etof.py
 python export_lulc_ensemble.py
