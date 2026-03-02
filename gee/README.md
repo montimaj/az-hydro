@@ -205,7 +205,7 @@ GEE handles on-the-fly reprojection when these assets are combined at tile-downl
 **Method:** For each year in 1896–1999:
 1. Load Reitz ET for that year, convert mm/day → mm/month.
 2. Inner join with the 12 pre-exported OpenET/Reitz ratio grids on `month`.
-3. Multiply: $\text{actual\_et} = \text{Reitz ET (mm/month)} \times \text{ratio}$.
+3. Multiply: $\text{ET}_{\text{adj}} = \text{Reitz ET (mm/month)} \times \text{ratio}$ → band `actual_et`.
 4. Export each of the 12 monthly images.
 
 **Output:** 1,248 images (`{year}_{month:02d}`), each with band `actual_et` in mm/month.
@@ -238,7 +238,7 @@ GEE handles on-the-fly reprojection when these assets are combined at tile-downl
 1. Load pre-exported MACA monthly ETo for that year.
 2. Load pre-exported monthly EToF (12 images).
 3. Inner join on `month`.
-4. Multiply: $\text{actual\_et} = \text{MACA ETo} \times \text{EToF}$.
+4. Multiply: $\text{ET}_{\text{adj}} = \text{MACA ETo} \times \text{EToF}$ → band `actual_et`.
 5. Export each month.
 
 **Output:** 888 images (`{year}_{month:02d}`), each with band `actual_et` in mm/month.
