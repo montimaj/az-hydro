@@ -58,10 +58,10 @@ if __name__ == '__main__':
         end_year,
         skip_download,
         tile_size,
-        num_workers=32,
-        worker_memory='1.5G',
+        num_workers=40,
+        worker_memory='1G',
         gee_scale=tile_raster_res,
-        verbose=True
+        verbose=False
     )
     
     # dataops.mosaic_tiles(

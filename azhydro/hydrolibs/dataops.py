@@ -322,7 +322,7 @@ def download_gee_tif(
         if gee_scale > 30:
             if band_name == 'lulc':
                 reducer = ee.Reducer.mode(maxRaw=max_pixels)
-            elif band_name in ['annual_irrmapper_fraction', 'annual_crop_fraction']:
+            elif band_name in ['annual_irr_fraction', 'annual_crop_fraction']:
                 reducer = ee.Reducer.count()
             elif band_scale < 1000:
                 reducer = ee.Reducer.mean()
@@ -342,7 +342,7 @@ def download_gee_tif(
                     crs=crs,
                     scale=band_scale
                 ).reproject(crs, scale=gee_scale)
-        if band_name in ['annual_irrmapper_fraction', 'annual_crop_fraction']:
+        if band_name in ['annual_irr_fraction', 'annual_crop_fraction']:
             band = band.multiply(band_scale ** 2).divide(gee_scale ** 2)
             band = band.where(band.gt(1), 1)
         if 'precip' in band_name:
@@ -508,6 +508,7 @@ def download_gee_tile(
         'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/physical/ksat_mean'
     ).rename('ksat_mean_micromps')
     ee_geom = ee.Geometry.Rectangle(tile_values[1:])
+    peff_pcml_1896 = None
     for year in year_list:
         local_file_name = f'{download_dir}Tile_{tile_values[0]}_{year}.tif'
         if os.path.exists(local_file_name):
@@ -536,7 +537,6 @@ def download_gee_tile(
         # MACA daily IC is still needed for precipitation and temperature (2026-2099)
         maca_daily_ic = build_daily_maca_ensemble(year)
         openet_ic = openet_ic_v2 if 2000 <= year <= 2024 else openet_ic_v2_1 if year == 2025 else None
-        peff_pcml_1896 = None
         if 2000 <= year <= 2025:
             actual_et = openet_ic \
                 .filterDate(start_year_gee, end_year_gee) \

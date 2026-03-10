@@ -6,7 +6,7 @@ to produce bias-corrected monthly ET grids.
 
 Dependency: Run export_openet_reitz_ratio.py first.
 
-Asset: projects/azhydro/assets/usgs_adjusted_et/ (104 years × 12 months = 1248 images)
+Asset: projects/azhydro/assets/usgs_adjusted_et/ (1896-01 to 2018-09)
 
 Usage:
     conda activate azhydro
@@ -24,7 +24,8 @@ from config import (
 ASSET_ID = f'{ASSET_PREFIX}/usgs_adjusted_et'
 RATIO_ASSET = f'{ASSET_PREFIX}/openet_reitz_et_ratio'
 DEFAULT_START = 1896
-DEFAULT_END = 1999
+DEFAULT_END = 2018
+REITZ_END_DATE = '2018-10-01'  # Reitz dataset ends Sept 2018
 
 
 def build_and_export(start_year, end_year):
@@ -40,8 +41,9 @@ def build_and_export(start_year, end_year):
 
     tasks = []
     for year in range(start_year, end_year + 1):
-        # Filter to this year first, then convert mm/day → mm/month
-        reitz_year = reitz_ic.filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+        # Filter to this year, capped at Reitz end date; convert mm/day → mm/month
+        year_end = f'{year + 1}-01-01' if year < 2018 else REITZ_END_DATE
+        reitz_year = reitz_ic.filterDate(f'{year}-01-01', year_end) \
             .map(lambda img:
                 img.rename('reitz_et')
                     .multiply(
@@ -67,8 +69,9 @@ def build_and_export(start_year, end_year):
                 .set('year', year)
         )
 
-        # Export each month
-        for m in range(1, 13):
+        # Export each month (only through Sept for 2018)
+        last_month = 9 if year == 2018 else 12
+        for m in range(1, last_month + 1):
             img_name = f'{year}_{m:02d}'
             img_asset = f'{ASSET_ID}/{img_name}'
             if img_asset in existing:

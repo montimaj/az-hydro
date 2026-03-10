@@ -165,11 +165,16 @@ def build_monthly_peff(year, maca_daily_ic=None):
             ee.Image.constant(10).pow(eto.multiply(0.02426))
         ).rename('peff')
 
-        # Clamp: ep <= pr, ep <= eto, ep >= 0; then convert back to mm
+        # Clamp: ep <= pr, ep <= eto, ep >= 0; convert to mm; final clamp against mm precip
         ep_cleaned = ep.where(ep.gte(pr), pr) \
             .where(ep.gt(eto), eto) \
             .clamp(0, 10000) \
             .multiply(25.4)  # inches → mm
+
+        # Final safeguard: clamp against original mm precip to handle reprojection artifacts
+        pr_mm = img.select('pr')
+        ep_cleaned = ep_cleaned.where(ep_cleaned.gt(pr_mm), pr_mm) \
+            .clamp(0, 10000)
 
         return ee.Image(ep_cleaned) \
             .setDefaultProjection(crs='EPSG:4326', scale=ep_scale) \
