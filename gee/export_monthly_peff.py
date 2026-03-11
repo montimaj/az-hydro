@@ -5,7 +5,7 @@ Computes monthly effective precipitation using the USDA-SCS method (eq. 2-84/2-8
 with the following inputs per era:
   - 1896-1978: PRISM Hargreaves ETo (pre-exported asset) + PRISM precipitation
   - 1979-2025: gridMET ETo + PRISM precipitation
-  - 2026-2099: MACA ETo (pre-exported asset, per-model/scenario ensemble) + MACA daily precipitation (aggregated to monthly)
+  - 2026-2099: MACA ETo (pre-exported asset, per-model/scenario ensemble) + MACA precipitation (flat pipeline, sum/40)
 
 Parameters: mad_factor=1, rz_depth_m=2m for all months (consistent with UCRB comparisons).
 
@@ -24,8 +24,8 @@ import ee
 from config import (
     init_ee, get_az_geometry, create_ic_asset, list_existing_assets,
     list_pending_task_descriptions, export_image, wait_for_tasks,
-    get_export_parser, build_daily_maca_ensemble,
-    ASSET_PREFIX, PRISM_SCALE
+    get_export_parser,
+    ASSET_PREFIX, PRISM_SCALE, MACA_BANDS, MACA_MODELS, MACA_SCENARIOS
 )
 import logging
 
@@ -37,6 +37,7 @@ PRISM_ETO_ASSET = f'{ASSET_PREFIX}/prism_hargreaves_eto'
 MACA_ETO_ASSET = f'{ASSET_PREFIX}/maca_monthly_eto_v2'
 DEFAULT_START = 1896
 DEFAULT_END = 2099
+N_MEMBERS = len(MACA_MODELS) * len(MACA_SCENARIOS)  # 40
 
 # USDA SCS parameters (consistent with dataops.py call site)
 MAD_FACTOR = 1
@@ -75,7 +76,7 @@ def get_monthly_eto(year):
     return monthly_eto
 
 
-def get_monthly_precip(year, maca_daily_ic=None):
+def get_monthly_precip(year):
     """
     Get monthly precipitation ImageCollection for a given year.
     Returns ee.ImageCollection with band 'pr' (mm) and property 'month'.
@@ -84,15 +85,14 @@ def get_monthly_precip(year, maca_daily_ic=None):
     end_date = f'{year + 1}-01-01'
 
     if year > 2025:
-        # Aggregate daily MACA precipitation to monthly
-        pr_daily = maca_daily_ic.select('pr').map(lambda img:
-            img.set('month', ee.Date(img.get('system:time_start')).get('month'))
-        )
+        # Flat pipeline: sum all MACA daily precip per month, divide by n_members
+        maca_ic = ee.ImageCollection('IDAHO_EPSCOR/MACAv2_METDATA') \
+            .filterDate(start_date, end_date).select(['pr'])
         months = ee.List.sequence(1, 12)
         year_ee = ee.Number(year)
         pr_monthly = ee.ImageCollection(months.map(lambda m:
-            pr_daily.filter(ee.Filter.eq('month', m))
-                .sum()
+            maca_ic.filter(ee.Filter.calendarRange(m, m, 'month'))
+                .sum().divide(N_MEMBERS)
                 .rename('pr')
                 .set('month', m)
                 .set('system:time_start', ee.Date.fromYMD(year_ee, m, 1).millis())
@@ -110,13 +110,13 @@ def get_monthly_precip(year, maca_daily_ic=None):
     return pr_monthly
 
 
-def build_monthly_peff(year, maca_daily_ic=None):
+def build_monthly_peff(year):
     """
     Compute 12 monthly USDA SCS effective precipitation images for a single year.
     Returns ee.ImageCollection with band 'peff' (inches, converted to mm at export).
     """
     monthly_eto = get_monthly_eto(year)
-    monthly_precip = get_monthly_precip(year, maca_daily_ic)
+    monthly_precip = get_monthly_precip(year)
 
     # AWC from OpenET soil dataset (in inches)
     awc = ee.Image('projects/openet/soil/ssurgo_AWC_WTA_0to152cm_composite')
@@ -196,10 +196,7 @@ def build_and_export(start_year, end_year):
 
     tasks = []
     for year in range(start_year, end_year + 1):
-        # Build MACA daily ensemble only for future years (needed for precipitation)
-        maca_daily_ic = build_daily_maca_ensemble(year) if year > 2025 else None
-
-        monthly_peff = build_monthly_peff(year, maca_daily_ic)
+        monthly_peff = build_monthly_peff(year)
 
         for m in range(1, 13):
             img_name = f'{year}_{m:02d}'

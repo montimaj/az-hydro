@@ -51,7 +51,7 @@ The pipeline stitches disparate sources into a consistent 1896–2099 time serie
 - **ET**: Reitz ensemble (1896–1999) → OpenET v2.0/v2.1 (2000–2025) → MACA × EToF crop coefficients (2026–2099)
 - **ETo**: PRISM Hargreaves (1896–1978) → gridMET (1979–2025) → MACA 20-model ensemble (2026–2099)
 - **LULC**: USGS historical scenario (≤1984) → NLCD (1985–2025) → USGS 4-scenario mode ensemble (2026–2099)
-- **Climate projections**: MACA v2 daily data averaged across 20 GCMs × 2 RCPs (RCP 4.5, RCP 8.5) = 40-member ensemble
+- **Climate projections**: MACA v2 daily data across 20 GCMs × 2 RCPs (RCP 4.5, RCP 8.5) = 40-member ensemble. All MACA queries use a flat-pipeline approach (single filter + reduce) to keep GEE computation graphs small: ETo uses `.sum().divide(40)` per month (computed per-image to preserve nonlinearity), precip uses `.sum().divide(40)`, and temperature uses `.mean()`.
 
 Per-pixel, per-month bias-correction ratios are computed from overlapping observation periods and applied to extend each variable seamlessly. See [`gee/README.md`](gee/README.md) for asset export details and equations.
 

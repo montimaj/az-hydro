@@ -99,7 +99,7 @@ The export pipeline harmonizes multiple heterogeneous data sources into temporal
 
 - **1979–2025 (gridMET, native):** gridMET monthly ETo (`projects/openet/assets/reference_et/conus/gridmet/monthly/v1`) is used directly. This is the reference standard to which all other eras are harmonized.
 
-- **2026–2099 (MACA → gridMET scale):** To preserve the nonlinear response of the Penman-Monteith equation, ETo is computed independently for each of the 20 GCMs × 2 RCPs = 40 members. For each member: daily climate data is fed to `openet.refetgee.Daily.maca()` (ASCE Penman-Monteith), daily ETo is summed to monthly, and gridMET bias-correction ratios (`projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/`) are applied. The ensemble mean is then taken across all 40 bias-corrected monthly ETo images: $\text{ETo}_{\text{corrected}} = \text{mean}_{i}\left(\text{MACA ETo}_{i} \times \text{gridMET ratio}\right)$. This avoids the low bias that results from averaging nonlinear climate inputs before computing ETo.
+- **2026–2099 (MACA → gridMET scale):** To preserve the nonlinear response of the Penman-Monteith equation, ETo is computed for every individual MACA image (all 20 GCMs × 2 RCPs) using a flat pipeline. A single `map()` applies `openet.refetgee.Daily.maca()` to every MACA image in the year, then for each month the sum is divided by the number of members (40) to obtain the ensemble-mean monthly ETo. GridMET bias-correction ratios (`projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/`) are then applied: $\text{ETo}_{\text{corrected}} = \frac{1}{N}\sum_{i=1}^{N}\text{ETo}_i \times \text{gridMET ratio}$. This avoids the low bias that results from averaging nonlinear climate inputs before computing ETo. The flat-pipeline approach (single map + reduce instead of 40 separate computation pipelines) keeps the GEE computation graph small enough to avoid out-of-memory errors.
 
 ### LULC Harmonization (2 eras)
 
@@ -214,18 +214,18 @@ GEE handles on-the-fly reprojection when these assets are combined at tile-downl
 
 ### 6. MACA Monthly ETo (`maca_monthly_eto_v2`)
 
-**Purpose:** Monthly ETo for future scenarios 2026–2099, bias-corrected with gridMET ratios. Computed per model/scenario to preserve nonlinear ETo response.
+**Purpose:** Monthly ETo for future scenarios 2026–2099, bias-corrected with gridMET ratios. Computed per-image via a flat pipeline to preserve nonlinear ETo response while keeping the computation graph small.
 
 **Method:** For each year in 2026–2099:
-1. For each of the 20 GCMs × 2 scenarios (RCP4.5, RCP8.5) = 40 members:
-   a. Build daily MACA data for that single model/scenario. Bands: `tasmax`, `tasmin`, `pr`, `rsds`, `uas`, `vas`, `huss`.
-   b. Compute daily ETo using `openet.refetgee.Daily.maca()` with NASADEM elevation and pixel latitude.
-   c. Sum daily ETo to monthly (12 images).
-   d. Apply gridMET bias-correction ratios (`projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/{MonthName}`), joined on `month`.
-2. For each month, take the ensemble mean across all 40 bias-corrected monthly ETo images.
-3. Export each month.
+1. Load ALL MACA daily images for the year (20 models × 2 scenarios × 365 days ≈ 14,600 images).
+2. Map `openet.refetgee.Daily.maca()` over the entire collection to compute daily ETo for each image (using NASADEM elevation and pixel latitude).
+3. For each month, sum all daily ETo and divide by `N_MEMBERS` (40) to get the ensemble-mean monthly ETo.
+4. Apply gridMET bias-correction ratios (`projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/{MonthName}`), joined on `month`.
+5. Export each month.
 
-This approach avoids averaging climate inputs (temperature, humidity, radiation, wind) before the nonlinear Penman-Monteith calculation, which would systematically bias ETo low (Jensen's inequality).
+The flat pipeline (one `.map()` + `.sum().divide(40)` per month) keeps the GEE computation graph as a simple map-reduce pattern, avoiding the out-of-memory errors that result from building 40 separate computation pipelines.
+
+This approach still preserves per-image nonlinearity: ETo is computed from each individual MACA image's climate variables before any averaging occurs.
 
 **Output:** 888 images (`{year}_{month:02d}`), each with band `eto` in mm/month.
 
@@ -276,7 +276,7 @@ This approach avoids averaging climate inputs (temperature, humidity, radiation,
    - 2026–2099: Pre-exported `maca_monthly_eto_v2` asset
 2. **Get monthly precipitation:**
    - 1896–2025: PRISM (`OREGONSTATE/PRISM/ANm`, band `ppt`)
-   - 2026–2099: MACA daily ensemble precipitation aggregated to monthly
+   - 2026–2099: Flat MACA pipeline — sum all daily precip images per month, divide by `N_MEMBERS` (40) for ensemble mean
 3. **Inner join** ETo and precipitation on `month`.
 4. **Compute USDA SCS effective precipitation** (equations 2-84 and 2-85):
    - Convert ETo and precip from mm to inches.
@@ -349,7 +349,7 @@ GEE enforces a 3,000-task queue limit. `export_image()` automatically calls `_wa
 | `get_export_parser(description)` | Argparse with `--start-year`, `--end-year`, `--no-wait` |
 | `calc_prism_monthly_eto(img)` | Hargreaves PET from PRISM tmax/tmin |
 | `build_openet_monthly_et_ic()` | Monthly OpenET ET 2000–2025 |
-| `build_daily_maca_ensemble(year)` | Daily MACA ensemble for one year |
+| `build_daily_maca_ensemble(year)` | Daily MACA ensemble for one year (legacy, used by `dataops.py`) |
 | `build_daily_maca_single(year, model, scenario)` | Daily MACA data for one GCM/scenario |
 
 ## How `dataops.py` Consumes These Assets
@@ -375,3 +375,14 @@ maca_et_ic = maca_monthly_et_ic.filterDate(start_year_gee, end_year_gee)
 ```
 
 This replaces the previous approach of building these collections from scratch (with expensive joins, Hargreaves calculations, and MACA ensemble averaging) on every tile × year combination.
+
+For future-year (2026–2099) precipitation and temperature, `dataops.py` queries the raw MACA collection directly using the flat-pipeline approach:
+
+```python
+maca_ic = ee.ImageCollection('IDAHO_EPSCOR/MACAv2_METDATA').filterDate(start, end)
+precip = maca_ic.select('pr').sum().divide(n_members)      # sum/40 for precip
+tmmx   = maca_ic.select('tasmax').mean()                    # mean for temp
+tmmn   = maca_ic.select('tasmin').mean()
+```
+
+Since every day has exactly one image per model/scenario pair, `.mean()` across all ~14,600 images/year gives the grand mean (equivalent to per-model averaging). For additive quantities (precipitation), `.sum().divide(40)` gives the ensemble-mean annual total.

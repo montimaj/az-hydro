@@ -143,39 +143,6 @@ def generate_chunks(input_list: list, num_chunks: int):
         yield input_list[idx: idx + num_chunks]
 
 
-def build_daily_maca_ensemble(year: str) -> ee.ImageCollection:
-    """
-    Build a daily ensemble of MACA climate data for 2026-2099 by taking the mean of all available GCMs and scenarios 
-    for each day.
-
-    Args:
-    year (str): Year in YYYY format for which the daily image belongs to.
-
-    Returns:
-    ee.ImageCollection: Daily ensemble of MACA climate data for 2026-2099 with bands 'tasmax', 'tasmin', 'pr', etc. 
-    and properties 'system:time_start' and 'system:time_end'.
-    """
-
-    _, _, maca_bands = get_maca_scenarios_models_bands()
-    startDate = ee.Date.fromYMD(year, 1, 1)
-    endDate = ee.Date.fromYMD(ee.Number(year).add(1), 1, 1)
-    nDays = endDate.difference(startDate, 'day')
-
-    maca_daily_ic = ee.ImageCollection('IDAHO_EPSCOR/MACAv2_METDATA') \
-        .filterDate(startDate, endDate) \
-        .select(maca_bands)
-
-    dayOffsets = ee.List.sequence(0, nDays.subtract(1))
-
-    ensemble_daily = ee.ImageCollection(dayOffsets.map(lambda offset: 
-        maca_daily_ic.filterDate(startDate.advance(offset, 'day'), startDate.advance(ee.Number(offset).add(1), 'day'))
-            .mean()
-            .set('system:time_start', startDate.advance(offset, 'day').millis())
-            .set('system:time_end', startDate.advance(ee.Number(offset).add(1), 'day').millis())
-    ))
-    return ensemble_daily
-
-
 def get_eto(
         year: int, 
         prism_eto_ic: ee.ImageCollection | None = None,
@@ -536,8 +503,6 @@ def download_gee_tile(
         irr_mask = irr.updateMask(mask).remap([0], [1])
         start_year_gee = f'{year}-01-01'
         end_year_gee = f'{year + 1}-01-01'
-        # MACA daily IC is still needed for precipitation and temperature (2026-2099)
-        maca_daily_ic = build_daily_maca_ensemble(year)
         openet_ic = openet_ic_v2 if 2000 <= year <= 2024 else openet_ic_v2_1 if year == 2025 else None
         if 2000 <= year <= 2025:
             actual_et = openet_ic \
@@ -572,9 +537,14 @@ def download_gee_tile(
                 .mean()\
                 .add(273.15)
         else:
-            precip = maca_daily_ic.select('pr').sum()
-            tmmx = maca_daily_ic.select('tasmax').mean() # already in Kelvin
-            tmmn = maca_daily_ic.select('tasmin').mean() # already in Kelvin
+            # Flat MACA: sum/N_MEMBERS for precip, mean for temp
+            maca_scenarios, maca_models, _ = get_maca_scenarios_models_bands()
+            n_members = len(maca_models) * len(maca_scenarios)
+            maca_ic = ee.ImageCollection('IDAHO_EPSCOR/MACAv2_METDATA') \
+                .filterDate(start_year_gee, end_year_gee)
+            precip = maca_ic.select('pr').sum().divide(n_members)
+            tmmx = maca_ic.select('tasmax').mean()  # already in Kelvin
+            tmmn = maca_ic.select('tasmin').mean()  # already in Kelvin
         peff = monthly_peff_ic.filterDate(start_year_gee, end_year_gee) \
                 .select('peff').sum().rename('annual_peff_mm')
         if year == 1896:

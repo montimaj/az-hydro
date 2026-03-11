@@ -1,15 +1,16 @@
 """
 Export MACA bias-corrected monthly ETo as GEE assets for 2026-2099.
 
-Computes monthly ETo independently for each GCM × scenario combination:
-  1. For each model/scenario, build daily MACA data.
-  2. Compute daily ETo via openet.refetgee.Daily.maca().
-  3. Sum to monthly.
+Uses a flat-pipeline approach to avoid GEE out-of-memory errors:
+  1. Load ALL MACA daily images for the year (all 20 GCMs × 2 scenarios).
+  2. Map daily ETo (openet.refetgee.Daily.maca) over the entire collection.
+  3. For each month, sum all daily ETo and divide by n_members (40)
+     to get the ensemble-mean monthly ETo.
   4. Apply gridMET bias-correction ratios.
-Then takes the ensemble mean across all model/scenario monthly ETo images.
 
-This preserves non-linear relationships in the Penman-Monteith equation,
-avoiding the low bias that results from averaging climate inputs first.
+This preserves non-linear relationships in the Penman-Monteith equation
+(ETo is computed per-image, not from averaged inputs) while keeping the
+computation graph simple enough for GEE to evaluate without OOM.
 
 No custom asset dependency — uses existing gridMET ratios at
 projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/
@@ -22,13 +23,13 @@ Usage:
 """
 
 import ee
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from openet.refetgee import Daily
 from config import (
     init_ee, get_az_geometry, create_ic_asset, list_existing_assets,
     list_pending_task_descriptions, export_image, wait_for_tasks,
-    get_export_parser, build_daily_maca_single,
-    ASSET_PREFIX, MACA_SCALE, MACA_MODELS, MACA_SCENARIOS, MONTH_NAMES
+    get_export_parser,
+    ASSET_PREFIX, MACA_SCALE, MACA_BANDS, MACA_MODELS, MACA_SCENARIOS,
+    MONTH_NAMES
 )
 import logging
 
@@ -38,35 +39,53 @@ logger = logging.getLogger(__name__)
 ASSET_ID = f'{ASSET_PREFIX}/maca_monthly_eto_v2'
 DEFAULT_START = 2026
 DEFAULT_END = 2099
+N_MEMBERS = len(MACA_MODELS) * len(MACA_SCENARIOS)  # 40
 
 
-def _build_monthly_eto_single(year, model, scenario):
+def build_monthly_maca_eto(year):
     """
-    Build bias-corrected monthly ETo for a single GCM and scenario.
+    Build ensemble-mean bias-corrected monthly MACA ETo for a single year.
+
+    Uses a flat pipeline to keep the computation graph small:
+      - Maps daily ETo over ALL MACA images (all models/scenarios) at once.
+      - Sums per month and divides by n_members (40) for ensemble mean.
+      - Applies gridMET bias-correction ratios.
+
     Returns ee.ImageCollection with 12 images (band 'eto', mm/month).
     """
-    daily_ic = build_daily_maca_single(year, model, scenario)
+    start_date = ee.Date.fromYMD(year, 1, 1)
+    end_date = ee.Date.fromYMD(year + 1, 1, 1)
+
+    # Load ALL MACA images for the year (20 models × 2 scenarios × 365 days)
+    maca_ic = ee.ImageCollection('IDAHO_EPSCOR/MACAv2_METDATA') \
+        .filterDate(start_date, end_date).select(MACA_BANDS)
 
     lat_img = ee.Image.pixelLonLat().select('latitude')
     elev = ee.Image('NASA/NASADEM_HGT/001').select('elevation')
 
-    def calc_daily_eto(daily_img):
-        eto = Daily.maca(input_img=daily_img, lat=lat_img, elev=elev).eto
+    # Compute daily ETo for every individual image (one map over entire collection)
+    def _daily_eto(img):
+        eto = Daily.maca(input_img=img, lat=lat_img, elev=elev).eto
         return eto.rename('eto') \
-            .set('system:time_start', daily_img.get('system:time_start'))
+            .set('system:time_start', img.get('system:time_start'))
 
-    daily_eto = daily_ic.map(calc_daily_eto)
+    daily_eto = maca_ic.map(_daily_eto)
 
+    # For each month: sum all daily ETo, divide by n_members → ensemble mean
     year_ee = ee.Number(year)
     months = ee.List.sequence(1, 12)
+
     monthly_eto = ee.ImageCollection(months.map(lambda m:
-        daily_eto.filter(ee.Filter.calendarRange(m, m, 'month')).sum()
+        daily_eto.filter(ee.Filter.calendarRange(m, m, 'month'))
+            .sum().divide(N_MEMBERS)
+            .rename('eto')
             .set('system:time_start', ee.Date.fromYMD(year_ee, m, 1).millis())
             .set('system:time_end',
                  ee.Date.fromYMD(year_ee, m, 1).advance(1, 'month').millis())
             .set('month', m)
     ))
 
+    # Bias correction with gridMET ratios
     gridmet_ratio_base = \
         'projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/'
     ratio_ic = ee.ImageCollection([
@@ -88,52 +107,15 @@ def _build_monthly_eto_single(year, model, scenario):
     return corrected
 
 
-def build_monthly_maca_eto(year):
-    """
-    Build ensemble-mean bias-corrected monthly MACA ETo for a single year.
-
-    Computes monthly ETo for each GCM × scenario independently, then
-    averages across all members to produce the ensemble mean.
-    Returns ee.ImageCollection with 12 images (band 'eto', mm/month).
-    """
-    # Collect monthly ETo from every model × scenario
-    all_monthly = []
-    for model in MACA_MODELS:
-        for scenario in MACA_SCENARIOS:
-            all_monthly.append(_build_monthly_eto_single(year, model, scenario))
-
-    # Flatten all model/scenario monthly images into a single collection
-    all_images = ee.List([])
-    for ic in all_monthly:
-        all_images = all_images.cat(ic.toList(12))
-    merged = ee.ImageCollection(all_images)
-
-    # For each month, average across all model/scenario members
-    year_ee = ee.Number(year)
-    months = ee.List.sequence(1, 12)
-    n_members = len(all_monthly)
-
-    def _ensemble_month(m):
-        return merged.filter(ee.Filter.eq('month', m)).mean().rename('eto') \
-            .set('system:time_start', ee.Date.fromYMD(year_ee, m, 1).millis()) \
-            .set('system:time_end',
-                 ee.Date.fromYMD(year_ee, m, 1).advance(1, 'month').millis()) \
-            .set('month', m) \
-            .set('n_members', n_members)
-
-    return ee.ImageCollection(months.map(_ensemble_month))
-
-
-def build_and_export(start_year, end_year, max_workers=4):
+def build_and_export(start_year, end_year):
     init_ee()
     az = get_az_geometry()
     create_ic_asset(ASSET_ID)
     existing = list_existing_assets(ASSET_ID)
     pending = list_pending_task_descriptions()
 
-    def _submit_year(year):
-        """Build graph and submit export tasks for one year."""
-        year_tasks = []
+    tasks = []
+    for year in range(start_year, end_year + 1):
         monthly_eto = build_monthly_maca_eto(year)
         for m in range(1, 13):
             img_name = f'{year}_{m:02d}'
@@ -149,19 +131,8 @@ def build_and_export(start_year, end_year, max_workers=4):
                 az, MACA_SCALE,
                 pending_descriptions=pending
             )
-            year_tasks.append(task)
-        return year, year_tasks
-
-    tasks = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(_submit_year, year): year
-            for year in range(start_year, end_year + 1)
-        }
-        for future in as_completed(futures):
-            year, year_tasks = future.result()
-            tasks.extend(year_tasks)
-            logger.info(f'  Submitted year {year} ({len(tasks)} total tasks)')
+            tasks.append(task)
+        logger.info(f'  Submitted year {year} ({len(tasks)} total tasks)')
 
     return tasks
 
