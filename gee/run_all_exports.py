@@ -12,8 +12,8 @@ Dependency graph:
     - export_usgs_adjusted_et.py      (needs openet_reitz ratio)
     - export_maca_monthly_eto.py      (no custom dep, uses gridMET ratios)
   Level 3 (depends on Level 2):
-    - export_maca_monthly_et.py       (needs monthly_etof + maca_monthly_eto)
-    - export_monthly_peff.py          (needs prism_hargreaves_eto + maca_monthly_eto)
+    - export_maca_monthly_et.py       (needs monthly_etof + maca_monthly_eto_v2)
+    - export_monthly_peff.py          (needs prism_hargreaves_eto + maca_monthly_eto_v2)
 
 Usage:
     conda activate azhydro
@@ -23,6 +23,9 @@ Usage:
 import argparse
 import subprocess
 import sys
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 LEVELS = {
@@ -49,12 +52,11 @@ def run_script(script_name, extra_args=None):
     cmd = [sys.executable, script_name]
     if extra_args:
         cmd.extend(extra_args)
-    print(f'\n{"=" * 60}')
-    print(f'Running: {script_name}')
-    print(f'{"=" * 60}')
+    logger.info(f'Running: {script_name}')
+    logger.info('=' * 60)
     result = subprocess.run(cmd, cwd=sys.path[0] or '.')
     if result.returncode != 0:
-        print(f'WARNING: {script_name} exited with code {result.returncode}')
+        logger.warning(f'{script_name} exited with code {result.returncode}')
     return result.returncode
 
 
@@ -81,17 +83,17 @@ def main():
     extra = ['--no-wait'] if args.no_wait else []
 
     for level in levels_to_run:
-        print(f'\n{"#" * 60}')
-        print(f'# Level {level}')
-        print(f'{"#" * 60}')
+        logger.info(f'# Level {level}')
+        logger.info('#' * 60)
         for script, desc in LEVELS[level]:
-            print(f'\n  -> {desc}')
+            logger.info(f'  -> {desc}')
             run_script(script, extra)
 
-    print('\n' + '=' * 60)
-    print('All export levels completed.')
-    print('=' * 60)
+    logger.info('=' * 60)
+    logger.info('All export levels completed.')
+    logger.info('=' * 60)
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     main()

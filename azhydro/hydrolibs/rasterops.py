@@ -10,6 +10,7 @@ import geopandas as gpd
 import numpy as np
 import os
 import subprocess
+import logging
 
 from osgeo import gdal
 from joblib import Parallel, delayed
@@ -23,6 +24,8 @@ from sysops import az_nodata, makedirs
 import rasterio as rio
 gdal.PushErrorHandler('CPLQuietErrorHandler')
 gdal.UseExceptions()
+
+logger = logging.getLogger(__name__)
 
 
 def read_raster_as_arr(
@@ -289,7 +292,7 @@ def get_raster_extent(
 
 def reproject_raster_gdal(
         input_raster_file: str,
-        outfile_path: str or None = None,
+        outfile_path: str | None = None,
         resampling_factor: float | None = 1,
         resampling_func: str = 'near',
         downsampling: bool = True,
@@ -298,7 +301,7 @@ def reproject_raster_gdal(
         dst_yres: float | None = None,
         output_dtype: str = 'float32',
         src_band_dict: dict[str, tuple[int, str, str]] | None = None,
-        dst_raster_dir: str or None = None
+        dst_raster_dir: str | None = None
 ) -> None:
     """Reproject raster using GDALWarp Python API.
 
@@ -414,7 +417,7 @@ def reproject_raster_gdal(
                 stdout=subprocess.DEVNULL
             )
     except Exception as e:
-        print('Error occurred while resampling', input_raster_file, '\n', e)
+        logger.error(f'Error occurred while resampling {input_raster_file}', exc_info=e)
 
 
 def crop_rasters(
@@ -470,7 +473,7 @@ def parallel_crop_rasters(
 
     out_raster = outdir + input_raster_file[input_raster_file.rfind(os.sep) + 1:]
     if verbose:
-        print('Cropping', input_raster_file, '...')
+        logger.info(f'Cropping {input_raster_file} ...')
     crop_raster(
         input_raster_file, input_mask_file,
         out_raster, ext_mask=ext_mask,

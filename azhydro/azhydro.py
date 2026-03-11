@@ -9,41 +9,34 @@ import hydrolibs.gwops as gwops
 import hydrolibs.dataops as dataops
 import hydrolibs.mlops as mlops
 import hydrolibs.visualops as vizops  # Journal-quality visualization module
+import hydrolibs.streamflowops as streamflowops
 
 
 if __name__ == '__main__':
     input_dir = '../Data/Inputs/'
     output_dir = '../Data/Outputs/'
-    water_use = 'IRRIGATION'  # 'IRRIGATION' or 'All'. 'All' was used in Majumdar et al. (2022)
+    water_use = 'All'  # 'IRRIGATION' or 'All'. 'All' was used in Majumdar et al. (2022)
     wname = 'All_Wells' if water_use == 'All' else 'Irr_Wells'
     output_gw_vector_dir = f'{output_dir}GW/Vectors/{wname}/'
     vector_dir = f'{input_dir}GW_Data/'
     vector_reproj_dir = f'{output_dir}GW_Data/Vector_Reproj/'
     az_state = f'{vector_dir}/AZ.geojson'
     well_reg_file = f'{vector_dir}Well_Registry_2024/Well_Registry.shp'
-    az_gw_basin = f'{vector_dir}/Groundwater_Basin/Groundwater_Basin.shp'
-    az_gw_subbasin = f'{vector_dir}/ADWR_Groundwater_Subbasin/ADWR_Groundwater_Subbasin.shp'
-    ama_ina_file = f'{vector_dir}AMA_and_INA.geojson'
-    az_canal = f'{vector_dir}Canals/canals_az.shp'
     gw_csv_dir = f'{vector_dir}Meter Data/'
-    az_vectors = [
-        well_reg_file, az_gw_basin, 
-        ama_ina_file, az_canal,
-        az_gw_subbasin, vector_dir
-    ]
     cap_delivery_xls = f'{vector_dir}CAP/CAP Delivery Data DRI Request.xlsx'
     srp_delivery_xls = f'{vector_dir}SRP/SRP WATER DELVS HISTORY.xlsx'
     gcloud_project = 'azhydro'
     gcloud_bucket = 'azhydro'
     start_year = 1896
     end_year = 2099
-    skip_download = False
+    skip_download = True
     tile_raster_res = 2000 # this is the same as Majumdar et al. (2022)
     tile_size = 10000 if tile_raster_res == 30 else 80000
     fill_attr = 'AF Pumped'
     mosaic_raster_res = tile_raster_res
     gee_mosaic_data_dir = f'{output_dir}GEE_Mosaics_{int(mosaic_raster_res)}m/'
     gee_resampled_tile_dir = f'{output_dir}GEE_Tiles_{int(mosaic_raster_res)}m/'
+    streamflow_raster_dir = f'{output_dir}Streamflow_Rasters_{int(mosaic_raster_res)}m/'
     output_gw_volume_raster_dir = f'{output_dir}GW/Rasters/GW_Volumes_{wname}_{int(mosaic_raster_res)}m/'
     output_gw_depth_raster_dir = f'{output_dir}GW/Rasters/GW_Depths_{wname}_{int(mosaic_raster_res)}m/'
     pred_data_dir = f'{output_dir}Predictor_Data_{wname}_{int(mosaic_raster_res)}m/'
@@ -63,83 +56,96 @@ if __name__ == '__main__':
         gee_scale=tile_raster_res,
         verbose=False
     )
-    
-    # dataops.mosaic_tiles(
-    #     gee_data_dir,
-    #     gee_mosaic_data_dir,
-    #     start_year,
-    #     end_year,
-    #     already_mosaicked=load_files
-    # )
-    # ref_gw_file = gwops.preprocess_gw_csv(
-    #     well_reg_file,
-    #     gw_csv_dir,
-    #     output_gw_vector_dir,
-    #     fill_attr=fill_attr,
-    #     use_only_ama_ina=False,
-    #     already_preprocessed=load_files,
-    #     water_use=water_use
-    # )
-    # for az_vector in az_vectors:
-    #     gwops.reproject_vectors(
-    #         az_vector,
-    #         vector_reproj_dir,
-    #         ref_file=ref_gw_file,
-    #         already_reprojected=load_files
-    #     )
-    # max_gw = 3000 if water_use == 'All' else None # 3000 mm (~10 ft) was used in Majumdar et al. (2022)
-    # gwops.create_gw_volume_rasters(
-    #     output_gw_vector_dir,
-    #     output_gw_volume_raster_dir,
-    #     value_field=fill_attr,
-    #     xres=mosaic_raster_res,
-    #     yres=mosaic_raster_res,
-    #     already_created=load_files,
-    #     max_gw = max_gw 
-    # )
-    # gwops.create_gw_depth_rasters(
-    #     output_gw_volume_raster_dir,
-    #     output_gw_depth_raster_dir,
-    #     already_created=load_files
-    # )
-    # gw_cropped_raster_dir = gwops.crop_gw_rasters(
-    #     output_gw_depth_raster_dir,
-    #     output_gw_depth_raster_dir,
-    #     az_state_file=f'{vector_reproj_dir}AZ.geojson',
-    #     already_cropped=load_files
-    # )
-    # gw_basin_proj = f'{vector_reproj_dir}Groundwater_Basin.shp'
-    # az_canal_proj = f'{vector_reproj_dir}canals_az.shp'
-    # gwops.create_gw_basin_streamflow_rasters(
-    #     gw_basin_proj,
-    #     az_canal_proj,
-    #     gee_mosaic_data_dir,
-    #     mosaic_raster_res,
-    #     mosaic_raster_res,
-    #     start_year,
-    #     end_year,
-    #     water_year_agg=False,
-    #     already_created=load_files
-    # )
-    # dataops.reproject_gee_mosaics(
-    #     gee_mosaic_data_dir,
-    #     pred_data_dir,
-    #     gw_cropped_raster_dir,
-    #     already_reprojected=load_files
-    # )
-    # model_dir = f'{output_dir}ML_Model_{wname}_{int(mosaic_raster_res)}m/'
-    # # load_files = False
-    # az_df = dataops.create_az_data_csv(
-    #     pred_data_dir,
-    #     gw_cropped_raster_dir,
-    #     model_dir,
-    #     data_band_names,
-    #     gw_basin_proj,
-    #     start_year,
-    #     end_year,
-    #     load_csv=load_files,
-    #     lu_smoothing=3,
-    # )
+    dataops.mosaic_tiles(
+        gee_data_dir,
+        gee_mosaic_data_dir,
+        start_year,
+        end_year,
+        already_mosaicked=load_files
+    )
+    ref_gw_file = gwops.preprocess_gw_csv(
+        well_reg_file,
+        gw_csv_dir,
+        output_gw_vector_dir,
+        fill_attr=fill_attr,
+        use_only_ama_ina=False,
+        already_preprocessed=load_files,
+        water_use=water_use
+    )
+    az_vector_reproj = gwops.reproject_vectors(
+        vector_dir,
+        vector_reproj_dir,
+        ref_file=ref_gw_file,
+        already_reprojected=load_files
+    )
+    well_reg_file = az_vector_reproj['Well_Registry']
+    az_gw_basin = az_vector_reproj['Groundwater_Basin']
+    ama_ina_file = az_vector_reproj['AMA_and_INA']
+    az_sw_watershed = az_vector_reproj['Surface_Watershed']
+    cap_service_area = az_vector_reproj['CAP_Service_Area']
+    az_gw_subbasin = az_vector_reproj['ADWR_Groundwater_Subbasin']
+    az_state = az_vector_reproj['AZ']
+    max_gw = 3000 if water_use == 'All' else None # 3000 mm (~10 ft) was used in Majumdar et al. (2022)
+    gwops.create_gw_volume_rasters(
+        output_gw_vector_dir,
+        output_gw_volume_raster_dir,
+        value_field=fill_attr,
+        xres=mosaic_raster_res,
+        yres=mosaic_raster_res,
+        already_created=load_files,
+        max_gw = max_gw 
+    )
+    gwops.create_gw_depth_rasters(
+        output_gw_volume_raster_dir,
+        output_gw_depth_raster_dir,
+        already_created=load_files
+    )
+    gw_cropped_raster_dir = gwops.crop_gw_rasters(
+        output_gw_depth_raster_dir,
+        output_gw_depth_raster_dir,
+        az_state_file=az_state,
+        already_cropped=load_files
+    )
+    streamflowops.create_streamflow_rasters(
+        watershed_geojson=az_sw_watershed,
+        cap_service_area_geojson=cap_service_area,
+        sites_csv=f'{vector_dir}Streamflow/sites.csv',
+        output_dir=gee_mosaic_data_dir,
+        xres=mosaic_raster_res,
+        yres=mosaic_raster_res,
+        start_year=start_year,
+        end_year=end_year,
+        already_created=load_files
+    )
+    gwops.create_gw_basin_rasters(
+        az_gw_basin,
+        gee_mosaic_data_dir,
+        xres=mosaic_raster_res,
+        yres=mosaic_raster_res,
+        start_year=start_year,
+        end_year=end_year,
+        already_created=load_files,
+    )
+    dataops.reproject_gee_mosaics(
+        gee_mosaic_data_dir,
+        pred_data_dir,
+        gw_cropped_raster_dir,
+        already_reprojected=load_files
+    )
+    model_dir = f'{output_dir}ML_Model_{wname}_{int(mosaic_raster_res)}m/'
+    load_files = True
+    az_df = dataops.create_az_data_csv(
+        pred_data_dir,
+        gw_cropped_raster_dir,
+        model_dir,
+        data_band_names,
+        az_gw_basin,
+        start_year=start_year,
+        end_year=end_year,
+        load_csv=load_files,
+        lu_smoothing=3,
+    )
+    vizops.explore_az_data(az_df, f'{model_dir}EDA/')
     # model_eval_dict = {
     #     'T1': ((2015, 2024),),
     #     # 'T2': ((1990, 1992), (2005, 2007), (2022, 2024)),

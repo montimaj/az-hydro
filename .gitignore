@@ -174,3 +174,5 @@ Data/Outputs/Predictor_Data_804m
 *.xml
 Data/Outputs/ML_Model_Irr_Wells_2000m/Model_Evaluation/
 js/
+USBR/
+AZ_Data.parquet

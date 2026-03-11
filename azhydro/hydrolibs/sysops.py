@@ -8,7 +8,10 @@ Source: https://code.usgs.gov/map/wu/aiwum-2.0-hydromap_ml-mirror/-/blob/main/ai
 
 import os
 import shutil
+import logging
 from glob import glob
+
+logger = logging.getLogger(__name__)
 
 
 def az_nodata() -> float:
@@ -94,7 +97,7 @@ def copy_files(
         file_name = f[f.rfind(os.sep) + 1:]
         outfile = f'{target_dir}{prefix}{file_name}'
         if verbose:
-            print('Copying', f, 'to', outfile, '...')
+            logger.info(f'Copying {f} to {outfile} ...')
         shutil.copyfile(f, outfile)
 
 
@@ -122,7 +125,7 @@ def copy_file(
     if suffix or ext:
         output_file += suffix + ext
     if verbose:
-        print('Copying', input_file, 'to', output_file, '...')
+        logger.info(f'Copying {input_file} to {output_file} ...')
     shutil.copyfile(input_file, output_file)
 
 

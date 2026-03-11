@@ -19,10 +19,10 @@ The scripts use the GEE high-volume endpoint (`https://earthengine-highvolume.go
 | `monthly_etof` | 12 | — (monthly climatology) | `etof` | 4638.3 | `export_monthly_etof.py` |
 | `prism_hargreaves_eto` | 996 | 1896–1978 | `eto` | 4638.3 | `export_prism_hargreaves_eto.py` |
 | `usgs_adjusted_et` | 1,248 | 1896–1999 | `actual_et` | 800 | `export_usgs_adjusted_et.py` |
-| `maca_monthly_eto` | 888 | 2026–2099 | `eto` | 4638.3 | `export_maca_monthly_eto.py` |
-| `maca_monthly_et` | 888 | 2026–2099 | `actual_et` | 4638.3 | `export_maca_monthly_et.py` |
+| `maca_monthly_eto_v2` | 888 | 2026–2099 | `eto` | 4638.3 | `export_maca_monthly_eto.py` |
+| `maca_monthly_et_v2` | 888 | 2026–2099 | `actual_et` | 4638.3 | `export_maca_monthly_et.py` |
 | `lulc_projection_ensemble` | 74 | 2026–2099 | `landcover` | 250 | `export_lulc_ensemble.py` |
-| `monthly_peff` | 2,448 | 1896–2099 | `peff` | 4638.3 | `export_monthly_peff.py` |
+| `monthly_peff_v2` | 2,448 | 1896–2099 | `peff` | 4638.3 | `export_monthly_peff.py` |
 
 ## Dependency Graph
 
@@ -41,8 +41,8 @@ Level 2 (depends on Level 1):
   └── export_maca_monthly_eto.py        ← no custom dep (uses gridMET ratios)
 
 Level 3 (depends on Level 2):
-  ├── export_maca_monthly_et.py         ← needs monthly_etof + maca_monthly_eto
-  └── export_monthly_peff.py            ← needs prism_hargreaves_eto + maca_monthly_eto
+  ├── export_maca_monthly_et.py         ← needs monthly_etof + maca_monthly_eto_v2
+  └── export_monthly_peff.py            ← needs prism_hargreaves_eto + maca_monthly_eto_v2
 ```
 
 ## Data Harmonization
@@ -81,8 +81,8 @@ The export pipeline harmonizes multiple heterogeneous data sources into temporal
       PRISM Hargreaves ETo      gridMET ETo           MACA ETo
     ┌─────────────────────┐   ┌───────────────┐   ┌─────────────────┐
     │    1896 – 1978      │   │  1979 – 2025  │   │   2026 – 2099   │
-    │  (monthly tmax/tmin │   │  (native      │   │ (daily ensemble │
-    │   → Hargreaves PET) │   │   monthly)    │   │  → RefET → sum) │
+    │  (monthly tmax/tmin │   │  (native      │   │ (per-model/scen │
+    │   → Hargreaves PET) │   │   monthly)    │   │  → RefET → ens) │
     └──────────┬──────────┘   └───────┬───────┘   └────────┬────────┘
                │                      │                    │
                │ Hargreaves/gridMET   │   gridMET bias     │
@@ -99,7 +99,7 @@ The export pipeline harmonizes multiple heterogeneous data sources into temporal
 
 - **1979–2025 (gridMET, native):** gridMET monthly ETo (`projects/openet/assets/reference_et/conus/gridmet/monthly/v1`) is used directly. This is the reference standard to which all other eras are harmonized.
 
-- **2026–2099 (MACA → gridMET scale):** A daily MACA ensemble (mean of 20 GCMs × 2 RCPs = 40 members) is constructed for each year. Daily ETo is computed via `openet.refetgee.Daily.maca()` (ASCE Penman-Monteith) and summed to monthly. Pre-existing gridMET bias-correction ratio grids (`projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/`) are then applied: $\text{ETo}_{\text{corrected}} = \text{raw MACA ETo} \times \text{gridMET ratio}$.
+- **2026–2099 (MACA → gridMET scale):** To preserve the nonlinear response of the Penman-Monteith equation, ETo is computed independently for each of the 20 GCMs × 2 RCPs = 40 members. For each member: daily climate data is fed to `openet.refetgee.Daily.maca()` (ASCE Penman-Monteith), daily ETo is summed to monthly, and gridMET bias-correction ratios (`projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/`) are applied. The ensemble mean is then taken across all 40 bias-corrected monthly ETo images: $\text{ETo}_{\text{corrected}} = \text{mean}_{i}\left(\text{MACA ETo}_{i} \times \text{gridMET ratio}\right)$. This avoids the low bias that results from averaging nonlinear climate inputs before computing ETo.
 
 ### LULC Harmonization (2 eras)
 
@@ -212,25 +212,28 @@ GEE handles on-the-fly reprojection when these assets are combined at tile-downl
 
 ---
 
-### 6. MACA Monthly ETo (`maca_monthly_eto`)
+### 6. MACA Monthly ETo (`maca_monthly_eto_v2`)
 
-**Purpose:** Monthly ETo for future scenarios 2026–2099, bias-corrected with gridMET ratios.
+**Purpose:** Monthly ETo for future scenarios 2026–2099, bias-corrected with gridMET ratios. Computed per model/scenario to preserve nonlinear ETo response.
 
 **Method:** For each year in 2026–2099:
-1. Build daily MACA ensemble by averaging all 20 GCMs × 2 scenarios (RCP4.5, RCP8.5) per day. Bands used: `tasmax`, `tasmin`, `pr`, `rsds`, `uas`, `vas`, `huss`.
-2. Compute daily ETo using `openet.refetgee.Daily.maca()` with NASADEM elevation and pixel latitude.
-3. Sum daily ETo to monthly (12 images per year).
-4. Apply gridMET bias-correction ratios (`projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/{MonthName}`), joined on `month`.
-5. Multiply: $\text{ETo} = \text{raw MACA ETo} \times \text{gridMET ratio}$.
-6. Export each month.
+1. For each of the 20 GCMs × 2 scenarios (RCP4.5, RCP8.5) = 40 members:
+   a. Build daily MACA data for that single model/scenario. Bands: `tasmax`, `tasmin`, `pr`, `rsds`, `uas`, `vas`, `huss`.
+   b. Compute daily ETo using `openet.refetgee.Daily.maca()` with NASADEM elevation and pixel latitude.
+   c. Sum daily ETo to monthly (12 images).
+   d. Apply gridMET bias-correction ratios (`projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/{MonthName}`), joined on `month`.
+2. For each month, take the ensemble mean across all 40 bias-corrected monthly ETo images.
+3. Export each month.
+
+This approach avoids averaging climate inputs (temperature, humidity, radiation, wind) before the nonlinear Penman-Monteith calculation, which would systematically bias ETo low (Jensen's inequality).
 
 **Output:** 888 images (`{year}_{month:02d}`), each with band `eto` in mm/month.
 
 ---
 
-### 7. MACA Monthly ET (`maca_monthly_et`)
+### 7. MACA Monthly ET (`maca_monthly_et_v2`)
 
-**Dependencies:** `monthly_etof` + `maca_monthly_eto`
+**Dependencies:** `monthly_etof` + `maca_monthly_eto_v2`
 
 **Purpose:** Monthly ET for 2026–2099.
 
@@ -258,9 +261,9 @@ GEE handles on-the-fly reprojection when these assets are combined at tile-downl
 
 ---
 
-### 9. Monthly USDA SCS Effective Precipitation (`monthly_peff`)
+### 9. Monthly USDA SCS Effective Precipitation (`monthly_peff_v2`)
 
-**Dependencies:** `prism_hargreaves_eto` (for 1896–1978) + `maca_monthly_eto` (for 2026–2099)
+**Dependencies:** `prism_hargreaves_eto` (for 1896–1978) + `maca_monthly_eto_v2` (for 2026–2099)
 
 **Purpose:** Monthly effective precipitation for 1896–2099 using the USDA SCS method.
 
@@ -270,7 +273,7 @@ GEE handles on-the-fly reprojection when these assets are combined at tile-downl
 1. **Get monthly ETo** from the appropriate source:
    - 1896–1978: Pre-exported `prism_hargreaves_eto` asset
    - 1979–2025: gridMET native monthly ETo
-   - 2026–2099: Pre-exported `maca_monthly_eto` asset
+   - 2026–2099: Pre-exported `maca_monthly_eto_v2` asset
 2. **Get monthly precipitation:**
    - 1896–2025: PRISM (`OREGONSTATE/PRISM/ANm`, band `ppt`)
    - 2026–2099: MACA daily ensemble precipitation aggregated to monthly
@@ -347,6 +350,7 @@ GEE enforces a 3,000-task queue limit. `export_image()` automatically calls `_wa
 | `calc_prism_monthly_eto(img)` | Hargreaves PET from PRISM tmax/tmin |
 | `build_openet_monthly_et_ic()` | Monthly OpenET ET 2000–2025 |
 | `build_daily_maca_ensemble(year)` | Daily MACA ensemble for one year |
+| `build_daily_maca_single(year, model, scenario)` | Daily MACA data for one GCM/scenario |
 
 ## How `dataops.py` Consumes These Assets
 
@@ -356,8 +360,8 @@ After export, `dataops.py` loads the assets once before the tile-download loop:
 _ASSET_PREFIX = 'projects/azhydro/assets'
 prism_hargreaves_eto_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/prism_hargreaves_eto')
 usgs_adjusted_et_ic     = ee.ImageCollection(f'{_ASSET_PREFIX}/usgs_adjusted_et')
-maca_monthly_eto_ic     = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_eto')
-maca_monthly_et_ic      = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_et')
+maca_monthly_eto_ic     = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_eto_v2')
+maca_monthly_et_ic      = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_et_v2')
 lulc_projection_ensemble_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/lulc_projection_ensemble')
 ```
 

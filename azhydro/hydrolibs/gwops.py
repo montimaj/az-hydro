@@ -10,55 +10,72 @@ import vectorops as vops
 import visualops as vizops  # New visualization module
 import os
 import shutil
+import multiprocessing
 import numpy as np
 import geopandas as gpd
 import pandas as pd
 import dataretrieval.nwis as nwis
 import scipy.ndimage.filters as flt
+import logging
 
 from typing import Any
+from joblib import Parallel, delayed
 from sysops import makedirs, copy_file
 from glob import glob
 from copy import deepcopy
+
+logger = logging.getLogger(__name__)
 
 
 def reproject_vectors(
         input_dir: str,
         output_dir: str,
         ref_file: str,
-        pattern: str = '*.geojson',
         already_reprojected: bool = False
-) -> None:
+) -> dict[str, str]:
     """
-    Reproject various AZ vector files.
+    Reproject all shapefiles and geojsons found recursively under input_dir.
 
     Args:
-        input_dir (str): Input directory containing vector files.
-        output_dir (str): Output directory.
-        ref_file (str): Reference vector file.
-        pattern (str): Vector file path pattern.
+        input_dir (str): Input directory containing vector files (searched recursively).
+        output_dir (str): Output directory for reprojected files (flat structure).
+        ref_file (str): Reference vector file for target CRS.
         already_reprojected (bool): Set True to disable reprojection.
 
     Returns:
-        tuple (str, ...): Sorted list of reprojected vector file paths.
+        dict[str, str]: Mapping of stem filename (without extension) to reprojected file path.
     """
 
+    def _find_vectors(search_dir):
+        shps = glob(os.path.join(search_dir, '**', '*.shp'), recursive=True)
+        geojsons = glob(os.path.join(search_dir, '**', '*.geojson'), recursive=True)
+        return sorted(shps + geojsons)
+
     if not already_reprojected:
-        if os.path.isfile(input_dir):
-            vector_files = [input_dir]
-        else:
-            vector_files = glob(f'{input_dir}{pattern}')
         makedirs(output_dir)
-        for f in vector_files:
-            output_f = f"{output_dir}{f[f.rfind(os.sep) + 1:]}"
+        vector_files = _find_vectors(input_dir)
+
+        def _reproject(f):
+            basename = os.path.basename(f)
+            output_f = os.path.join(output_dir, basename)
             vops.reproject_vector(
                 f,
                 outfile_path=output_f,
                 ref_file=ref_file,
                 raster=False
             )
+
+        num_cores = min(multiprocessing.cpu_count() - 1, len(vector_files))
+        Parallel(n_jobs=num_cores)(delayed(_reproject)(f) for f in vector_files)
     else:
-        print('Boundary/State/AMA_INA shapefiles are already reprojected')
+        logger.info('Vector files are already reprojected')
+
+    reprojected = _find_vectors(output_dir)
+    result = {}
+    for f in reprojected:
+        stem = os.path.splitext(os.path.basename(f))[0]
+        result[stem] = f
+    return result
 
 
 def crop_gw_rasters(
@@ -89,7 +106,7 @@ def crop_gw_rasters(
             ext_mask=True
         )
     else:
-        print('GW rasters already cropped')
+        logger.info('GW rasters already cropped')
     return cropped_dir
 
 
@@ -131,16 +148,21 @@ def preprocess_gw_csv(
         str: File path of the first GW pumping shapefile or geojson.
     """
 
+    def _process_csv(csv_file):
+        out_shp = f'{output_dir}{csv_file[csv_file.rfind(os.sep) + 1:csv_file.rfind(".")]}.shp'
+        vops.add_attribute_well_reg(
+            well_registry_file, csv_file, out_shp,
+            fill_attr, filter_attr, filter_attr_value,
+            use_only_ama_ina, **kwargs
+        )
+
     if not already_preprocessed:
         makedirs(output_dir)
-        vops.add_attribute_well_reg_multiple(
-            input_well_reg_file=well_registry_file,
-            input_gw_csv_dir=input_gw_csv_dir, out_gw_shp_dir=output_dir,
-            fill_attr=fill_attr, filter_attr=filter_attr,
-            filter_attr_value=filter_attr_value,
-            use_only_ama_ina=use_only_ama_ina,
-            **kwargs
-        )
+        csv_files = glob(f'{input_gw_csv_dir}*.csv')
+        num_cores = multiprocessing.cpu_count() - 2
+        logger.info('Updating Well Registry shapefiles...')
+        Parallel(n_jobs=num_cores)(delayed(_process_csv)(f) for f in csv_files)
+
     ref_file = glob(f'{output_dir}*.shp')[0]
     return ref_file
 
@@ -215,7 +237,7 @@ def create_gw_volume_rasters(
     """
 
     if not already_created:
-        print('Creating GW withdrawal volume (acreft) rasters...')
+        logger.info('Creating GW withdrawal volume (acreft) rasters...')
         gw_volume_dir_uncorrected = f'{output_gw_dir}Uncorrected_GW_Volumes/'
         makedirs(gw_volume_dir_uncorrected)
         vops.shps2rasters(
@@ -243,7 +265,7 @@ def create_gw_volume_rasters(
         )
         shutil.rmtree(gw_volume_dir_uncorrected, ignore_errors=True)
     else:
-        print('GW  pumping volume rasters already created')
+        logger.info('GW  pumping volume rasters already created')
 
 
 def create_gw_depth_rasters(
@@ -268,7 +290,8 @@ def create_gw_depth_rasters(
     if not already_created:
         makedirs(output_gw_dir)
         nodata = rops.az_nodata()
-        for gw_volume_file in glob(gw_volume_dir + gw_pattern):
+
+        def _convert_volume_to_depth(gw_volume_file):
             gw_depth_file = f'{output_gw_dir}{gw_volume_file[gw_volume_file.rfind(os.sep) + 1:]}'
             gw_vol_arr, gw_vol_ref = rops.read_raster_as_arr(gw_volume_file)
             xres, yres = gw_vol_ref.res
@@ -278,34 +301,38 @@ def create_gw_depth_rasters(
                 gw_depth_arr, gw_vol_ref, transform_=gw_vol_ref.transform,
                 outfile_path=gw_depth_file, no_data_value=nodata
             )
+
+        volume_files = glob(gw_volume_dir + gw_pattern)
+        num_cores = min(multiprocessing.cpu_count() - 1, len(volume_files))
+        Parallel(n_jobs=num_cores)(
+            delayed(_convert_volume_to_depth)(f) for f in volume_files
+        )
     else:
-        print('GW pumping depth rasters already created...')
+        logger.info('GW pumping depth rasters already created...')
 
 
-def create_gw_basin_streamflow_rasters(
+def create_gw_basin_rasters(
         gw_basin_vector: str,
-        canal_vector: str,
         output_dir: str,
         xres: float = 500,
         yres: float = 500,
         start_year: int = 1985,
         end_year: int = 2023,
-        water_year_agg: bool = False,
-        already_created: bool = False
+        already_created: bool = False,
+        verbose: bool = False
 ) -> None:
     """
     Create GW basin and Colorado river streamflow rasters for Arizona.
 
     Args:
         gw_basin_vector (str): GW Basin shapefile or geojson for Arizona.
-        canal_vector (str): Canal shapefile or geojson for Arizona.
         output_dir (str): Output directory.
         xres (float): X-Resolution (m).
         yres (float): Y-Resolution (m).
         start_year (int): Start year in YYYY.
         end_year (int): End year in YYYY.
-        water_year_agg (bool): Set True to aggregate by water year.
         already_created (bool): Set True if raster already exists.
+        verbose (bool): Set True to print additional information.
 
     Returns:
         None
@@ -326,232 +353,11 @@ def create_gw_basin_streamflow_rasters(
             az_gw_basin_tif = f'{output_dir}GW_Basin_{year}.tif'
             copy_file(
                 az_gw_basin_sy_tif,
-                az_gw_basin_tif
-            )
-        canal_dir = f'{output_dir}Canal/'
-        makedirs(canal_dir)
-        canal_gdf_az = gpd.read_file(canal_vector)
-        co_attr = 'ColoRiver'
-        co_river_flt = canal_gdf_az[co_attr] == 1
-        canal_gdf_az.loc[~co_river_flt, co_attr] = 0
-        canal_az_shp = f'{canal_dir}Canal_AZ.shp'
-        canal_gdf_az.to_file(canal_az_shp)
-        az_canal_tif = f'{canal_dir}Canal_AZ.tif'
-        vops.shp2raster(
-            canal_az_shp, az_canal_tif,
-            xres=xres, yres=yres,
-            value_field=co_attr,
-            add_value=False
-        )
-        year_list = range(start_year, end_year + 1)
-        canal_raster_arr, canal_raster_file = rops.read_raster_as_arr(az_canal_tif)
-        flow_attr = 'dv_ft3_sec'
-        dv_start_year = f'{start_year}-01-01'
-        dv_end_year = f'{end_year}-12-31'
-        if water_year_agg:
-            dv_start_year = f'{start_year - 1}-10-01'
-            dv_end_year = f'{end_year}-09-30'
-        usgs_site_daily = nwis.get_record(
-            sites='09427520', # COLORADO RIVER BELOW PARKER DAM, AZ-CA
-            service='dv', # daily discharge values in ft3/s
-            start=dv_start_year, # water year
-            end=dv_end_year,
-            parameterCd='00060'
-        ).rename(columns={'00060_Mean': flow_attr}).reset_index()
-        usgs_site_daily = usgs_site_daily[usgs_site_daily[flow_attr] >= 0]
-        usgs_site_daily.datetime = pd.to_datetime(usgs_site_daily.datetime)
-        usgs_site_monthly = usgs_site_daily.groupby(
-            pd.Grouper(key='datetime', freq='ME')
-        ).agg({flow_attr: 'mean'}).reset_index()
-        if water_year_agg:
-            usgs_site_monthly['Year'] = usgs_site_monthly.datetime.dt.year.where(
-                usgs_site_monthly.datetime.dt.month < 10,
-                usgs_site_monthly.datetime.dt.year + 1
-            )
-        else:
-            usgs_site_monthly['Year'] = usgs_site_monthly.datetime.dt.year
-        usgs_site_annual = usgs_site_monthly.groupby('Year').agg({flow_attr: 'mean'}).reset_index()
-        usgs_site_annual[flow_attr] *= 0.0283168
-        flow_attr = 'dv_m3_sec'
-        usgs_site_annual.columns = ['Year', flow_attr]
-        mean_flow = usgs_site_annual[flow_attr].mean(skipna=True)
-        usgs_site_annual[flow_attr] = usgs_site_annual[flow_attr].fillna(mean_flow)
-        for year in year_list:
-            streamflow_tif = f'{output_dir}Streamflow_{year}.tif'
-            canal_arr = deepcopy(canal_raster_arr)
-            try:
-                canal_arr[canal_arr == 1] *= usgs_site_annual[usgs_site_annual.Year == year][flow_attr].values[0]
-            except IndexError:
-                canal_arr[canal_arr == 1] *= usgs_site_annual[flow_attr].mean()
-            canal_arr[np.isnan(canal_arr)] = 0
-            rops.write_raster(
-                canal_arr,
-                canal_raster_file,
-                transform_=canal_raster_file.transform,
-                outfile_path=streamflow_tif,
-                no_data_value=0
+                az_gw_basin_tif,
+                verbose=verbose
             )
 
-    print('GW Basin and Streamflow rasters created...')
-
-
-def create_annual_eff_precip_rasters(
-        monthly_eff_precip_dir: str,
-        output_dir: str,
-        start_year: int = 1985,
-        end_year: int = 2023,
-        start_month: int = 1,
-        end_month: int = 12,
-        already_created: bool = False
-) -> None:
-    """
-    Create annual effective precipitation rasters from monthly effective precipitation rasters.
-
-    Args:
-        monthly_eff_precip_dir (str): Monthly effective precipitation raster directory.
-        output_dir (str): Output directory.
-        start_year (int): Start year in YYYY.
-        end_year (int): End year in YYYY.
-        start_month (int): Start month in MM.
-        end_month (int): End month in MM.
-        already_created (bool): Set True if raster already exists.
-
-    Returns:
-        None
-    """
-
-    if not already_created:
-        year_list = range(start_year, end_year + 1)
-        makedirs(output_dir)
-        # copy months 1 to 9 from second year to first year
-        for month in range(1, 10):
-            annual_eff_precip_file = f'{monthly_eff_precip_dir}effective_precip_{start_year}_{month}.tif'
-            if not os.path.exists(annual_eff_precip_file):
-                monthly_eff_precip_file = f'{monthly_eff_precip_dir}effective_precip_{start_year + 1}_{month}.tif'
-                if os.path.exists(monthly_eff_precip_file):
-                    copy_file(
-                        monthly_eff_precip_file,
-                        annual_eff_precip_file
-                    )
-        monthly_eff_precip_rio = None
-        for year in year_list:
-            annual_eff_precip_arr = None
-            for month in range(start_month, end_month + 1):
-                monthly_eff_precip_file = f'{monthly_eff_precip_dir}effective_precip_{year}_{month}.tif'
-                if os.path.exists(monthly_eff_precip_file):
-                    monthly_eff_precip_arr, monthly_eff_precip_rio = rops.read_raster_as_arr(monthly_eff_precip_file)
-                    if annual_eff_precip_arr is None:
-                        annual_eff_precip_arr = monthly_eff_precip_arr
-                    else:
-                        annual_eff_precip_arr += monthly_eff_precip_arr
-            if annual_eff_precip_arr is not None:
-                annual_eff_precip_file = f'{output_dir}Peff_{year}.tif'
-                rops.write_raster(
-                    annual_eff_precip_arr,
-                    monthly_eff_precip_rio,
-                    transform_=monthly_eff_precip_rio.transform,
-                    outfile_path=annual_eff_precip_file,
-                    no_data_value=monthly_eff_precip_rio.nodata
-                )
-        for year in year_list:
-            if year < 1985:
-                copy_file(
-                    f'{output_dir}Peff_1985.tif',
-                    f'{output_dir}Peff_{year}.tif'
-                )
-    print('Annual effective precipitation rasters created...')
-
-
-
-def create_gw_basin_sw_delivery_rasters(
-        gw_basin_vector: str,
-        cap_delivery_xls: str,
-        srp_delivery_xls: str,
-        output_dir: str,
-        xres: float = 500,
-        yres: float = 500,
-        start_year: int = 1985,
-        end_year: int = 2023,
-        already_created: bool = False
-) -> None:
-    """
-    Create CAP and SRP surface water delivery data for Arizona.
-
-    Args:
-        gw_basin_vector (str): GW Basin shapefile or geojson for Arizona.
-        cap_delivery_xls (str): XLS filepath for the CAP annual surface water delivery data in acre-feet.
-        srp_delivery_xls (str): XLS filepath for the SRP annual surface water delivery data in acre-feet.
-        output_dir (str): Output directory.
-        xres (float): X-Resolution (m).
-        yres (float): Y-Resolution (m).
-        start_year (int): Start year in YYYY.
-        end_year (int): End year in YYYY.
-        already_created (bool): Set True if raster already exists.
-
-    Returns:
-        None
-    """
-
-    if not already_created:
-        year_list = range(start_year, end_year + 1)
-        makedirs(output_dir)
-        gw_basin_gdf = gpd.read_file(gw_basin_vector)
-        cap_df = pd.read_excel(cap_delivery_xls)[['Year', 'AMA', 'Delivery AF']]
-        cap_df = cap_df[cap_df.Year.isin(year_list)]
-        year_col = 'Year'
-        basin_col = 'BASIN_NAME'
-        delivery_col = 'AF'
-        cap_df.columns = [year_col, basin_col, delivery_col]
-        cap_df[basin_col] = cap_df[basin_col].str.upper()
-        srp_df = pd.read_excel(srp_delivery_xls)[['Water Move Year', 'AMA', 'SUM_WATER_QTY', 'Water Type', 'Water Use']]
-        srp_df.columns = [year_col, basin_col, delivery_col, 'WT', 'WU']
-        srp_df = srp_df[
-            (srp_df.Year.isin(year_list)) &
-            (srp_df.WT.str.contains('SURFACE WATER')) &
-            (srp_df.WU.str.contains('EXEMPT IRRIGATION DELIVERY'))
-        ].drop(columns=['WT', 'WU']).groupby([year_col, basin_col]).sum().reset_index()
-        srp_missing_data = pd.DataFrame({
-            year_col: [2023, 2024],
-            basin_col: ['Phoenix AMA'] * 2,
-            delivery_col: [srp_df[delivery_col].mean()] * 2
-        })
-        srp_df = pd.concat([srp_df, srp_missing_data])
-        srp_df[basin_col] = srp_df[basin_col].str.upper()
-        for year in year_list:
-            select_rows = (cap_df[basin_col] == 'PHOENIX AMA') & (cap_df[year_col] == year)
-            cap_srp_delivery = cap_df[select_rows][delivery_col] + srp_df[srp_df[year_col] == year][delivery_col]
-            cap_df.loc[select_rows, delivery_col] = cap_srp_delivery.copy()
-        gw_basin_cap_srp_gdf = gw_basin_gdf.merge(cap_df, on=basin_col)[[year_col, basin_col, delivery_col, 'geometry']]
-        for year in year_list:
-            basin_gdf = gw_basin_gdf.copy(deep=True)[[basin_col, 'geometry']]
-            gw_basin_shp = f'{output_dir}GW_Basin_CAP_SRP_Total_{year}.shp'
-            for gw_basin in basin_gdf[basin_col]:
-                delivery_vals = gw_basin_cap_srp_gdf[
-                    (gw_basin_cap_srp_gdf[basin_col] == gw_basin) &
-                    (gw_basin_cap_srp_gdf[year_col] == year) &
-                    (gw_basin_cap_srp_gdf[delivery_col] > 0)
-                ][delivery_col].values
-                if not delivery_vals.size:
-                    delivery_data = 0
-                else:
-                    delivery_data = delivery_vals[0]
-                basin_gdf.loc[basin_gdf[basin_col] == gw_basin, delivery_col] = delivery_data
-            basin_gdf.to_file(gw_basin_shp)
-            gw_basin_tif = f'{output_dir}GW_Basin_CAP_SRP_Total_{year}.tif'
-            vops.shp2raster(
-                gw_basin_shp,
-                gw_basin_tif,
-                xres=xres, yres=yres,
-                value_field=delivery_col,
-                add_value=False
-            )
-        for year in year_list:
-            if year < 1985:
-                copy_file(
-                    f'{output_dir}GW_Basin_CAP_SRP_Total_1985.tif',
-                    f'{output_dir}GW_Basin_CAP_SRP_Total_{year}.tif'
-                )
-    print('GW Basin surface water delivery rasters created...')
+    logger.info('GW Basin rasters created...')
 
 
 def create_land_use_data(
@@ -563,7 +369,7 @@ def create_land_use_data(
     Create Gaussian-filtered land use array.
 
     Args:
-        input_df (pd.DataFrame): Dataframe used to store the Guassian-filtered reclassified CDL arrays, where
+        input_df (pd.DataFrame): Dataframe used to store the Guassian-filtered LULC arrays, where
                                  1 = Agriculture, 2 = Surface Water, and 3 = Urban.
         cdl_arr (np.array): CDL array.
         smoothing (int): Smoothing window size for the Gaussian filter.
@@ -572,19 +378,7 @@ def create_land_use_data(
         pd.DataFrame: input_df updated with the Gaussian-filtered reclassified CDL arrays.
     """
 
-    cdl_reclass_dict = {
-        (0, 59.5): 1,
-        (66.5, 77.5): 1,
-        (203.5, 255): 1,
-        (110.5, 111.5): 2,
-        (111.5, 112.5): 0,
-        (120.5, 124.5): 3,
-        (59.5, 61.5): 0,
-        (130.5, 195.5): 0
-    }
     cdl_labels = ('AGRI', 'SW', 'URBAN')
-    for key in cdl_reclass_dict.keys():
-        cdl_arr[np.logical_and(cdl_arr > key[0], cdl_arr <= key[1])] = cdl_reclass_dict[key]
     cdl_arr = cdl_arr.astype(np.float32)
     for idx, cdl_label in enumerate(cdl_labels):
         lu_arr = np.full_like(cdl_arr, fill_value=0.)

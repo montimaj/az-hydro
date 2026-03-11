@@ -18,6 +18,9 @@ from config import (
     list_pending_task_descriptions, export_image, wait_for_tasks,
     ASSET_PREFIX, PRISM_SCALE, calc_prism_monthly_eto
 )
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 ASSET_ID = f'{ASSET_PREFIX}/gridmet_hargreaves_eto_ratio'
@@ -71,7 +74,7 @@ def build_and_export():
         img_name = f'month_{m:02d}'
         img_asset = f'{ASSET_ID}/{img_name}'
         if img_asset in existing:
-            print(f'  Skipping {img_name} (already exists)')
+            logger.info(f'  Skipping {img_name} (already exists)')
             continue
         monthly_mean = joined.filter(ee.Filter.calendarRange(m, m, 'month')).mean() \
             .rename('ratio') \
@@ -84,19 +87,20 @@ def build_and_export():
             pending_descriptions=pending
         )
         tasks.append(task)
-        print(f'  Submitted {img_name}')
+        logger.info(f'  Submitted {img_name}')
 
     return tasks
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     import argparse
     parser = argparse.ArgumentParser(description='Export gridMET/Hargreaves ETo ratio')
     parser.add_argument('--no-wait', action='store_true')
     args = parser.parse_args()
 
-    print('Exporting gridMET/Hargreaves ETo ratio (12 monthly grids)...')
+    logger.info('Exporting gridMET/Hargreaves ETo ratio (12 monthly grids)...')
     tasks = build_and_export()
     if tasks and not args.no_wait:
         wait_for_tasks(tasks)
-    print(f'Asset: {ASSET_ID}')
+    logger.info(f'Asset: {ASSET_ID}')

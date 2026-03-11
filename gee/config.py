@@ -14,7 +14,9 @@ import time
 import argparse
 from http.client import RemoteDisconnected
 from functools import wraps
+import logging
 
+logger = logging.getLogger(__name__)
 
 _RETRYABLE_ERRORS = (ee.EEException, RemoteDisconnected, ConnectionError, TimeoutError, OSError)
 MAX_RETRIES = 10
@@ -31,7 +33,7 @@ def _retry(func):
                 if attempt == MAX_RETRIES:
                     raise
                 wait = min(2 ** attempt, 120)
-                print(f'  [{func.__name__}] {e} (attempt {attempt}/{MAX_RETRIES}). '
+                logger.warning(f'  [{func.__name__}] {e} (attempt {attempt}/{MAX_RETRIES}). '
                       f'Retrying in {wait}s...')
                 time.sleep(wait)
     return wrapper
@@ -91,7 +93,7 @@ def create_ic_asset(asset_id):
         ee.data.getAsset(asset_id)
     except ee.EEException:
         ee.data.createAsset({'type': 'IMAGE_COLLECTION'}, asset_id)
-        print(f'Created ImageCollection: {asset_id}')
+        logger.info(f'Created ImageCollection: {asset_id}')
 
 
 def asset_exists(asset_id):
@@ -139,7 +141,7 @@ def _wait_for_queue_capacity(max_queue=2900, poll_interval=60):
         try:
             ops = ee.data.listOperations()
         except _RETRYABLE_ERRORS as e:
-            print(f'  [_wait_for_queue_capacity] {e}. Retrying in {poll_interval}s...')
+            logger.warning(f'  [_wait_for_queue_capacity] {e}. Retrying in {poll_interval}s...')
             time.sleep(poll_interval)
             continue
         busy = sum(1 for op in ops
@@ -147,7 +149,7 @@ def _wait_for_queue_capacity(max_queue=2900, poll_interval=60):
                    ('PENDING', 'RUNNING', 'READY'))
         if busy < max_queue:
             return
-        print(f'  Queue full ({busy} tasks). Waiting {poll_interval}s...')
+        logger.info(f'  Queue full ({busy} tasks). Waiting {poll_interval}s...')
         time.sleep(poll_interval)
 
 
@@ -158,11 +160,11 @@ def export_image(image, asset_id, description, region, scale, crs='EPSG:4326',
     Automatically waits if the task queue is near the 3000-task limit.
     Skips if the asset already exists or a task with the same description is queued."""
     if asset_exists(asset_id):
-        print(f'  Skipping {description} (asset already exists)')
+        logger.info(f'  Skipping {description} (asset already exists)')
         return None
     desc = description[:100]
     if pending_descriptions is not None and desc in pending_descriptions:
-        print(f'  Skipping {desc} (task already queued)')
+        logger.info(f'  Skipping {desc} (task already queued)')
         return None
     _wait_for_queue_capacity()
     out = image.clip(region).toInt() if as_int else image.clip(region).toFloat()
@@ -183,22 +185,22 @@ def wait_for_tasks(tasks, check_interval=30):
     """Wait for all export tasks to complete and report status."""
     tasks = [t for t in tasks if t is not None]
     if not tasks:
-        print('No tasks to wait for.')
+        logger.info('No tasks to wait for.')
         return
-    print(f'Waiting for {len(tasks)} tasks...')
+    logger.info(f'Waiting for {len(tasks)} tasks...')
     while True:
         active = [t for t in tasks if t.active()]
         if not active:
             break
-        print(f'  {len(active)} tasks still active...')
+        logger.info(f'  {len(active)} tasks still active...')
         time.sleep(check_interval)
     failed = 0
     for t in tasks:
         status = t.status()
         if status['state'] == 'FAILED':
-            print(f'  FAILED: {status["description"]} - {status.get("error_message", "")}')
+            logger.error(f'  FAILED: {status["description"]} - {status.get("error_message", "")}')
             failed += 1
-    print(f'Done. {len(tasks) - failed}/{len(tasks)} succeeded.')
+    logger.info(f'Done. {len(tasks) - failed}/{len(tasks)} succeeded.')
 
 
 def get_export_parser(description):
@@ -290,6 +292,30 @@ def build_daily_maca_ensemble(year):
             startDate.advance(offset, 'day'),
             startDate.advance(ee.Number(offset).add(1), 'day')
         ).mean()
+        .set('system:time_start', startDate.advance(offset, 'day').millis())
+        .set('system:time_end', startDate.advance(ee.Number(offset).add(1), 'day').millis())
+    ))
+
+
+def build_daily_maca_single(year, model, scenario):
+    """
+    Build daily MACA ImageCollection for a single model and scenario.
+    Returns ee.ImageCollection with one image per day.
+    """
+    startDate = ee.Date.fromYMD(year, 1, 1)
+    endDate = ee.Date.fromYMD(year + 1, 1, 1)
+    nDays = endDate.difference(startDate, 'day')
+    maca_ic = ee.ImageCollection('IDAHO_EPSCOR/MACAv2_METDATA') \
+        .filterDate(startDate, endDate) \
+        .filter(ee.Filter.eq('model', model)) \
+        .filter(ee.Filter.eq('scenario', scenario)) \
+        .select(MACA_BANDS)
+    dayOffsets = ee.List.sequence(0, nDays.subtract(1))
+    return ee.ImageCollection(dayOffsets.map(lambda offset:
+        maca_ic.filterDate(
+            startDate.advance(offset, 'day'),
+            startDate.advance(ee.Number(offset).add(1), 'day')
+        ).first()
         .set('system:time_start', startDate.advance(offset, 'day').millis())
         .set('system:time_end', startDate.advance(ee.Number(offset).add(1), 'day').millis())
     ))

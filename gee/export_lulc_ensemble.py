@@ -19,6 +19,9 @@ from config import (
     list_pending_task_descriptions, export_image, wait_for_tasks,
     get_export_parser, ASSET_PREFIX, USGS_LULC_SCALE, USGS_LULC_SCENARIOS
 )
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 ASSET_ID = f'{ASSET_PREFIX}/lulc_projection_ensemble'
@@ -74,20 +77,21 @@ def build_and_export(start_year, end_year):
         )
         tasks.append(task)
         if len(tasks) % 10 == 0:
-            print(f'  Submitted {len(tasks)} tasks...')
+            logger.info(f'  Submitted {len(tasks)} tasks...')
 
-    print(f'  Total: {len(tasks)} tasks submitted')
+    logger.info(f'  Total: {len(tasks)} tasks submitted')
     return tasks
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     parser = get_export_parser('Export LULC projection ensemble (2026-2099)')
     args = parser.parse_args()
     start = args.start_year or DEFAULT_START
     end = args.end_year or DEFAULT_END
 
-    print(f'Exporting LULC projection ensemble for {start}-{end}...')
+    logger.info(f'Exporting LULC projection ensemble for {start}-{end}...')
     tasks = build_and_export(start, end)
     if tasks and not args.no_wait:
         wait_for_tasks(tasks)
-    print(f'Asset: {ASSET_ID}')
+    logger.info(f'Asset: {ASSET_ID}')

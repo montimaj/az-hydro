@@ -58,6 +58,9 @@ from sklearn.inspection import permutation_importance
 from sysops import makedirs, make_proper_dir_name
 from gwops import get_ama_ina_basin_names
 import visualops as vizops  # Journal-quality visualization module
+import logging
+
+logger = logging.getLogger(__name__)
 from catboost import CatBoostRegressor
 
 # Suppress warnings for cleaner output
@@ -465,7 +468,7 @@ def compute_perm_imp(
         None if model_name is not one of 'RF', 'ETR', 'LGBM', or 'DRF.'
     """
     if model_name in ['RF', 'ETR', 'LGBM', 'XGB', 'XGBRF', 'HGBR']:
-        print('Computing permutation importance...')
+        logger.info('Computing permutation importance...')
         scoring_metrics = {
             'r2': 'r2',
             'scaled_rmse': make_scorer(normalized_rmse, greater_is_better=False),
@@ -579,7 +582,7 @@ def compute_ale_plots(
         'test': (x_test, y_test)
     }
     for data_type, (x_data, y_data) in data_dict.items():
-        print(f'Creating ALE plots for {data_type} data...')        
+        logger.info(f'Creating ALE plots for {data_type} data...')        
         explainer = skexplain.ExplainToolkit(
             (model_name, model), 
             X=x_data, y=y_data, 
@@ -685,7 +688,7 @@ def build_ml_model(
                 minimum_memory='8G', maximum_memory='10G'
             )
             dask_client = Client(cluster)
-            print('Waiting for dask workers...')
+            logger.info('Waiting for dask workers...')
             dask_client.wait_for_workers(1)
             cv_lib = 'dask_ml'
         model_dict, param_dict = get_model_param_dict(random_state, use_dask)
@@ -698,7 +701,7 @@ def build_ml_model(
             cv = RepeatedStratifiedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
             cv = cv.split(x_train, stratify_labels)
         makedirs(make_proper_dir_name(model_dir))
-        print('\nSearching best params for {}...'.format(model_name))
+        logger.info(f'Searching best params for {model_name}...')
         scoring_metrics = {
             'r2': 'r2',
             'adjusted_r2': make_scorer(adjusted_r2, p=x_train.shape[1], greater_is_better=True),
@@ -726,7 +729,7 @@ def build_ml_model(
             )
         model_grid.fit(x_train, y_train)
         metric_df = get_grid_search_stats(model_grid, metric_csv)
-        print('Best params: ', model_grid.best_params_)
+        logger.info(f'Best params: {model_grid.best_params_}')
         model = model_dict[model_name]
         model.set_params(**model_grid.best_params_)
         model.fit(x_train, y_train)
@@ -949,7 +952,7 @@ def build_ml_model_optuna(
                 show_progress_bar=True
             )
         best_params = study.best_params
-        print('Best params: ', best_params)
+        logger.info(f'Best params: {best_params}')
         model_dict, _ = get_model_param_dict(random_state)
         model = model_dict[model_name]
         model.set_params(**best_params)
@@ -1157,7 +1160,7 @@ def build_ml_model_optuna_dask(
                 memory_limit='2GB'
             )
             dask_client = Client(dask_cluster)
-            print(f'Dask cluster started with {n_dask_workers} workers')
+            logger.info(f'Dask cluster started with {n_dask_workers} workers')
         
         # Create or load study
         if os.path.isfile(optuna_storage):
@@ -1165,7 +1168,7 @@ def build_ml_model_optuna_dask(
                 study_name=f'Optuna_{model_name}',
                 storage=f'sqlite:///{optuna_storage}'
             )
-            print(f'Loaded existing study with {len(study.trials)} trials')
+            logger.info(f'Loaded existing study with {len(study.trials)} trials')
         else:
             # Create sampler with pruning support
             sampler = optuna.samplers.TPESampler(
@@ -1209,8 +1212,8 @@ def build_ml_model_optuna_dask(
             dask_client.close()
         
         best_params = study.best_params
-        print(f'Best params for {model_name}: {best_params}')
-        print(f'Best value: {study.best_value:.4f}')
+        logger.info(f'Best params for {model_name}: {best_params}')
+        logger.info(f'Best value: {study.best_value:.4f}')
         
         # Train final model with best parameters
         include_all = model_name in ['GBR', 'ADA', 'BAG', 'CAT']
@@ -1377,13 +1380,13 @@ def compare_all_models(
     if model_names is None:
         model_names = ['XGB', 'XGBRF', 'LGBM', 'RF', 'ETR', 'HGBR']
     
-    print('='*60)
-    print('Model Comparison')
-    print('='*60)
+    logger.info('='*60)
+    logger.info('Model Comparison')
+    logger.info('='*60)
     
     # Train individual models
     for model_name in model_names:
-        print(f'\nTraining {model_name}...')
+        logger.info(f'Training {model_name}...')
         model_subdir = f'{model_dir}{model_name}/'
         
         if use_optuna:
@@ -1484,9 +1487,9 @@ def compare_all_models(
             'Overfit_Val_R2': overfit_val_r2,
         })
         
-        print(f'  Train R2: {train_r2:.4f}, Val R2: {cv_val_r2:.4f}, Test R2: {test_r2:.4f}')
-        print(f'  Train RMSE: {train_rmse:.2f}%, Val RMSE: {cv_val_rmse:.2f}%, Test RMSE: {test_rmse:.2f}%')
-        print(f'  Overfitting (R2 gap): {overfit_r2:.4f}')
+        logger.info(f'  Train R2: {train_r2:.4f}, Val R2: {cv_val_r2:.4f}, Test R2: {test_r2:.4f}')
+        logger.info(f'  Train RMSE: {train_rmse:.2f}%, Val RMSE: {cv_val_rmse:.2f}%, Test RMSE: {test_rmse:.2f}%')
+        logger.info(f'  Overfitting (R2 gap): {overfit_r2:.4f}')
     
     # Create results dataframe
     results_df = pd.DataFrame(results)
@@ -1496,12 +1499,12 @@ def compare_all_models(
     # Create comprehensive comparison plots with overfitting analysis
     _create_model_comparison_plots(results_df, model_dir)
     
-    print('\n' + '='*60)
-    print('Best Model:', results_df.iloc[0]['Model'])
-    print(f"Test R2: {results_df.iloc[0]['Test_R2']:.4f}")
-    print(f"Test RMSE: {results_df.iloc[0]['Test_RMSE']:.2f}%")
-    print(f"Overfitting (R2 gap): {results_df.iloc[0]['Overfit_R2']:.4f}")
-    print('='*60)
+    logger.info('='*60)
+    logger.info(f'Best Model: {results_df.iloc[0]["Model"]}')
+    logger.info(f"Test R2: {results_df.iloc[0]['Test_R2']:.4f}")
+    logger.info(f"Test RMSE: {results_df.iloc[0]['Test_RMSE']:.2f}%")
+    logger.info(f"Overfitting (R2 gap): {results_df.iloc[0]['Overfit_R2']:.4f}")
+    logger.info('='*60)
     
     return results_df
 
@@ -1936,7 +1939,7 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
     plt.savefig(f'{model_dir}Overfitting_Summary_Table.png', dpi=600, bbox_inches='tight')
     plt.close()
     
-    print(f'\nVisualization plots saved to {model_dir}')
+    logger.info(f'Visualization plots saved to {model_dir}')
 
 
 def calc_train_test_metrics(
@@ -2053,7 +2056,7 @@ def get_grid_search_stats(
         metric_df = pd.concat([metric_df, temp_df], ignore_index=True)
     for col in ['R2', 'Adjusted_R2', 'RMSE (%)', 'MAE (%)', 'MBE (%)']:
         metric_df[col] = metric_df[col].apply(lambda x: round_to_n_nonzero(x, precision))
-    print(metric_df)
+    logger.info(f'\n{metric_df}')
     metric_df.to_csv(metric_csv, index=False)
     return metric_df
 
@@ -2297,10 +2300,10 @@ def get_prediction_results(
     if apply_bias_correction == 0:
         return pred_df
     elif model_name not in ['LGBM', 'DRF', 'ETR', 'RF', 'XGB', 'XGBRF', 'HGBR']:
-        print(f'No bias correction for {model_name} model.')
+        logger.info(f'No bias correction for {model_name} model.')
         return pred_df
     elif apply_bias_correction == 1:
-        print('Applying global bias correction...')
+        logger.info('Applying global bias correction...')
         output_dir = f'{model_dir}Global_Bias_Correction_{model_name}/'
         makedirs(make_proper_dir_name(output_dir))
         train_df = train_df.drop(columns=[gw_basin_col])
@@ -2315,7 +2318,7 @@ def get_prediction_results(
             pred_df.loc[pred_df.DATA == 'TEST', 'Pred_GW_mm'] += val2
         pred_df.Error_GW_mm = pred_df.Actual_GW_mm - pred_df.Pred_GW_mm
     else:
-        print('Applying basin-wise bias correction...')
+        logger.info('Applying basin-wise bias correction...')
         gw_pred_df = pd.DataFrame()
         output_dir = f'{model_dir}Basin_Bias_Correction_{model_name}/'
         makedirs(output_dir)
@@ -2326,7 +2329,7 @@ def get_prediction_results(
             basin_df_train = basin_df[basin_df.DATA == 'TRAIN'].copy(deep=True).dropna()
             basin_df_test = basin_df[basin_df.DATA == 'TEST'].copy(deep=True).dropna()
             if basin_df_train.shape[0] == 0 or basin_df_test.shape[0] == 0:
-                print(f'No data for {gw_basin} in train/test data. Skipping bias correction.')
+                logger.info(f'No data for {gw_basin} in train/test data. Skipping bias correction.')
                 val1 = 1
                 val2 = 0
             else:

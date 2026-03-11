@@ -19,11 +19,14 @@ import seaborn as sns
 import numpy as np
 import pandas as pd
 import multiprocessing
+import logging
 
 from typing import Any
 from joblib import Parallel, delayed
 from sysops import makedirs
 from scipy import stats
+
+logger = logging.getLogger(__name__)
 
 
 # Journal-quality plot settings
@@ -413,7 +416,7 @@ def create_basin_time_series_plot(
     basin_df = pred_df[pred_df[gw_basin_col] == basin_name].copy()
     
     if basin_df.empty:
-        print(f'No data for basin: {basin_name}')
+        logger.info(f'No data for basin: {basin_name}')
         return
     
     # Pixel area for unit conversions
@@ -845,11 +848,11 @@ def create_complete_model_visualization(
         create_basin_plots: Whether to create individual basin plots.
         n_jobs: Number of parallel jobs.
     """
-    print(f'\nCreating visualizations for {model_name} - {test_case}...')
+    logger.info(f'Creating visualizations for {model_name} - {test_case}...')
     makedirs(output_dir)
     
     # 1. Aggregate time series plot
-    print('  Creating time series plots...')
+    logger.info('  Creating time series plots...')
     create_time_series_plot_journal(
         pred_df, output_dir, model_name, test_case, test_year_limits,
         year_col=year_col, actual_col=actual_col, pred_col=pred_col,
@@ -858,14 +861,14 @@ def create_complete_model_visualization(
     )
     
     # 2. Scatter plots
-    print('  Creating scatter plots...')
+    logger.info('  Creating scatter plots...')
     create_train_test_scatter(
         pred_df, output_dir, model_name, test_case,
         actual_col=actual_col, pred_col=pred_col
     )
     
     # 3. Residual plots
-    print('  Creating residual plots...')
+    logger.info('  Creating residual plots...')
     create_residual_plot(
         pred_df, output_dir, model_name, test_case,
         actual_col=actual_col, pred_col=pred_col, year_col=year_col
@@ -873,13 +876,13 @@ def create_complete_model_visualization(
     
     # 4. Basin-level plots (parallel)
     if create_basin_plots:
-        print('  Creating basin-level plots...')
+        logger.info('  Creating basin-level plots...')
         create_all_basin_plots_parallel(
             pred_df, output_dir, model_name, test_case, test_year_limits,
             gw_basin_col=gw_basin_col, raster_res=raster_res, n_jobs=n_jobs
         )
     
-    print(f'  Visualizations saved to: {output_dir}')
+    logger.info(f'  Visualizations saved to: {output_dir}')
 
 
 # Legacy function wrappers for backward compatibility
@@ -942,7 +945,7 @@ def make_time_series_plots(
         y_scaler: Any = None
 ) -> None:
     """Legacy wrapper for backward compatibility."""
-    print('Creating time series plots...')
+    logger.info('Creating time series plots...')
     makedirs(output_dir)
     
     actual_gw_col = 'Actual_GW_mm'
@@ -974,3 +977,232 @@ def make_time_series_plots(
         gw_basin_col=gw_basin_col, raster_res=raster_res, use_ama_ina=True,
         units=['af', 'm3', 'mm']
     )
+
+
+def get_variable_name_dict() -> dict[str, str]:
+    """
+    Returns a dictionary mapping variable names to more descriptive labels for plotting.
+    """
+
+    var_name_dict = {
+        'gw_pumping_mm': 'Annual Groundwater Withdrawals (mm)',
+        'annual_et_ensemble_mm': 'Annual ET (mm)',
+        'annual_eto_mm': 'Annual ETo (mm)',
+        'annual_precip_mm': 'Annual Precipitation (mm)',
+        'annual_peff_mm': 'Annual USDA-SCS Effective Precipitation (mm)',
+        'annual_peff_pcml_mm': 'Annual PCML Effective Precipitation (mm)',
+        'annual_tmmx_K': 'Annual Maximum Air Temperature (K)',
+        'annual_tmmn_K': 'Annual Minimum Air Temperature (K)',
+        'AGRI': 'Agricultural Density',
+        'URBAN': 'Urban Density',
+        'SW': 'Surface Water Density',
+        'streamflow_mm': 'Streamflow (mm)',
+        'gw_basin_type': 'Groundwater Basin Type',
+        'GW_Basin': 'Groundwater Basin',
+        'soil_depth_mm': 'Soil Depth (mm)',
+        'awc_mm': 'Available Water Capacity (mm)',
+        'ksat_mean_micromps': 'Mean Saturated Hydraulic Conductivity (µm/s)',
+        'annual_gw_fraction': 'Annual Groundwater Irrigation Fraction',
+        'annual_crop_fraction': 'Annual Crop Fraction',
+        'annual_irr_fraction': 'Annual Irrigated Fraction',
+    }
+    return var_name_dict
+
+
+# ─── Exploratory data analysis ───────────────────────────────────────────────
+
+# Period definitions for era-based coloring/shading
+ERA_PERIODS = {
+    'Hindcast':    (1896, 1983),
+    'Historical':  (1985, 2024),
+    'Forecast':    (2025, 2025),
+    'Projection':  (2026, 2099),
+}
+
+ERA_COLORS = {
+    'Hindcast':   '#8E44AD',   # Purple
+    'Historical': '#2980B9',   # Blue
+    'Forecast':   '#E67E22',   # Orange
+    'Projection': '#27AE60',   # Green
+}
+
+
+def _assign_era(year: int) -> str:
+    """Map a year to its era label."""
+    for era, (start, end) in ERA_PERIODS.items():
+        if start <= year <= end:
+            return era
+    return 'Other'
+
+
+def explore_az_data(
+        az_df: pd.DataFrame,
+        output_dir: str,
+        year_col: str = 'Year',
+        gw_basin_col: str = 'GW_Basin',
+        basin_type_col: str = 'GW_Basin_Type',
+        skip_cols: tuple[str, ...] = ('easting_m', 'northing_m'),
+        figsize_ts: tuple[float, float] = (14, 5),
+        figsize_box: tuple[float, float] = (14, 6),
+) -> None:
+    """
+    Exploratory visualizations (boxplots, violin plots, time series) for all
+    numeric columns in *az_df*, grouped by GW_Basin_Type and GW_Basin.
+
+    Four eras are highlighted:
+        Hindcast 1896-1983 | Historical 1985-2024 | Forecast 2025 | Projection 2026-2099
+
+    Args:
+        az_df: Arizona predictor dataframe produced by ``create_az_data_csv``.
+        output_dir: Directory where plots are saved.
+        year_col: Name of the year column.
+        gw_basin_col: Name of the groundwater basin column.
+        basin_type_col: Name of the basin type column (0=AMA, 1=INA, 2=Other).
+        skip_cols: Columns to skip in the visualizations.
+        figsize_ts: Figure size for time series plots.
+        figsize_box: Figure size for box/violin plots.
+    """
+    makedirs(output_dir)
+    apply_journal_style()
+
+    df = az_df.copy()
+    df['Era'] = df[year_col].apply(_assign_era)
+
+    basin_type_map = {0: 'AMA', 1: 'INA', 2: 'Other'}
+    df['Basin_Type_Label'] = df[basin_type_col].map(basin_type_map)
+
+    numeric_cols = [
+        c for c in df.select_dtypes(include='number').columns
+        if c not in (year_col, basin_type_col) and c not in skip_cols
+    ]
+
+    era_order = list(ERA_PERIODS.keys())
+    era_palette = [ERA_COLORS[e] for e in era_order]
+
+    logger.info(f'Generating exploratory plots for {len(numeric_cols)} columns …')
+
+    ama_ina_basins = get_ama_ina_basin_names()
+    var_name_dict = get_variable_name_dict()
+
+    for col in numeric_cols:
+        safe = col.replace('/', '_')
+        label = var_name_dict.get(col, col)
+
+        # For gw_pumping_mm restrict to 1984-2024 (metered years) and AMA/INA
+        if col == 'gw_pumping_mm':
+            col_df = df[(df[year_col].between(1984, 2024)) &
+                        (df[gw_basin_col].isin(ama_ina_basins))].copy()
+        else:
+            col_df = df
+
+        # Exclude zero values before plotting
+        col_df = col_df[col_df[col] > 0]
+
+        # ── 1. Time series (mean ± std per year), shaded by era ──────────
+        yearly = col_df.groupby(year_col)[col].agg(['mean', 'std']).reset_index()
+        yearly['Era'] = yearly[year_col].apply(_assign_era)
+
+        fig, ax = plt.subplots(figsize=figsize_ts)
+        for era in era_order:
+            mask = yearly['Era'] == era
+            if not mask.any():
+                continue
+            sub = yearly[mask]
+            ax.plot(sub[year_col], sub['mean'], color=ERA_COLORS[era], lw=1.5)
+            ax.fill_between(
+                sub[year_col],
+                sub['mean'] - sub['std'],
+                sub['mean'] + sub['std'],
+                color=ERA_COLORS[era], alpha=0.18,
+            )
+        # shade era backgrounds
+        for era, (s, e) in ERA_PERIODS.items():
+            ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.06)
+        ax.set_xlabel('Year')
+        ax.set_ylabel(label)
+        ax.set_title(f'{label} — Annual Mean ± Std')
+        handles = [mpatches.Patch(color=ERA_COLORS[e], label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
+                   for e in era_order]
+        ax.legend(handles=handles, loc='best', fontsize=9)
+        plt.tight_layout()
+        plt.savefig(f'{output_dir}{safe}_timeseries.png')
+        plt.close()
+
+        # ── 2. Time series grouped by Basin Type ─────────────────────────
+        fig, ax = plt.subplots(figsize=figsize_ts)
+        for bt_label, bt_df in col_df.groupby('Basin_Type_Label'):
+            yt = bt_df.groupby(year_col)[col].mean().reset_index()
+            ax.plot(yt[year_col], yt[col], label=bt_label, lw=1.3)
+        for era, (s, e) in ERA_PERIODS.items():
+            ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.06)
+        ax.set_xlabel('Year')
+        ax.set_ylabel(label)
+        ax.set_title(f'{label} — Annual Mean by Basin Type')
+        ax.legend(loc='best', fontsize=9)
+        plt.tight_layout()
+        plt.savefig(f'{output_dir}{safe}_timeseries_by_basin_type.png')
+        plt.close()
+
+        # ── 3. Boxplot by Era ────────────────────────────────────────────
+        fig, ax = plt.subplots(figsize=figsize_box)
+        era_df = col_df[col_df['Era'].isin(era_order)]
+        sns.boxplot(
+            data=era_df, x='Era', y=col, order=era_order,
+            palette=era_palette, ax=ax, fliersize=2,
+        )
+        ax.set_title(f'{label} — Distribution by Era')
+        plt.tight_layout()
+        plt.savefig(f'{output_dir}{safe}_boxplot_era.png')
+        plt.close()
+
+        # ── 4. Violin plot by Era ────────────────────────────────────────
+        fig, ax = plt.subplots(figsize=figsize_box)
+        sns.violinplot(
+            data=era_df, x='Era', y=col, order=era_order,
+            palette=era_palette, ax=ax, inner='quartile', cut=0,
+        )
+        ax.set_title(f'{label} — Violin by Era')
+        plt.tight_layout()
+        plt.savefig(f'{output_dir}{safe}_violin_era.png')
+        plt.close()
+
+        # ── 5. Boxplot by GW_Basin_Type ──────────────────────────────────
+        fig, ax = plt.subplots(figsize=figsize_box)
+        sns.boxplot(
+            data=col_df, x='Basin_Type_Label', y=col,
+            hue='Era', hue_order=era_order,
+            palette=ERA_COLORS, ax=ax, fliersize=2,
+        )
+        ax.set_title(f'{label} — by Basin Type & Era')
+        ax.set_xlabel('Basin Type')
+        ax.legend(loc='best', fontsize=9)
+        plt.tight_layout()
+        plt.savefig(f'{output_dir}{safe}_boxplot_basin_type.png')
+        plt.close()
+
+        # ── 6. Boxplot by GW_Basin ───────────────────────────────────────
+        if col == 'gw_pumping_mm':
+            # Show all AMA/INA basins for pumping
+            basin_df = col_df[col_df[gw_basin_col].isin(ama_ina_basins)]
+            basin_list = sorted(basin_df[gw_basin_col].unique())
+        else:
+            top_basins = col_df[gw_basin_col].value_counts().head(10).index.tolist()
+            basin_df = col_df[col_df[gw_basin_col].isin(top_basins)]
+            basin_list = top_basins
+        fig, ax = plt.subplots(figsize=(16, 7))
+        sns.boxplot(
+            data=basin_df, x=gw_basin_col, y=col,
+            order=basin_list,
+            hue='Era', hue_order=era_order,
+            palette=ERA_COLORS, ax=ax, fliersize=1,
+        )
+        title_suffix = 'AMA/INA Basins' if col == 'gw_pumping_mm' else 'top 10'
+        ax.set_title(f'{label} — by GW Basin ({title_suffix}) & Era')
+        ax.set_xlabel('GW Basin')
+        ax.tick_params(axis='x', rotation=35)
+        ax.legend(loc='best', fontsize=8)
+        plt.tight_layout()
+        plt.savefig(f'{output_dir}{safe}_boxplot_gw_basin.png')
+        plt.close()
+
+    logger.info(f'Exploratory plots saved to {output_dir}')

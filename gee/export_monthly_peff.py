@@ -5,15 +5,15 @@ Computes monthly effective precipitation using the USDA-SCS method (eq. 2-84/2-8
 with the following inputs per era:
   - 1896-1978: PRISM Hargreaves ETo (pre-exported asset) + PRISM precipitation
   - 1979-2025: gridMET ETo + PRISM precipitation
-  - 2026-2099: MACA ETo (pre-exported asset) + MACA daily precipitation (aggregated to monthly)
+  - 2026-2099: MACA ETo (pre-exported asset, per-model/scenario ensemble) + MACA daily precipitation (aggregated to monthly)
 
 Parameters: mad_factor=1, rz_depth_m=2m for all months (consistent with UCRB comparisons).
 
 Dependencies (Level 2 assets):
   - prism_hargreaves_eto (for 1896-1978)
-  - maca_monthly_eto (for 2026-2099)
+  - maca_monthly_eto_v2 (for 2026-2099)
 
-Asset: projects/azhydro/assets/monthly_peff/ (204 years × 12 months = 2448 images)
+Asset: projects/azhydro/assets/monthly_peff_v2/ (204 years × 12 months = 2448 images)
 
 Usage:
     conda activate azhydro
@@ -27,11 +27,14 @@ from config import (
     get_export_parser, build_daily_maca_ensemble,
     ASSET_PREFIX, PRISM_SCALE
 )
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-ASSET_ID = f'{ASSET_PREFIX}/monthly_peff'
+ASSET_ID = f'{ASSET_PREFIX}/monthly_peff_v2'
 PRISM_ETO_ASSET = f'{ASSET_PREFIX}/prism_hargreaves_eto'
-MACA_ETO_ASSET = f'{ASSET_PREFIX}/maca_monthly_eto'
+MACA_ETO_ASSET = f'{ASSET_PREFIX}/maca_monthly_eto_v2'
 DEFAULT_START = 1896
 DEFAULT_END = 2099
 
@@ -208,25 +211,26 @@ def build_and_export(start_year, end_year):
             ).first()
             task = export_image(
                 img, img_asset,
-                f'peff_{img_name}',
+                f'peff_v2_{img_name}',
                 az, PRISM_SCALE,
                 pending_descriptions=pending
             )
             tasks.append(task)
 
-        print(f'  Submitted year {year} ({len(tasks)} total tasks)')
+        logger.info(f'  Submitted year {year} ({len(tasks)} total tasks)')
 
     return tasks
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     parser = get_export_parser('Export monthly USDA SCS effective precipitation (1896-2099)')
     args = parser.parse_args()
     start = args.start_year or DEFAULT_START
     end = args.end_year or DEFAULT_END
 
-    print(f'Exporting monthly USDA SCS peff for {start}-{end}...')
+    logger.info(f'Exporting monthly USDA SCS peff for {start}-{end}...')
     tasks = build_and_export(start, end)
     if tasks and not args.no_wait:
         wait_for_tasks(tasks)
-    print(f'Asset: {ASSET_ID}')
+    logger.info(f'Asset: {ASSET_ID}')

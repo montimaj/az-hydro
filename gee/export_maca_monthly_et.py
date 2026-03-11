@@ -6,9 +6,9 @@ to produce bias-corrected monthly ET grids.
 
 Dependencies: Run these first:
   1. export_monthly_etof.py
-  2. export_maca_monthly_eto.py
+  2. export_maca_monthly_eto.py (produces maca_monthly_eto_v2)
 
-Asset: projects/azhydro/assets/maca_monthly_et/ (74 years × 12 months = 888 images)
+Asset: projects/azhydro/assets/maca_monthly_et_v2/ (74 years × 12 months = 888 images)
 
 Usage:
     conda activate azhydro
@@ -21,11 +21,14 @@ from config import (
     list_pending_task_descriptions, export_image, wait_for_tasks,
     get_export_parser, ASSET_PREFIX, MACA_SCALE
 )
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-ASSET_ID = f'{ASSET_PREFIX}/maca_monthly_et'
+ASSET_ID = f'{ASSET_PREFIX}/maca_monthly_et_v2'
 ETOF_ASSET = f'{ASSET_PREFIX}/monthly_etof'
-MACA_ETO_ASSET = f'{ASSET_PREFIX}/maca_monthly_eto'
+MACA_ETO_ASSET = f'{ASSET_PREFIX}/maca_monthly_eto_v2'
 DEFAULT_START = 2026
 DEFAULT_END = 2099
 
@@ -74,24 +77,25 @@ def build_and_export(start_year, end_year):
             ).first()
             task = export_image(
                 img, img_asset,
-                f'maca_et_{img_name}',
+                f'maca_et_v2_{img_name}',
                 az, MACA_SCALE,
                 pending_descriptions=pending
             )
             tasks.append(task)
-        print(f'  Submitted year {year} ({len(tasks)} total tasks)')
+        logger.info(f'  Submitted year {year} ({len(tasks)} total tasks)')
 
     return tasks
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     parser = get_export_parser('Export MACA monthly ET (2026-2099)')
     args = parser.parse_args()
     start = args.start_year or DEFAULT_START
     end = args.end_year or DEFAULT_END
 
-    print(f'Exporting MACA monthly ET for {start}-{end}...')
+    logger.info(f'Exporting MACA monthly ET for {start}-{end}...')
     tasks = build_and_export(start, end)
     if tasks and not args.no_wait:
         wait_for_tasks(tasks)
-    print(f'Asset: {ASSET_ID}')
+    logger.info(f'Asset: {ASSET_ID}')

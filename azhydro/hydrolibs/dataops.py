@@ -33,6 +33,7 @@ logging.getLogger('rasterio').setLevel(logging.ERROR)
 logging.getLogger('googleapiclient').setLevel(logging.ERROR)
 logging.getLogger('googleapiclient.http').setLevel(logging.ERROR)
 logging.getLogger('google_auth_httplib2').setLevel(logging.ERROR)
+from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 from sysops import makedirs
@@ -47,7 +48,8 @@ from dask.distributed import Client, LocalCluster
 from http.client import RemoteDisconnected
 from tqdm import tqdm
 for _dask_logger in ['dask', 'distributed', 'distributed.worker', 'distributed.worker.state_machine',
-                     'distributed.scheduler', 'distributed.nanny', 'dask_jobqueue']:
+                     'distributed.scheduler', 'distributed.nanny', 'dask_jobqueue',
+                     'tornado', 'tornado.application']:
     logging.getLogger(_dask_logger).setLevel(logging.CRITICAL)
 
 
@@ -484,10 +486,10 @@ def download_gee_tile(
     _ASSET_PREFIX = 'projects/azhydro/assets'
     prism_hargreaves_eto_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/prism_hargreaves_eto')
     usgs_adjusted_et_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/usgs_adjusted_et')
-    maca_monthly_eto_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_eto')
-    maca_monthly_et_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_et')
+    maca_monthly_eto_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_eto_v2')
+    maca_monthly_et_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_et_v2')
     lulc_projection_ensemble_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/lulc_projection_ensemble')
-    monthly_peff_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/monthly_peff')
+    monthly_peff_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/monthly_peff_v2')
     gw_fraction_img_dict = {
         '2000': ee.Image("projects/fwhung/assets/CroplandNew60m/Crop_IrrSource_2000"),
         '2005': ee.Image("projects/fwhung/assets/CroplandNew60m/Crop_IrrSource_2005"),
@@ -780,43 +782,13 @@ def download_gee_data(
                 )
                 for tile_vals in tile_chunk
             )
-        dask_client.shutdown()
+        try:
+            dask_client.close()
+            dask_cluster.close()
+        except (TimeoutError, OSError):
+            logger.warning('Dask cluster cleanup timed out (all tasks completed successfully)')
     return data_dir, data_band_names
 
-
-def mosaic_tiles_parallel(
-        input_tile_dir: str,
-        output_dir: str,
-        year: int,
-        output_prefix: str = 'Predictor',
-        gdal_merge_path: str = '/usr/bin/gdal_merge.py'
-) -> None:
-    """
-    Mosaic all tiles based on the start and end years.
-
-    Args:
-        input_tile_dir (str): Input tile directory. The naming convention is Tile_<tile_number>_<year>.tif.
-        output_dir (str): Output directory.
-        year (int): Year in YYYY.
-        output_prefix (str): Output prefix name to append to output files.
-        gdal_merge_path (str): Path to the gdal_merge.py script.
-
-    Returns:
-        None.
-    """
-
-    tiles = ' '.join(glob(f'{input_tile_dir}*{year}.tif'))
-    merged_tif = f'{output_dir}{output_prefix}_{year}.tif'
-    if os.path.exists(merged_tif):
-        os.remove(merged_tif)
-    gdal_sys_call = f'{gdal_merge_path} -o {merged_tif} -of GTiff -init 0 {tiles}'
-    subprocess.call(
-        gdal_sys_call,
-        shell=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
 
 def mosaic_tiles(
         input_tile_dir: str,
@@ -841,18 +813,37 @@ def mosaic_tiles(
         None.
     """
 
+    def _mosaic_year(year):
+        tile_list = glob(f'{input_tile_dir}*{year}.tif')
+        tiles = ' '.join(tile_list)
+        merged_tif = f'{output_dir}{output_prefix}_{year}.tif'
+        if os.path.exists(merged_tif):
+            os.remove(merged_tif)
+        gdal_sys_call = f'{gdal_merge_path} -o {merged_tif} -of GTiff -init 0 {tiles}'
+        subprocess.call(
+            gdal_sys_call,
+            shell=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        # Preserve band descriptions from source tile
+        if tile_list:
+            with rio.open(tile_list[0]) as src:
+                descriptions = src.descriptions
+            if any(descriptions):
+                with rio.open(merged_tif, 'r+') as dst:
+                    for idx, desc in enumerate(descriptions, start=1):
+                        if desc:
+                            dst.set_band_description(idx, desc)
+
     if not already_mosaicked:
         makedirs(output_dir)
-        print('Mosaicking tiles...')
+        logger.info('Mosaicking tiles...')
         gdal_merge_path = f'{os.environ["CONDA_PREFIX"]}/bin/gdal_merge.py'
         joblib.Parallel(n_jobs=-1)(
-            joblib.delayed(mosaic_tiles_parallel)(
-                input_tile_dir,
-                output_dir,
-                year,
-                output_prefix,
-                gdal_merge_path
-            ) for year in range(start_year, end_year + 1)
+            joblib.delayed(_mosaic_year)(year)
+            for year in range(start_year, end_year + 1)
         )
 
 
@@ -928,9 +919,7 @@ def create_az_data_csv(
         var_names = [
             'Predictor',
             'GW_Basin',
-            'Streamflow',
-            'GW_Basin_CAP_SRP_Total',
-            'Peff'
+            'Streamflow'
         ]
         for year in range(start_year, end_year + 1):
             df = pd.DataFrame()
@@ -945,7 +934,7 @@ def create_az_data_csv(
                                     band=band_num + 1,
                                     get_file=False
                                 )
-                                if band_name == 'crop_cdl':
+                                if band_name == 'lulc':
                                     df = create_land_use_data(
                                         df, raster_arr,
                                         smoothing=lu_smoothing
@@ -959,26 +948,41 @@ def create_az_data_csv(
                         raster_arr = read_raster_as_arr(raster_file, get_file=False).ravel()
                         if var_name == 'Streamflow':
                             raster_arr[np.isnan(raster_arr)] = 0
-                            df['streamflow_m3s'] = raster_arr
-                        elif var_name == 'GW_Basin_CAP_SRP_Total':
-                            df['cap_srp_delivery_km3'] = raster_arr * 1.23348e-6 # Convert acre-feet to km3
+                            df['streamflow_mm'] = raster_arr
                         elif var_name == 'GW':
                             raster_arr[np.isnan(raster_arr)] = 0
-                        elif var_name == 'Peff':
-                            raster_arr[np.isnan(raster_arr)] = 0
-                            df['annual_peff_mm'] = raster_arr
                         else:
                             df[var_name] = raster_arr
-                gw_file = f'{gw_data_dir}GW_{year}.tif'
+                # We will later predict GW pumping for years outside 1984-2024
+                gw_file = f'{gw_data_dir}GW_{year}.tif' if 1984 <= year <= 2024 else sorted(
+                    glob(f'{gw_data_dir}GW_*.tif'))[0]
                 df['gw_pumping_mm'] = read_raster_as_arr(gw_file, get_file=False).ravel()
                 lon_grid, lat_grid = get_xy_grids_from_raster(gw_file)
                 df['easting_m'] = lon_grid.ravel()
                 df['northing_m'] = lat_grid.ravel()
-                df['awc_mm'] = df.awc_cm * 10
+                df['awc_mm'] = df.awc_in * 25.4 # convert from inches to mm
+                df['soil_depth_mm'] = df.soil_depth_cm * 10 # convert from cm to mm
                 df['Year'] = year
-                df = df.drop(columns=['awc_cm'])
+                df = df.drop(columns=['awc_in', 'soil_depth_cm'])
                 data_df = pd.concat([data_df, df])
-        data_df = data_df[~np.isnan(data_df.gw_pumping_mm)].reset_index(drop=True)
+        # Set annual_irr_fraction to 0 where annual_crop_fraction is 0
+        data_df.loc[data_df.annual_crop_fraction == 0, 'annual_irr_fraction'] = 0.0
+        # Fit a linear regression of annual_irr_fraction on annual_crop_fraction using
+        # 1985-2025 IrrMapper data (non-zero crop fraction only), then predict for years
+        # outside that range. Where crop fraction is zero, irr fraction is set to zero.
+        irr_mask = data_df.Year.between(1985, 2025)
+        train = data_df.loc[irr_mask].dropna(subset=['annual_irr_fraction', 'annual_crop_fraction'])
+        train = train[train.annual_crop_fraction > 0]
+        irr_reg = LinearRegression().fit(
+            train[['annual_crop_fraction']].values,
+            train['annual_irr_fraction'].values
+        )
+        for mask in [data_df.Year < 1985, data_df.Year > 2025]:
+            data_df.loc[mask, 'annual_irr_fraction'] = 0.0
+            nonzero = mask & (data_df.annual_crop_fraction > 0)
+            pred = irr_reg.predict(data_df.loc[nonzero, ['annual_crop_fraction']].values)
+            data_df.loc[nonzero, 'annual_irr_fraction'] = np.clip(pred, 0, 1)
+
         gw_basin_gdf = gpd.read_file(gw_basin_vector)
         gw_basin_dict = {}
         ama_ina_basins = get_ama_ina_basin_names()
@@ -987,10 +991,10 @@ def create_az_data_csv(
             gw_basin_dict[gw_basin] = gw_basin_name
         nan_str = 'OUTSIDE AZ'
         gw_basin_dict[0] = nan_str
+        data_df = data_df.reset_index(drop=True)
         data_df.GW_Basin = data_df.GW_Basin.swifter.apply(
             lambda x: gw_basin_dict[x] if not np.isnan(x) else nan_str)
         data_df = data_df[data_df.GW_Basin != nan_str]
-
         ama_basins = [b for b in ama_ina_basins if 'AMA' in b]
         ina_basins = [b for b in ama_ina_basins if b not in ama_basins]
         data_df = data_df.reset_index(drop=True)
@@ -1283,7 +1287,7 @@ def process_outliers(
                 lower_limit = min_data if lower_limit < min_data else lower_limit
                 invalid_idx = (selected_data[target_attr] >= upper_limit) | (selected_data[target_attr] <= lower_limit)
                 outliers = invalid_idx.sum()
-                print(f'{gw_basin} {year} outliers: {outliers}')
+                logger.info(f'{gw_basin} {year} outliers: {outliers}')
                 num_outliers += outliers
                 input_df.loc[selection, 'Outlier'] = invalid_idx
         input_df = input_df[input_df['Outlier'] == False]
@@ -1293,8 +1297,8 @@ def process_outliers(
         input_df.loc[invalid_idx, target_attr] = np.nan
         num_outliers = invalid_idx.sum()
     input_df = input_df.dropna()
-    print('Old DF rows = {}, New DF rows = {}'.format(init_rows, input_df.shape[0]))
-    print(f'{num_outliers} outliers removed...')
+    logger.info('Old DF rows = {}, New DF rows = {}'.format(init_rows, input_df.shape[0]))
+    logger.info(f'{num_outliers} outliers removed...')
     return input_df
 
 
