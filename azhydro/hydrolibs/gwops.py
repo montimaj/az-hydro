@@ -319,10 +319,11 @@ def create_gw_basin_rasters(
         start_year: int = 1985,
         end_year: int = 2023,
         already_created: bool = False,
-        verbose: bool = False
+        verbose: bool = False,
+        subbasin_vector: str | None = None,
 ) -> None:
     """
-    Create GW basin and Colorado river streamflow rasters for Arizona.
+    Create GW basin (and optionally sub-basin) rasters for Arizona.
 
     Args:
         gw_basin_vector (str): GW Basin shapefile or geojson for Arizona.
@@ -333,6 +334,9 @@ def create_gw_basin_rasters(
         end_year (int): End year in YYYY.
         already_created (bool): Set True if raster already exists.
         verbose (bool): Set True to print additional information.
+        subbasin_vector (str | None): ADWR Groundwater Sub-basin shapefile.
+            When provided, ``GW_Subbasin_{year}.tif`` rasters are created
+            alongside the basin rasters.
 
     Returns:
         None
@@ -349,6 +353,17 @@ def create_gw_basin_rasters(
             value_field='OBJECTID',
             add_value=False
         )
+
+        if subbasin_vector is not None:
+            az_gw_subbasin_sy_tif = f'{output_dir}GW_Subbasin_{start_year}.tif'
+            vops.shp2raster(
+                subbasin_vector,
+                az_gw_subbasin_sy_tif,
+                xres=xres, yres=yres,
+                value_field='OBJECTID',
+                add_value=False
+            )
+
         for year in year_list:
             az_gw_basin_tif = f'{output_dir}GW_Basin_{year}.tif'
             copy_file(
@@ -356,6 +371,13 @@ def create_gw_basin_rasters(
                 az_gw_basin_tif,
                 verbose=verbose
             )
+            if subbasin_vector is not None:
+                az_gw_subbasin_tif = f'{output_dir}GW_Subbasin_{year}.tif'
+                copy_file(
+                    az_gw_subbasin_sy_tif,
+                    az_gw_subbasin_tif,
+                    verbose=verbose
+                )
 
     logger.info('GW Basin rasters created...')
 
@@ -495,3 +517,77 @@ def make_time_series_plots(
         pred_attr, split_strategy, test_gw_basins,
         raster_res, x_scaler, y_scaler
     )
+
+
+def create_well_density_raster(
+        well_registry_file: str,
+        output_dir: str,
+        water_use: str | None = None,
+        xres: float = 2000,
+        yres: float = 2000,
+        start_year: int = 1896,
+        end_year: int = 2099,
+        already_created: bool = False
+) -> str:
+    """
+    Create well density rasters (well count per pixel) from the ADWR Well Registry.
+
+    A single raster is computed from the well registry and then replicated for
+    each year to maintain consistency with the per-year predictor file pattern.
+
+    Args:
+        well_registry_file (str): Path to the ADWR Well Registry shapefile.
+        output_dir (str): Output directory for the well density rasters.
+        water_use (str or None): Filter wells by WATER_USE attribute.
+            E.g. 'IRRIGATION'. Set None to include all wells.
+        xres (float): X-resolution in map units. Defaults to 2000.
+        yres (float): Y-resolution in map units. Defaults to 2000.
+        start_year (int): Start year. Defaults to 1896.
+        end_year (int): End year. Defaults to 2099.
+        already_created (bool): If True, skip creation.
+
+    Returns:
+        str: Path to the base well density raster.
+    """
+
+    base_raster = f'{output_dir}Well_Density_{start_year}.tif'
+    if already_created:
+        logger.info('Well density rasters already created, skipping...')
+        return base_raster
+
+    makedirs(output_dir)
+
+    # Load well registry
+    gdf = gpd.read_file(well_registry_file)
+    if water_use:
+        gdf = gdf[gdf['WATER_USE'] == water_use]
+    logger.info(f'Using {len(gdf)} wells for density rasterization')
+
+    # Add count attribute
+    gdf = gdf.copy()
+    gdf['_count'] = 1.0
+
+    # Save as temp shapefile
+    tmp_dir = f'{output_dir}_well_temp/'
+    makedirs(tmp_dir)
+    tmp_shp = f'{tmp_dir}wells.shp'
+    gdf[['_count', 'geometry']].to_file(tmp_shp)
+
+    # Rasterize: well count per pixel
+    vops.shp2raster(
+        tmp_shp, base_raster,
+        value_field='_count',
+        xres=xres, yres=yres,
+        add_value=True
+    )
+
+    # Copy for each year
+    for year in range(start_year + 1, end_year + 1):
+        out_file = f'{output_dir}Well_Density_{year}.tif'
+        copy_file(base_raster, out_file, verbose=False)
+
+    # Clean up temp files
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    logger.info(f'Created well density rasters ({start_year}-{end_year}) in {output_dir}')
+    return base_raster

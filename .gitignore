@@ -176,3 +176,6 @@ Data/Outputs/ML_Model_Irr_Wells_2000m/Model_Evaluation/
 js/
 USBR/
 AZ_Data.parquet
+GRAIN_v.1.0.zip
+_*.py
+

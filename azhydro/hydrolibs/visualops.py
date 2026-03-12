@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import multiprocessing
 import logging
+import geopandas as gpd
 
 from typing import Any
 from joblib import Parallel, delayed
@@ -1014,7 +1015,7 @@ def get_variable_name_dict() -> dict[str, str]:
 # Period definitions for era-based coloring/shading
 ERA_PERIODS = {
     'Hindcast':    (1896, 1983),
-    'Historical':  (1985, 2024),
+    'Historical':  (1984, 2024),
     'Forecast':    (2025, 2025),
     'Projection':  (2026, 2099),
 }
@@ -1206,3 +1207,438 @@ def explore_az_data(
         plt.close()
 
     logger.info(f'Exploratory plots saved to {output_dir}')
+
+
+# ─── ML Pipeline Visualization Helpers ───────────────────────────────────────
+
+
+def plot_loo_heatmap(
+        metrics_df: pd.DataFrame,
+        fold_col: str,
+        output_dir: str,
+        title: str = 'LOO Heatmap',
+) -> None:
+    """Heatmap of Test R² (fold × model)."""
+    apply_journal_style()
+    pivot = metrics_df.pivot(index=fold_col, columns='Model', values='Test_R2')
+    fig, ax = plt.subplots(figsize=(max(8, len(pivot.columns) * 1.2),
+                                    max(4, len(pivot) * 0.45)))
+    sns.heatmap(
+        pivot, annot=True, fmt='.3f', cmap='RdYlGn',
+        linewidths=0.5, ax=ax, vmin=0, vmax=1,
+    )
+    ax.set_title(title, fontweight='bold')
+    ax.set_ylabel('')
+    plt.tight_layout()
+    fig.savefig(f'{output_dir}LOO_Heatmap_R2.png', dpi=600)
+    plt.close()
+
+
+def plot_loo_bar(
+        metrics_df: pd.DataFrame,
+        fold_col: str,
+        output_dir: str,
+) -> None:
+    """Grouped bar chart of averaged Test RMSE and R² per model."""
+    apply_journal_style()
+    avg = metrics_df.groupby('Model').agg(
+        R2_mean=('Test_R2', 'mean'),
+        R2_std=('Test_R2', 'std'),
+        RMSE_mean=('Test_RMSE', 'mean'),
+        RMSE_std=('Test_RMSE', 'std'),
+    ).reset_index()
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].bar(avg.Model, avg.R2_mean, yerr=avg.R2_std, capsize=4,
+                color='#2980B9', edgecolor='black', linewidth=0.5)
+    axes[0].set_ylabel('Mean Test R²', fontweight='bold')
+    axes[0].set_title(f'LOO Averaged Test R² ({fold_col})', fontweight='bold')
+    axes[0].tick_params(axis='x', rotation=45)
+
+    axes[1].bar(avg.Model, avg.RMSE_mean, yerr=avg.RMSE_std, capsize=4,
+                color='#E74C3C', edgecolor='black', linewidth=0.5)
+    axes[1].set_ylabel('Mean Test RMSE (%)', fontweight='bold')
+    axes[1].set_title(f'LOO Averaged Test RMSE ({fold_col})', fontweight='bold')
+    axes[1].tick_params(axis='x', rotation=45)
+
+    plt.tight_layout()
+    fig.savefig(f'{output_dir}LOO_Averaged_Metrics.png', dpi=600)
+    plt.close()
+
+
+def create_cross_strategy_summary(all_results: dict, output_dir: str) -> None:
+    """Create a summary table and figure comparing all strategies."""
+    makedirs(output_dir)
+    rows = []
+    for strategy_name, res in all_results.items():
+        if 'comparison_df' in res:
+            for _, row in res['comparison_df'].iterrows():
+                rows.append({
+                    'Strategy': strategy_name,
+                    'Model': row['Model'],
+                    'Test_R2': row['Test_R2'],
+                    'Test_RMSE': row['Test_RMSE'],
+                    'Overfit_R2': row['Overfit_R2'],
+                })
+        elif 'avg_df' in res:
+            for _, row in res['avg_df'].iterrows():
+                rows.append({
+                    'Strategy': strategy_name,
+                    'Model': row['Model'],
+                    'Test_R2': row['Mean_Test_R2'],
+                    'Test_RMSE': row['Mean_Test_RMSE'],
+                    'Overfit_R2': row['Mean_Overfit_R2'],
+                })
+    summary_df = pd.DataFrame(rows)
+    summary_df.to_csv(f'{output_dir}Cross_Strategy_Summary.csv', index=False)
+
+    apply_journal_style()
+    strategies = summary_df.Strategy.unique()
+    models = summary_df.Model.unique()
+    n_strategies = len(strategies)
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    metrics = ['Test_R2', 'Test_RMSE', 'Overfit_R2']
+    ylabels = ['Test R²', 'Test RMSE (%)', 'Overfitting (R² gap)']
+    width = 0.8 / n_strategies
+    x = np.arange(len(models))
+
+    for ax, metric, ylabel in zip(axes, metrics, ylabels):
+        for i, strategy in enumerate(strategies):
+            sub = summary_df[summary_df.Strategy == strategy]
+            vals = [sub[sub.Model == m][metric].values[0]
+                    if len(sub[sub.Model == m]) > 0 else 0
+                    for m in models]
+            ax.bar(x + i * width, vals, width, label=strategy, alpha=0.8)
+        ax.set_xticks(x + width * (n_strategies - 1) / 2)
+        ax.set_xticklabels(models, rotation=45, ha='right')
+        ax.set_ylabel(ylabel, fontweight='bold')
+    axes[0].legend()
+    plt.suptitle('Cross-Strategy Model Comparison', fontweight='bold', fontsize=14)
+    plt.tight_layout()
+    fig.savefig(f'{output_dir}Cross_Strategy_Comparison.png', dpi=600)
+    plt.close()
+    logger.info(f'Cross-strategy summary saved to {output_dir}')
+
+
+def create_full_period_time_series(
+        yearly_predictions: dict,
+        output_dir: str,
+        start_year: int = 1896,
+        end_year: int = 2099,
+) -> None:
+    """Time series of predicted AMA/INA pumping with era shading."""
+    apply_journal_style()
+    makedirs(output_dir)
+
+    years = sorted(yearly_predictions.keys())
+    vol_af = [yearly_predictions[y]['Volume_AF'] for y in years]
+    depth_mm = [yearly_predictions[y]['Mean_Depth_mm'] for y in years]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 9), sharex=True)
+
+    for era, (s, e) in ERA_PERIODS.items():
+        ax1.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
+        ax2.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
+
+    ax1.plot(years, depth_mm, color='#2C3E50', linewidth=1.5, marker='.', markersize=3)
+    ax1.set_ylabel('Mean Depth (mm)', fontweight='bold')
+    ax1.set_title('XGBoost Predicted AMA/INA Groundwater Pumping (1896–2099)',
+                  fontweight='bold', fontsize=14)
+    ax1.grid(True, alpha=0.3, linestyle='--')
+
+    ax2.plot(years, vol_af, color='#2C3E50', linewidth=1.5, marker='.', markersize=3)
+    ax2.set_xlabel('Year', fontweight='bold')
+    ax2.set_ylabel('Total Volume (acre-ft)', fontweight='bold')
+    ax2.grid(True, alpha=0.3, linestyle='--')
+
+    handles = [
+        mpatches.Patch(color=ERA_COLORS[e], alpha=0.4,
+                       label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
+        for e in ERA_PERIODS
+    ]
+    ax1.legend(handles=handles, loc='upper left', framealpha=0.9)
+    ax2.set_xlim(start_year - 1, end_year + 1)
+
+    plt.tight_layout()
+    fig.savefig(f'{output_dir}Full_Period_Time_Series.png', dpi=600, bbox_inches='tight')
+    plt.close()
+
+    ts_df = pd.DataFrame({
+        'Year': years,
+        'Mean_Depth_mm': depth_mm,
+        'Mean_Depth_ft': [yearly_predictions[y]['Mean_Depth_ft'] for y in years],
+        'Volume_m3': [yearly_predictions[y]['Volume_m3'] for y in years],
+        'Volume_AF': vol_af,
+    })
+    ts_df['Era'] = ts_df.Year.apply(lambda y: next(
+        (e for e, (s, end) in ERA_PERIODS.items() if s <= y <= end), 'Other'))
+    ts_df.to_csv(f'{output_dir}Full_Period_Time_Series.csv', index=False)
+    logger.info('Full-period time series saved.')
+
+
+def create_era_summary_maps(
+        yearly_predictions: dict,
+        output_dir: str,
+        title_prefix: str = '',
+) -> None:
+    """Bar chart of mean annual pumping per era."""
+    apply_journal_style()
+    makedirs(output_dir)
+
+    label = f'{title_prefix} ' if title_prefix else ''
+    era_means = {}
+    for era, (s, e) in ERA_PERIODS.items():
+        era_vals = [yearly_predictions[y]['Volume_AF']
+                    for y in range(s, e + 1) if y in yearly_predictions]
+        era_means[era] = np.mean(era_vals) if era_vals else 0
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bars = ax.bar(
+        era_means.keys(),
+        era_means.values(),
+        color=[ERA_COLORS[e] for e in era_means],
+        edgecolor='black',
+        linewidth=0.8,
+    )
+    for bar, val in zip(bars, era_means.values()):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
+                f'{val:,.0f}', ha='center', va='bottom', fontsize=11, fontweight='bold')
+
+    ax.set_ylabel('Mean Annual Pumping\n(acre-ft)', fontweight='bold')
+    ax.set_title(f'Mean Annual {label}GW Pumping by Era', fontweight='bold', fontsize=14)
+    ax.grid(axis='y', alpha=0.3, linestyle='--')
+
+    plt.tight_layout()
+    fig.savefig(f'{output_dir}Era_Summary_Bar.png', dpi=600, bbox_inches='tight')
+    plt.close()
+    logger.info('Era summary bar chart saved.')
+
+
+def build_annual_df(
+        yearly_dict: dict[int, dict[str, dict]],
+        name_col: str,
+) -> pd.DataFrame:
+    """Pivot *yearly_dict* {year: {name: metrics_dict}} → long-form DataFrame."""
+    rows = []
+    for year, totals in sorted(yearly_dict.items()):
+        for name, metrics in totals.items():
+            row = {'Year': year, name_col: name}
+            row.update(metrics)
+            rows.append(row)
+    df = pd.DataFrame(rows)
+    df['Era'] = df.Year.apply(
+        lambda y: next(
+            (e for e, (s, end) in ERA_PERIODS.items() if s <= y <= end), 'Other'
+        )
+    )
+    return df
+
+
+def era_shaded_ts(
+        ax: plt.Axes,
+        years: np.ndarray,
+        mean_vals: np.ndarray,
+        std_vals: np.ndarray,
+        color: str = '#2C3E50',
+        label: str | None = None,
+) -> None:
+    """Plot a line with ±1 σ shading and era background colours."""
+    for era, (s, e) in ERA_PERIODS.items():
+        ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.08)
+    ax.plot(years, mean_vals, color=color, linewidth=1.4, marker='.', markersize=3,
+            label=label)
+    ax.fill_between(years, mean_vals - std_vals, mean_vals + std_vals,
+                    color=color, alpha=0.18)
+
+
+def create_basin_time_series(
+        basin_yearly: dict[int, dict[str, dict]],
+        output_dir: str,
+        start_year: int = 1896,
+        end_year: int = 2099,
+        title_prefix: str = '',
+) -> None:
+    """Per-basin annual GW withdrawal time series with era shading + uncertainty."""
+    apply_journal_style()
+    label = f'{title_prefix} ' if title_prefix else ''
+    ts_dir = f'{output_dir}Basin_Time_Series/'
+    makedirs(ts_dir)
+
+    df = build_annual_df(basin_yearly, 'Basin')
+    df.to_csv(f'{ts_dir}Basin_Annual_GW.csv', index=False)
+
+    basins = sorted(df.Basin.unique())
+    n_basins = len(basins)
+    palette = sns.color_palette('tab10', n_basins)
+
+    # --- Combined plot (all basins, volume in acre-ft) ----------------------
+    fig, ax = plt.subplots(figsize=(16, 7))
+    for i, basin in enumerate(basins):
+        bdf = df[df.Basin == basin].sort_values('Year')
+        ax.plot(bdf.Year, bdf.Volume_AF, linewidth=1.3, label=basin,
+                color=palette[i])
+    for era, (s, e) in ERA_PERIODS.items():
+        ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.08)
+    ax.set_xlabel('Year', fontweight='bold')
+    ax.set_ylabel('GW Withdrawal (acre-ft)', fontweight='bold')
+    ax.set_title(f'Annual {label}GW Withdrawal by Basin (1896–2099)', fontweight='bold',
+                 fontsize=14)
+    ax.legend(fontsize=8, ncol=2, loc='upper left', framealpha=0.9)
+    ax.set_xlim(start_year - 1, end_year + 1)
+    ax.grid(True, alpha=0.3, linestyle='--')
+    plt.tight_layout()
+    fig.savefig(f'{ts_dir}All_Basins_Time_Series.png', dpi=600, bbox_inches='tight')
+    plt.close()
+
+    # --- Individual basin plots (2-panel: depth + volume) -------------------
+    for i, basin in enumerate(basins):
+        bdf = df[df.Basin == basin].sort_values('Year')
+        years = bdf.Year.values
+        depth_mm = bdf.Mean_Depth_mm.values
+        vol_af = bdf.Volume_AF.values
+
+        std_depth = pd.Series(depth_mm).rolling(5, min_periods=1, center=True).std().fillna(0).values
+        std_vol = pd.Series(vol_af).rolling(5, min_periods=1, center=True).std().fillna(0).values
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+        era_shaded_ts(ax1, years, depth_mm, std_depth, color=palette[i])
+        ax1.set_ylabel('Mean Depth (mm)', fontweight='bold')
+        ax1.set_title(f'{basin} — Annual {label}GW Withdrawal (1896–2099)',
+                      fontweight='bold', fontsize=13)
+        ax1.grid(True, alpha=0.3, linestyle='--')
+
+        era_shaded_ts(ax2, years, vol_af, std_vol, color=palette[i])
+        ax2.set_xlabel('Year', fontweight='bold')
+        ax2.set_ylabel('Volume (acre-ft)', fontweight='bold')
+        ax2.grid(True, alpha=0.3, linestyle='--')
+
+        handles = [
+            mpatches.Patch(color=ERA_COLORS[e], alpha=0.35,
+                           label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
+            for e in ERA_PERIODS
+        ]
+        handles.append(mpatches.Patch(color=palette[i], alpha=0.25,
+                                       label='±1σ (5-yr rolling)'))
+        ax1.legend(handles=handles, fontsize=8, loc='upper left', framealpha=0.9)
+        ax2.set_xlim(start_year - 1, end_year + 1)
+        plt.tight_layout()
+        safe = basin.replace(' ', '_')
+        fig.savefig(f'{ts_dir}{safe}_Time_Series.png', dpi=600, bbox_inches='tight')
+        plt.close()
+
+        bdf.to_csv(f'{ts_dir}{safe}_Annual_GW.csv', index=False)
+
+    logger.info(f'Basin time series saved to {ts_dir}')
+
+
+def create_subbasin_time_series(
+        subbasin_yearly: dict[int, dict[str, dict]],
+        output_dir: str,
+        subbasin_shp: str,
+        ama_code_map: dict[str, str],
+        start_year: int = 1896,
+        end_year: int = 2099,
+        title_prefix: str = '',
+) -> None:
+    """Per-sub-basin annual GW withdrawal time series with era shading + uncertainty."""
+    apply_journal_style()
+    label = f'{title_prefix} ' if title_prefix else ''
+    ts_dir = f'{output_dir}Subbasin_Time_Series/'
+    makedirs(ts_dir)
+
+    df = build_annual_df(subbasin_yearly, 'Subbasin')
+    df.to_csv(f'{ts_dir}Subbasin_Annual_GW.csv', index=False)
+
+    # Map sub-basins → parent AMA/INA for grouped plots
+    sub_gdf = gpd.read_file(subbasin_shp)
+    sub_to_parent = {}
+    for _, row in sub_gdf.iterrows():
+        code = row.get('AMA_CODE', '')
+        if code in ama_code_map:
+            sub_to_parent[row['SUBBASIN_N']] = ama_code_map[code]
+    df['Parent_Basin'] = df.Subbasin.map(sub_to_parent).fillna('Other')
+
+    subbasins = sorted(df.Subbasin.unique())
+    parent_basins = sorted(df[df.Parent_Basin != 'Other'].Parent_Basin.unique())
+
+    # --- Grouped plot: one subplot per parent AMA/INA -----------------------
+    n_parents = len(parent_basins)
+    n_cols = 2
+    n_rows = int(np.ceil(n_parents / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 4.5 * n_rows),
+                             sharex=True)
+    axes_flat = axes.ravel() if n_parents > 1 else [axes]
+
+    for idx, parent in enumerate(parent_basins):
+        ax = axes_flat[idx]
+        children = sorted(df[df.Parent_Basin == parent].Subbasin.unique())
+        palette_p = sns.color_palette('Set2', len(children))
+        for j, sb in enumerate(children):
+            sdf = df[df.Subbasin == sb].sort_values('Year')
+            ax.plot(sdf.Year, sdf.Volume_AF, linewidth=1.2, label=sb,
+                    color=palette_p[j])
+        for era, (s, e) in ERA_PERIODS.items():
+            ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.07)
+        ax.set_title(parent, fontweight='bold', fontsize=11)
+        ax.legend(fontsize=7, loc='upper left', framealpha=0.9)
+        ax.set_xlim(start_year - 1, end_year + 1)
+        ax.grid(True, alpha=0.3, linestyle='--')
+        if idx >= (n_rows - 1) * n_cols:
+            ax.set_xlabel('Year', fontweight='bold')
+        if idx % n_cols == 0:
+            ax.set_ylabel('GW Withdrawal\n(acre-ft)', fontweight='bold')
+
+    for k in range(n_parents, len(axes_flat)):
+        axes_flat[k].set_visible(False)
+
+    plt.suptitle(f'Annual {label}GW Withdrawal by Sub-basin (1896–2099)',
+                 fontweight='bold', fontsize=14, y=1.01)
+    plt.tight_layout()
+    fig.savefig(f'{ts_dir}Subbasin_Grouped_Time_Series.png', dpi=600,
+                bbox_inches='tight')
+    plt.close()
+
+    # --- Individual sub-basin plots (2-panel: depth + volume) ---------------
+    n_sb = len(subbasins)
+    palette_all = sns.color_palette('husl', n_sb)
+    for i, sb in enumerate(subbasins):
+        sdf = df[df.Subbasin == sb].sort_values('Year')
+        years = sdf.Year.values
+        depth_mm = sdf.Mean_Depth_mm.values
+        vol_af = sdf.Volume_AF.values
+        std_depth = pd.Series(depth_mm).rolling(5, min_periods=1, center=True).std().fillna(0).values
+        std_vol = pd.Series(vol_af).rolling(5, min_periods=1, center=True).std().fillna(0).values
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+        parent = sub_to_parent.get(sb, '')
+        era_shaded_ts(ax1, years, depth_mm, std_depth, color=palette_all[i])
+        ax1.set_ylabel('Mean Depth (mm)', fontweight='bold')
+        title_suffix = f' ({parent})' if parent else ''
+        ax1.set_title(f'{sb}{title_suffix} — Annual {label}GW Withdrawal (1896–2099)',
+                      fontweight='bold', fontsize=13)
+        ax1.grid(True, alpha=0.3, linestyle='--')
+
+        era_shaded_ts(ax2, years, vol_af, std_vol, color=palette_all[i])
+        ax2.set_xlabel('Year', fontweight='bold')
+        ax2.set_ylabel('Volume (acre-ft)', fontweight='bold')
+        ax2.grid(True, alpha=0.3, linestyle='--')
+
+        handles = [
+            mpatches.Patch(color=ERA_COLORS[e], alpha=0.35,
+                           label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
+            for e in ERA_PERIODS
+        ]
+        handles.append(mpatches.Patch(color=palette_all[i], alpha=0.25,
+                                       label='±1σ (5-yr rolling)'))
+        ax1.legend(handles=handles, fontsize=8, loc='upper left', framealpha=0.9)
+        ax2.set_xlim(start_year - 1, end_year + 1)
+        plt.tight_layout()
+        safe = sb.replace(' ', '_').replace('.', '')
+        fig.savefig(f'{ts_dir}{safe}_Time_Series.png', dpi=600, bbox_inches='tight')
+        plt.close()
+
+        sdf.to_csv(f'{ts_dir}{safe}_Annual_GW.csv', index=False)
+
+    logger.info(f'Sub-basin time series saved to {ts_dir}')

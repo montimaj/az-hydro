@@ -52,3 +52,62 @@ may be required for this GEE authentication step. Refer to the installation docs
 
 ### 5. Running AZHydro
 //TODO
+
+## Library modules (`hydrolibs/`)
+
+### `partitionops.py` — Water-budget partitioning
+
+Decomposes total pumping predictions into eight withdrawal categories using
+ancillary data already in the predictor stack:
+
+| Category | Derivation |
+|---|---|
+| **Irrigation** | `total × irr_fraction` (USGS irrigation-fraction raster) |
+| **Non_Irrigation** | `total − Irrigation` |
+| **Irrigation_GW** | `Irrigation × gw_fraction` (USGS GW-fraction snapshots) |
+| **Irrigation_SW** | `Irrigation − Irrigation_GW` |
+| **Non_Irrigation_GW** | `Non_Irrigation × (1 − sw_fraction)` |
+| **Non_Irrigation_SW** | `Non_Irrigation × sw_fraction` (canal-density proxy) |
+| **Total_GW** | `Irrigation_GW + Non_Irrigation_GW` |
+| **Total_SW** | `Irrigation_SW + Non_Irrigation_SW` |
+
+Key helpers:
+- **`focal_fill_irr_fraction()`** — fills edge-pixel gaps (`irr_frac < 0.05`)
+  with a focal mean of valid neighbours, avoiding NaN propagation along
+  irrigated-area boundaries.
+- **`compute_sw_fraction()`** — normalises canal density to [0, 1] using a
+  local-maximum filter (`maximum_filter(size=5)`), so that the pixel with the
+  highest canal density in a 5 × 5 window receives `sw_fraction = 1.0`.
+- **`partition_predictions()`** — orchestrates all splits, applies well-density
+  masking, and returns a dict keyed by the eight category names.
+
+All partitions use subtraction from the parent total (e.g., `nonirr = total − irr`)
+to guarantee exact budget closure with no floating-point drift.
+
+### `wellops.py` — Well-level withdrawal package
+
+Disaggregates pixel-level withdrawal rasters to individual wells from the
+ADWR Well Registry and writes a GeoPackage (`Well_Package.gpkg`).
+
+**Sampling**: Only the **mm** rasters are read (9 categories per year); ft, m³,
+and acre-ft values are computed arithmetically, reducing I/O by 75 %.
+
+**Distribution logic** — when multiple wells share a 2 km pixel, the pixel
+total is split using capacity-proportional weights with a three-tier fallback:
+
+1. **Historical pumping** — mean `AF Pumped` across all years a well appears
+   in the per-year GW shapefiles (`GW_YYYY.shp`).  These cover metered wells
+   within AMA/INA management areas (~3 k wells/year, 1984–2024).
+2. **PUMPRATE fallback** — for unmetered wells, the `PUMPRATE` field (GPM)
+   from the Well Registry is used (~79 k wells have this attribute).
+3. **Equal-share fallback** — wells with neither record receive weight 1.0.
+
+Within each pixel the raw weights are normalised to sum to 1, so the pixel
+budget is preserved regardless of which tier each well belongs to.
+
+**Nodata masking**: Wells landing in raster nodata or out-of-bounds pixels
+are dropped before weight computation, preventing valid wells from losing
+share to neighbours in invalid pixels.
+
+**Zero floor**: A `np.maximum(all_mm, 0)` clamp is applied after sampling to
+eliminate any negative model artifacts before unit conversion.

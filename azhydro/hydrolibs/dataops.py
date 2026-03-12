@@ -860,6 +860,7 @@ def create_az_data_csv(
         exclude_years: list[int] | None = None,
         lu_smoothing: int = 3,
         load_csv: bool = False,
+        subbasin_vector: str | None = None,
 ) -> pd.DataFrame:
     """
     Create Arizona predictor data CSV.
@@ -875,6 +876,10 @@ def create_az_data_csv(
         exclude_years (list(int, ...) or None): Exclude these years from the dataframe.
         lu_smoothing (int): Gaussian smoothing window size for land use rasters obtained from CDL.
         load_csv (bool): Set True to load existing CSV.
+        subbasin_vector (str | None): Path to the ADWR Groundwater Sub-basin
+            shapefile.  When provided, ``GW_Subbasin`` OBJECTID values are
+            mapped to ``SUBBASIN_N`` names (AMA/INA only; others get
+            ``'NO_SUBBASIN'``).
 
     Returns:
         pd.DataFrame: Output dataframe.
@@ -889,7 +894,11 @@ def create_az_data_csv(
         var_names = [
             'Predictor',
             'GW_Basin',
-            'Streamflow'
+            'GW_Subbasin',
+            'Streamflow',
+            'Canal_Weighted_Streamflow',
+            'Canal_Density',
+            'Well_Density'
         ]
         for year in range(start_year, end_year + 1):
             df = pd.DataFrame()
@@ -919,6 +928,15 @@ def create_az_data_csv(
                         if var_name == 'Streamflow':
                             raster_arr[np.isnan(raster_arr)] = 0
                             df['streamflow_mm'] = raster_arr
+                        elif var_name == 'Canal_Weighted_Streamflow':
+                            raster_arr[np.isnan(raster_arr)] = 0
+                            df['canal_weighted_streamflow_mm'] = raster_arr
+                        elif var_name == 'Canal_Density':
+                            raster_arr[np.isnan(raster_arr)] = 0
+                            df['canal_density'] = raster_arr
+                        elif var_name == 'Well_Density':
+                            raster_arr[np.isnan(raster_arr)] = 0
+                            df['well_density'] = raster_arr
                         elif var_name == 'GW':
                             raster_arr[np.isnan(raster_arr)] = 0
                         else:
@@ -971,6 +989,18 @@ def create_az_data_csv(
         data_df['GW_Basin_Type'] = data_df.GW_Basin.swifter.apply(
             lambda x: 0 if x in ama_basins else 1 if x in ina_basins else 2
         ).reset_index(drop=True)
+
+        # Map GW_Subbasin OBJECTID → SUBBASIN_N
+        if subbasin_vector is not None:
+            sub_gdf = gpd.read_file(subbasin_vector)
+            oid_to_name = dict(zip(sub_gdf['OBJECTID'], sub_gdf['SUBBASIN_N']))
+            data_df['GW_Subbasin'] = data_df['GW_Subbasin'].swifter.apply(
+                lambda x: oid_to_name.get(x, 'NO_SUBBASIN')
+                if not np.isnan(x) else 'NO_SUBBASIN'
+            )
+            logger.info('GW_Subbasin unique values: %s',
+                        sorted(data_df.GW_Subbasin.unique()))
+
         data_df.to_parquet(data_parquet, index=False)
     else:
         data_df = pd.read_parquet(data_parquet)

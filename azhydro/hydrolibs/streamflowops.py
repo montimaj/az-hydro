@@ -6,6 +6,7 @@ Contains codes for downloading and processing streamflow data from USGS and USBR
 # Email: sayantan.majumdar@dri.edu
 
 import os
+import shutil
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -14,7 +15,7 @@ import dataretrieval.nwis as nwis
 import logging
 
 from glob import glob
-from sysops import makedirs, az_nodata
+from sysops import makedirs, az_nodata, copy_file
 from rasterops import write_raster
 from vectorops import shp2raster
 
@@ -58,7 +59,7 @@ def _download_usgs_monthly(site_id, param_cd, stat_cd, start_year, end_year):
     return df.resample('MS').mean().dropna()
 
 
-def _find_nearest_usbr_site(site_id, usbr_sites, sites_df):
+def _find_nearest_usbr_site(site_id, usbr_sites):
     """Find the nearest USBR-gauged site based on USGS site coordinates."""
     try:
         info, _ = nwis.get_info(sites=[site_id] + usbr_sites)
@@ -212,7 +213,7 @@ def download_streamflow(
             continue
 
         # Find the nearest USBR-gauged reference site
-        ref_site = _find_nearest_usbr_site(site_id, usbr_sites, sites_df)
+        ref_site = _find_nearest_usbr_site(site_id, usbr_sites)
         ref_usgs = usgs_data.get(ref_site)
         ref_usbr = usbr_data.get(ref_site)
 
@@ -358,6 +359,7 @@ def create_streamflow_rasters(
         yres: float = 2000,
         start_year: int = 1896,
         end_year: int = 2099,
+        canal_density_file: str | None = None,
         already_created: bool = False
 ) -> None:
     """
@@ -369,6 +371,10 @@ def create_streamflow_rasters(
     additionally receive Colorado River streamflow normalized by the CAP
     service area. Units are mm/yr, consistent with ET and precipitation bands.
 
+    When canal_density_file is provided, also creates canal-weighted streamflow
+    rasters where flow within each watershed is redistributed proportionally
+    to canal density (segment count per pixel).
+
     Args:
         watershed_geojson (str): Path to Surface_Watershed.geojson.
         cap_service_area_geojson (str): Path to CAP_Service_Area.geojson.
@@ -378,6 +384,8 @@ def create_streamflow_rasters(
         yres (float): Y-resolution in geographic units. Defaults to 2000.
         start_year (int): Start year. Defaults to 1896.
         end_year (int): End year. Defaults to 2099.
+        canal_density_file (str or None): Path to the canal density raster. If
+            provided, also creates Canal_Weighted_Streamflow_YYYY.tif rasters.
         already_created (bool): If True, skip creation.
 
     Returns:
@@ -442,6 +450,29 @@ def create_streamflow_rasters(
         cap_arr = cap_arr_native
     cap_file.close()
 
+    # Read and align canal density raster if provided
+    canal_arr = None
+    if canal_density_file and os.path.exists(canal_density_file):
+        from rasterio.warp import reproject, Resampling
+        cd_file = rio.open(canal_density_file)
+        cd_arr_native = cd_file.read(1).astype(np.float32)
+        if cd_file.shape != ws_shape or cd_file.transform != ws_transform:
+            canal_arr = np.zeros(ws_shape, dtype=np.float32)
+            reproject(
+                source=cd_arr_native,
+                destination=canal_arr,
+                src_transform=cd_file.transform,
+                src_crs=cd_file.crs,
+                dst_transform=ws_transform,
+                dst_crs=ws_file.crs,
+                resampling=Resampling.nearest
+            )
+        else:
+            canal_arr = cd_arr_native
+        cd_file.close()
+        canal_arr[np.isnan(canal_arr)] = 0.0
+        logger.info('Loaded canal density raster for weighted streamflow')
+
     # Step 3: Map gauges to watersheds and compute watershed areas (m²)
     ws_sites = _get_site_watershed_map(sites_csv, watershed_geojson)
     unique_oids = [int(v) for v in np.unique(ws_arr) if v > 0 and not np.isnan(v)]
@@ -483,6 +514,17 @@ def create_streamflow_rasters(
     )
     co_annual = co_annual_m3s * m3s_to_mm_yr / cap_area_m2
 
+    # Precompute canal density sums per watershed for canal-weighted streamflow
+    ws_canal_sum = {}
+    ws_pixel_count = {}
+    if canal_arr is not None:
+        for oid in unique_oids:
+            mask = ws_arr == oid
+            ws_canal_sum[oid] = float(canal_arr[mask].sum())
+            ws_pixel_count[oid] = int(mask.sum())
+        cap_mask_pre = cap_arr > 0
+        cap_canal_sum = float(canal_arr[cap_mask_pre].sum())
+
     # Step 5: Create annual rasters (mm/yr)
     no_data = az_nodata()
     for year in range(start_year, end_year + 1):
@@ -514,5 +556,126 @@ def create_streamflow_rasters(
             no_data_value=no_data
         )
 
+        # Canal-weighted streamflow: redistribute flow proportionally to canal density
+        if canal_arr is not None:
+            cw_arr = np.full(ws_shape, 0.0, dtype=np.float32)
+            for oid in unique_oids:
+                if oid not in ws_annual:
+                    continue
+                if year in ws_annual[oid].index:
+                    flow_mm = ws_annual[oid].loc[year]
+                else:
+                    flow_mm = ws_annual[oid].mean()
+                mask = ws_arr == oid
+                total_canal = ws_canal_sum.get(oid, 0.0)
+                n_pixels = ws_pixel_count.get(oid, 1)
+                if total_canal > 0:
+                    # Redistribute: total volume preserved, weighted by canal density
+                    cw_arr[mask] = flow_mm * n_pixels * (canal_arr[mask] / total_canal)
+                else:
+                    # No canals in watershed: fall back to uniform
+                    cw_arr[mask] = flow_mm
+
+            # CAP overlay weighted by canal density
+            cap_mask = cap_arr > 0
+            if year in co_annual.index:
+                co_flow = co_annual.loc[year]
+            else:
+                co_flow = co_annual.mean() if not co_annual.empty else 0.0
+            if cap_canal_sum > 0:
+                n_cap = int(cap_mask.sum())
+                cw_arr[cap_mask] += co_flow * n_cap * (canal_arr[cap_mask] / cap_canal_sum)
+            else:
+                cw_arr[cap_mask] += co_flow
+
+            cw_arr[np.isnan(cw_arr)] = 0.0
+            cw_file = os.path.join(output_dir, f'Canal_Weighted_Streamflow_{year}.tif')
+            write_raster(
+                cw_arr, ws_file,
+                transform_=ws_transform,
+                outfile_path=cw_file,
+                no_data_value=no_data
+            )
+
     ws_file.close()
-    logger.info(f'Created {end_year - start_year + 1} annual streamflow rasters in {output_dir}')
+    n_rasters = end_year - start_year + 1
+    logger.info(f'Created {n_rasters} annual streamflow rasters in {output_dir}')
+    if canal_arr is not None:
+        logger.info(f'Created {n_rasters} canal-weighted streamflow rasters in {output_dir}')
+
+
+def create_canal_density_raster(
+        grain_parquet: str,
+        az_boundary_file: str,
+        output_dir: str,
+        xres: float = 2000,
+        yres: float = 2000,
+        start_year: int = 1896,
+        end_year: int = 2099,
+        already_created: bool = False
+) -> str:
+    """
+    Create canal density rasters (segment count per pixel) from the GRAIN dataset.
+
+    A single raster is computed from all GRAIN canal segments clipped to AZ and
+    then replicated for each year to maintain consistency with the per-year
+    predictor file pattern. No filtering by canal use is applied here;
+    irrigation vs. non-agricultural partitioning is handled downstream
+    using the irrigation fraction for each basin.
+
+    Args:
+        grain_parquet (str): Path to the GRAIN GeoParquet file.
+        az_boundary_file (str): Path to the AZ state boundary file (reprojected).
+        output_dir (str): Output directory for the canal density rasters.
+        xres (float): X-resolution in map units. Defaults to 2000.
+        yres (float): Y-resolution in map units. Defaults to 2000.
+        start_year (int): Start year. Defaults to 1896.
+        end_year (int): End year. Defaults to 2099.
+        already_created (bool): If True, skip creation.
+
+    Returns:
+        str: Path to the base canal density raster.
+    """
+
+    base_raster = os.path.join(output_dir, f'Canal_Density_{start_year}.tif')
+    if already_created:
+        logger.info('Canal density rasters already created, skipping...')
+        return base_raster
+
+    makedirs(output_dir)
+
+    # Load GRAIN data and clip to AZ
+    gdf = gpd.read_parquet(grain_parquet)
+    az = gpd.read_file(az_boundary_file)
+    gdf = gdf.to_crs(az.crs)
+    gdf = gpd.clip(gdf, az)
+    logger.info(f'Clipped {len(gdf)} canal segments for rasterization')
+
+    # Add count attribute for segment count density
+    gdf = gdf.copy()
+    gdf['_count'] = 1.0
+
+    # Save as temp shapefile
+    tmp_dir = os.path.join(output_dir, '_canal_temp')
+    makedirs(tmp_dir)
+    tmp_shp = os.path.join(tmp_dir, 'canals.shp')
+    gdf[['_count', 'geometry']].to_file(tmp_shp)
+
+    # Rasterize: segment count per pixel
+    shp2raster(
+        tmp_shp, base_raster,
+        value_field='_count',
+        xres=xres, yres=yres,
+        add_value=True
+    )
+
+    # Copy for each year
+    for year in range(start_year + 1, end_year + 1):
+        out_file = os.path.join(output_dir, f'Canal_Density_{year}.tif')
+        copy_file(base_raster, out_file, verbose=False)
+
+    # Clean up temp files
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    logger.info(f'Created canal density rasters ({start_year}-{end_year}) in {output_dir}')
+    return base_raster
