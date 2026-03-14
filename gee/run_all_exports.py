@@ -73,6 +73,10 @@ def main():
         '--no-wait', action='store_true',
         help='Pass --no-wait to each export script'
     )
+    parser.add_argument(
+        '--keep-going', action='store_true',
+        help='Continue running subsequent scripts even if one fails'
+    )
     args = parser.parse_args()
 
     if args.level == 'all':
@@ -82,15 +86,24 @@ def main():
 
     extra = ['--no-wait'] if args.no_wait else []
 
+    failed_scripts = []
     for level in levels_to_run:
         logger.info(f'# Level {level}')
         logger.info('#' * 60)
         for script, desc in LEVELS[level]:
             logger.info(f'  -> {desc}')
-            run_script(script, extra)
+            rc = run_script(script, extra)
+            if rc != 0:
+                failed_scripts.append(script)
+                if not args.keep_going:
+                    logger.error(f'{script} failed (exit code {rc}). '
+                                 f'Stopping. Use --keep-going to continue.')
+                    sys.exit(rc)
 
-    logger.info('=' * 60)
-    logger.info('All export levels completed.')
+    if failed_scripts:
+        logger.warning(f'Completed with failures: {failed_scripts}')
+    else:
+        logger.info('All export levels completed successfully.')
     logger.info('=' * 60)
 
 

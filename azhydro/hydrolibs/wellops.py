@@ -293,4 +293,3 @@ def create_well_package(
     logger.info(f'Well package written: {out_gpkg}  '
                 f'({n_wells} wells × {n_sampled} years)')
     return out_gpkg
-    return out_gpkg

@@ -391,7 +391,7 @@ def create_land_use_data(
     Create Gaussian-filtered land use array.
 
     Args:
-        input_df (pd.DataFrame): Dataframe used to store the Guassian-filtered LULC arrays, where
+        input_df (pd.DataFrame): Dataframe used to store the Gaussian-filtered LULC arrays, where
                                  1 = Agriculture, 2 = Surface Water, and 3 = Urban.
         cdl_arr (np.array): CDL array.
         smoothing (int): Smoothing window size for the Gaussian filter.

@@ -1,4 +1,4 @@
-""""
+"""
 Export monthly gridMET/Hargreaves ETo ratio grids (12 images) as a GEE asset.
 
 Computes the ratio of gridMET ETo to PRISM Hargreaves ETo for each month,

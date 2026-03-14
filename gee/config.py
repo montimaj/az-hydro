@@ -155,11 +155,19 @@ def _wait_for_queue_capacity(max_queue=2900, poll_interval=60):
 
 @_retry
 def export_image(image, asset_id, description, region, scale, crs='EPSG:4326',
-                 as_int=False, pending_descriptions=None):
+                 as_int=False, pending_descriptions=None, existing_assets=None):
     """Export an ee.Image to a GEE asset, clipped to region.
     Automatically waits if the task queue is near the 3000-task limit.
-    Skips if the asset already exists or a task with the same description is queued."""
-    if asset_exists(asset_id):
+    Skips if the asset already exists or a task with the same description is queued.
+
+    When *existing_assets* is provided (a set of asset IDs), the caller's
+    pre-fetched set is used instead of making a per-image ``asset_exists``
+    API call, avoiding redundant requests during large batch exports."""
+    if existing_assets is not None:
+        if asset_id in existing_assets:
+            logger.info(f'  Skipping {description} (asset already exists)')
+            return None
+    elif asset_exists(asset_id):
         logger.info(f'  Skipping {description} (asset already exists)')
         return None
     desc = description[:100]

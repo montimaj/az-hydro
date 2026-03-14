@@ -1383,6 +1383,38 @@ def run_cu_ie_usgs_intercomparison() -> pd.DataFrame:
     )
 
 
+def run_cap_srp_sw_validation() -> pd.DataFrame:
+    """
+    Validate ML Total_SW predictions against observed CAP and SRP
+    surface-water delivery records across Arizona groundwater basins.
+
+    Returns
+    -------
+    pd.DataFrame
+        Per-basin statistics (RMSD, MAD, Pct Diff, Pearson R).
+    """
+    logger.info('=' * 60)
+    logger.info('Step 4c: CAP/SRP Total SW Validation')
+    logger.info('=' * 60)
+
+    prediction_dir = f'{MODEL_DIR}Full_Prediction_XGB/'
+    total_sw_dir = f'{prediction_dir}Total_SW_Rasters/Depth_mm/'
+
+    cap_xlsx = f'{VECTOR_DIR}CAP/CAP Delivery Data DRI Request.xlsx'
+    srp_xlsx = f'{VECTOR_DIR}SRP/SRP WATER DELVS HISTORY.xlsx'
+
+    output_dir = f'{prediction_dir}CAP_SRP_Validation/'
+
+    return intercompops.run_cap_srp_validation(
+        cap_xlsx=cap_xlsx,
+        srp_xlsx=srp_xlsx,
+        total_sw_dir=total_sw_dir,
+        basin_shp=AZ_GW_BASIN,
+        basin_col='BASIN_NAME',
+        output_dir=output_dir,
+    )
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -1452,6 +1484,9 @@ def main(
 
     # Step 4b — CU / IE intercomparison
     run_cu_ie_usgs_intercomparison()
+
+    # Step 4c — CAP/SRP total surface water validation
+    run_cap_srp_sw_validation()
 
     logger.info('\n' + '='*60)
     logger.info('Pipeline complete!')

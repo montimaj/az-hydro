@@ -445,6 +445,48 @@ Difference in AF, m³, mm).  IE uses dimensionless ratio metrics.  Outputs
 include metrics CSVs, per-basin tables, time series, and scatter plots,
 written to `{prediction_dir}CU_IE_Intercomparison/`.
 
+#### Step 4c — CAP/SRP surface-water validation (`run_cap_srp_sw_validation()`)
+
+Validates ML `Total_SW` predictions at the basin scale against observed
+delivery records from the Central Arizona Project (CAP) and Salt River
+Project (SRP).
+
+| Source | Basins covered | Years | Filter |
+|---|---|---|---|
+| **CAP** | Phoenix, Tucson, Pinal AMA; Harquahala INA; Ranegras Plain; Parker | 1985–2024 | `Recharge Facility` is null (direct use only) |
+| **SRP** | Phoenix AMA only | 1984–2023 | `Parent Water Type == 'SURFACE WATER'` |
+
+For Phoenix AMA the CAP and SRP totals are summed; all other basins use
+CAP data only.
+
+**Data exclusions and caveats:**
+
+- **CAP "Multiple" AMA records** (25 rows, ~15,600 AF total) and **NaN-AMA
+  records** (16 rows, ~86,300 AF) are excluded because they cannot be
+  attributed to a single groundwater basin.
+- **Recharge filtering**: CAP rows where `Recharge Facility` is non-null are
+  excluded.  This removes managed aquifer recharge deliveries so that only
+  direct surface-water use is compared against the ML `Total_SW` estimate.
+  Some direct-use deliveries may be partially classified as recharge, so
+  the observed series is a conservative lower bound.
+- **Non-CAP/non-SRP surface water**: Surface-water sources not captured by
+  CAP or SRP (e.g., local canal diversions, non-SRP irrigation districts)
+  are not represented in the observed comparison series.  The ML predictions
+  encompass all surface water, so the observed total is expected to be
+  lower than the ML estimate, particularly for basins outside the Phoenix
+  AMA.
+- **Temporal alignment**: Both datasets use calendar years (CAP `Year`,
+  SRP `Water Move Year`).  The common overlap period is 1985–2023.
+- **Spill water sensitivity**: SRP also reports ``SPILL WATER`` deliveries
+  (19–366,000 AF/yr, highly variable).  A sensitivity series that includes
+  spill water alongside surface water is plotted as a third time series for
+  comparison.
+
+Outputs include per-basin time series plots (with spill-water sensitivity
+overlay), a scatter plot of ML vs observed AF per basin-year with 1:1 line
+and R², metrics CSV, and time series CSV, written to
+`{prediction_dir}CAP_SRP_Validation/`.
+
 ---
 
 ## Library modules (`hydrolibs/`)
@@ -605,6 +647,12 @@ Basin-scale comparison of ML predictions with independent USGS datasets.
 - IE: dimensionless ratio → area-weighted basin means.
 - Produces metrics, per-basin tables, time series, and scatter plots.
 
+**CAP/SRP validation** (`run_cap_srp_validation()`):
+- Compares ML Total SW predictions with observed CAP + SRP delivery records.
+- Filters CAP to direct-use only; SRP to Surface Water (+ optional Spill
+  Water sensitivity).
+- Produces per-basin time series, scatter plots, and validation metrics.
+
 ### `rasterops.py` — Raster I/O utilities
 
 Core raster manipulation operations.
@@ -675,5 +723,6 @@ Data/Outputs/
         ├── Visualizations/                  # Time series & era summary maps
         ├── Well_Package/                    # Per-well GeoPackage
         ├── Intercomparison/                 # Step 4a — withdrawal comparison
-        └── CU_IE_Intercomparison/           # Step 4b — CU/IE comparison
+        ├── CU_IE_Intercomparison/           # Step 4b — CU/IE comparison
+        └── CAP_SRP_Validation/              # Step 4c — CAP/SRP SW validation
 ```

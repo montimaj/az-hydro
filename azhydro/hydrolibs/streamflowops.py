@@ -423,7 +423,6 @@ def create_streamflow_rasters(
     )
 
     # Read template rasters
-    _, ws_file = rio.open(ws_raster), None
     ws_file = rio.open(ws_raster)
     ws_arr = ws_file.read(1).astype(np.float32)
     ws_transform = ws_file.transform
