@@ -386,3 +386,9 @@ tmmn   = maca_ic.select('tasmin').mean()
 ```
 
 Since every day has exactly one image per model/scenario pair, `.mean()` across all ~14,600 images/year gives the grand mean (equivalent to per-model averaging). For additive quantities (precipitation), `.sum().divide(40)` gives the ensemble-mean annual total.
+
+## Citations
+
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). The Arizona Water Use Dataset (1896–2099): Withdrawals, consumptive use, and irrigation efficiency partitioned by source. _In prep. for Nature Scientific Data_.
+
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Where Arizona's Water Goes: Two Centuries of Groundwater and Surface Water Withdrawals, Consumptive Use, and Irrigation Efficiency (1896–2099). _In prep. for AGU Earth's Future_.

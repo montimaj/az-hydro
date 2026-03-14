@@ -632,6 +632,113 @@ def compute_ale_plots(
         # plt.clf()
 
 
+def compute_shap_plots(
+        model_name: str,
+        model: Any,
+        x_data: pd.DataFrame,
+        output_dir: str,
+        max_display: int = 20,
+        n_dependence: int = 10,
+        subsample: int = 5000,
+) -> None:
+    """
+    Create SHAP beeswarm, bar, dependence, and waterfall plots.
+
+    Args:
+        model_name (str): Name of the ML model (e.g. 'XGB', 'LGBM').
+        model (Any): Fitted model object.
+        x_data (pd.DataFrame): Feature matrix used for SHAP value computation.
+        output_dir (str): Output directory for saved plots.
+        max_display (int): Maximum number of features to display (default 20).
+        n_dependence (int): Number of top features for dependence plots (default 10).
+        subsample (int): Maximum number of samples for SHAP computation.
+            Set to 0 to use all samples (may be slow for large datasets).
+
+    Returns:
+        None
+    """
+    import shap
+
+    makedirs(output_dir)
+    feature_dict = get_feature_dict()
+
+    # Subsample if necessary
+    if 0 < subsample < len(x_data):
+        x_sub = x_data.sample(n=subsample, random_state=42)
+    else:
+        x_sub = x_data
+
+    # Rename columns to display names
+    x_display = x_sub.rename(columns=feature_dict)
+
+    logger.info(f'Computing SHAP values for {model_name} ({len(x_sub)} samples)...')
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(x_sub)
+
+    # 1. Beeswarm summary plot
+    plt.figure(figsize=(12, 8))
+    shap.summary_plot(
+        shap_values, x_display,
+        max_display=max_display, show=False,
+    )
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}{model_name}_SHAP_Summary.png', dpi=600)
+    plt.clf()
+    plt.close()
+
+    # 2. Bar plot (mean |SHAP|)
+    plt.figure(figsize=(12, 8))
+    shap.summary_plot(
+        shap_values, x_display,
+        plot_type='bar', max_display=max_display, show=False,
+    )
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}{model_name}_SHAP_Bar.png', dpi=600)
+    plt.clf()
+    plt.close()
+
+    # 3. Dependence plots for top N features
+    dep_dir = f'{output_dir}Dependence/'
+    makedirs(dep_dir)
+    mean_abs_shap = np.abs(shap_values).mean(axis=0)
+    top_indices = np.argsort(mean_abs_shap)[::-1][:n_dependence]
+    display_cols = list(x_display.columns)
+
+    for idx in top_indices:
+        feat_name = display_cols[idx]
+        plt.figure(figsize=(10, 6))
+        shap.dependence_plot(
+            idx, shap_values, x_display,
+            show=False,
+        )
+        plt.tight_layout()
+        safe_name = feat_name.replace('/', '_').replace(' ', '_')
+        plt.savefig(f'{dep_dir}{model_name}_SHAP_Dep_{safe_name}.png', dpi=600)
+        plt.clf()
+        plt.close()
+
+    logger.info(f'  {n_dependence} dependence plots saved to {dep_dir}')
+
+    # 4. Waterfall plot for a representative sample (median prediction)
+    explanation = shap.Explanation(
+        values=shap_values,
+        base_values=np.full(len(x_sub), explainer.expected_value),
+        data=x_display.values,
+        feature_names=display_cols,
+    )
+    pred_vals = shap_values.sum(axis=1) + explainer.expected_value
+    median_idx = np.argmin(np.abs(pred_vals - np.median(pred_vals)))
+
+    plt.figure(figsize=(12, 8))
+    shap.waterfall_plot(explanation[median_idx], max_display=max_display, show=False)
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}{model_name}_SHAP_Waterfall.png', dpi=600)
+    plt.clf()
+    plt.close()
+
+    logger.info(f'SHAP plots saved to {output_dir}')
+
+
 
 def build_ml_model(
         x_train: np.ndarray | pd.DataFrame,

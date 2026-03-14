@@ -1327,10 +1327,13 @@ def create_full_period_time_series(
         output_dir: str,
         start_year: int = 1896,
         end_year: int = 2099,
+        actual_data: dict | None = None,
+        title_prefix: str = '',
 ) -> None:
     """Time series of predicted AMA/INA pumping with era shading."""
     apply_journal_style()
     makedirs(output_dir)
+    label = f'{title_prefix} ' if title_prefix else ''
 
     years = sorted(yearly_predictions.keys())
     vol_af = [yearly_predictions[y]['Volume_AF'] for y in years]
@@ -1342,23 +1345,36 @@ def create_full_period_time_series(
         ax1.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
         ax2.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
 
-    ax1.plot(years, depth_mm, color='#2C3E50', linewidth=1.5, marker='.', markersize=3)
+    ax1.plot(years, depth_mm, color=COLORS['predicted'], linewidth=1.5, marker='.',
+             markersize=3, label='Predicted')
     ax1.set_ylabel('Mean Depth (mm)', fontweight='bold')
-    ax1.set_title('XGBoost Predicted AMA/INA Groundwater Pumping (1896–2099)',
+    ax1.set_title(f'XGBoost {label}AMA/INA Groundwater Pumping (1896–2099)',
                   fontweight='bold', fontsize=14)
     ax1.grid(True, alpha=0.3, linestyle='--')
 
-    ax2.plot(years, vol_af, color='#2C3E50', linewidth=1.5, marker='.', markersize=3)
+    ax2.plot(years, vol_af, color=COLORS['predicted'], linewidth=1.5, marker='.',
+             markersize=3, label='Predicted')
     ax2.set_xlabel('Year', fontweight='bold')
     ax2.set_ylabel('Total Volume (acre-ft)', fontweight='bold')
     ax2.grid(True, alpha=0.3, linestyle='--')
+
+    # Overlay actual meter data for available years
+    if actual_data:
+        act_years = sorted(actual_data.keys())
+        act_depth = [actual_data[y]['Mean_Depth_mm'] for y in act_years]
+        act_vol = [actual_data[y]['Volume_AF'] for y in act_years]
+        ax1.plot(act_years, act_depth, color=COLORS['actual'], linewidth=1.5,
+                 marker='o', markersize=4, label='Observed (ADWR Meter)', zorder=5)
+        ax2.plot(act_years, act_vol, color=COLORS['actual'], linewidth=1.5,
+                 marker='o', markersize=4, label='Observed (ADWR Meter)', zorder=5)
 
     handles = [
         mpatches.Patch(color=ERA_COLORS[e], alpha=0.4,
                        label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
         for e in ERA_PERIODS
     ]
-    ax1.legend(handles=handles, loc='upper left', framealpha=0.9)
+    ax1.legend(handles=ax1.get_legend_handles_labels()[0] + handles,
+               loc='upper left', framealpha=0.9)
     ax2.set_xlim(start_year - 1, end_year + 1)
 
     plt.tight_layout()
@@ -1372,6 +1388,14 @@ def create_full_period_time_series(
         'Volume_m3': [yearly_predictions[y]['Volume_m3'] for y in years],
         'Volume_AF': vol_af,
     })
+    # Merge actual data into the CSV if available
+    if actual_data:
+        act_df = pd.DataFrame([
+            {'Year': y, 'Actual_Depth_mm': actual_data[y]['Mean_Depth_mm'],
+             'Actual_Volume_AF': actual_data[y]['Volume_AF']}
+            for y in sorted(actual_data.keys())
+        ])
+        ts_df = ts_df.merge(act_df, on='Year', how='left')
     ts_df['Era'] = ts_df.Year.apply(lambda y: next(
         (e for e, (s, end) in ERA_PERIODS.items() if s <= y <= end), 'Other'))
     ts_df.to_csv(f'{output_dir}Full_Period_Time_Series.csv', index=False)
@@ -1459,6 +1483,7 @@ def create_basin_time_series(
         start_year: int = 1896,
         end_year: int = 2099,
         title_prefix: str = '',
+        actual_basin_yearly: dict[int, dict[str, dict]] | None = None,
 ) -> None:
     """Per-basin annual GW withdrawal time series with era shading + uncertainty."""
     apply_journal_style()
@@ -1467,7 +1492,22 @@ def create_basin_time_series(
     makedirs(ts_dir)
 
     df = build_annual_df(basin_yearly, 'Basin')
-    df.to_csv(f'{ts_dir}Basin_Annual_GW.csv', index=False)
+
+    # Build actual DataFrame if meter data is provided
+    actual_df = None
+    if actual_basin_yearly:
+        actual_df = build_annual_df(actual_basin_yearly, 'Basin')
+        actual_df = actual_df.rename(columns={
+            'Mean_Depth_mm': 'Actual_Depth_mm',
+            'Volume_AF': 'Actual_Volume_AF',
+        })
+        merged = df.merge(
+            actual_df[['Year', 'Basin', 'Actual_Depth_mm', 'Actual_Volume_AF']],
+            on=['Year', 'Basin'], how='left',
+        )
+        merged.to_csv(f'{ts_dir}Basin_Annual_GW.csv', index=False)
+    else:
+        df.to_csv(f'{ts_dir}Basin_Annual_GW.csv', index=False)
 
     basins = sorted(df.Basin.unique())
     n_basins = len(basins)
@@ -1479,13 +1519,29 @@ def create_basin_time_series(
         bdf = df[df.Basin == basin].sort_values('Year')
         ax.plot(bdf.Year, bdf.Volume_AF, linewidth=1.3, label=basin,
                 color=palette[i])
+        # Overlay actual data for this basin
+        if actual_df is not None:
+            abdf = actual_df[actual_df.Basin == basin].sort_values('Year')
+            if not abdf.empty:
+                ax.plot(abdf.Year, abdf.Actual_Volume_AF, linewidth=1.3,
+                        color=palette[i], linestyle='--', alpha=0.7,
+                        marker='o', markersize=3)
     for era, (s, e) in ERA_PERIODS.items():
         ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.08)
     ax.set_xlabel('Year', fontweight='bold')
     ax.set_ylabel('GW Withdrawal (acre-ft)', fontweight='bold')
     ax.set_title(f'Annual {label}GW Withdrawal by Basin (1896–2099)', fontweight='bold',
                  fontsize=14)
-    ax.legend(fontsize=8, ncol=2, loc='upper left', framealpha=0.9)
+    # Add a single dashed-line entry for 'Observed' in the legend
+    if actual_df is not None:
+        from matplotlib.lines import Line2D
+        obs_handle = Line2D([], [], color='gray', linestyle='--', marker='o',
+                            markersize=3, label='Observed (ADWR Meter)')
+        handles, labels = ax.get_legend_handles_labels()
+        handles.append(obs_handle)
+        ax.legend(handles=handles, fontsize=8, ncol=2, loc='upper left', framealpha=0.9)
+    else:
+        ax.legend(fontsize=8, ncol=2, loc='upper left', framealpha=0.9)
     ax.set_xlim(start_year - 1, end_year + 1)
     ax.grid(True, alpha=0.3, linestyle='--')
     plt.tight_layout()
@@ -1514,6 +1570,17 @@ def create_basin_time_series(
         ax2.set_ylabel('Volume (acre-ft)', fontweight='bold')
         ax2.grid(True, alpha=0.3, linestyle='--')
 
+        # Overlay actual data for this basin
+        if actual_df is not None:
+            abdf = actual_df[actual_df.Basin == basin].sort_values('Year')
+            if not abdf.empty:
+                ax1.plot(abdf.Year, abdf.Actual_Depth_mm, color=COLORS['actual'],
+                         linewidth=1.5, marker='o', markersize=4,
+                         label='Observed (ADWR Meter)', zorder=5)
+                ax2.plot(abdf.Year, abdf.Actual_Volume_AF, color=COLORS['actual'],
+                         linewidth=1.5, marker='o', markersize=4,
+                         label='Observed (ADWR Meter)', zorder=5)
+
         handles = [
             mpatches.Patch(color=ERA_COLORS[e], alpha=0.35,
                            label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
@@ -1521,6 +1588,10 @@ def create_basin_time_series(
         ]
         handles.append(mpatches.Patch(color=palette[i], alpha=0.25,
                                        label='±1σ (5-yr rolling)'))
+        if actual_df is not None:
+            from matplotlib.lines import Line2D
+            handles.append(Line2D([], [], color=COLORS['actual'], marker='o',
+                                  markersize=4, label='Observed (ADWR Meter)'))
         ax1.legend(handles=handles, fontsize=8, loc='upper left', framealpha=0.9)
         ax2.set_xlim(start_year - 1, end_year + 1)
         plt.tight_layout()
@@ -1541,6 +1612,7 @@ def create_subbasin_time_series(
         start_year: int = 1896,
         end_year: int = 2099,
         title_prefix: str = '',
+        actual_subbasin_yearly: dict[int, dict[str, dict]] | None = None,
 ) -> None:
     """Per-sub-basin annual GW withdrawal time series with era shading + uncertainty."""
     apply_journal_style()
@@ -1549,7 +1621,22 @@ def create_subbasin_time_series(
     makedirs(ts_dir)
 
     df = build_annual_df(subbasin_yearly, 'Subbasin')
-    df.to_csv(f'{ts_dir}Subbasin_Annual_GW.csv', index=False)
+
+    # Build actual DataFrame if meter data is provided
+    actual_df = None
+    if actual_subbasin_yearly:
+        actual_df = build_annual_df(actual_subbasin_yearly, 'Subbasin')
+        actual_df = actual_df.rename(columns={
+            'Mean_Depth_mm': 'Actual_Depth_mm',
+            'Volume_AF': 'Actual_Volume_AF',
+        })
+        merged = df.merge(
+            actual_df[['Year', 'Subbasin', 'Actual_Depth_mm', 'Actual_Volume_AF']],
+            on=['Year', 'Subbasin'], how='left',
+        )
+        merged.to_csv(f'{ts_dir}Subbasin_Annual_GW.csv', index=False)
+    else:
+        df.to_csv(f'{ts_dir}Subbasin_Annual_GW.csv', index=False)
 
     # Map sub-basins → parent AMA/INA for grouped plots
     sub_gdf = gpd.read_file(subbasin_shp)
@@ -1579,6 +1666,13 @@ def create_subbasin_time_series(
             sdf = df[df.Subbasin == sb].sort_values('Year')
             ax.plot(sdf.Year, sdf.Volume_AF, linewidth=1.2, label=sb,
                     color=palette_p[j])
+            # Overlay actual data for this sub-basin
+            if actual_df is not None:
+                asdf = actual_df[actual_df.Subbasin == sb].sort_values('Year')
+                if not asdf.empty:
+                    ax.plot(asdf.Year, asdf.Actual_Volume_AF, linewidth=1.2,
+                            color=palette_p[j], linestyle='--', alpha=0.7,
+                            marker='o', markersize=2)
         for era, (s, e) in ERA_PERIODS.items():
             ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.07)
         ax.set_title(parent, fontweight='bold', fontsize=11)
@@ -1625,6 +1719,17 @@ def create_subbasin_time_series(
         ax2.set_ylabel('Volume (acre-ft)', fontweight='bold')
         ax2.grid(True, alpha=0.3, linestyle='--')
 
+        # Overlay actual data for this sub-basin
+        if actual_df is not None:
+            asdf = actual_df[actual_df.Subbasin == sb].sort_values('Year')
+            if not asdf.empty:
+                ax1.plot(asdf.Year, asdf.Actual_Depth_mm, color=COLORS['actual'],
+                         linewidth=1.5, marker='o', markersize=4,
+                         label='Observed (ADWR Meter)', zorder=5)
+                ax2.plot(asdf.Year, asdf.Actual_Volume_AF, color=COLORS['actual'],
+                         linewidth=1.5, marker='o', markersize=4,
+                         label='Observed (ADWR Meter)', zorder=5)
+
         handles = [
             mpatches.Patch(color=ERA_COLORS[e], alpha=0.35,
                            label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
@@ -1632,6 +1737,10 @@ def create_subbasin_time_series(
         ]
         handles.append(mpatches.Patch(color=palette_all[i], alpha=0.25,
                                        label='±1σ (5-yr rolling)'))
+        if actual_df is not None:
+            from matplotlib.lines import Line2D
+            handles.append(Line2D([], [], color=COLORS['actual'], marker='o',
+                                  markersize=4, label='Observed (ADWR Meter)'))
         ax1.legend(handles=handles, fontsize=8, loc='upper left', framealpha=0.9)
         ax2.set_xlim(start_year - 1, end_year + 1)
         plt.tight_layout()
