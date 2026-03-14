@@ -3,24 +3,51 @@ Maintainers: [Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majumdar
 
 <img src="Readme_Figures/DRITaglineLogoTransparentBackground.png" height="45"/> &nbsp; <img src="Readme_Figures/CSU-Signature-C-357.png" height="55"/>
 
-## Proposal Summary
-Groundwater plays a vital role in maintaining global food security and is an essential element of the water budget. However, due to the growing global population, dietary changes, and climate change, there has been a surge in freshwater consumption, and many basins are heavily exploiting their groundwater reserves, which provide almost half of the freshwater supply. As a result, the adverse effects of groundwater overdrafts, such as land subsidence, aquifer depletion, and water pollution, are becoming increasingly apparent worldwide. Despite the urgent need to address these challenges, there is a lack of proactive local-scale monitoring of groundwater withdrawals in most regions, including the United States (US). As the volume of groundwater withdrawn is critical to know in order to implement sustainable solutions, methods for estimating groundwater use at the management scale are needed. 
+## Abstract
 
-Existing methods to estimate withdrawals are either expensive and time-consuming or unable to produce reliable predictions at scales needed for local management. Our currently funded grant is developing machine learning approaches that integrate satellite datasets to estimate withdrawals. In this supplement, we propose to extend this funding to enable water managers in Arizona to better understand water budgets. This will provide timely information to local agencies, including the Arizona Department of Water Resources, who have been tasked by Senate Bill 1740 to analyze and prepare a water supply and demand assessment for at least six of the state's groundwater basins every year, with all the basins requiring a supply and demand assessment once every five years. The assessment entails producing estimates of water use in each basin and projections of future water use under various scenarios related to climate, land use, and surface water availability. However, estimating water use in regions without metered datasets poses a challenge that requires significant time and resources from water agencies and still yields high uncertainty. Moreover, conventional estimates of water use only provide "hindcasts," or estimates of past water use, with no ability to project water use into the future.
-
-Arizona is currently in its 28th-year long-term drought, which has depleted surface water reserves from the Colorado River. Consequently, groundwater resources in Southern and South-Central Arizona are under significant stress resulting in land subsidence. Hence, reliable and efficient groundwater pumping monitoring solutions are critical to addressing this region's water security issues.
-
-This work aims to enhance our existing machine learning and remote sensing-based model estimates in Arizona. Current model limitations include uncertainty in the effect of surface water on groundwater use and irrigation efficiency. Further, while our model is capable of making forecasts, extensive data pre-processing is required to produce forecasts. This research will provide us with the necessary resources to develop a robust model that provides actionable withdrawal estimates in light of ongoing and future reductions in the Colorado River and other surface water bodies.
-
+AZ-Hydro is an end-to-end pipeline for estimating annual groundwater pumping, consumptive use, effective precipitation, and irrigation efficiencies across Arizona at 2 km resolution from 1896 to 2099. The pipeline fuses 14 bands of satellite-derived and climate-model-projected predictor data—including evapotranspiration, reference ET, precipitation, effective precipitation, temperature, land use/land cover, irrigated fraction, groundwater fraction, soil properties, streamflow, canal density, and well density—into a spatially explicit predictor stack via Google Earth Engine. An XGBoost model, tuned with Optuna TPE hyperparameter search (100 trials, 5-fold CV) and parallelized with Dask, is trained on metered Arizona Department of Water Resources (ADWR) pumping records (1984–2024). Model performance is evaluated using random, temporal leave-one-out (six configurations), and spatial leave-one-out strategies across eight ensemble tree algorithms. Full-period predictions are partitioned into eight withdrawal categories (Irrigation, Non-Irrigation, and their GW/SW splits), three consumptive-use products, and three irrigation-efficiency products. A well-level package disaggregates pixel-level rasters to individual ADWR wells using capacity-proportional weighting. Predictions are independently validated against USGS National Hydrologic Model (NHM) HUC12 withdrawals, consumptive use, and irrigation efficiencies, as well as USGS Reitz 800 m irrigation water-use rasters, aggregated to ADWR groundwater basin totals.
 
 ## Getting Started
 
-[Installing the correct environment and running the project](azhydro/README.md)
+See [azhydro/README.md](azhydro/README.md) for installation instructions (conda environment, GEE authentication) and detailed documentation of the ML pipeline steps, configuration constants, library modules, and output directory structure.
+
+See [gee/README.md](gee/README.md) for documentation of the Google Earth Engine export scripts used to generate the predictor data layers.
+
+### Repository disk space requirements
+
+A full clone with all input data and a complete pipeline run requires approximately **37 GB**:
+
+| Component | Size | Notes |
+|---|---|---|
+| **Inputs total** | ~14 GB | |
+| &emsp;GEE tiles | ~1 GB | Raw 2 km tiles (80 km × 80 km each) |
+| &emsp;GW data | ~2.5 GB | ADWR metered records, shapefiles, well registry, ancillary vectors |
+| &emsp;USGS water-use data | ~11 GB | NHM withdrawals/CU/IE, Reitz 800 m rasters, crop surveys |
+| **Outputs total** | ~16 GB | |
+| &emsp;GW rasters & vectors | ~14 GB | Observed pumping depth rasters + per-year vector shapefiles |
+| &emsp;Reprojected vectors | ~900 MB | Basins, wells, CAP, streamflow in consistent CRS |
+| &emsp;ML model outputs | ~500 MB+ | Evaluation, predictions, intercomparisons (grows with full run) |
+| **Code & figures** | ~2 MB | Python source, GEE scripts, readme figures |
+
+Disk usage will increase if additional model configurations or prediction years are added.
 
 ## Citations
-Majumdar, S., Smith, R., Conway, B. D., & Lakshmi, V. (2022). Advancing remote sensing and machine learning‐driven frameworks for groundwater withdrawal estimation in Arizona: Linking land subsidence to groundwater withdrawals. Hydrological Processes, 36(11), e14757. https://doi.org/10.1002/hyp.14757
+
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). The Arizona Water Use Dataset (1896–2099): Withdrawals, consumptive use, and irrigation efficiency partitioned by source. _In prep. for Nature Scientific Data_.
+
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Where Arizona's Water Goes: Two Centuries of Groundwater and Surface Water Withdrawals, Consumptive Use, and Irrigation Efficiency (1896–2099). _In prep. for AGU Earth's Future_.
 
 ## Acknowledgments
-We would like to acknowledge funding from NASA (Grant numbers: 80NSSC21K0979 and 80NSSC23K1453). We are grateful to all the opensource software and data communities for making their resources publicly available and also thank the ADWR (https://infoshare.azwater.gov/docushare/dsweb/View/Collection-72) for providing the necessary data sets related to groundwater withdrawals, land subsidence, and other shapefiles used in this research. Finally, we would like to convey our gratitude to our colleagues and families for their continuous motivation and support. Any opinions, findings, conclusions, or recommendations expressed in this material are those of the authors and do not necessarily reflect the views of the funding agencies.
+We would like to acknowledge funding from NASA (Grant numbers: 80NSSC21K0979 and 80NSSC23K1453). We are grateful to all the opensource software and data communities for making their resources publicly available and also thank the ADWR for providing the necessary data sets related to groundwater withdrawals and other shapefiles used in this research. We also acknowledge compute and storage support from Google Earth Engine. Finally, we would like to convey our gratitude to our colleagues and families for their continuous motivation and support. Any opinions, findings, conclusions, or recommendations expressed in this material are those of the authors and do not necessarily reflect the views of the funding agencies.
 
 <img src="Readme_Figures/DRITaglineLogoTransparentBackground.png" height="100"/> &nbsp;  &nbsp; <img src="Readme_Figures/CSU-Signature-C-357.png" height="130"/> &nbsp; <img src="Readme_Figures/ADWR.png" height="120"/> &nbsp;  &nbsp; <img src="Readme_Figures/nasa-logo-web-rgb.png" height="120"/>
+
+## References
+
+Martin, D. J., Niswonger, R. G., Regan, R. S., Huntington, J. L., Ott, T., Morton, C., Senay, G. B., Friedrichs, M., Melton, F. S., Haynes, J., Henson, W., Read, A., Xie, Y., Lark, T., & Rush, M. (2025). Estimating irrigation consumptive use for the conterminous United States: coupling satellite-sourced estimates of actual evapotranspiration with a national hydrologic model. _Journal of Hydrology_, _662_, 133909. https://doi.org/10.1016/j.jhydrol.2025.133909
+
+Haynes, J.V., Read, A.L., Chan, A.Y., Martin, D.J., Regan, R.S., Henson, W.R., Niswonger, R.G., & Stewart, J.S., 2023, Monthly crop irrigation withdrawals and efficiencies by HUC12 watershed for years 2000-2020 within the conterminous United States (ver. 2.0, September 2024). _U.S. Geological Survey data release_, https://doi.org/10.5066/P9LGISUM.
+
+Reitz, M., Sanford, W. E., & Saxe, S. (2023). Ensemble Estimation of Historical Evapotranspiration for the Conterminous U.S. _Water Resources Research_, _59_(6). https://doi.org/10.1029/2022WR034012
+
+Majumdar, S., Smith, R., Conway, B. D., & Lakshmi, V. (2022). Advancing remote sensing and machine learning‐driven frameworks for groundwater withdrawal estimation in Arizona: Linking land subsidence to groundwater withdrawals. _Hydrological Processes, 36_(11), e14757. https://doi.org/10.1002/hyp.14757

@@ -10,6 +10,7 @@ import geopandas as gpd
 import numpy as np
 import os
 import subprocess
+import logging
 
 from osgeo import gdal
 from joblib import Parallel, delayed
@@ -24,12 +25,15 @@ import rasterio as rio
 gdal.PushErrorHandler('CPLQuietErrorHandler')
 gdal.UseExceptions()
 
+logger = logging.getLogger(__name__)
+
 
 def read_raster_as_arr(
         raster_file: str | rio.DatasetReader,
         band: int = 1,
         get_file: bool = True,
-        change_dtype: bool = True
+        change_dtype: bool = True,
+        file_mode: str = 'r'
 ) -> tuple[np.ndarray, rio.DatasetReader] | np.ndarray:
     """Read a raster band as a numpy array.
 
@@ -39,6 +43,7 @@ def read_raster_as_arr(
         get_file (bool): Get rasterio DatasetReader object file if set to True.
         change_dtype (bool): Change raster data type to float if True. Also, if a no data value exists, then it is set
                              to np.nan if change_dtype is True.
+        file_mode (str): File mode to read raster file. Default is 'r' for read. Set to 'r+' to read and write.
 
     Returns:
         np.ndarray: Raster numpy array (if, get_file is False).
@@ -47,7 +52,7 @@ def read_raster_as_arr(
     """
     rasterio_obj = isinstance(raster_file, rio.DatasetReader)
     if not rasterio_obj:
-        raster_file = rio.open(raster_file)
+        raster_file = rio.open(raster_file, mode=file_mode)
     else:
         get_file = False
     raster_arr = raster_file.read(band)
@@ -106,6 +111,41 @@ def write_raster(
             nodata=no_data_value
     ) as dst:
         dst.write(raster_data, num_bands)
+
+
+def clamp_and_rewrite_raster(
+        raster_file: str,
+        min_val: float = 0,
+        max_val: float | None = None,
+        band_descriptions: list[str] | None = None
+) -> None:
+    """Clamp raster values to a given range and rewrite the file with updated statistics.
+
+    Reads the raster, clamps pixel values to [min_val, max_val], rewrites the file from scratch
+    (discarding stale embedded statistics), and optionally sets band descriptions.
+
+    Args:
+        raster_file (str): Path to the raster file.
+        min_val (float): Minimum allowed pixel value. Defaults to 0.
+        max_val (float or None): Maximum allowed pixel value. If None, no upper clamp is applied.
+        band_descriptions (list[str] or None): List of band description strings. If provided, must
+            have one entry per band.
+
+    Returns:
+        None
+    """
+    with rio.open(raster_file) as src:
+        arr = src.read()
+        profile = src.profile.copy()
+    arr = np.maximum(arr, min_val)
+    if max_val is not None:
+        arr = np.minimum(arr, max_val)
+    os.remove(raster_file)
+    with rio.open(raster_file, 'w', **profile) as dst:
+        dst.write(arr)
+        if band_descriptions is not None:
+            for idx, desc in enumerate(band_descriptions, start=1):
+                dst.set_band_description(idx, desc)
 
 
 def crop_raster(
@@ -252,7 +292,7 @@ def get_raster_extent(
 
 def reproject_raster_gdal(
         input_raster_file: str,
-        outfile_path: str or None = None,
+        outfile_path: str | None = None,
         resampling_factor: float | None = 1,
         resampling_func: str = 'near',
         downsampling: bool = True,
@@ -261,7 +301,7 @@ def reproject_raster_gdal(
         dst_yres: float | None = None,
         output_dtype: str = 'float32',
         src_band_dict: dict[str, tuple[int, str, str]] | None = None,
-        dst_raster_dir: str or None = None
+        dst_raster_dir: str | None = None
 ) -> None:
     """Reproject raster using GDALWarp Python API.
 
@@ -377,7 +417,7 @@ def reproject_raster_gdal(
                 stdout=subprocess.DEVNULL
             )
     except Exception as e:
-        print('Error occurred while resampling', input_raster_file, '\n', e)
+        logger.error(f'Error occurred while resampling {input_raster_file}', exc_info=e)
 
 
 def crop_rasters(
@@ -433,7 +473,7 @@ def parallel_crop_rasters(
 
     out_raster = outdir + input_raster_file[input_raster_file.rfind(os.sep) + 1:]
     if verbose:
-        print('Cropping', input_raster_file, '...')
+        logger.info(f'Cropping {input_raster_file} ...')
     crop_raster(
         input_raster_file, input_mask_file,
         out_raster, ext_mask=ext_mask,

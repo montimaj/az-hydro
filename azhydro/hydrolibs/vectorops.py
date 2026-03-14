@@ -13,6 +13,7 @@ import fiona
 import os
 import multiprocessing
 import warnings
+import logging
 
 from osgeo import gdal
 gdal.PushErrorHandler('CPLQuietErrorHandler')
@@ -20,6 +21,8 @@ gdal.UseExceptions()
 from joblib import Parallel, delayed
 from glob import glob
 from sysops import az_nodata
+
+logger = logging.getLogger(__name__)
 from shapely.geometry import Point
 
 
@@ -29,7 +32,8 @@ def reproject_vector(
         ref_file: str | None = None,
         crs: str = 'epsg:4326',
         crs_from_file: bool = True,
-        raster: bool = True
+        raster: bool = True,
+        verbose: bool = True
 ) -> None:
     """
     Reproject a vector file.
@@ -41,12 +45,14 @@ def reproject_vector(
         ref_file (str or None): Reference file (raster or vector) for obtaining target CRS.
         crs_from_file (bool): If true (default) read CRS from file (raster or vector).
         raster (bool): If true (default) read CRS from raster else vector.
+        verbose (bool): Set True to print messages.
 
     Returns:
         None.
     """
 
-    print('Reprojecting', input_vector_file)
+    if verbose:
+        logger.info(f'Reprojecting {input_vector_file}')
     input_vector_file = gpd.read_file(input_vector_file)
     if crs_from_file:
         if raster:
@@ -57,6 +63,12 @@ def reproject_vector(
     else:
         crs = {'init': crs}
     output_vector_file = input_vector_file.to_crs(crs)
+    drop_cols = [c for c in output_vector_file.columns
+                 if c.startswith('Shape__') or c.startswith('Shape_')]
+    if drop_cols:
+        output_vector_file = output_vector_file.drop(columns=drop_cols)
+    for col in output_vector_file.select_dtypes(include=['datetime', 'datetimetz']).columns:
+        output_vector_file[col] = output_vector_file[col].astype(str)
     output_vector_file.to_file(outfile_path)
 
 
@@ -221,108 +233,7 @@ def add_attribute_well_reg(
     matched_wells = len(set(well_id_selected).intersection(
         set(well_reg_gdf[shp_well_id].tolist())
     ))
-    print(input_gw_csv_file, ': Matched wells:', matched_wells)
-
-
-def add_attribute_well_reg_multiple(
-        input_well_reg_file: str,
-        input_gw_csv_dir: str,
-        out_gw_shp_dir: str,
-        fill_attr: str = 'AF Pumped',
-        filter_attr: str = 'AMA INA',
-        filter_attr_value: str = 'NOT WITHIN ANY AMA OR INA',
-        use_only_ama_ina: bool = False,
-        **kwargs: dict[str, str]
-) -> None:
-    """
-    Parallelization based on multiple groundwater pumping CSV files.
-    Add an attribute present in the GW csv file to the Well Registry shape file based on matching ids given in kwargs.
-    By default, the GW withdrawal is added. The csv ids must include: csv_well_id, csv_mov_id, csv_water_id,
-    movement_type, water_type, The shp id must include shp_well_id. For the Arizona datasets, csv_well_id='Well Id',
-    csv_mov_id='Movement Type', csv_water_id='Water Type', movement_type='WITHDRAWAL', water_type='GROUNDWATER', and
-    shp_well_id='REGISTRY_I' by default. For changing, pass appropriate kwargs.
-
-    Args:
-        input_well_reg_file (str): Input Well Registry shapefile or geojson path.
-        input_gw_csv_dir (str): Input GW csv directory containing yearly withdrawal CSVs.
-        out_gw_shp_dir (str): Output directory to store the GW withdrawal data.
-        fill_attr (str): Attribute present in the CSV file to add to Well Registry
-        filter_attr (str): Remove specific wells based on this attribute. Set None to disable filtering.
-        filter_attr_value (str): Value for filter_attr.
-        use_only_ama_ina (bool): Set True to use only AMA/INA for model training.
-        kwargs (dict (str, str)): Additional variables, which include csv_well_id='Well Id',
-                                  csv_mov_id='Movement Type', csv_water_id='Water Type', movement_type='WITHDRAWAL',
-                                  water_type='GROUNDWATER', water_use = 'IRRIGATION', and shp_well_id='REGISTRY_I'
-                                  as defaults. if water_use is set to 'All', then all water uses will be considered. 
-                                  Default is 'IRRIGATION'.
-
-    Returns:
-        None.
-    """
-
-    num_cores = multiprocessing.cpu_count() - 1
-    print('Updating Well Registry shapefiles...\n')
-    Parallel(n_jobs=num_cores - 1)(delayed(parallel_add_attribute_well_reg)(
-        input_well_reg_file,
-        input_gw_csv_file,
-        out_gw_shp_dir,
-        fill_attr,
-        filter_attr,
-        filter_attr_value,
-        use_only_ama_ina,
-        **kwargs
-    ) for input_gw_csv_file in glob(input_gw_csv_dir + '*.csv'))
-
-
-def parallel_add_attribute_well_reg(
-        input_well_reg_file: str,
-        input_gw_csv_file: str,
-        out_gw_shp_dir: str,
-        fill_attr: str = 'AF Pumped',
-        filter_attr: str = 'AMA INA',
-        filter_attr_value: str = 'NOT WITHIN ANY AMA OR INA',
-        use_only_ama_ina:bool = False,
-        **kwargs: dict[str, str]
-):
-    """
-    Add an attribute present in the GW csv file to the Well Registry shape files (yearwise) based on matching ids given
-    in kwargs. By default, the GW withdrawal is added. The csv ids must include: csv_well_id, csv_mov_id, csv_water_id,
-    movement_type, water_type, The shp id must include shp_well_id. For the Arizona datasets, csv_well_id='Well Id',
-    csv_mov_id='Movement Type', csv_water_id='Water Type', movement_type='WITHDRAWAL', water_type='GROUNDWATER', and
-    shp_well_id='REGISTRY_I' by default. For changing, pass appropriate kwargs. This function should be called from
-    #add_attribute_well_reg_multiple(...)
-
-    Args:
-        input_well_reg_file (str): Input well registry shapefile.
-        input_gw_csv_file (str): Input GW csv file.
-        out_gw_shp_dir (str): Output GW geojson directory having GW withdrawal data.
-        fill_attr (str): Attribute present in the CSV file to add to Well Registry.
-        filter_attr (str): Remove specific wells based on this attribute. Set None to disable filtering.
-        use_only_ama_ina (bool): Set True to use only AMA/INA for model training.
-        filter_attr_value (str): Value for filter_attr.
-        kwargs (dict (str, str)): Additional variables, which include csv_well_id='Well Id',
-                                  csv_mov_id='Movement Type', csv_water_id='Water Type', movement_type='WITHDRAWAL',
-                                  water_type='GROUNDWATER', water_use = 'IRRIGATION', and shp_well_id='REGISTRY_I'
-                                  as defaults. if water_use is set to 'All', then all water uses will be considered.
-                                  Default is 'IRRIGATION'.
-
-    Returns:
-        None.
-    """
-
-    out_well_reg_file = out_gw_shp_dir + input_gw_csv_file[
-                                         input_gw_csv_file.rfind(os.sep) + 1: input_gw_csv_file.rfind('.')
-                                         ] + '.shp'
-    add_attribute_well_reg(
-        input_well_reg_file,
-        input_gw_csv_file,
-        out_well_reg_file,
-        fill_attr,
-        filter_attr,
-        filter_attr_value,
-        use_only_ama_ina,
-        **kwargs
-    )
+    logger.info(f'{input_gw_csv_file}: Matched wells: {matched_wells}')
 
 
 def gdf2shp(
@@ -450,53 +361,18 @@ def shps2rasters(
         None.
     """
 
+    def _convert(shp_file):
+        outfile_path = output_dir + shp_file[shp_file.rfind(os.sep) + 1: shp_file.rfind('.') + 1] + 'tif'
+        shp2raster(
+            shp_file,
+            outfile_path=outfile_path,
+            value_field=value_field,
+            value_field_pos=value_field_pos,
+            xres=xres,
+            yres=yres,
+            burn_value=burn_value,
+            add_value=add_value
+        )
+
     num_cores = multiprocessing.cpu_count() - 2
-    Parallel(n_jobs=num_cores)(delayed(parallel_shp2raster)(
-        shp_file,
-        output_dir=output_dir,
-        burn_value=burn_value,
-        value_field=value_field,
-        value_field_pos=value_field_pos,
-        xres=xres, yres=yres,
-        add_value=add_value
-    ) for shp_file in glob(input_dir + '*.shp'))
-
-
-def parallel_shp2raster(
-        shp_file: str,
-        output_dir: str,
-        burn_value: float | None = None,
-        value_field: str | None = None,
-        value_field_pos: int = 0,
-        xres: float = 1000,
-        yres: float = 1000,
-        add_value: bool = True,
-) -> None:
-    """
-    Use this from #shp2rasters to parallelize raster creation.
-    Args:
-        shp_file (str): Input shapefile path.
-        output_dir (str): Output TIFF directory.
-        burn_value (float or None): Set burn value. If not None, then add_value, value_field, and value_field_pos
-                                    arguments are ignored.
-        value_field (str or None): Name of the value attribute. Set None to use value_field_pos.
-        value_field_pos (int): Value field position (zero indexing). Only used if value_field is None.
-        xres (float): Pixel width in geographic units.
-        yres (float): Pixel height in geographic units.
-        add_value (bool): Set False to disable adding value to existing raster cell.
-
-    Returns:
-        None
-    """
-
-    outfile_path = output_dir + shp_file[shp_file.rfind(os.sep) + 1: shp_file.rfind('.') + 1] + 'tif'
-    shp2raster(
-        shp_file,
-        outfile_path=outfile_path,
-        value_field=value_field,
-        value_field_pos=value_field_pos,
-        xres=xres,
-        yres=yres,
-        burn_value=burn_value,
-        add_value=add_value
-    )
+    Parallel(n_jobs=num_cores)(delayed(_convert)(f) for f in glob(input_dir + '*.shp'))
