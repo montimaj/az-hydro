@@ -1656,6 +1656,18 @@ def _plot_cu_ie_time_series(
                 ax.grid(True, alpha=0.3, linestyle='--')
                 ax.legend(fontsize=9)
 
+        # ── Twin y-axes: mm↔ft and AF↔m³ ──
+        if variable == 'CU':
+            ax_ft = axes[0].twinx()
+            ax_ft.set_ylabel('(ft)', fontweight='bold')
+            lo, hi = axes[0].get_ylim()
+            ax_ft.set_ylim(lo * MM_TO_FT, hi * MM_TO_FT)
+
+            ax_m3_tw = axes[1].twinx()
+            ax_m3_tw.set_ylabel('(m³)', fontweight='bold')
+            lo, hi = axes[1].get_ylim()
+            ax_m3_tw.set_ylim(lo / M3_TO_AF, hi / M3_TO_AF)
+
         clean_name = basin.replace(' ', '_').replace('/', '_')
         out_path = os.path.join(output_dir, f'TS_{variable}_{clean_name}.png')
         fig.savefig(out_path, dpi=300, bbox_inches='tight')

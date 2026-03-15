@@ -23,6 +23,9 @@ The scripts use the GEE high-volume endpoint (`https://earthengine-highvolume.go
 | `maca_monthly_et_v2` | 888 | 2026–2099 | `actual_et` | 4638.3 | `export_maca_monthly_et.py` |
 | `lulc_projection_ensemble` | 74 | 2026–2099 | `landcover` | 250 | `export_lulc_ensemble.py` |
 | `monthly_peff_v2` | 2,448 | 1896–2099 | `peff` | 4638.3 | `export_monthly_peff.py` |
+| `maca_gcm_annual_eto` | 370 | 2026–2099 | `eto` | 4638.3 | `export_maca_gcm_annual_eto.py` |
+| `maca_gcm_annual_et` | 370 | 2026–2099 | `actual_et` | 4638.3 | `export_maca_gcm_annual_et.py` |
+| `maca_gcm_annual_peff` | 370 | 2026–2099 | `peff` | 4638.3 | `export_maca_gcm_annual_peff.py` |
 
 ## Dependency Graph
 
@@ -43,6 +46,11 @@ Level 2 (depends on Level 1):
 Level 3 (depends on Level 2):
   ├── export_maca_monthly_et.py         ← needs monthly_etof + maca_monthly_eto_v2
   └── export_monthly_peff.py            ← needs prism_hargreaves_eto + maca_monthly_eto_v2
+
+Level 4 — per-GCM uncertainty (no inter-level deps; uses gridMET ratios + etof):
+  ├── export_maca_gcm_annual_eto.py     ← 5 representative GCMs (370 images)
+  ├── export_maca_gcm_annual_et.py      ← computes monthly ETo×EToF internally
+  └── export_maca_gcm_annual_peff.py    ← computes monthly USDA SCS Peff internally
 ```
 
 ## Data Harmonization
@@ -291,6 +299,44 @@ This approach still preserves per-image nonlinearity: ETo is computed from each 
 
 **Output:** 2,448 images (`{year}_{month:02d}`), each with band `peff` in mm/month.
 
+---
+
+### 10–12. Per-GCM Uncertainty Assets (Level 4)
+
+**Purpose:** Capture climate-model uncertainty (σ_MACA) by exporting per-GCM versions of the three MACA-driven variables (ETo, ET, Peff). Downstream, each GCM's complete chain is run through the pipeline, and the inter-GCM spread quantifies the uncertainty attributable to GCM selection.
+
+**Representative GCMs:** Five GCMs spanning the Southwest US temperature × precipitation space (cf. Rupp et al., 2013):
+
+| GCM | Climate Corner |
+|---|---|
+| CCSM4 | Central / median |
+| CNRM-CM5 | Cool-wet |
+| HadGEM2-ES365 | Hot-dry |
+| MIROC-ESM-CHEM | Hot-wet |
+| inmcm4 | Cool-dry (lowest climate sensitivity in CMIP5) |
+
+For each GCM, both RCP scenarios (rcp45, rcp85) are averaged — yielding a 2-member per-GCM mean — using the same flat-pipeline approach as the 40-member ensemble version.
+
+Since the downstream XGBoost model operates on **annual** predictor variables, all per-GCM exports are annual (monthly computation happens server-side in GEE and is summed to annual before export). This reduces total assets from 13,320 (monthly) to 1,110 (annual).
+
+#### 10. Per-GCM Annual ETo (`maca_gcm_annual_eto`)
+
+Same flat pipeline as §6 (ensemble ETo), but filtered to one model (2 scenarios). Monthly ETo is `daily_eto.sum().divide(2)`, gridMET bias-corrected, then summed to annual. Used at tile-download time for the Peff clamp safeguard in `dataops.py`.
+
+**Output:** 370 images (`{model}_{year}`), band `eto` (mm/year), properties `model` + `year`.
+
+#### 11. Per-GCM Annual ET (`maca_gcm_annual_et`)
+
+Computes bias-corrected monthly ETo internally (same as §10), multiplies by monthly EToF, sums to annual ET. No dependency on the per-GCM ETo asset — monthly ETo is recomputed internally for the EToF multiplication.
+
+**Output:** 370 images (`{model}_{year}`), band `actual_et` (mm/year), properties `model` + `year`.
+
+#### 12. Per-GCM Annual Peff (`maca_gcm_annual_peff`)
+
+Computes bias-corrected monthly ETo + per-GCM precip internally, applies the nonlinear USDA SCS formula per month (same as §9), sums to annual. Only 2026–2099 because historical Peff uses PRISM/gridMET observations equally for all GCMs.
+
+**Output:** 370 images (`{model}_{year}`), band `peff` (mm/year), properties `model` + `year`.
+
 ## Usage
 
 ### Run everything in order
@@ -325,6 +371,12 @@ python export_monthly_peff.py --start-year 1896 --end-year 1978
 
 # All scripts support --no-wait to submit tasks without blocking
 python export_maca_monthly_eto.py --no-wait
+
+# Per-GCM uncertainty exports (Level 4) — all 5 GCMs or a single GCM
+python export_maca_gcm_annual_eto.py                          # all 5 GCMs
+python export_maca_gcm_annual_eto.py --gcm HadGEM2-ES365      # single GCM
+python export_maca_gcm_annual_et.py --gcm CCSM4
+python export_maca_gcm_annual_peff.py --start-year 2050 --end-year 2099
 ```
 
 ### Resumability
@@ -351,6 +403,7 @@ GEE enforces a 3,000-task queue limit. `export_image()` automatically calls `_wa
 | `build_openet_monthly_et_ic()` | Monthly OpenET ET 2000–2025 |
 | `build_daily_maca_ensemble(year)` | Daily MACA ensemble for one year (legacy, used by `dataops.py`) |
 | `build_daily_maca_single(year, model, scenario)` | Daily MACA data for one GCM/scenario |
+| `MACA_REPRESENTATIVE_GCMS` | 5 GCMs spanning hot-dry/hot-wet/cool-dry/cool-wet/median for uncertainty quantification |
 
 ## How `dataops.py` Consumes These Assets
 

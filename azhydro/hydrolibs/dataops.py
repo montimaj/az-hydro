@@ -408,7 +408,9 @@ def download_gee_tile(
         gcloud_project: str = 'azhydro',
         gee_scale: float = 30,
         verbose: bool = False,
-        crs: str = 'EPSG:4326'
+        crs: str = 'EPSG:4326',
+        gcm: str | None = None,
+        lulc_scenario: str | None = None,
 ):
     """
     Download GEE tile through dask.
@@ -422,6 +424,12 @@ def download_gee_tile(
     gee_scale (float): GEE data download scale in m.
     verbose (bool): Set True to see extra details on file downloads.
     crs (str): Coordinate reference system for the downloaded data. Defaults to 'EPSG:4326'.
+    gcm (str | None): When provided, use per-GCM climate data instead of
+        the 40-member ensemble mean for future years (2026-2099).  Must be
+        one of the 5 representative GCMs.
+    lulc_scenario (str | None): When provided, use a single USGS LULC
+        projection scenario (e.g. 'B1', 'B2', 'A1B', 'A2') instead of
+        the pixel-wise mode ensemble for future years (2026-2099).
 
     Returns:
         None.
@@ -456,6 +464,7 @@ def download_gee_tile(
     maca_monthly_eto_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_eto_v2')
     maca_monthly_et_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_et_v2')
     lulc_projection_ensemble_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/lulc_projection_ensemble')
+    lulc_projection_raw_ic = ee.ImageCollection('projects/nwi-usgs/assets/USGS-LULC-CONUS')
     monthly_peff_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/monthly_peff_v2')
     gw_fraction_img_dict = {
         '2000': ee.Image("projects/fwhung/assets/CroplandNew60m/Crop_IrrSource_2000"),
@@ -514,16 +523,26 @@ def download_gee_tile(
                 .filterDate(start_year_gee, end_year_gee) \
                 .select('actual_et').sum()
         else:
-            actual_et = maca_monthly_et_ic \
-                .filterDate(start_year_gee, end_year_gee) \
-                .select('actual_et').sum()
+            if gcm is not None:
+                actual_et = ee.Image(
+                    f'{_ASSET_PREFIX}/maca_gcm_annual_et/{gcm}_{year}'
+                ).select('actual_et')
+            else:
+                actual_et = maca_monthly_et_ic \
+                    .filterDate(start_year_gee, end_year_gee) \
+                    .select('actual_et').sum()
         if year < 2026:
             prism_eto_ic = prism_hargreaves_eto_ic.filterDate(start_year_gee, end_year_gee)
             annual_eto = get_eto(year, prism_eto_ic=prism_eto_ic, return_annual=True)
         else:
-            annual_eto = maca_monthly_eto_ic \
-                .filterDate(start_year_gee, end_year_gee) \
-                .select('eto').sum().rename('annual_eto_mm')
+            if gcm is not None:
+                annual_eto = ee.Image(
+                    f'{_ASSET_PREFIX}/maca_gcm_annual_eto/{gcm}_{year}'
+                ).select('eto').rename('annual_eto_mm')
+            else:
+                annual_eto = maca_monthly_eto_ic \
+                    .filterDate(start_year_gee, end_year_gee) \
+                    .select('eto').sum().rename('annual_eto_mm')
         if year < 2026:
             precip = prism_ic.select('ppt') \
                     .filterDate(start_year_gee, end_year_gee) \
@@ -537,16 +556,25 @@ def download_gee_tile(
                 .mean()\
                 .add(273.15)
         else:
-            # Flat MACA: sum/N_MEMBERS for precip, mean for temp
-            maca_scenarios, maca_models, _ = get_maca_scenarios_models_bands()
-            n_members = len(maca_models) * len(maca_scenarios)
             maca_ic = ee.ImageCollection('IDAHO_EPSCOR/MACAv2_METDATA') \
                 .filterDate(start_year_gee, end_year_gee)
+            if gcm is not None:
+                maca_ic = maca_ic.filter(ee.Filter.eq('model', gcm))
+                n_members = 2  # rcp45 + rcp85 for a single GCM
+            else:
+                # Flat MACA: sum/N_MEMBERS for precip, mean for temp
+                maca_scenarios, maca_models, _ = get_maca_scenarios_models_bands()
+                n_members = len(maca_models) * len(maca_scenarios)
             precip = maca_ic.select('pr').sum().divide(n_members)
             tmmx = maca_ic.select('tasmax').mean()  # already in Kelvin
             tmmn = maca_ic.select('tasmin').mean()  # already in Kelvin
-        peff = monthly_peff_ic.filterDate(start_year_gee, end_year_gee) \
-                .select('peff').sum().rename('annual_peff_mm')
+        if gcm is not None and year > 2025:
+            peff = ee.Image(
+                f'{_ASSET_PREFIX}/maca_gcm_annual_peff/{gcm}_{year}'
+            ).select('peff').rename('annual_peff_mm')
+        else:
+            peff = monthly_peff_ic.filterDate(start_year_gee, end_year_gee) \
+                    .select('peff').sum().rename('annual_peff_mm')
         if year == 1896:
             # get mean annual 2000-2023 if year is 1896, and save it for use in other years outside 2000-2024 
             # since PCML data only starts in 2000
@@ -560,6 +588,10 @@ def download_gee_tile(
         if year < 1985 or year > 2025:
             if year < 1985:
                 usgs_lulc_ic = usgs_lulc_historical_ic
+            elif lulc_scenario is not None:
+                usgs_lulc_ic = lulc_projection_raw_ic.filterMetadata(
+                    'scenario', 'equals', lulc_scenario
+                )
             else:
                 usgs_lulc_ic = lulc_projection_ensemble_ic
             # Use historical USGS LULC data from 1938-1984.
@@ -640,7 +672,9 @@ def download_gee_data(
         num_workers: int = 32,
         worker_memory='0.5G',
         gee_scale: float = 2000,
-        verbose: bool = False
+        verbose: bool = False,
+        gcm: str | None = None,
+        lulc_scenario: str | None = None,
 ) -> tuple[str, list[str]]:
     """
     Download multiple GEE datasets as rasters at 100 m spatial resolution.
@@ -658,13 +692,22 @@ def download_gee_data(
     free GEE users.
     gee_scale (float): GEE data download scale in m.
     verbose (bool): Set True to see extra details on file downloads.
+    gcm (str | None): When provided, download per-GCM climate data for
+        future years (2026-2099) instead of the ensemble mean.  Tiles are
+        stored in a GCM-specific subdirectory.
+    lulc_scenario (str | None): When provided, download per-scenario LULC
+        projection data for future years (2026-2099) instead of the
+        pixel-wise mode ensemble.  Tiles are stored in a scenario-specific
+        subdirectory.
 
     Returns:
         tuple (str, list (str, ...)): Tuple containing the directory path containing all the downloaded GEE tiles and
         the ordered list of band names for each tile.
     """
 
-    data_dir = f'{download_dir}GEE_Data/GEE_Tiles_{int(gee_scale)}m/'
+    gcm_suffix = f'_{gcm}' if gcm is not None else ''
+    lulc_suffix = f'_LULC_{lulc_scenario}' if lulc_scenario is not None else ''
+    data_dir = f'{download_dir}GEE_Data/GEE_Tiles_{int(gee_scale)}m{gcm_suffix}{lulc_suffix}/'
     data_band_names = [
         'annual_et_ensemble_mm',
         'annual_eto_mm',
@@ -748,7 +791,9 @@ def download_gee_data(
                     tile_vals, data_dir, year_list,
                     data_band_names, gcloud_project,
                     gee_scale,
-                    verbose=verbose
+                    verbose=verbose,
+                    gcm=gcm,
+                    lulc_scenario=lulc_scenario,
                 )
                 for tile_vals in tile_chunk
             )
@@ -849,7 +894,7 @@ def reproject_gee_mosaics(
             )
 
 
-def create_az_data_csv(
+def create_az_data_parquet(
         input_file_dir: str,
         gw_data_dir: str,
         output_dir: str,
@@ -859,11 +904,11 @@ def create_az_data_csv(
         end_year: int = 2023,
         exclude_years: list[int] | None = None,
         lu_smoothing: int = 3,
-        load_csv: bool = False,
+        load_parquet: bool = False,
         subbasin_vector: str | None = None,
 ) -> pd.DataFrame:
     """
-    Create Arizona predictor data CSV.
+    Create Arizona predictor data Parquet.
 
     Args:
         input_file_dir (str): Input directory where the file names follow <Variable>_<Year>, e.g, Predictor_2015.tif.
@@ -875,7 +920,7 @@ def create_az_data_csv(
         end_year (int): End year in YYYY.
         exclude_years (list(int, ...) or None): Exclude these years from the dataframe.
         lu_smoothing (int): Gaussian smoothing window size for land use rasters obtained from CDL.
-        load_csv (bool): Set True to load existing CSV.
+        load_parquet (bool): Set True to load existing Parquet.
         subbasin_vector (str | None): Path to the ADWR Groundwater Sub-basin
             shapefile.  When provided, ``GW_Subbasin`` OBJECTID values are
             mapped to ``SUBBASIN_N`` names (AMA/INA only; others get
@@ -886,7 +931,7 @@ def create_az_data_csv(
     """
 
     data_parquet = f'{output_dir}AZ_Data.parquet'
-    if not load_csv:
+    if not load_parquet:
         makedirs(output_dir)
         if exclude_years is None:
             exclude_years = []

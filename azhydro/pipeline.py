@@ -36,6 +36,7 @@ import hydrolibs.wellops as wellops
 import hydrolibs.gwops as gwops
 import hydrolibs.streamflowops as streamflowops
 import hydrolibs.intercompops as intercompops
+import hydrolibs.uncertaintyops as uncops
 from hydrolibs.rasterops import read_raster_as_arr, write_raster
 from hydrolibs.sysops import makedirs
 
@@ -105,8 +106,6 @@ DROP_ATTRS = (
     'SW',
     'GW_Basin_Type',
     'annual_peff_pcml_mm',
-    'annual_prism_tmmx_K',
-    'annual_prism_tmmn_K',
 )
 
 # Temporal holdout configurations (from azhydro.py)
@@ -292,7 +291,7 @@ def create_az_data(data_band_names: list[str]) -> pd.DataFrame:
     """
     Build the AZ predictor dataframe for years START_YEAR to END_YEAR.
 
-    Calls ``dataops.create_az_data_csv`` which reads each year's
+    Calls ``dataops.create_az_data_parquet`` which reads each year's
     Predictor, GW_Basin, GW_Subbasin, Streamflow,
     Canal_Weighted_Streamflow, Canal_Density, and Well_Density rasters,
     then maps ADWR sub-basin OBJECTIDs to names and runs EDA.
@@ -301,7 +300,7 @@ def create_az_data(data_band_names: list[str]) -> pd.DataFrame:
     logger.info('Step 1: Creating AZ predictor data (1896-2099)...')
     logger.info('='*60)
 
-    az_df = dataops.create_az_data_csv(
+    az_df = dataops.create_az_data_parquet(
         PRED_DATA_DIR,
         GW_CROPPED_RASTER_DIR,
         MODEL_DIR,
@@ -309,7 +308,7 @@ def create_az_data(data_band_names: list[str]) -> pd.DataFrame:
         AZ_GW_BASIN,
         start_year=START_YEAR,
         end_year=END_YEAR,
-        load_csv=True,
+        load_parquet=True,
         subbasin_vector=ADWR_SUBBASIN_SHP,
     )
     logger.info(f'AZ data shape: {az_df.shape}')
@@ -739,10 +738,16 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
 # =============================================================================
 # Step 3 — Predict annual pumping rasters 1896-2099 with XGBoost
 # =============================================================================
-def predict_full_period(az_df: pd.DataFrame) -> None:
+def predict_full_period(az_df: pd.DataFrame) -> tuple:
     """
     Train XGBoost on the full 1984-2024 metered data (temporal split T1)
     and predict groundwater pumping rasters for every year from 1896 to 2099.
+
+    Returns
+    -------
+    tuple
+        (model, feature_cols, x_train, y_train) — the trained XGBoost model,
+        feature column names, and training data for uncertainty quantification.
     """
     logger.info('='*60)
     logger.info('Step 3: XGBoost full-period prediction (1896-2099)')
@@ -855,7 +860,7 @@ def predict_full_period(az_df: pd.DataFrame) -> None:
         makedirs(ie_raster_dirs[ie_cat])
 
     # Build a valid-pixel mask from the GW_Basin raster (same for all years).
-    # In create_az_data_csv, pixels with NaN or 0 in GW_Basin are labelled
+    # In create_az_data_parquet, pixels with NaN or 0 in GW_Basin are labelled
     # 'OUTSIDE AZ' and dropped.  The remaining rows — in ravel order — are
     # what appears in az_df for each year.
     ref_basin_file = f'{PRED_DATA_DIR}GW_Basin_{YEAR_LIST[0]}.tif'
@@ -922,10 +927,10 @@ def predict_full_period(az_df: pd.DataFrame) -> None:
             logger.warning(f'No data for year {year}, skipping.')
             continue
 
-        # Build feature matrix matching training columns
+        # XGBoost features = create_az_data_parquet columns - DROP_ATTRS - target
         drop_list = [a for a in DROP_ATTRS if a in year_df.columns]
         pred_features = year_df.drop(
-            columns=drop_list + ['gw_pumping_mm', 'GW_Basin', 'Year'],
+            columns=drop_list + ['gw_pumping_mm'],
             errors='ignore'
         )
         # Ensure same columns and order as training
@@ -944,7 +949,7 @@ def predict_full_period(az_df: pd.DataFrame) -> None:
         predictions = cat_predictions['Irrigation'] + cat_predictions['Non_Irrigation']
 
         # Reconstruct raster: valid_mask marks the pixels that survived
-        # the 'OUTSIDE AZ' filter in create_az_data_csv.
+        # the 'OUTSIDE AZ' filter in create_az_data_parquet.
         pred_mm = np.full(basin_flat.shape[0], np.nan, dtype=np.float32)
         pred_mm[valid_mask] = predictions.astype(np.float32)
         pred_mm = pred_mm.reshape(raster_shape)
@@ -1171,28 +1176,9 @@ def predict_full_period(az_df: pd.DataFrame) -> None:
                 f'  |  CU = {cu_af:,.0f} AF  IE = {ie_mean:.2f}'
             )
 
-    # ---- 3c. Time series and map visualisations ----
-    # Total pumping
-    vizops.create_full_period_time_series(
-        yearly_predictions, prediction_dir,
-        start_year=START_YEAR, end_year=END_YEAR,
-        actual_data=actual_yearly,
-    )
+    # ---- 3c. Era summary maps (time series plots deferred to UQ step) ----
     vizops.create_era_summary_maps(yearly_predictions, prediction_dir)
-    vizops.create_basin_time_series(
-        basin_yearly, prediction_dir,
-        start_year=START_YEAR, end_year=END_YEAR,
-        actual_basin_yearly=actual_basin_yearly,
-    )
-    vizops.create_subbasin_time_series(
-        subbasin_yearly, prediction_dir,
-        subbasin_shp=ADWR_SUBBASIN_SHP,
-        ama_code_map=AMA_CODE_MAP,
-        start_year=START_YEAR, end_year=END_YEAR,
-        actual_subbasin_yearly=actual_subbasin_yearly,
-    )
 
-    # Per-category time series
     CAT_TITLES = {
         'Irrigation':         'Irrigation',
         'Non_Irrigation':     'Non-Irrigation',
@@ -1205,29 +1191,11 @@ def predict_full_period(az_df: pd.DataFrame) -> None:
     }
     for cat, title in CAT_TITLES.items():
         cat_dir = f'{prediction_dir}{cat}/'
-        vizops.create_full_period_time_series(
-            cat_yearly[cat], cat_dir,
-            start_year=START_YEAR, end_year=END_YEAR,
-            title_prefix=title,
-        )
         vizops.create_era_summary_maps(
             cat_yearly[cat], cat_dir,
             title_prefix=title,
         )
-        vizops.create_basin_time_series(
-            cat_basin_yearly[cat], cat_dir,
-            start_year=START_YEAR, end_year=END_YEAR,
-            title_prefix=title,
-        )
-        vizops.create_subbasin_time_series(
-            cat_subbasin_yearly[cat], cat_dir,
-            subbasin_shp=ADWR_SUBBASIN_SHP,
-            ama_code_map=AMA_CODE_MAP,
-            start_year=START_YEAR, end_year=END_YEAR,
-            title_prefix=title,
-        )
 
-    # Per-consumptive-use-category time series
     CU_TITLES = {
         'Irrigation_CU':    'Irrigation Consumptive Use',
         'Irrigation_GW_CU': 'Irrigation GW Consumptive Use',
@@ -1235,51 +1203,8 @@ def predict_full_period(az_df: pd.DataFrame) -> None:
     }
     for cu_cat, title in CU_TITLES.items():
         cu_dir = f'{prediction_dir}{cu_cat}/'
-        vizops.create_full_period_time_series(
-            cu_yearly[cu_cat], cu_dir,
-            start_year=START_YEAR, end_year=END_YEAR,
-            title_prefix=title,
-        )
         vizops.create_era_summary_maps(
             cu_yearly[cu_cat], cu_dir,
-            title_prefix=title,
-        )
-        vizops.create_basin_time_series(
-            cu_basin_yearly[cu_cat], cu_dir,
-            start_year=START_YEAR, end_year=END_YEAR,
-            title_prefix=title,
-        )
-        vizops.create_subbasin_time_series(
-            cu_subbasin_yearly[cu_cat], cu_dir,
-            subbasin_shp=ADWR_SUBBASIN_SHP,
-            ama_code_map=AMA_CODE_MAP,
-            start_year=START_YEAR, end_year=END_YEAR,
-            title_prefix=title,
-        )
-
-    # Per-irrigation-efficiency-category time series
-    IE_TITLES = {
-        'Irrigation_Efficiency':    'Irrigation Efficiency',
-        'Irrigation_GW_Efficiency': 'Irrigation GW Efficiency',
-        'Irrigation_SW_Efficiency': 'Irrigation SW Efficiency',
-    }
-    for ie_cat, title in IE_TITLES.items():
-        ie_dir = f'{prediction_dir}{ie_cat}/'
-        vizops.create_full_period_time_series(
-            ie_yearly[ie_cat], ie_dir,
-            start_year=START_YEAR, end_year=END_YEAR,
-            title_prefix=title,
-        )
-        vizops.create_basin_time_series(
-            ie_basin_yearly[ie_cat], ie_dir,
-            start_year=START_YEAR, end_year=END_YEAR,
-            title_prefix=title,
-        )
-        vizops.create_subbasin_time_series(
-            ie_subbasin_yearly[ie_cat], ie_dir,
-            subbasin_shp=ADWR_SUBBASIN_SHP,
-            ama_code_map=AMA_CODE_MAP,
-            start_year=START_YEAR, end_year=END_YEAR,
             title_prefix=title,
         )
 
@@ -1300,6 +1225,7 @@ def predict_full_period(az_df: pd.DataFrame) -> None:
     )
 
     logger.info(f'Full-period prediction complete. Results in {prediction_dir}')
+    return model, feature_cols, x_train, y_train
 
 
 # =============================================================================
@@ -1477,7 +1403,36 @@ def main(
     )
 
     # Step 3
-    predict_full_period(az_df)
+    model, feature_cols, x_train, y_train = predict_full_period(az_df)
+
+    # Step 3b — Hybrid uncertainty quantification
+    uncops.run_uncertainty_quantification(
+        model=model,
+        feature_cols=feature_cols,
+        x_train=x_train,
+        y_train=y_train,
+        az_df=az_df,
+        drop_attrs=DROP_ATTRS,
+        pred_data_dir=PRED_DATA_DIR,
+        model_dir=MODEL_DIR,
+        input_dir=INPUT_DIR,
+        output_dir=OUTPUT_DIR,
+        vector_dir=VECTOR_DIR,
+        mosaic_res=MOSAIC_RASTER_RES,
+        gcloud_project=GCLOUD_PROJECT,
+        gcloud_bucket=GCLOUD_BUCKET,
+        tile_size=TILE_SIZE,
+        start_year=START_YEAR,
+        end_year=END_YEAR,
+        year_list=YEAR_LIST,
+        n_trials=N_TRIALS,
+        n_dask_workers=N_DASK_WORKERS,
+        use_dask=USE_DASK,
+        skip_download=skip_download,
+        subbasin_shp=ADWR_SUBBASIN_SHP,
+        ama_code_map=AMA_CODE_MAP,
+        basin_shp=AZ_GW_BASIN,
+    )
 
     # Step 4
     run_usgs_intercomparison()

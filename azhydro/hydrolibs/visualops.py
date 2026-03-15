@@ -60,6 +60,28 @@ COLORS = {
     'ci_predicted': '#D5DBDB', # Light gray for CI
 }
 
+# ── Unit-conversion constants for twinx axes ─────────────────────────────
+_MM_TO_FT = 1.0 / 304.8
+_AF_TO_M3 = 1233.48   # 1 AF = 1233.48 m³
+
+
+def _add_ft_twinx(ax):
+    """Add a ft twinx to a mm depth axis. Call after all plotting."""
+    ax_ft = ax.twinx()
+    ax_ft.set_ylabel('(ft)', fontweight='bold')
+    lo, hi = ax.get_ylim()
+    ax_ft.set_ylim(lo * _MM_TO_FT, hi * _MM_TO_FT)
+    return ax_ft
+
+
+def _add_m3_twinx(ax):
+    """Add a m³ twinx to an AF volume axis. Call after all plotting."""
+    ax_m3 = ax.twinx()
+    ax_m3.set_ylabel('(m³)', fontweight='bold')
+    lo, hi = ax.get_ylim()
+    ax_m3.set_ylim(lo * _AF_TO_M3, hi * _AF_TO_M3)
+    return ax_m3
+
 
 def get_ama_ina_basin_names() -> list[str]:
     """
@@ -213,7 +235,7 @@ def create_time_series_plot_journal(
     apply_journal_style()
     
     if units is None:
-        units = ['mm', 'af', 'm3']
+        units = ['mm', 'af', 'm3', 'ft']
     
     # Filter for AMA/INA if requested
     if use_ama_ina:
@@ -1054,7 +1076,7 @@ def explore_az_data(
         Hindcast 1896-1983 | Historical 1985-2024 | Forecast 2025 | Projection 2026-2099
 
     Args:
-        az_df: Arizona predictor dataframe produced by ``create_az_data_csv``.
+        az_df: Arizona predictor dataframe produced by ``create_az_data_parquet``.
         output_dir: Directory where plots are saved.
         year_col: Name of the year column.
         gw_basin_col: Name of the groundwater basin column.
@@ -1329,6 +1351,7 @@ def create_full_period_time_series(
         end_year: int = 2099,
         actual_data: dict | None = None,
         title_prefix: str = '',
+        sigma_data: dict | None = None,
 ) -> None:
     """Time series of predicted AMA/INA pumping with era shading."""
     apply_journal_style()
@@ -1358,6 +1381,26 @@ def create_full_period_time_series(
     ax2.set_ylabel('Total Volume (acre-ft)', fontweight='bold')
     ax2.grid(True, alpha=0.3, linestyle='--')
 
+    # 95% CI from model uncertainty
+    if sigma_data:
+        ci_years = [y for y in years if y in sigma_data]
+        ci_depth = np.array([yearly_predictions[y]['Mean_Depth_mm']
+                             for y in ci_years])
+        ci_vol = np.array([yearly_predictions[y]['Volume_AF']
+                           for y in ci_years])
+        s_depth = np.array([sigma_data[y]['Mean_Depth_mm']
+                            for y in ci_years])
+        s_vol = np.array([sigma_data[y]['Volume_AF']
+                          for y in ci_years])
+        ax1.fill_between(ci_years, ci_depth - 1.96 * s_depth,
+                         ci_depth + 1.96 * s_depth,
+                         alpha=0.2, color=COLORS['ci_predicted'],
+                         label='95% CI (model σ)', zorder=1)
+        ax2.fill_between(ci_years, ci_vol - 1.96 * s_vol,
+                         ci_vol + 1.96 * s_vol,
+                         alpha=0.2, color=COLORS['ci_predicted'],
+                         label='95% CI (model σ)', zorder=1)
+
     # Overlay actual meter data for available years
     if actual_data:
         act_years = sorted(actual_data.keys())
@@ -1376,6 +1419,9 @@ def create_full_period_time_series(
     ax1.legend(handles=ax1.get_legend_handles_labels()[0] + handles,
                loc='upper left', framealpha=0.9)
     ax2.set_xlim(start_year - 1, end_year + 1)
+
+    _add_ft_twinx(ax1)
+    _add_m3_twinx(ax2)
 
     plt.tight_layout()
     fig.savefig(f'{output_dir}Full_Period_Time_Series.png', dpi=600, bbox_inches='tight')
@@ -1398,6 +1444,13 @@ def create_full_period_time_series(
         ts_df = ts_df.merge(act_df, on='Year', how='left')
     ts_df['Era'] = ts_df.Year.apply(lambda y: next(
         (e for e, (s, end) in ERA_PERIODS.items() if s <= y <= end), 'Other'))
+    if sigma_data:
+        ts_df['Sigma_Depth_mm'] = ts_df['Year'].map(
+            lambda y: sigma_data.get(y, {}).get('Mean_Depth_mm', np.nan))
+        ts_df['Sigma_Depth_ft'] = ts_df['Sigma_Depth_mm'] * _MM_TO_FT
+        ts_df['Sigma_Volume_AF'] = ts_df['Year'].map(
+            lambda y: sigma_data.get(y, {}).get('Volume_AF', np.nan))
+        ts_df['Sigma_Volume_m3'] = ts_df['Sigma_Volume_AF'] * _AF_TO_M3
     ts_df.to_csv(f'{output_dir}Full_Period_Time_Series.csv', index=False)
     logger.info('Full-period time series saved.')
 
@@ -1433,6 +1486,8 @@ def create_era_summary_maps(
     ax.set_ylabel('Mean Annual Pumping\n(acre-ft)', fontweight='bold')
     ax.set_title(f'Mean Annual {label}GW Pumping by Era', fontweight='bold', fontsize=14)
     ax.grid(axis='y', alpha=0.3, linestyle='--')
+
+    _add_m3_twinx(ax)
 
     plt.tight_layout()
     fig.savefig(f'{output_dir}Era_Summary_Bar.png', dpi=600, bbox_inches='tight')
@@ -1484,6 +1539,7 @@ def create_basin_time_series(
         end_year: int = 2099,
         title_prefix: str = '',
         actual_basin_yearly: dict[int, dict[str, dict]] | None = None,
+        sigma_basin_yearly: dict[int, dict[str, dict]] | None = None,
 ) -> None:
     """Per-basin annual GW withdrawal time series with era shading + uncertainty."""
     apply_journal_style()
@@ -1544,6 +1600,7 @@ def create_basin_time_series(
         ax.legend(fontsize=8, ncol=2, loc='upper left', framealpha=0.9)
     ax.set_xlim(start_year - 1, end_year + 1)
     ax.grid(True, alpha=0.3, linestyle='--')
+    _add_m3_twinx(ax)
     plt.tight_layout()
     fig.savefig(f'{ts_dir}All_Basins_Time_Series.png', dpi=600, bbox_inches='tight')
     plt.close()
@@ -1557,6 +1614,22 @@ def create_basin_time_series(
 
         std_depth = pd.Series(depth_mm).rolling(5, min_periods=1, center=True).std().fillna(0).values
         std_vol = pd.Series(vol_af).rolling(5, min_periods=1, center=True).std().fillna(0).values
+        sigma_label = '±1σ (5-yr rolling)'
+
+        if sigma_basin_yearly:
+            cv_arr = np.array([
+                sigma_basin_yearly.get(y, {}).get(basin, {}).get('CV', 0)
+                for y in years
+            ])
+            sigma_af = np.array([
+                sigma_basin_yearly.get(y, {}).get(basin, {}).get(
+                    'Sigma_Volume_AF', 0)
+                for y in years
+            ])
+            if np.any(sigma_af > 0):
+                std_depth = 1.96 * cv_arr * np.abs(depth_mm)
+                std_vol = 1.96 * sigma_af
+                sigma_label = '95% CI (model σ)'
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
         era_shaded_ts(ax1, years, depth_mm, std_depth, color=palette[i])
@@ -1587,13 +1660,15 @@ def create_basin_time_series(
             for e in ERA_PERIODS
         ]
         handles.append(mpatches.Patch(color=palette[i], alpha=0.25,
-                                       label='±1σ (5-yr rolling)'))
+                                       label=sigma_label))
         if actual_df is not None:
             from matplotlib.lines import Line2D
             handles.append(Line2D([], [], color=COLORS['actual'], marker='o',
                                   markersize=4, label='Observed (ADWR Meter)'))
         ax1.legend(handles=handles, fontsize=8, loc='upper left', framealpha=0.9)
         ax2.set_xlim(start_year - 1, end_year + 1)
+        _add_ft_twinx(ax1)
+        _add_m3_twinx(ax2)
         plt.tight_layout()
         safe = basin.replace(' ', '_')
         fig.savefig(f'{ts_dir}{safe}_Time_Series.png', dpi=600, bbox_inches='tight')
@@ -1613,6 +1688,7 @@ def create_subbasin_time_series(
         end_year: int = 2099,
         title_prefix: str = '',
         actual_subbasin_yearly: dict[int, dict[str, dict]] | None = None,
+        sigma_subbasin_yearly: dict[int, dict[str, dict]] | None = None,
 ) -> None:
     """Per-sub-basin annual GW withdrawal time series with era shading + uncertainty."""
     apply_journal_style()
@@ -1683,6 +1759,11 @@ def create_subbasin_time_series(
             ax.set_xlabel('Year', fontweight='bold')
         if idx % n_cols == 0:
             ax.set_ylabel('GW Withdrawal\n(acre-ft)', fontweight='bold')
+        ax_m3 = ax.twinx()
+        af_lo, af_hi = ax.get_ylim()
+        ax_m3.set_ylim(af_lo * _AF_TO_M3, af_hi * _AF_TO_M3)
+        if (idx + 1) % n_cols == 0 or idx == n_parents - 1:
+            ax_m3.set_ylabel('(m³)', fontweight='bold', fontsize=10)
 
     for k in range(n_parents, len(axes_flat)):
         axes_flat[k].set_visible(False)
@@ -1704,6 +1785,22 @@ def create_subbasin_time_series(
         vol_af = sdf.Volume_AF.values
         std_depth = pd.Series(depth_mm).rolling(5, min_periods=1, center=True).std().fillna(0).values
         std_vol = pd.Series(vol_af).rolling(5, min_periods=1, center=True).std().fillna(0).values
+        sigma_label = '±1σ (5-yr rolling)'
+
+        if sigma_subbasin_yearly:
+            cv_arr = np.array([
+                sigma_subbasin_yearly.get(y, {}).get(sb, {}).get('CV', 0)
+                for y in years
+            ])
+            sigma_af = np.array([
+                sigma_subbasin_yearly.get(y, {}).get(sb, {}).get(
+                    'Sigma_Volume_AF', 0)
+                for y in years
+            ])
+            if np.any(sigma_af > 0):
+                std_depth = 1.96 * cv_arr * np.abs(depth_mm)
+                std_vol = 1.96 * sigma_af
+                sigma_label = '95% CI (model σ)'
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
         parent = sub_to_parent.get(sb, '')
@@ -1736,13 +1833,15 @@ def create_subbasin_time_series(
             for e in ERA_PERIODS
         ]
         handles.append(mpatches.Patch(color=palette_all[i], alpha=0.25,
-                                       label='±1σ (5-yr rolling)'))
+                                       label=sigma_label))
         if actual_df is not None:
             from matplotlib.lines import Line2D
             handles.append(Line2D([], [], color=COLORS['actual'], marker='o',
                                   markersize=4, label='Observed (ADWR Meter)'))
         ax1.legend(handles=handles, fontsize=8, loc='upper left', framealpha=0.9)
         ax2.set_xlim(start_year - 1, end_year + 1)
+        _add_ft_twinx(ax1)
+        _add_m3_twinx(ax2)
         plt.tight_layout()
         safe = sb.replace(' ', '_').replace('.', '')
         fig.savefig(f'{ts_dir}{safe}_Time_Series.png', dpi=600, bbox_inches='tight')

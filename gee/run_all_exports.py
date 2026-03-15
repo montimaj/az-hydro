@@ -14,10 +14,14 @@ Dependency graph:
   Level 3 (depends on Level 2):
     - export_maca_monthly_et.py       (needs monthly_etof + maca_monthly_eto_v2)
     - export_monthly_peff.py          (needs prism_hargreaves_eto + maca_monthly_eto_v2)
+  Level 4 — per-GCM uncertainty (no inter-level deps; uses gridMET ratios + etof):
+    - export_maca_gcm_annual_eto.py   (5 GCMs × 74 years = 370 images)
+    - export_maca_gcm_annual_et.py    (5 GCMs × 74 years = 370 images)
+    - export_maca_gcm_annual_peff.py  (5 GCMs × 74 years = 370 images)
 
 Usage:
     conda activate azhydro
-    python run_all_exports.py [--level {1,2,3,all}]
+    python run_all_exports.py [--level {1,2,3,4,all}]
 """
 
 import argparse
@@ -44,6 +48,11 @@ LEVELS = {
         ('export_maca_monthly_et.py', 'MACA monthly ET 2026-2099 (888 images)'),
         ('export_monthly_peff.py', 'Monthly USDA SCS peff 1896-2099 (2448 images)'),
     ],
+    4: [
+        ('export_maca_gcm_annual_eto.py', 'Per-GCM annual ETo 2026-2099 (370 images)'),
+        ('export_maca_gcm_annual_et.py', 'Per-GCM annual ET 2026-2099 (370 images)'),
+        ('export_maca_gcm_annual_peff.py', 'Per-GCM annual peff 2026-2099 (370 images)'),
+    ],
 }
 
 
@@ -66,7 +75,7 @@ def main():
     )
     parser.add_argument(
         '--level', type=str, default='all',
-        choices=['1', '2', '3', 'all'],
+        choices=['1', '2', '3', '4', 'all'],
         help='Which dependency level to run (default: all)'
     )
     parser.add_argument(
@@ -80,7 +89,7 @@ def main():
     args = parser.parse_args()
 
     if args.level == 'all':
-        levels_to_run = [1, 2, 3]
+        levels_to_run = [1, 2, 3, 4]
     else:
         levels_to_run = [int(args.level)]
 

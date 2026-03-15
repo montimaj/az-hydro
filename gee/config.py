@@ -56,6 +56,18 @@ MACA_MODELS = [
 ]
 MACA_BANDS = ['tasmax', 'tasmin', 'pr', 'rsds', 'uas', 'vas', 'huss']
 
+# Representative GCMs spanning the Southwest US climate spread for uncertainty
+# quantification.  Selected from the 20-model MACA ensemble to capture hot-dry,
+# hot-wet, cool-dry, cool-wet, and central tendency corners of projected
+# temperature × precipitation space (cf. Rupp et al., 2013).
+MACA_REPRESENTATIVE_GCMS = [
+    'CCSM4',           # central / median
+    'CNRM-CM5',        # cool-wet
+    'HadGEM2-ES365',   # hot-dry
+    'MIROC-ESM-CHEM',  # hot-wet
+    'inmcm4',          # cool-dry  (lowest climate sensitivity in CMIP5)
+]
+
 USGS_LULC_SCENARIOS = ['B1', 'B2', 'A1B', 'A2']
 
 # Native scales (meters) for each source

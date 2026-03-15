@@ -254,7 +254,7 @@ Downloads, mosaics, and aligns all input datasets to a common 2 km grid.
 
 Reads every year's multi-band predictor raster (1896–2099) plus the
 basin, sub-basin, streamflow, canal-density, and well-density rasters into
-a single DataFrame via `dataops.create_az_data_csv()`.  Each row represents
+a single DataFrame via `dataops.create_az_data_parquet()`.  Each row represents
 one pixel in one year; columns include all GEE predictors, ancillary
 layers, basin/sub-basin labels, and (for metered years) observed pumping.
 
@@ -374,17 +374,16 @@ Unit conversions:
 - m³ → AF: m³ / 1233.48
 - mm → ft: mm / 304.8
 
-#### 3c. Visualisation
+#### 3c. Era summary maps
 
-After the prediction loop, the pipeline generates time series, era summary
-maps, basin-level plots, and sub-basin-level plots for every product:
+After the prediction loop, the pipeline generates era summary maps for
+every depth/volume product.  All time-series plots (AZ-wide, per-basin,
+per-sub-basin) are **deferred to the UQ step** (§3d) so that they include
+95 % confidence intervals derived from the augmented 6-band rasters.
 
 | Plot type | Function | Applied to |
 |---|---|---|
-| Full-period time series (1896–2099) | `vizops.create_full_period_time_series()` | Total, 8 categories, 3 CU, 3 IE |
 | Era summary maps | `vizops.create_era_summary_maps()` | Total, 8 categories, 3 CU |
-| Per-basin time series | `vizops.create_basin_time_series()` | Total, 8 categories, 3 CU, 3 IE |
-| Per-sub-basin time series | `vizops.create_subbasin_time_series()` | Total, 8 categories, 3 CU, 3 IE |
 
 Four temporal eras are distinguished in the plots:
 
@@ -395,7 +394,360 @@ Four temporal eras are distinguished in the plots:
 | Forecast | 2025 | Transition year. |
 | Projected | 2026–2099 | Future projections. |
 
-#### 3d. Well package
+#### 3d. Hybrid uncertainty quantification (`uncertaintyops.run_uncertainty_quantification()`)
+
+Pixel-level uncertainty is quantified for every year (1896–2099) by
+computing five independent error components and combining them via
+quadrature:
+
+$$\sigma_{\text{total}} = \sqrt{\sigma_{\text{MACA}}^2 + \sigma_{\text{model}}^2 + \sigma_{\text{irr}}^2 + \sigma_{\text{LULC}}^2 + \sigma_{\text{gw}}^2}$$
+
+Each component isolates a specific source of prediction uncertainty.
+
+##### σ_MACA — Inter-GCM climate spread (future only, 2026–2099)
+
+Five representative GCMs spanning the Southwest US climate space are
+selected following Rupp et al. (2013):
+
+| GCM | Climate archetype |
+|-----|-------------------|
+| CCSM4 | Central / median |
+| CNRM-CM5 | Cool-wet |
+| HadGEM2-ES365 | Hot-dry |
+| MIROC-ESM-CHEM | Hot-wet |
+| inmcm4 | Cool-dry |
+
+For each future year, per-GCM predictor rasters are downloaded from GEE
+(using the same `download_gee_data()` pipeline with `gcm=<model>`),
+mosaicked, and stored in `GEE_Mosaics_{res}m_{GCM}/`.  The six
+MACA-derived climate columns (ET, ETo, precip, Peff, Tmax, Tmin) from each
+GCM's predictor raster replace the ensemble values in the year DataFrame,
+the XGBoost model predicts total pumping, and σ_MACA is the per-pixel
+sample standard deviation across the 5 predictions:
+
+$$\sigma_{\text{MACA}}(x, y, t) = \text{std}\bigl[\hat{y}_{\text{GCM}_1}, \ldots, \hat{y}_{\text{GCM}_5}\bigr]$$
+
+For historical years (1896–2025), σ_MACA = 0 because observations replace
+GCM projections.
+
+##### σ_model — XGBoost seed ensemble (all years, 1896–2099)
+
+Ten XGBoost models are trained on the full metered dataset (1984–2024) with
+identical Optuna-tuned hyperparameters but different random seeds:
+
+```
+Seeds: 42, 123, 456, 789, 1024, 2048, 3072, 4096, 5120, 6144
+```
+
+Training is parallelised across Dask workers (100 Optuna trials per seed).
+For each year and pixel, σ_model is the sample standard deviation of the
+10 seed predictions:
+
+$$\sigma_{\text{model}}(x, y, t) = \text{std}\bigl[\hat{y}_{s_1}, \ldots, \hat{y}_{s_{10}}\bigr]$$
+
+This captures the sensitivity of the model to stochastic training choices
+(e.g., feature subsampling, tree-building order) at every pixel and year.
+
+##### σ_irr — Irrigation fraction spread (historical only, 1896–2025)
+
+Two independent estimates of irrigated area fraction are available:
+
+1. **IrrMapper-based** (`annual_irr_fraction`, band 14) — the primary
+   predictor used in the model.  Uses binary irrigated-area maps from
+   IrrMapper RF v1.2 (1985–2025).
+2. **Regression-based** — a simple linear regression predicting
+   `irr_fraction ~ crop_fraction` trained on the metered period.
+
+σ_irr is computed in two stages:
+
+1. **Residual RMSE** of the regression on training data measures the
+   typical discrepancy between the two fractions.
+2. **Finite-difference sensitivity** — the XGBoost model is evaluated at
+   `irr_frac ± δ` (where δ = regression RMSE), and σ_irr is taken as
+   `|pred_plus − pred_minus| / 2`.
+
+This captures how prediction uncertainty propagates through the model's
+sensitivity to the irrigation fraction input:
+
+$$\sigma_{\text{irr}}(x, y, t) = \frac{\bigl|\hat{y}(f_{\text{irr}} + \delta) - \hat{y}(f_{\text{irr}} - \delta)\bigr|}{2}$$
+
+For future years (2026–2099) σ_irr = 0 because the full LULC → crop_frac
+→ irr_frac chain is re-derived per scenario in σ_LULC, avoiding
+double-counting.
+
+##### σ_LULC — LULC projection spread (future only, 2026–2099)
+
+The USGS has published four LULC projection scenarios for CONUS:
+
+| Scenario | Description |
+|----------|-------------|
+| B1 | Low growth, high environmental emphasis |
+| B2 | Low growth, low environmental emphasis |
+| A1B | High growth, balanced |
+| A2 | High growth, low environmental emphasis |
+
+The primary LULC predictor (band 8) uses the **mode** across all four
+scenarios.  σ_LULC captures the spread when individual scenarios are used
+instead.  For each of the 4 scenarios:
+
+1. Per-scenario GEE tiles are downloaded via
+   `download_gee_data(lulc_scenario=scenario)`.
+2. The LULC class, crop fraction, and irrigation fraction are re-derived
+   end-to-end (LULC → AGRI/URBAN via `gwops.create_land_use_data()` →
+   `crop_frac` → `irr_frac` via the regression model).
+3. The XGBoost model predicts total pumping under each scenario.
+
+σ_LULC is the sample standard deviation across the 4 scenario predictions:
+
+$$\sigma_{\text{LULC}}(x, y, t) = \text{std}\bigl[\hat{y}_{B1}, \hat{y}_{B2}, \hat{y}_{A1B}, \hat{y}_{A2}\bigr]$$
+
+Because σ_LULC re-derives the entire irrigation-fraction chain per
+scenario, it fully subsumes σ_irr for future years.
+
+##### σ_gw — GW fraction inter-snapshot spread (all years, 1896–2099)
+
+USGS groundwater irrigation fraction data are available at four snapshots
+(2000, 2005, 2010, 2015).  The primary model uses interpolated/extended
+values via band 12.  σ_gw evaluates the model at each of the four snapshot
+fractions and takes the per-pixel standard deviation:
+
+$$\sigma_{\text{gw}}(x, y, t) = \text{std}\bigl[\hat{y}_{2000}, \hat{y}_{2005}, \hat{y}_{2010}, \hat{y}_{2015}\bigr]$$
+
+This quantifies how sensitive the prediction is to the choice of GW
+fraction snapshot at each pixel.
+
+##### σ_total — Quadrature combination
+
+The five components are assumed independent and combined in quadrature.
+For each year the output is a 2-band raster:
+
+| Band | Description |
+|------|-------------|
+| 1 | σ_total (mm) |
+| 2 | CV = σ_total / \|prediction\| |
+
+A temporal average `Mean_CV.tif` is also computed across all years.
+
+**Outputs:**
+
+```
+Full_Prediction_XGB/Uncertainty/
+├── Sigma_MACA/
+│   ├── Rasters/Sigma_MACA_mm_{year}.tif
+│   ├── Basin_Sigma_MACA.csv
+│   ├── Subbasin_Sigma_MACA.csv
+│   └── Uncertainty_Summary_MACA.csv
+├── Sigma_Model/
+│   ├── Rasters/Sigma_Model_mm_{year}.tif
+│   ├── Basin_Sigma_Model.csv
+│   ├── Subbasin_Sigma_Model.csv
+│   └── Uncertainty_Summary_Model.csv
+├── Sigma_Irr/
+│   ├── Rasters/Sigma_Irr_mm_{year}.tif
+│   ├── Basin_Sigma_Irr.csv
+│   ├── Subbasin_Sigma_Irr.csv
+│   └── Uncertainty_Summary_Irr.csv
+├── Sigma_LULC/
+│   ├── Rasters/Sigma_LULC_mm_{year}.tif
+│   ├── Basin_Sigma_LULC.csv
+│   ├── Subbasin_Sigma_LULC.csv
+│   └── Uncertainty_Summary_LULC.csv
+├── Sigma_GW/
+│   ├── Rasters/Sigma_GW_mm_{year}.tif
+│   ├── Basin_Sigma_GW.csv
+│   ├── Subbasin_Sigma_GW.csv
+│   └── Uncertainty_Summary_GW.csv
+├── Sigma_Total/
+│   ├── Rasters/Sigma_Total_mm_{year}.tif   (2-band: σ, CV)
+│   ├── Mean_CV.tif
+│   ├── Basin_Sigma_Total.csv
+│   ├── Subbasin_Sigma_Total.csv
+│   └── Uncertainty_Summary_Total.csv
+├── Sigma_CU/
+│   ├── Rasters/Sigma_{CU_cat}_mm_{year}.tif
+│   └── Uncertainty_Summary_CU.csv
+└── Plots/
+    ├── {Component}_time_series.png
+    ├── Combined_uncertainty_time_series.png
+    └── Basin_Sigma/
+        ├── Basin_{region}_Sigma.png                  # per-basin: mean±CI + σ_total (twinx m³/AF)
+        ├── Subbasin_{region}_Sigma.png               # per-sub-basin
+        ├── Basin_All_Sigma_Summary.png               # all basins overlaid
+        ├── Subbasin_All_Sigma_Summary.png            # all sub-basins overlaid
+        ├── Basin_{region}_Sigma_{Component}.png      # per-basin per-component σ
+        ├── Subbasin_{region}_Sigma_{Component}.png   # per-sub-basin per-component σ
+        ├── Basin_All_Sigma_{Component}_Summary.png   # all basins overlaid per-component
+        └── Subbasin_All_Sigma_{Component}_Summary.png
+```
+
+##### σ_CU — Consumptive-use inter-GCM spread (future only, 2026–2099)
+
+Consumptive use is defined as CU = max(ET_irr − Peff_irr, 0), which
+depends on ET and Peff — both climate-model-dependent quantities.  σ_CU
+captures how CU varies across the 5 representative GCMs:
+
+1. For each GCM, per-GCM ET (band 1) and Peff (band 4) are read from the
+   per-GCM predictor rasters (already built during σ_MACA).
+2. Ensemble `irr_frac` and `gw_frac` (from the ensemble predictor) are
+   applied to derive per-GCM `CU = max(ET × irr_frac − Peff × irr_frac, 0)`.
+3. CU is split into CU_GW (`CU × gw_frac`) and CU_SW (`CU − CU_GW`).
+4. σ_CU is the per-pixel sample standard deviation across the 5 GCMs for
+   each CU category (Irrigation_CU, Irrigation_GW_CU, Irrigation_SW_CU).
+
+For historical years (1896–2025), σ_CU = 0 because ET and Peff are
+observation-derived.
+
+##### Augmented prediction rasters (6-band)
+
+After σ_total and σ_CU are computed, all prediction rasters are
+**augmented in-place** from 1-band to 6-band GeoTIFFs:
+
+| Band | Description |
+|------|-------------|
+| 1 | Prediction (original units) |
+| 2 | σ (uncertainty in same units) |
+| 3 | CV = σ / \|prediction\| (dimensionless) |
+| 4 | SNR = \|prediction\| / σ (dimensionless) |
+| 5 | Lower 95% CI = prediction − 1.96·σ |
+| 6 | Upper 95% CI = prediction + 1.96·σ |
+
+This augmentation is applied to:
+
+| Product | σ source | Units augmented | Details |
+|---------|----------|----------------|---------|
+| **Total pumping** (32 rasters/yr) | σ_total × unit scale | mm, ft, m³, AF | σ_total computed in mm, scaled by conversion factor per unit |
+| **8 withdrawal categories** (256 rasters/yr) | σ_cat = (cat/total) × σ_total | mm, ft, m³, AF | Fraction of total is computed per-pixel; CV is preserved |
+| **3 CU categories** (48 rasters/yr) | σ_CU (inter-GCM spread) | mm, ft, m³, AF | σ_CU in mm, scaled to target unit |
+| **3 IE categories** (12 rasters/yr) | Ratio error propagation | dimensionless | $\sigma_{\text{IE}} = \text{IE} \times \sqrt{\text{CV}_{\text{CU}}^2 + \text{CV}_{\text{wd}}^2}$ |
+
+**Unit conversion for σ:** σ_total is natively in mm.  For other units
+the same conversion factors as the predictions are applied:
+
+| Target unit | Scale factor |
+|-------------|-------------|
+| mm | 1.0 |
+| ft | 1 / 304.8 |
+| m³ | pixel_area_m² / 1000 = 4,000,000 / 1000 = 4000 |
+| AF | 4000 / 1233.48 ≈ 3.2428 |
+
+**Category uncertainty:** Because each category is a linear fraction of
+the total prediction (`cat = frac × total`), and the fractions (irr_frac,
+gw_frac, sw_frac) come from external data treated as fixed inputs:
+
+$$\sigma_{\text{cat}} = f_{\text{cat}} \times \sigma_{\text{total}}$$
+
+where $f_{\text{cat}} = \text{cat}_{\text{pixel}} / \text{total}_{\text{pixel}}$.
+CV and SNR are identical to the total (the fraction cancels in the ratio).
+
+**IE uncertainty:** IE = CU / withdrawal is a ratio of two uncertain
+quantities.  Standard ratio error propagation gives:
+
+$$\frac{\sigma_{\text{IE}}}{\text{IE}} = \sqrt{\left(\frac{\sigma_{\text{CU}}}{\text{CU}}\right)^2 + \left(\frac{\sigma_{\text{wd}}}{\text{wd}}\right)^2} = \sqrt{\text{CV}_{\text{CU}}^2 + \text{CV}_{\text{wd}}^2}$$
+
+CV_CU and CV_wd are read from band 3 of the already-augmented CU and
+withdrawal category rasters respectively.
+
+**Execution order** (dependencies require sequential processing):
+
+1. Compute σ_total → augment total prediction rasters (all 4 units)
+2. Augment category rasters (reads augmented total rasters for σ)
+3. Compute σ_CU → augment CU rasters
+4. Augment IE rasters (reads augmented CU + category rasters for CV)
+
+##### Basin / sub-basin scale uncertainty
+
+Pixel-level σ values cannot be naively summed to obtain basin-scale σ
+because spatial correlations between pixels are non-negligible (shared
+GCM forcings, model parameters, and land-use projections).  Instead, the
+**aggregate-then-spread** approach is used:
+
+1. For each σ component, every ensemble member's per-pixel prediction
+   (mm) is summed within each groundwater basin and sub-basin to obtain
+   the member's total volume (AF).
+2. Basin-scale σ is the sample standard deviation of these member volumes.
+
+This preserves intra-basin spatial correlation because each member volume
+already reflects the correlated pixel-level response.
+
+Each `compute_sigma_*` function writes per-component CSVs:
+
+| File | Contents |
+|------|----------|
+| `{Sigma_X}/Basin_Sigma_{X}.csv` | Per-basin, per-year σ (m³ and AF) for component X |
+| `{Sigma_X}/Subbasin_Sigma_{X}.csv` | Per-sub-basin, per-year σ (m³ and AF) |
+
+CSV columns: `Year, Region, Mean_Volume_m3, Sigma_Volume_m3,
+Mean_Volume_AF, Sigma_Volume_AF, CV, Lower_95CI_m3, Upper_95CI_m3,
+Lower_95CI_AF, Upper_95CI_AF, N_Members`.
+
+After all components are computed, `compute_basin_sigma_total` combines
+them via quadrature at the basin/sub-basin level:
+
+$$\sigma_{\text{total,basin}} = \sqrt{\sum_i \sigma_{i,\text{basin}}^2}$$
+
+and writes `Basin_Sigma_Total.csv` / `Subbasin_Sigma_Total.csv` into
+`Sigma_Total/`.  These include per-component σ columns (in both m³ and
+AF) alongside the combined total, enabling direct attribution of
+basin-scale uncertainty to individual sources.
+
+Per-region time-series plots are generated in `Plots/Basin_Sigma/` with
+dual y-axes (m³ on the left, AF on the right):
+
+- **Per-region PNGs** — Two panels: (1) mean prediction ± 95 % CI,
+  (2) σ_total time series, both with era shading and twinx.
+- **Summary PNGs** — All regions overlaid on a single plot for σ_total
+  and CV, with twinx for σ.
+
+##### Per-component basin / sub-basin σ time series
+
+In addition to the combined σ_total basin plots, per-component σ time
+series are generated for each of the five uncertainty components (MACA,
+Model, Irr, LULC, GW).  For each component,
+`_plot_component_basin_sigma()` reads the component's
+`Basin_Sigma_{X}.csv` and `Subbasin_Sigma_{X}.csv` and produces:
+
+- **Per-region plots** — Two panels: (1) mean volume ± 95 % CI,
+  (2) component σ — both with twinx for m³ ↔ AF, era shading.
+- **Summary overlays** — All basins (or sub-basins) overlaid for σ and
+  CV.
+
+These plots are saved alongside the σ_total plots in
+`Plots/Basin_Sigma/` with the component name in the filename.
+
+##### Uncertainty-bounded time series from augmented rasters
+
+After all rasters have been augmented to 6 bands, the UQ step
+regenerates **every** time-series plot (AZ-wide, per-basin, per-sub-basin)
+directly from the augmented rasters using zonal statistics.  This replaces
+the time-series plots that were previously generated in Step 3c without
+uncertainty bounds.
+
+`_replot_from_augmented_rasters()` performs the following for each of the
+15 product groups (total, 8 categories, 3 CU, 3 IE):
+
+1. **AZ-wide statistics** (`_az_wide_stats`) — Reads bands 1/2/5/6 from
+   each year's 6-band raster to compute mean depth, total volume (m³/AF),
+   σ_depth, and σ_volume.  Volume-level σ is derived from the CI bands:
+   $$\sigma_V = \frac{|\Sigma_{\text{upper CI}} - \Sigma_{\text{lower CI}}|}{2 \times 1.96}$$
+2. **Zonal statistics** (`_zone_stats`) — Clips each raster to every
+   basin and sub-basin polygon (via `rasterio.mask`) and computes
+   per-zone prediction, σ, and CV.
+3. **Observed actuals** — Where a pre-existing time-series CSV from
+   Step 3c contains observed data (metered period 1984–2024), actuals are
+   extracted and overlaid on the predicted time series.
+4. **Plot generation** — Calls `vizops.create_full_period_time_series()`,
+   `vizops.create_basin_time_series()`, and
+   `vizops.create_subbasin_time_series()` with `sigma_data`,
+   `sigma_basin_yearly`, and `sigma_subbasin_yearly` arguments to render
+   95 % CI shading on all time-series plots.
+
+For the 3 IE products, `_process_ie_group()` uses the dimensionless
+efficiency values directly (mean ± 1.96 σ) rather than volume conversions.
+
+All plots are written to the `Visualizations/` directory, overwriting any
+earlier plots from Step 3c that lacked uncertainty bounds.
+
+#### 3e. Well package
 
 `wellops.create_well_package()` disaggregates pixel-level withdrawal
 rasters to individual wells from the ADWR Well Registry and writes a
@@ -501,7 +853,7 @@ Key functions:
   Storage, then downloads as tiled GeoTIFFs.
 - **`mosaic_tiles()`** — Merges GEE tiles into annual mosaics.
 - **`reproject_gee_mosaics()`** — Reprojects mosaics to the GW raster grid.
-- **`create_az_data_csv()`** — Reads all years' predictor rasters and
+- **`create_az_data_parquet()`** — Reads all years' predictor rasters and
   stacks them with basin labels and observed pumping into a single DataFrame.
 - **`create_train_test_data()`** — Splits the DataFrame into train/test
   sets using one of four strategies (temporal, spatial, random ratio,
@@ -637,6 +989,60 @@ eliminate any negative model artifacts before unit conversion.
 Basin-scale comparison of ML predictions with independent USGS datasets.
 
 **Withdrawal intercomparison** (`run_intercomparison()`):
+
+### `uncertaintyops.py` — Hybrid uncertainty quantification
+
+Computes pixel-level prediction uncertainty for all products (total
+pumping, withdrawal categories, consumptive use, irrigation efficiency)
+and writes augmented 6-band GeoTIFFs.
+
+Key functions:
+- **`run_uncertainty_quantification()`** — Master orchestrator.  Computes
+  all σ components, combines them via quadrature, writes σ rasters and
+  summary CSVs, generates time-series plots, augments all prediction
+  rasters with uncertainty bands, and regenerates all time-series plots
+  with uncertainty bounds via zonal statistics.  Accepts `basin_shp` and
+  `subbasin_shp` parameters for basin/sub-basin shapefiles.
+- **`compute_sigma_maca()`** — Inter-GCM climate spread (5 GCMs, future
+  only).  Also returns per-GCM mosaic directories reused by σ_CU.
+- **`compute_sigma_model()`** — XGBoost 10-seed ensemble spread (all
+  years).  Parallelised via Dask + Optuna.
+- **`compute_sigma_irr()`** — Irrigation fraction sensitivity (historical
+  only, 1896–2025).  Uses IrrMapper vs regression finite-difference.
+- **`compute_sigma_lulc()`** — LULC projection spread (4 USGS scenarios,
+  future only, 2026–2099).  Re-derives the full LULC → crop_frac →
+  irr_frac chain per scenario.
+- **`compute_sigma_gw()`** — GW fraction snapshot spread (4 USGS
+  snapshots, all years).
+- **`compute_sigma_total()`** — Quadrature combination of all five
+  components.  Writes 2-band rasters (σ, CV) and temporal Mean_CV.tif.
+- **`compute_basin_sigma_total()`** — Reads per-component basin/sub-basin
+  σ CSVs and combines via quadrature into `Basin_Sigma_Total.csv` /
+  `Subbasin_Sigma_Total.csv`.
+- **`compute_sigma_cu()`** — CU inter-GCM spread (5 GCMs, future only).
+  Writes per-category σ_CU rasters (Irrigation_CU, Irrigation_GW_CU,
+  Irrigation_SW_CU).
+- **`augment_prediction_rasters()`** — Rewrites total pumping rasters as
+  6-band GeoTIFFs (pred, σ, CV, SNR, lower CI, upper CI) for all 4 units.
+- **`augment_category_rasters()`** — Augments 8 withdrawal category rasters
+  using per-pixel fraction scaling of σ_total.
+- **`augment_cu_rasters()`** — Augments 3 CU category rasters using σ_CU.
+- **`augment_ie_rasters()`** — Augments 3 IE rasters using ratio error
+  propagation from augmented CU and withdrawal CV bands.
+- **`_replot_from_augmented_rasters()`** — Regenerates all time-series
+  plots (AZ-wide, per-basin, per-sub-basin) with 95 % CI uncertainty
+  bounds by reading the 6-band augmented rasters via zonal statistics
+  (`rasterio.mask`).  Replaces the earlier non-uncertainty time-series
+  plots from Step 3c.
+- **`_plot_component_basin_sigma()`** — Generates per-component (MACA,
+  Model, Irr, LULC, GW) basin and sub-basin σ time-series plots with
+  dual y-axes (m³/AF) and era shading.
+
+### `intercompops.py` — USGS intercomparison
+
+Basin-scale comparison of ML predictions with independent USGS datasets.
+
+**Withdrawal intercomparison** (`run_intercomparison()`):
 - Loads ML, NHM, and Reitz data; aggregates to basin volumes (AF).
 - Computes pairwise RMSD, MAD, Percent Difference.
 - Produces per-basin time series, scatter plots, and spatial difference maps.
@@ -712,14 +1118,23 @@ Data/Outputs/
     │
     └── Full_Prediction_XGB/
         ├── Model_Interpretability/          # SHAP, ALE, permutation importance
-        ├── Predicted_Rasters/               # Total pumping (4 units)
+        ├── Predicted_Rasters/               # Total pumping (4 units, 6-band)
         │   ├── Depth_mm/
         │   ├── Depth_ft/
         │   ├── Volume_m3/
         │   └── Volume_AF/
-        ├── {Category}_Rasters/              # 8 withdrawal categories (4 units)
-        ├── Irrigation_CU_Rasters/           # CU (4 units)
-        ├── Irrigation_Efficiency_Rasters/   # IE (dimensionless)
+        ├── {Category}_Rasters/              # 8 withdrawal categories (4 units, 6-band)
+        ├── Irrigation_CU_Rasters/           # CU (4 units, 6-band)
+        ├── Irrigation_Efficiency_Rasters/   # IE (dimensionless, 6-band)
+        ├── Uncertainty/                     # Hybrid uncertainty quantification
+        │   ├── Sigma_MACA/                  #   Inter-GCM climate spread
+        │   ├── Sigma_Model/                 #   Seed ensemble spread
+        │   ├── Sigma_Irr/                   #   Irrigation fraction spread
+        │   ├── Sigma_LULC/                  #   LULC projection spread
+        │   ├── Sigma_GW/                    #   GW fraction spread
+        │   ├── Sigma_Total/                 #   Quadrature combination (σ + CV)
+        │   ├── Sigma_CU/                    #   CU inter-GCM spread
+        │   └── Plots/                       #   Time-series plots
         ├── Visualizations/                  # Time series & era summary maps
         ├── Well_Package/                    # Per-well GeoPackage
         ├── Intercomparison/                 # Step 4a — withdrawal comparison
