@@ -5,23 +5,25 @@ Handle various raster operations.
 # Author: Dr. Sayantan Majumdar
 # Email: sayantan.majumdar@dri.edu
 
-import matplotlib.pyplot as plt
-import geopandas as gpd
-import numpy as np
-import os
-import subprocess
 import logging
-
-from osgeo import gdal
-from joblib import Parallel, delayed
-from rasterio.plot import plotting_extent
-from rasterio.mask import mask
-from shapely.geometry import mapping
-from shapely.geometry import Point
+import os
+import shutil
+import subprocess
 from glob import glob
-from fiona import transform
-from sysops import az_nodata, makedirs
+
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import numpy as np
 import rasterio as rio
+from fiona import transform
+from joblib import Parallel, delayed
+from osgeo import gdal
+from rasterio.mask import mask
+from rasterio.plot import plotting_extent
+from shapely.geometry import Point, mapping
+
+from hydrolibs.sysops import az_nodata, makedirs
+
 gdal.PushErrorHandler('CPLQuietErrorHandler')
 gdal.UseExceptions()
 
@@ -409,11 +411,11 @@ def reproject_raster_gdal(
                 output_bands.append(outband_path)
             if use_tile_format:
                 outfile_path = f'{dst_raster_dir}{tile_num}_{year}.tif'
-            output_bands = ' '.join(output_bands)
-            gdal_sys_call = f'{os.environ["CONDA_PREFIX"]}/bin/gdal_merge.py -separate {output_bands} -o {outfile_path}'
+            gdal_merge_path = shutil.which('gdal_merge.py')
+            if gdal_merge_path is None:
+                raise FileNotFoundError('gdal_merge.py not found on PATH')
             subprocess.call(
-                gdal_sys_call,
-                shell=True,
+                [gdal_merge_path, '-separate'] + output_bands + ['-o', outfile_path],
                 stdout=subprocess.DEVNULL
             )
     except Exception as e:

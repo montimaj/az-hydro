@@ -1,0 +1,34 @@
+# Ruff configuration for az-hydro
+# https://docs.astral.sh/ruff/configuration/
+
+target-version = "py312"
+line-length = 120
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "PERF", # perflint (performance anti-patterns)
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "E741",   # ambiguous variable name (common in scientific code)
+    "B006",   # mutable default argument (used intentionally in pipeline)
+    "SIM108", # ternary operator (readability preference)
+    "UP015",  # redundant open mode (explicit is fine)
+]
+
+[lint.per-file-ignores]
+"azhydro/pipeline.py" = ["E402"]  # module-level imports not at top
+"gee/*.py" = ["F841"]             # local variable assigned but never used (GEE exports)
+
+[lint.isort]
+known-first-party = ["hydrolibs"]
+
+[format]
+quote-style = "single"

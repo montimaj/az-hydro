@@ -24,9 +24,10 @@ Author: Dr. Sayantan Majumdar (sayantan.majumdar@dri.edu)
 import logging
 import os
 import pickle
+
+import geopandas as gpd
 import numpy as np
 import pandas as pd
-import geopandas as gpd
 import rasterio as rio
 
 logger = logging.getLogger(__name__)
@@ -597,10 +598,11 @@ def compute_sigma_irr(
     dict[int, np.ndarray]
         year → 1-D array of σ_irr values (valid-pixel length).
     """
+    from sklearn.linear_model import LinearRegression
+
     import hydrolibs.partitionops as partops
     from hydrolibs.rasterops import read_raster_as_arr, write_raster
     from hydrolibs.sysops import makedirs
-    from sklearn.linear_model import LinearRegression
 
     logger.info('Computing σ_irr (irrigation fraction uncertainty)...')
     base_dir = f'{output_dir}Sigma_Irr/'
@@ -650,7 +652,6 @@ def compute_sigma_irr(
 
         if 1985 <= year <= 2025:
             # Two counterfactuals: IrrMapper (original) vs regression
-            irr_frac_orig = year_df['annual_irr_fraction'].values.copy()
 
             # Compute regression-based irr fraction
             crop_frac = year_df['annual_crop_fraction'].values
@@ -754,12 +755,13 @@ def compute_sigma_lulc(
     dict[int, np.ndarray]
         year → 1-D array of σ_LULC values (valid-pixel length).
     """
+    from sklearn.linear_model import LinearRegression
+
     import hydrolibs.dataops as dataops
     import hydrolibs.partitionops as partops
     from hydrolibs.gwops import create_land_use_data
     from hydrolibs.rasterops import read_raster_as_arr, write_raster
     from hydrolibs.sysops import makedirs
-    from sklearn.linear_model import LinearRegression
 
     logger.info('Computing σ_LULC (inter-scenario LULC uncertainty)...')
     base_dir = f'{output_dir}Sigma_LULC/'
@@ -1053,7 +1055,6 @@ def compute_sigma_total(
     pixel_area_m2 = mosaic_res ** 2
     mm_to_m3 = pixel_area_m2 / 1000
 
-    component_names = list(sigma_components.keys())
     all_years = set()
     for comp in sigma_components.values():
         all_years.update(comp.keys())
@@ -1175,7 +1176,6 @@ def compute_basin_sigma_total(output_dir: str) -> None:
     """
     component_labels = ('MACA', 'Model', 'Irr', 'LULC', 'GW')
     total_dir = f'{output_dir}Sigma_Total/'
-    af_to_m3 = 1.0 / M3_TO_AF  # 1233.48
 
     for level in ('Basin', 'Subbasin'):
         merged = None
@@ -2104,12 +2104,12 @@ def _replot_from_augmented_rasters(
     ``σ_V = (Σ upper_CI − Σ lower_CI) / (2 × 1.96)``,
     which corresponds to a spatially-correlated (conservative) bound.
     """
-    import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
-    import hydrolibs.visualops as vizops
-    import hydrolibs.partitionops as partops
+    import matplotlib.pyplot as plt
     from rasterio.mask import mask as rio_mask
     from shapely.geometry import mapping
+
+    import hydrolibs.visualops as vizops
     from hydrolibs.sysops import makedirs
 
     logger.info('Re-plotting time series from augmented rasters '
@@ -2177,9 +2177,10 @@ def _replot_from_augmented_rasters(
                         all_touched=True,
                     )
                 except Exception:
+                    logger.debug('Zonal mask failed for %s=%s', zone_col, name)
                     continue
                 pred = out_img[0].astype(np.float64)
-                sigma = out_img[1].astype(np.float64)
+                _sigma = out_img[1].astype(np.float64)
                 lower = out_img[4].astype(np.float64)
                 upper = out_img[5].astype(np.float64)
 
@@ -2369,6 +2370,7 @@ def _replot_from_augmented_rasters(
                             crop=True, nodata=np.nan, all_touched=True,
                         )
                     except Exception:
+                        logger.debug('Basin mask failed for %s', name)
                         continue
                     p, s = out_img[0], out_img[1]
                     v = np.isfinite(p)
@@ -2390,6 +2392,7 @@ def _replot_from_augmented_rasters(
                             crop=True, nodata=np.nan, all_touched=True,
                         )
                     except Exception:
+                        logger.debug('Subbasin mask failed for %s', name)
                         continue
                     p, s = out_img[0], out_img[1]
                     v = np.isfinite(p)
@@ -2596,11 +2599,14 @@ def _plot_uncertainty_time_series(
     2. Per-basin and per-sub-basin σ time series from the existing
        ``{Basin|Subbasin}_Sigma_{comp}.csv`` files.
     """
-    import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
+    import matplotlib.pyplot as plt
+
     from hydrolibs.sysops import makedirs
     from hydrolibs.visualops import (
-        apply_journal_style, ERA_PERIODS, ERA_COLORS,
+        ERA_COLORS,
+        ERA_PERIODS,
+        apply_journal_style,
     )
 
     pixel_area_m2 = mosaic_res ** 2
@@ -2800,11 +2806,14 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
     and writes one PNG per unique region into ``Plots/Basin_Sigma/``
     plus a combined all-regions summary PNG.
     """
-    import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
+    import matplotlib.pyplot as plt
+
     from hydrolibs.sysops import makedirs
     from hydrolibs.visualops import (
-        apply_journal_style, ERA_PERIODS, ERA_COLORS,
+        ERA_COLORS,
+        ERA_PERIODS,
+        apply_journal_style,
     )
 
     apply_journal_style()
@@ -2829,9 +2838,9 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
 
             years = rdf['Year'].values
             sigma_m3 = rdf['Sigma_Total_m3'].values
-            sigma_af = rdf['Sigma_Total_AF'].values
+            _sigma_af = rdf['Sigma_Total_AF'].values
             mean_m3 = rdf['Mean_Volume_m3'].values
-            mean_af = rdf['Mean_Volume_AF'].values
+            _mean_af = rdf['Mean_Volume_AF'].values
 
             fig, axes = plt.subplots(2, 1, figsize=(16, 9), sharex=True)
 

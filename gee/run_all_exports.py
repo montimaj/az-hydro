@@ -25,9 +25,9 @@ Usage:
 """
 
 import argparse
+import logging
 import subprocess
 import sys
-import logging
 
 logger = logging.getLogger(__name__)
 

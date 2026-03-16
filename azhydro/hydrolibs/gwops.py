@@ -5,24 +5,23 @@ Handle groundwater withdrawal processing codes.
 # Author: Dr. Sayantan Majumdar
 # Email: sayantan.majumdar@dri.edu
 
-import rasterops as rops
-import vectorops as vops
-import visualops as vizops  # New visualization module
+import logging
+import multiprocessing
 import os
 import shutil
-import multiprocessing
-import numpy as np
-import geopandas as gpd
-import pandas as pd
-import dataretrieval.nwis as nwis
-import scipy.ndimage.filters as flt
-import logging
-
-from typing import Any
-from joblib import Parallel, delayed
-from sysops import makedirs, copy_file
+import warnings
 from glob import glob
-from copy import deepcopy
+from typing import Any
+
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+import scipy.ndimage as flt
+from joblib import Parallel, delayed
+
+import hydrolibs.rasterops as rops
+import hydrolibs.vectorops as vops
+from hydrolibs.sysops import copy_file, makedirs
 
 logger = logging.getLogger(__name__)
 
@@ -417,11 +416,19 @@ def get_ama_ina_basin_names() -> list[str]:
     """
     Get the names of AMA and INA basins.
     
-    Note: This function is now also available in visualops module.
+    .. deprecated::
+        Import from ``hydrolibs.visualops`` instead.
 
     Returns:
         list: List of AMA and INA basin names.
     """
+    warnings.warn(
+        "gwops.get_ama_ina_basin_names() is deprecated; "
+        "import from hydrolibs.visualops instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    import hydrolibs.visualops as vizops
     return vizops.get_ama_ina_basin_names()
 
 
@@ -463,6 +470,7 @@ def parallel_make_time_series_plots(
         None.
     """
     # Use the new visualops module for journal-quality plots
+    import hydrolibs.visualops as vizops
     vizops.parallel_make_time_series_plots(
         idx, gw_basin, input_df, output_dir, test_year_limits,
         year_col, actual_gw_col, pred_gw_col, gw_basin_col,
@@ -511,6 +519,7 @@ def make_time_series_plots(
         None.
     """
     # Use the new visualops module for journal-quality plots
+    import hydrolibs.visualops as vizops
     vizops.make_time_series_plots(
         input_df, model, features, output_dir,
         year_col, gw_basin_col, test_year_limits,

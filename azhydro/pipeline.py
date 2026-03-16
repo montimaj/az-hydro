@@ -20,23 +20,24 @@ This script executes the remaining pipeline:
 # Author: Dr. Sayantan Majumdar
 # Email: sayantan.majumdar@dri.edu
 
-import sys
-import os
+import argparse
 import logging
+import os
+
+import geopandas as gpd
 import numpy as np
 import pandas as pd
-import geopandas as gpd
 from sklearn.metrics import r2_score
 
 import hydrolibs.dataops as dataops
-import hydrolibs.mlops as mlops
-import hydrolibs.visualops as vizops
-import hydrolibs.partitionops as partops
-import hydrolibs.wellops as wellops
 import hydrolibs.gwops as gwops
-import hydrolibs.streamflowops as streamflowops
 import hydrolibs.intercompops as intercompops
+import hydrolibs.mlops as mlops
+import hydrolibs.partitionops as partops
+import hydrolibs.streamflowops as streamflowops
 import hydrolibs.uncertaintyops as uncops
+import hydrolibs.visualops as vizops
+import hydrolibs.wellops as wellops
 from hydrolibs.rasterops import read_raster_as_arr, write_raster
 from hydrolibs.sysops import makedirs
 
@@ -222,7 +223,6 @@ def prepare_data(skip_download: bool = True, load_files: bool = True) -> list[st
         az_state_file=az_state,
         already_cropped=load_files,
     )
-    load_files = False
 
     # Canal density & streamflow rasters
     canal_density_file = streamflowops.create_canal_density_raster(
@@ -738,6 +738,45 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
 # =============================================================================
 # Step 3 — Predict annual pumping rasters 1896-2099 with XGBoost
 # =============================================================================
+def _valid_pixels_to_raster(
+        values: np.ndarray,
+        valid_mask: np.ndarray,
+        raster_shape: tuple,
+) -> np.ndarray:
+    """Map valid-pixel values back to a full 2-D raster grid."""
+    grid = np.full(valid_mask.shape[0], np.nan, dtype=np.float32)
+    grid[valid_mask] = values.astype(np.float32)
+    return grid.reshape(raster_shape)
+
+
+def _write_multi_unit_rasters(
+        mm_grid: np.ndarray,
+        out_dirs: dict[str, str],
+        prefix: str,
+        year: int,
+        ref_raster_file: str,
+        mm_to_ft: float,
+        mm_to_m3: float,
+        m3_to_af: float,
+) -> None:
+    """Write a depth grid in mm, ft, m³, and AF."""
+    unit_grids = {
+        'mm': mm_grid,
+        'ft': mm_grid * mm_to_ft,
+        'm3': mm_grid * mm_to_m3,
+        'AF': mm_grid * mm_to_m3 * m3_to_af,
+    }
+    for unit, grid in unit_grids.items():
+        _, raster_file_obj = read_raster_as_arr(ref_raster_file, get_file=True)
+        out_path = f'{out_dirs[unit]}{prefix}_{year}_{unit}.tif'
+        write_raster(
+            grid, raster_file_obj,
+            raster_file_obj.transform, out_path,
+            no_data_value=np.nan,
+        )
+        raster_file_obj.close()
+
+
 def predict_full_period(az_df: pd.DataFrame) -> tuple:
     """
     Train XGBoost on the full 1984-2024 metered data (temporal split T1)
@@ -950,51 +989,19 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
 
         # Reconstruct raster: valid_mask marks the pixels that survived
         # the 'OUTSIDE AZ' filter in create_az_data_parquet.
-        pred_mm = np.full(basin_flat.shape[0], np.nan, dtype=np.float32)
-        pred_mm[valid_mask] = predictions.astype(np.float32)
-        pred_mm = pred_mm.reshape(raster_shape)
-
-        # Derive grids in other units — total pumping
-        pred_ft = pred_mm * mm_to_ft
-        pred_m3 = pred_mm * mm_to_m3
-        pred_af = pred_mm * mm_to_m3 * m3_to_af
-
-        unit_grids = {
-            'mm': pred_mm,
-            'ft': pred_ft,
-            'm3': pred_m3,
-            'AF': pred_af,
-        }
-        for unit, grid in unit_grids.items():
-            _, raster_file_obj = read_raster_as_arr(ref_raster_file, get_file=True)
-            out_path = f'{raster_dirs[unit]}Predicted_GW_{year}_{unit}.tif'
-            write_raster(
-                grid, raster_file_obj,
-                raster_file_obj.transform, out_path,
-                no_data_value=np.nan,
-            )
-            raster_file_obj.close()
+        pred_mm = _valid_pixels_to_raster(predictions, valid_mask, raster_shape)
+        _write_multi_unit_rasters(
+            pred_mm, raster_dirs, 'Predicted_GW', year,
+            ref_raster_file, mm_to_ft, mm_to_m3, m3_to_af,
+        )
 
         # Write category rasters (irr, non-irr, irr_gw, irr_sw, nonirr_gw, nonirr_sw)
         for cat, cat_pred in cat_predictions.items():
-            cat_mm = np.full(basin_flat.shape[0], np.nan, dtype=np.float32)
-            cat_mm[valid_mask] = cat_pred.astype(np.float32)
-            cat_mm = cat_mm.reshape(raster_shape)
-            cat_units = {
-                'mm': cat_mm,
-                'ft': cat_mm * mm_to_ft,
-                'm3': cat_mm * mm_to_m3,
-                'AF': cat_mm * mm_to_m3 * m3_to_af,
-            }
-            for unit, grid in cat_units.items():
-                _, raster_file_obj = read_raster_as_arr(ref_raster_file, get_file=True)
-                out_path = f'{cat_raster_dirs[cat][unit]}{cat}_{year}_{unit}.tif'
-                write_raster(
-                    grid, raster_file_obj,
-                    raster_file_obj.transform, out_path,
-                    no_data_value=np.nan,
-                )
-                raster_file_obj.close()
+            cat_mm = _valid_pixels_to_raster(cat_pred, valid_mask, raster_shape)
+            _write_multi_unit_rasters(
+                cat_mm, cat_raster_dirs[cat], cat, year,
+                ref_raster_file, mm_to_ft, mm_to_m3, m3_to_af,
+            )
 
         # ---- Consumptive use and irrigation efficiency ----
         et_vals = year_df['annual_et_ensemble_mm'].values.copy()
@@ -1049,30 +1056,15 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
 
         # Write consumptive use rasters (multiple units)
         for cu_cat, cu_pred in cu_dict.items():
-            cu_mm = np.full(basin_flat.shape[0], np.nan, dtype=np.float32)
-            cu_mm[valid_mask] = cu_pred.astype(np.float32)
-            cu_mm = cu_mm.reshape(raster_shape)
-            cu_units = {
-                'mm': cu_mm,
-                'ft': cu_mm * mm_to_ft,
-                'm3': cu_mm * mm_to_m3,
-                'AF': cu_mm * mm_to_m3 * m3_to_af,
-            }
-            for unit, grid in cu_units.items():
-                _, raster_file_obj = read_raster_as_arr(ref_raster_file, get_file=True)
-                out_path = f'{cu_raster_dirs[cu_cat][unit]}{cu_cat}_{year}_{unit}.tif'
-                write_raster(
-                    grid, raster_file_obj,
-                    raster_file_obj.transform, out_path,
-                    no_data_value=np.nan,
-                )
-                raster_file_obj.close()
+            cu_mm = _valid_pixels_to_raster(cu_pred, valid_mask, raster_shape)
+            _write_multi_unit_rasters(
+                cu_mm, cu_raster_dirs[cu_cat], cu_cat, year,
+                ref_raster_file, mm_to_ft, mm_to_m3, m3_to_af,
+            )
 
         # Write irrigation efficiency rasters (dimensionless)
         for ie_cat, ie_vals in ie_dict.items():
-            ie_grid = np.full(basin_flat.shape[0], np.nan, dtype=np.float32)
-            ie_grid[valid_mask] = ie_vals.astype(np.float32)
-            ie_grid = ie_grid.reshape(raster_shape)
+            ie_grid = _valid_pixels_to_raster(ie_vals, valid_mask, raster_shape)
             _, raster_file_obj = read_raster_as_arr(ref_raster_file, get_file=True)
             out_path = f'{ie_raster_dirs[ie_cat]}{ie_cat}_{year}.tif'
             write_raster(
@@ -1344,33 +1336,77 @@ def run_cap_srp_sw_validation() -> pd.DataFrame:
 # =============================================================================
 # Main
 # =============================================================================
-def main(
-        skip_download: bool = True,
-        load_files: bool = True,
-        run_data_prep: bool = True,
-) -> None:
-    """
-    Run the full AZ-Hydro pipeline.
+STEP_HELP = """\
+Pipeline steps (comma-separated or 'all'):
+  0    Data preparation (GEE download, GW processing)
+  1    Create AZ dataset (Parquet)
+  2a   Evaluate random 80/20 split
+  2b   Evaluate LOO temporal holdout
+  2c   Evaluate LOO spatial holdout
+  3    Full-period XGBoost prediction (1896-2099)
+  3b   Hybrid uncertainty quantification
+  4    USGS intercomparison
+  4b   CU / IE intercomparison
+  4c   CAP/SRP surface-water validation
+"""
 
-    Parameters
-    ----------
-    skip_download : bool
-        If *True*, skip the GEE tile download (use existing tiles).
-    load_files : bool
-        If *True*, skip recreating intermediate files that already exist.
-    run_data_prep : bool
-        If *True*, execute Step 0 (data preparation).  Set to *False* if
-        all rasters / vectors are already prepared.
+
+def main() -> None:
     """
+    Run the AZ-Hydro pipeline.
+
+    Supports selective step execution via ``--steps``:
+
+        python pipeline.py --steps 0,1,2a
+        python pipeline.py --steps 3   # prediction only
+        python pipeline.py              # runs all steps
+    """
+    parser = argparse.ArgumentParser(
+        description='ML Pipeline for Arizona Groundwater Pumping Prediction.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=STEP_HELP,
+    )
+    parser.add_argument(
+        '--steps', type=str, default='all',
+        help='Comma-separated step IDs to run (e.g. "0,1,2a") or "all".',
+    )
+    parser.add_argument(
+        '--skip-download', action='store_true', default=True,
+        help='Skip GEE tile download (use existing tiles). Default: True.',
+    )
+    parser.add_argument(
+        '--download', dest='skip_download', action='store_false',
+        help='Force GEE tile download.',
+    )
+    parser.add_argument(
+        '--load-files', action='store_true', default=True,
+        help='Skip recreating intermediate files that already exist. Default: True.',
+    )
+    parser.add_argument(
+        '--recreate', dest='load_files', action='store_false',
+        help='Force recreation of intermediate files.',
+    )
+    args = parser.parse_args()
+
+    run_all = args.steps.lower() == 'all'
+    selected = set(s.strip().lower() for s in args.steps.split(',')) if not run_all else set()
+    skip_download = args.skip_download
+    load_files = args.load_files
+
+    data_band_names = None
+
+    def should_run(step_id: str) -> bool:
+        return run_all or step_id in selected
+
     # Step 0 — Data preparation
-    if run_data_prep:
+    if should_run('0'):
         data_band_names = prepare_data(
             skip_download=skip_download,
             load_files=load_files,
         )
-    else:
-        # Band names are still needed — grab from GEE config without
-        # triggering a download.
+
+    # Ensure band names are available for downstream steps
+    if data_band_names is None:
         _, data_band_names = dataops.download_gee_data(
             f'{VECTOR_DIR}AZ.geojson',
             GCLOUD_PROJECT, GCLOUD_BUCKET,
@@ -1380,68 +1416,93 @@ def main(
             tile_size=TILE_SIZE,
         )
 
+    az_df = None
+
+    def get_az_df():
+        nonlocal az_df
+        if az_df is None:
+            az_df = create_az_data(data_band_names)
+        return az_df
+
     # Step 1
-    az_df = create_az_data(data_band_names)
+    if should_run('1'):
+        get_az_df()
 
     # Step 2a — Random
-    random_results = evaluate_random(az_df)
+    random_results = None
+    if should_run('2a'):
+        random_results = evaluate_random(get_az_df())
 
     # Step 2b — LOO Temporal
-    temporal_results = evaluate_temporal_loo(az_df)
+    temporal_results = None
+    if should_run('2b'):
+        temporal_results = evaluate_temporal_loo(get_az_df())
 
     # Step 2c — LOO Spatial (ADWR sub-basins)
-    spatial_results = evaluate_spatial_loo(az_df)
+    spatial_results = None
+    if should_run('2c'):
+        spatial_results = evaluate_spatial_loo(get_az_df())
 
-    # Cross-strategy summary
-    vizops.create_cross_strategy_summary(
-        {
-            'Random': random_results,
-            'Temporal_LOO': temporal_results,
-            'Spatial_LOO': spatial_results,
-        },
-        f'{MODEL_DIR}Model_Evaluation/',
-    )
+    # Cross-strategy summary (only if all 3 evaluations ran)
+    if all(r is not None for r in (random_results, temporal_results, spatial_results)):
+        vizops.create_cross_strategy_summary(
+            {
+                'Random': random_results,
+                'Temporal_LOO': temporal_results,
+                'Spatial_LOO': spatial_results,
+            },
+            f'{MODEL_DIR}Model_Evaluation/',
+        )
 
     # Step 3
-    model, feature_cols, x_train, y_train = predict_full_period(az_df)
+    model = feature_cols = x_train = y_train = None
+    if should_run('3'):
+        model, feature_cols, x_train, y_train = predict_full_period(get_az_df())
 
     # Step 3b — Hybrid uncertainty quantification
-    uncops.run_uncertainty_quantification(
-        model=model,
-        feature_cols=feature_cols,
-        x_train=x_train,
-        y_train=y_train,
-        az_df=az_df,
-        drop_attrs=DROP_ATTRS,
-        pred_data_dir=PRED_DATA_DIR,
-        model_dir=MODEL_DIR,
-        input_dir=INPUT_DIR,
-        output_dir=OUTPUT_DIR,
-        vector_dir=VECTOR_DIR,
-        mosaic_res=MOSAIC_RASTER_RES,
-        gcloud_project=GCLOUD_PROJECT,
-        gcloud_bucket=GCLOUD_BUCKET,
-        tile_size=TILE_SIZE,
-        start_year=START_YEAR,
-        end_year=END_YEAR,
-        year_list=YEAR_LIST,
-        n_trials=N_TRIALS,
-        n_dask_workers=N_DASK_WORKERS,
-        use_dask=USE_DASK,
-        skip_download=skip_download,
-        subbasin_shp=ADWR_SUBBASIN_SHP,
-        ama_code_map=AMA_CODE_MAP,
-        basin_shp=AZ_GW_BASIN,
-    )
+    if should_run('3b'):
+        if model is None:
+            logger.warning('Step 3b requires a trained model from step 3. Skipping.')
+        else:
+            uncops.run_uncertainty_quantification(
+                model=model,
+                feature_cols=feature_cols,
+                x_train=x_train,
+                y_train=y_train,
+                az_df=get_az_df(),
+                drop_attrs=DROP_ATTRS,
+                pred_data_dir=PRED_DATA_DIR,
+                model_dir=MODEL_DIR,
+                input_dir=INPUT_DIR,
+                output_dir=OUTPUT_DIR,
+                vector_dir=VECTOR_DIR,
+                mosaic_res=MOSAIC_RASTER_RES,
+                gcloud_project=GCLOUD_PROJECT,
+                gcloud_bucket=GCLOUD_BUCKET,
+                tile_size=TILE_SIZE,
+                start_year=START_YEAR,
+                end_year=END_YEAR,
+                year_list=YEAR_LIST,
+                n_trials=N_TRIALS,
+                n_dask_workers=N_DASK_WORKERS,
+                use_dask=USE_DASK,
+                skip_download=skip_download,
+                subbasin_shp=ADWR_SUBBASIN_SHP,
+                ama_code_map=AMA_CODE_MAP,
+                basin_shp=AZ_GW_BASIN,
+            )
 
     # Step 4
-    run_usgs_intercomparison()
+    if should_run('4'):
+        run_usgs_intercomparison()
 
     # Step 4b — CU / IE intercomparison
-    run_cu_ie_usgs_intercomparison()
+    if should_run('4b'):
+        run_cu_ie_usgs_intercomparison()
 
     # Step 4c — CAP/SRP total surface water validation
-    run_cap_srp_sw_validation()
+    if should_run('4c'):
+        run_cap_srp_sw_validation()
 
     logger.info('\n' + '='*60)
     logger.info('Pipeline complete!')

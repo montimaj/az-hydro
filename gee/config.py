@@ -9,12 +9,13 @@ Usage:
     $ python export_<collection>.py [--start-year YYYY] [--end-year YYYY] [--no-wait]
 """
 
-import ee
-import time
 import argparse
-from http.client import RemoteDisconnected
-from functools import wraps
 import logging
+import time
+from functools import wraps
+from http.client import RemoteDisconnected
+
+import ee
 
 logger = logging.getLogger(__name__)
 

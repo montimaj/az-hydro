@@ -6,9 +6,9 @@ Source: https://code.usgs.gov/map/wu/aiwum-2.0-hydromap_ml-mirror/-/blob/main/ai
 # Author: Dr. Sayantan Majumdar
 # Email: sayantan.majumdar@dri.edu
 
+import logging
 import os
 import shutil
-import logging
 from glob import glob
 
 logger = logging.getLogger(__name__)

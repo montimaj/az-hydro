@@ -5,22 +5,25 @@ Handle various vector operations
 # Author: Dr. Sayantan Majumdar
 # Email: sayantan.majumdar@dri.edu
 
+import logging
+import multiprocessing
+import os
+import warnings
+
+import fiona
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 import rasterio as rio
-import numpy as np
-import fiona
-import os
-import multiprocessing
-import warnings
-import logging
-
 from osgeo import gdal
+
 gdal.PushErrorHandler('CPLQuietErrorHandler')
 gdal.UseExceptions()
-from joblib import Parallel, delayed
 from glob import glob
-from sysops import az_nodata
+
+from joblib import Parallel, delayed
+
+from hydrolibs.sysops import az_nodata
 
 logger = logging.getLogger(__name__)
 from shapely.geometry import Point
@@ -60,8 +63,6 @@ def reproject_vector(
         else:
             ref_file = gpd.read_file(ref_file)
         crs = ref_file.crs
-    else:
-        crs = {'init': crs}
     output_vector_file = input_vector_file.to_crs(crs)
     drop_cols = [c for c in output_vector_file.columns
                  if c.startswith('Shape__') or c.startswith('Shape_')]
@@ -220,7 +221,7 @@ def add_attribute_well_reg(
             if len(fill_value) > 1:
                 fill_value = np.sum(fill_value)
             else:
-                fill_value = fill_value[0]            
+                fill_value = fill_value[0]
             well_reg_gdf.loc[well_reg_gdf[shp_well_id] == well_id, fill_attr] = fill_value
     if not use_only_ama_ina:
         well_reg_schema = fiona.open(input_well_reg_file).schema
@@ -257,8 +258,7 @@ def gdf2shp(
         None.
     """
 
-    crs = {'init': source_crs}
-    gdf = gpd.GeoDataFrame(input_df, crs=crs, geometry=geometry)
+    gdf = gpd.GeoDataFrame(input_df, crs=source_crs, geometry=geometry)
     gdf.to_file(outfile_path)
     if target_crs != source_crs:
         reproject_vector(

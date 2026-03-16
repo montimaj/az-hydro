@@ -1,8 +1,6 @@
 # AZ-Hydro
 
-Maintainers: [Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majumdar/) [sayantan.majumdar@dri.edu], [Ryan G. Smith](https://www.engr.colostate.edu/ce/ryan-g-smith/) [ryan.g.smith@colostate.edu]
-
-<img src="../Readme_Figures/DRITaglineLogoTransparentBackground.png" height="45"/> &nbsp; <img src="../Readme_Figures/CSU-Signature-C-357.png" height="55"/> 
+Maintainers [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majumdar/) [sayantan.majumdar@dri.edu]
 
 ## Citations
 
@@ -54,15 +52,42 @@ From the `azhydro/` directory, run the pipeline with:
 python pipeline.py
 ```
 
-The `main()` function accepts three keyword arguments (all default to `True`):
+The pipeline supports selective step execution via CLI arguments:
 
-| Argument | Default | Description |
-|---|---|---|
-| `skip_download` | `True` | Skip GEE tile download; use existing tiles on disk. |
-| `load_files` | `True` | Skip recreating intermediate rasters/vectors that already exist. |
-| `run_data_prep` | `True` | Execute Step 0 (data preparation). Set `False` if all rasters/vectors are already prepared. |
+```bash
+python pipeline.py                        # run all steps (default)
+python pipeline.py --steps 0,1,2a         # run only steps 0, 1, and 2a
+python pipeline.py --steps 3              # prediction only
+python pipeline.py --steps 3,3b           # prediction + uncertainty quantification
+python pipeline.py --download --recreate  # force fresh GEE download and file recreation
+```
 
-The pipeline executes Steps 0–4 in sequence (details below).
+#### Available steps
+
+| Step | Description |
+|------|-------------|
+| `0`  | Data preparation (GEE download, GW processing, rasterisation) |
+| `1`  | Create AZ predictor dataset (Parquet) |
+| `2a` | Evaluate random 80/20 train/test split |
+| `2b` | Evaluate LOO temporal holdout |
+| `2c` | Evaluate LOO spatial holdout |
+| `3`  | Full-period XGBoost prediction (1896–2099) |
+| `3b` | Hybrid uncertainty quantification |
+| `4`  | USGS intercomparison |
+| `4b` | CU / IE intercomparison |
+| `4c` | CAP/SRP surface-water validation |
+
+#### CLI flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--steps` | `all` | Comma-separated step IDs to run (e.g. `"0,1,2a"`) or `"all"`. |
+| `--skip-download` | `True` | Skip GEE tile download; use existing tiles on disk. |
+| `--download` | — | Force GEE tile download. |
+| `--load-files` | `True` | Skip recreating intermediate files that already exist. |
+| `--recreate` | — | Force recreation of intermediate files. |
+
+The pipeline executes the selected steps in sequence (details below).
 
 ---
 

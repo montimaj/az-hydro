@@ -1,7 +1,5 @@
 # Improving remote sensing and machine learning-driven groundwater withdrawal estimation in Arizona 
-Maintainers: [Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majumdar/) [sayantan.majumdar@dri.edu], [Ryan G. Smith](https://www.engr.colostate.edu/ce/ryan-g-smith/) [ryan.g.smith@colostate.edu]
-
-<img src="Readme_Figures/DRITaglineLogoTransparentBackground.png" height="45"/> &nbsp; <img src="Readme_Figures/CSU-Signature-C-357.png" height="55"/>
+Maintainer: [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majumdar/) [sayantan.majumdar@dri.edu]
 
 ## Abstract
 
@@ -12,6 +10,64 @@ AZ-Hydro is an end-to-end pipeline for estimating annual groundwater pumping, co
 See [azhydro/README.md](azhydro/README.md) for installation instructions (conda environment, GEE authentication) and detailed documentation of the ML pipeline steps, configuration constants, library modules, and output directory structure.
 
 See [gee/README.md](gee/README.md) for documentation of the Google Earth Engine export scripts used to generate the predictor data layers.
+
+## Project Structure
+
+```
+az-hydro/
+├── README.md                        # This file
+├── LICENSE
+├── environment.yml                  # Conda environment specification
+├── ruff.toml                        # Ruff linter configuration
+│
+├── azhydro/                         # ML pipeline package
+│   ├── README.md                    # Installation & CLI usage docs
+│   ├── pipeline.py                  # Main entry point (CLI + step orchestration)
+│   └── hydrolibs/                   # Core library modules
+│       ├── __init__.py
+│       ├── dataops.py               # GEE download, data prep, ML DataFrame assembly
+│       ├── gwops.py                 # Groundwater CSV processing, land-use smoothing
+│       ├── intercompops.py          # USGS/NHM/Reitz intercomparison & validation
+│       ├── mlops.py                 # Model training, tuning (Optuna/Dask), evaluation
+│       ├── partitionops.py          # Withdrawal/CU/IE partitioning by category
+│       ├── rasterops.py             # Raster I/O, mosaicking, reprojection utilities
+│       ├── streamflowops.py         # USGS streamflow retrieval & rasterisation
+│       ├── sysops.py                # File-system helpers, directory creation
+│       ├── uncertaintyops.py        # 5-component hybrid uncertainty quantification
+│       ├── vectorops.py             # Vector reprojection, fishnet creation
+│       ├── visualops.py             # Journal-quality time-series & map plotting
+│       └── wellops.py               # Well-level disaggregation from pixel rasters
+│
+├── gee/                             # Google Earth Engine export scripts
+│   ├── README.md                    # GEE script documentation
+│   ├── config.py                    # Shared GEE constants (bands, models, scales)
+│   ├── run_all_exports.py           # CLI to batch-run all export scripts
+│   ├── export_gridmet_hargreaves_ratio.py
+│   ├── export_lulc_ensemble.py
+│   ├── export_maca_gcm_annual_et.py
+│   ├── export_maca_gcm_annual_eto.py
+│   ├── export_maca_gcm_annual_peff.py
+│   ├── export_maca_monthly_et.py
+│   ├── export_maca_monthly_eto.py
+│   ├── export_monthly_etof.py
+│   ├── export_monthly_peff.py
+│   ├── export_openet_reitz_ratio.py
+│   ├── export_prism_hargreaves_eto.py
+│   └── export_usgs_adjusted_et.py
+│
+├── tests/                           # Unit tests
+│   ├── conftest.py                  # Shared fixtures
+│   └── test_core.py                 # Core pipeline tests
+│
+├── Data/                            # Input data (not tracked in full by git)
+│   └── Inputs/
+│       ├── GEE_Data/                # Downloaded GEE tiles & HUC12 polygons
+│       ├── GW_Data/                 # ADWR records, shapefiles, ancillary vectors
+│       └── USGS WU/                 # NHM withdrawals, Reitz rasters, crop surveys
+│
+└── docs/
+    └── images/                   # Logo images for README
+```
 
 ### Repository disk space requirements
 
@@ -40,7 +96,7 @@ Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Wh
 ## Acknowledgments
 We would like to acknowledge funding from NASA (Grant numbers: 80NSSC21K0979 and 80NSSC23K1453). We are grateful to all the opensource software and data communities for making their resources publicly available and also thank the ADWR for providing the necessary data sets related to groundwater withdrawals and other shapefiles used in this research. We also acknowledge compute and storage support from Google Earth Engine. Finally, we would like to convey our gratitude to our colleagues and families for their continuous motivation and support. Any opinions, findings, conclusions, or recommendations expressed in this material are those of the authors and do not necessarily reflect the views of the funding agencies.
 
-<img src="Readme_Figures/DRITaglineLogoTransparentBackground.png" height="100"/> &nbsp;  &nbsp; <img src="Readme_Figures/CSU-Signature-C-357.png" height="130"/> &nbsp; <img src="Readme_Figures/ADWR.png" height="120"/> &nbsp;  &nbsp; <img src="Readme_Figures/nasa-logo-web-rgb.png" height="120"/>
+<img src="docs/images/DRITaglineLogoTransparentBackground.png" height="100"/> &nbsp;  &nbsp; <img src="docs/images/CSU-Signature-C-357.png" height="130"/> &nbsp; <img src="docs/images/ADWR.png" height="120"/> &nbsp;  &nbsp; <img src="docs/images/nasa-logo-web-rgb.png" height="120"/>
 
 ## References
 

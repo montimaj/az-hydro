@@ -9,56 +9,50 @@ Features:
 - Optuna-based hyperparameter optimization with Dask parallelization
 - Model comparison and evaluation utilities
 """
+import logging
 import os
+import pickle
 import warnings
+from typing import Any
+
+import matplotlib.pyplot as plt
+import numpy as np
+import optuna
 
 # Author: Sayantan Majumdar
 # Email: sayantan.majumdar@dri.edu
-
-
 import pandas as pd
-import numpy as np
-import pickle
-import optuna
-import matplotlib.pyplot as plt
 import seaborn as sns
 import skexplain
-import time
-
-from typing import Any
-from functools import partial
-from lightgbm import LGBMRegressor
-from xgboost import XGBRegressor, XGBRFRegressor
 from dask.distributed import Client, LocalCluster
-from dask import delayed, compute
+from dask_jobqueue import SLURMCluster
 from dask_ml.model_selection import GridSearchCV as DaskGCV
 from dask_ml.model_selection import RandomizedSearchCV as DaskRCV
-from dask_jobqueue import SLURMCluster
+from lightgbm import LGBMRegressor
 from sklearn.ensemble import (
-    RandomForestRegressor, 
-    ExtraTreesRegressor, 
-    HistGradientBoostingRegressor,
-    GradientBoostingRegressor,
     AdaBoostRegressor,
-    BaggingRegressor
+    BaggingRegressor,
+    ExtraTreesRegressor,
+    GradientBoostingRegressor,
+    HistGradientBoostingRegressor,
+    RandomForestRegressor,
 )
-from sklearn.tree import DecisionTreeRegressor
-from sklearn.base import clone
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import (
-    RepeatedStratifiedKFold, 
-    RepeatedKFold, 
-    GridSearchCV,
-    RandomizedSearchCV, 
-    cross_validate,
-    KFold
-)
-from sklearn.metrics import r2_score, root_mean_squared_error, mean_absolute_error, make_scorer
 from sklearn.inspection import permutation_importance
-from sysops import makedirs, make_proper_dir_name
-from gwops import get_ama_ina_basin_names
-import visualops as vizops  # Journal-quality visualization module
-import logging
+from sklearn.metrics import make_scorer, mean_absolute_error, r2_score, root_mean_squared_error
+from sklearn.model_selection import (
+    GridSearchCV,
+    RandomizedSearchCV,
+    RepeatedKFold,
+    RepeatedStratifiedKFold,
+    cross_validate,
+)
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.tree import DecisionTreeRegressor
+from xgboost import XGBRegressor, XGBRFRegressor
+
+import hydrolibs.visualops as vizops  # Journal-quality visualization module
+from hydrolibs.sysops import make_proper_dir_name, makedirs, round_to_n_nonzero
+from hydrolibs.visualops import get_ama_ina_basin_names
 
 logger = logging.getLogger(__name__)
 from catboost import CatBoostRegressor
@@ -92,7 +86,7 @@ def get_model_param_dict(
     n_jobs = -2
     if use_dask:
         n_jobs = 1
-    
+
     # Core models (always available)
     model_dict = {
         'XGB': XGBRegressor(
@@ -107,7 +101,7 @@ def get_model_param_dict(
             tree_learner='feature', random_state=random_state,
             verbosity=-1, n_estimators=300, max_depth=16, num_leaves=31,
             n_jobs=n_jobs
-        ), 
+        ),
         'RF': RandomForestRegressor(
             n_jobs=n_jobs, oob_score=False,
             n_estimators=300, max_features=None,
@@ -119,7 +113,7 @@ def get_model_param_dict(
             max_depth=None, random_state=random_state
         )
     }
-    
+
     # Additional ensemble models
     # Note: GBR and ADA don't support n_jobs (sequential only)
     # CatBoost uses thread_count instead of n_jobs
@@ -139,7 +133,7 @@ def get_model_param_dict(
             'BAG': BaggingRegressor(
                 estimator=DecisionTreeRegressor(max_depth=None, random_state=random_state),
                 n_estimators=100, random_state=random_state,
-                n_jobs=n_jobs, max_samples=0.8, max_features=0.8                
+                n_jobs=n_jobs, max_samples=0.8, max_features=0.8
             ),
             'CAT': CatBoostRegressor(
                 iterations=300, learning_rate=0.1,
@@ -147,7 +141,7 @@ def get_model_param_dict(
                 verbose=False, thread_count=thread_count
             ),
         })
-    
+
     if get_model_names_only:
         return list(model_dict.keys())
 
@@ -167,7 +161,7 @@ def get_model_param_dict(
             'num_parallel_tree': [1],
             'min_child_weight': [80, 90, 100],
             'n_estimators': [300, 400, 500],
-        }, 
+        },
         'XGBRF': {
             'eta': [0.01],
             'max_depth': [0],
@@ -181,7 +175,7 @@ def get_model_param_dict(
             'gamma': [0, 0.1, 0.5, 1],
             'num_parallel_tree': [300, 400, 500],
             'min_child_weight': [30, 40]
-        }, 
+        },
         'LGBM': {
             'n_estimators': [300, 400, 500],
             'max_depth': [16, 20, -1],
@@ -192,7 +186,7 @@ def get_model_param_dict(
             'path_smooth': [0.1, 0.2],
             'num_leaves': [31, 32],
             'min_child_samples': [30, 40]
-        }, 
+        },
         'RF': {
             'n_estimators': [300, 400, 500],
             'max_features': [None, 10, 8],
@@ -200,7 +194,7 @@ def get_model_param_dict(
             'max_leaf_nodes': [None],
             'max_samples': [None],
             'min_samples_leaf': [1, 2, 3]
-        }, 
+        },
         'ETR': {
             'n_estimators': [300, 400, 500],
             'max_features': [None, 10, 8],
@@ -208,7 +202,7 @@ def get_model_param_dict(
             'max_leaf_nodes': [None],
             'max_samples': [None],
             'min_samples_leaf': [1, 2, 3]
-        }, 
+        },
         'HGBR': {
             'max_iter': [300, 400, 500],
             'max_depth': [None, 10, 20],
@@ -218,7 +212,7 @@ def get_model_param_dict(
             'l2_regularization': [0.0, 0.1, 0.5],
         }
     }
-    
+
     # Additional model hyperparameters
     if include_all_models:
         param_dict.update({
@@ -255,7 +249,7 @@ def get_model_param_dict(
                 'bagging_temperature': [0, 0.5, 1]
             }
         })
-    
+
     return model_dict, param_dict
 
 
@@ -343,39 +337,6 @@ def normalized_mbe(
     return nmbe
 
 
-def round_to_n_nonzero(
-        value: float,
-        n: int = 2
-) -> float:
-    """
-    Round a value to n significant decimal places after the first non-zero digit.
-    
-    For values >= 1, rounds to n decimal places.
-    For values < 1, finds the first non-zero decimal digit and rounds to show
-    n significant digits from that position.
-
-    Args:
-        value (float): The value to round.
-        n (int): Number of significant digits to keep after the first non-zero decimal.
-
-    Returns:
-        float: The rounded value.
-    """
-    if value == 0 or np.isnan(value) or np.isinf(value):
-        return value
-    
-    abs_val = abs(value)
-    
-    if abs_val >= 1:
-        return round(value, n)
-    
-    # Find the position of first non-zero digit after decimal
-    decimal_pos = -int(np.floor(np.log10(abs_val)))
-    # Round to n digits starting from first non-zero
-    precision = decimal_pos + n - 1
-    return round(value, precision)
-
-
 def get_feature_dict(get_units: bool = False) -> dict[str, str] | tuple[dict[str, str], dict[str, str]]:
     """
     Get feature name dictionary for better visualization.
@@ -388,50 +349,49 @@ def get_feature_dict(get_units: bool = False) -> dict[str, str] | tuple[dict[str
     feature_dict = {
         'Year': 'Year',
         'GW_Basin': 'Groundwater Basin',
+        'GW_Subbasin': 'Groundwater Subbasin',
         'AGRI': 'Agricultural Density',
         'URBAN': 'Urban Density',
         'easting_m': 'Easting',
         'northing_m': 'Northing',
         'SW': 'Surface Water Density',
         'GW_Basin_Type': 'Groundwater Basin Type',
-        'annual_peff_mm': 'Effective Precipitation',
         'annual_et_ensemble_mm': 'Actual ET',
-        'annual_irrmapper_fraction': 'Irrigation Fraction',
-        'annual_prism_precip_mm': 'Precipitation',
-        'annual_prism_tmmx_K': '$T_{max}$',
-        'annual_prism_tmmn_K': '$T_{min}$',
-        'annual_era5land_swe_m': 'SWE',
-        'annual_era5land_runoff_m': 'Runoff',
-        'annual_era5land_volumetric_soil_water_layer_1': 'Volumetric Soil Water',
-        'annual_era5land_volumetric_soil_water_layer_2': 'Volumetric Soil Water L2',
-        'annual_era5land_volumetric_soil_water_layer_3': 'Volumetric Soil Water L3',
-        'annual_era5land_volumetric_soil_water_layer_4': 'Volumetric Soil Water L4',
-        'streamflow_m3s': 'Streamflow',
-        'soil_depth_cm': 'Soil Depth',
+        'annual_eto_mm': 'Reference ET',
+        'annual_precip_mm': 'Precipitation',
+        'annual_peff_mm': 'Effective Precipitation',
+        'annual_peff_pcml_mm': 'Effective Precipitation (PCML)',
+        'annual_tmmx_K': '$T_{max}$',
+        'annual_tmmn_K': '$T_{min}$',
+        'annual_gw_fraction': 'GW Irrigation Fraction',
+        'annual_crop_fraction': 'Crop Fraction',
+        'annual_irr_fraction': 'Irrigation Fraction',
+        'streamflow_mm': 'Streamflow',
+        'canal_weighted_streamflow_mm': 'Canal-Weighted Streamflow',
+        'canal_density': 'Canal Density',
+        'well_density': 'Well Density',
+        'soil_depth_mm': 'Soil Depth',
         'awc_mm': 'Available Water Capacity',
         'ksat_mean_micromps': '$K_{sat}$',
-        'cap_srp_delivery_km3': 'Surface Water Delivery'
+        'gw_pumping_mm': 'Groundwater Withdrawals',
     }
 
     feature_dict_units = {
         'easting_m': 'm',
         'northing_m': 'm',
-        'annual_peff_mm': 'mm',
         'annual_et_ensemble_mm': 'mm',
-        'annual_prism_precip_mm': 'mm',
-        'annual_prism_tmmx_K': 'K',
-        'annual_prism_tmmn_K': 'K',
-        'annual_era5land_swe_m': 'm',
-        'annual_era5land_runoff_m': 'm',
-        'annual_era5land_volumetric_soil_water_layer_1': 'm$^3$/m$^3$',
-        'annual_era5land_volumetric_soil_water_layer_2': 'm$^3$/m$^3$',
-        'annual_era5land_volumetric_soil_water_layer_3': 'm$^3$/m$^3$',
-        'annual_era5land_volumetric_soil_water_layer_4': 'm$^3$/m$^3$',
-        'streamflow_m3s': 'm$^3$/s',
-        'soil_depth_cm': 'cm',
+        'annual_eto_mm': 'mm',
+        'annual_precip_mm': 'mm',
+        'annual_peff_mm': 'mm',
+        'annual_peff_pcml_mm': 'mm',
+        'annual_tmmx_K': 'K',
+        'annual_tmmn_K': 'K',
+        'streamflow_mm': 'mm',
+        'canal_weighted_streamflow_mm': 'mm',
+        'soil_depth_mm': 'mm',
         'awc_mm': 'mm',
         'ksat_mean_micromps': r'$\mu$m/s',
-        'cap_srp_delivery_km3': 'km$^3$'
+        'gw_pumping_mm': 'mm',
     }
     return feature_dict if not get_units else (feature_dict, feature_dict_units)
 
@@ -557,35 +517,15 @@ def compute_ale_plots(
     makedirs(output_dir)
     feature_dict, feature_dict_units = get_feature_dict(get_units=True)
     feature_names = x_train.columns.tolist()
-    feature_2d_names = [
-        ('annual_irrmapper_fraction', 'annual_peff_mm'),
-        ('annual_prism_precip_mm', 'annual_et_ensemble_mm'),
-        ('annual_irrmapper_fraction', 'soil_depth_cm'),
-        ('annual_irrmapper_fraction', 'awc_cm'),
-        ('annual_prism_precip_mm', 'soil_depth_cm'),
-        ('annual_prism_precip_mm', 'awc_cm'),
-        ('annual_et_ensemble_mm', 'soil_depth_cm'),
-        ('annual_irrmapper_fraction', 'ksat_mean_micromps'),
-        ('annual_irrmapper_fraction', 'cap_srp_delivery_km3'),
-        ('annual_irrmapper_fraction', 'streamflow_m3s'),
-        ('annual_irrmapper_fraction', 'annual_era5land_volumetric_soil_water_layer_1'),
-        ('annual_era5land_volumetric_soil_water_layer_1', 'soil_depth_cm'),
-        ('AGRI', 'annual_peff_mm'),
-        ('URBAN', 'annual_peff_mm'),
-        ('AGRI', 'streamflow_m3s'),
-        ('URBAN', 'streamflow_m3s'),
-        ('AGRI', 'cap_srp_delivery_km3'),
-        ('URBAN', 'cap_srp_delivery_km3')
-    ]
     data_dict = {
         'train': (x_train, y_train),
         'test': (x_test, y_test)
     }
     for data_type, (x_data, y_data) in data_dict.items():
-        logger.info(f'Creating ALE plots for {data_type} data...')        
+        logger.info(f'Creating ALE plots for {data_type} data...')
         explainer = skexplain.ExplainToolkit(
-            (model_name, model), 
-            X=x_data, y=y_data, 
+            (model_name, model),
+            X=x_data, y=y_data,
             feature_names=feature_names
         )
         ale_1d_reg = explainer.ale(
@@ -840,25 +780,27 @@ def build_ml_model(
         model = model_dict[model_name]
         model.set_params(**model_grid.best_params_)
         model.fit(x_train, y_train)
-        pickle.dump(model, open(model_file, mode='wb+'))
+        with open(model_file, 'wb') as f:
+            pickle.dump(model, f)
         if dask_client:
             dask_client.close()
     else:
-        model = pickle.load(open(model_file, mode='rb'))
+        with open(model_file, 'rb') as f:
+            model = pickle.load(f)
         metric_df = pd.read_csv(metric_csv)
     return model, metric_df
 
 
 def objective_with_cv(
-        trial: Any, 
-        x_train: np.ndarray | pd.DataFrame, 
+        trial: Any,
+        x_train: np.ndarray | pd.DataFrame,
         y_train: np.ndarray,
         model_name: str,
         cv: Any,
         scoring_metrics: dict[str, Any],
         alpha: float = 0.1,
         random_state: int = 42
-) -> float: 
+) -> float:
     """
     Objective function for Optuna hyperparameter tuning with cross-validation.
     
@@ -947,8 +889,8 @@ def objective_with_cv(
         }
     else:
         raise ValueError(f"Unknown model name: {model_name}")
-    
-    model.set_params(**params)    
+
+    model.set_params(**params)
     cv_results = cross_validate(
         estimator=model,
         X=x_train,
@@ -1051,8 +993,8 @@ def build_ml_model_optuna(
             study.set_metric_names(['NRMSE_with_Overfitting_Penalty'])
             study.optimize(
                 lambda trial: objective_with_cv(
-                    trial, x_train, y_train, 
-                    model_name, cv, scoring_metrics, 
+                    trial, x_train, y_train,
+                    model_name, cv, scoring_metrics,
                     alpha, random_state
                 ),
                 n_trials=n_trials,
@@ -1065,12 +1007,14 @@ def build_ml_model_optuna(
         model.set_params(**best_params)
         model.fit(x_train, y_train)
         model_file = model_dir + model_name
-        pickle.dump(model, open(model_file, mode='wb+'))
+        with open(model_file, 'wb') as f:
+            pickle.dump(model, f)
         metric_csv = f'{model_dir}CV_Metrics_{model_name}.csv'
         metric_df = get_grid_search_stats(study, metric_csv, search_type='optuna')
     else:
         model_file = model_dir + model_name
-        model = pickle.load(open(model_file, mode='rb'))
+        with open(model_file, 'rb') as f:
+            model = pickle.load(f)
         metric_csv = f'{model_dir}CV_Metrics_{model_name}.csv'
         metric_df = pd.read_csv(metric_csv)
     return model, metric_df
@@ -1240,7 +1184,7 @@ def build_ml_model_optuna_dask(
         tuple[Any, pd.DataFrame]: Trained model object and dataframe containing CV stats.
     """
     makedirs(make_proper_dir_name(model_dir))
-    
+
     if not load_model:
         scoring_metrics = {
             'r2': 'r2',
@@ -1254,21 +1198,21 @@ def build_ml_model_optuna_dask(
             stratify_labels = kwargs['stratify_labels'].to_numpy().ravel()
             cv = RepeatedStratifiedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
             cv = cv.split(x_train, stratify_labels)
-        
+
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         optuna_storage = f'{model_dir}optuna_study_{model_name}.db'
-        
+
         # Setup Dask cluster if needed
         dask_client = None
         if use_dask and n_dask_workers > 1:
             dask_cluster = LocalCluster(
-                n_workers=n_dask_workers, 
+                n_workers=n_dask_workers,
                 threads_per_worker=2,
                 memory_limit='2GB'
             )
             dask_client = Client(dask_cluster)
             logger.info(f'Dask cluster started with {n_dask_workers} workers')
-        
+
         # Create or load study
         if os.path.isfile(optuna_storage):
             study = optuna.load_study(
@@ -1283,13 +1227,13 @@ def build_ml_model_optuna_dask(
                 multivariate=True,
                 group=True
             )
-            
+
             # Create pruner if enabled
             pruner = optuna.pruners.MedianPruner(
                 n_startup_trials=10,
                 n_warmup_steps=5
             ) if pruning else optuna.pruners.NopPruner()
-            
+
             study = optuna.create_study(
                 direction='minimize',
                 storage=f'sqlite:///{optuna_storage}',
@@ -1299,13 +1243,13 @@ def build_ml_model_optuna_dask(
                 pruner=pruner
             )
             study.set_metric_names(['NRMSE_with_Overfitting_Penalty'])
-            
+
             # Run optimization
             n_parallel_jobs = n_dask_workers if use_dask else 1
             study.optimize(
                 lambda trial: objective_with_cv_enhanced(
-                    trial, x_train, y_train, 
-                    model_name, cv, scoring_metrics, 
+                    trial, x_train, y_train,
+                    model_name, cv, scoring_metrics,
                     alpha, random_state, pruning
                 ),
                 n_trials=n_trials,
@@ -1313,38 +1257,40 @@ def build_ml_model_optuna_dask(
                 show_progress_bar=True,
                 gc_after_trial=True
             )
-        
+
         # Cleanup Dask
         if dask_client:
             dask_client.close()
-        
+
         best_params = study.best_params
         logger.info(f'Best params for {model_name}: {best_params}')
         logger.info(f'Best value: {study.best_value:.4f}')
-        
+
         # Train final model with best parameters
         include_all = model_name in ['GBR', 'ADA', 'BAG', 'CAT']
         model_dict, _ = get_model_param_dict(random_state, include_all_models=include_all)
         model = model_dict[model_name]
         model.set_params(**best_params)
         model.fit(x_train, y_train)
-        
+
         model_file = model_dir + model_name
-        pickle.dump(model, open(model_file, mode='wb+'))
+        with open(model_file, 'wb') as f:
+            pickle.dump(model, f)
         metric_csv = f'{model_dir}CV_Metrics_{model_name}.csv'
         metric_df = get_grid_search_stats(study, metric_csv, search_type='optuna')
     else:
         model_file = model_dir + model_name
-        model = pickle.load(open(model_file, mode='rb'))
+        with open(model_file, 'rb') as f:
+            model = pickle.load(f)
         metric_csv = f'{model_dir}CV_Metrics_{model_name}.csv'
         metric_df = pd.read_csv(metric_csv)
-    
+
     return model, metric_df
 
 
 def objective_with_cv_enhanced(
-        trial: Any, 
-        x_train: np.ndarray | pd.DataFrame, 
+        trial: Any,
+        x_train: np.ndarray | pd.DataFrame,
         y_train: np.ndarray,
         model_name: str,
         cv: Any,
@@ -1352,7 +1298,7 @@ def objective_with_cv_enhanced(
         alpha: float = 0.1,
         random_state: int = 42,
         pruning: bool = True
-) -> float: 
+) -> float:
     """
     Enhanced objective function for Optuna with pruning support.
     
@@ -1372,12 +1318,12 @@ def objective_with_cv_enhanced(
     """
     # Get hyperparameters for the model
     params = get_optuna_params_for_model(trial, model_name)
-    
+
     # Get model
     include_all = model_name in ['GBR', 'ADA', 'BAG', 'CAT']
     model = get_model_param_dict(random_state, include_all_models=include_all)[0][model_name]
     model.set_params(**params)
-    
+
     # Cross-validation with early stopping for pruning
     cv_results = cross_validate(
         estimator=model,
@@ -1388,12 +1334,12 @@ def objective_with_cv_enhanced(
         scoring=scoring_metrics,
         return_train_score=True
     )
-    
+
     # Calculate metrics
     test_mean_rmse = -cv_results['test_normalized_rmse'].mean()
     test_std_rmse = abs(cv_results['test_normalized_rmse'].std())
     train_mean_rmse = -cv_results['train_normalized_rmse'].mean()
-    
+
     # Store user attributes
     for data in ['train', 'test']:
         r2_key = f'{data}_r2'
@@ -1401,23 +1347,23 @@ def objective_with_cv_enhanced(
         neg_rmse_key = f'{data}_normalized_rmse'
         neg_mae_key = f'{data}_normalized_mae'
         mbe_key = f'{data}_normalized_mbe'
-        
+
         trial.set_user_attr(r2_key, cv_results[r2_key].mean())
         trial.set_user_attr(adj_r2_key, cv_results[adj_r2_key].mean())
         trial.set_user_attr(neg_rmse_key, -cv_results[neg_rmse_key].mean())
         trial.set_user_attr(neg_mae_key, -cv_results[neg_mae_key].mean())
         trial.set_user_attr(mbe_key, cv_results[mbe_key].mean())
-    
+
     # Calculate objective with overfitting penalty
     beta = 0.5 * alpha
     trial_obj = test_mean_rmse + alpha * abs(train_mean_rmse - test_mean_rmse) + beta * test_std_rmse
-    
+
     # Report for pruning
     if pruning:
         trial.report(trial_obj, 0)
         if trial.should_prune():
             raise optuna.TrialPruned()
-    
+
     return trial_obj
 
 
@@ -1476,26 +1422,26 @@ def compare_all_models(
     makedirs(make_proper_dir_name(model_dir))
     results = []
     trained_models = {}  # Store trained models for later use
-    
+
     # Check if we have full data for detailed evaluation
     has_full_data = all([
         year_train is not None, year_test is not None,
         basin_train is not None, basin_test is not None
     ])
-    
+
     # Default models
     if model_names is None:
         model_names = ['XGB', 'XGBRF', 'LGBM', 'RF', 'ETR', 'HGBR']
-    
+
     logger.info('='*60)
     logger.info('Model Comparison')
     logger.info('='*60)
-    
+
     # Train individual models
     for model_name in model_names:
         logger.info(f'Training {model_name}...')
         model_subdir = f'{model_dir}{model_name}/'
-        
+
         if use_optuna:
             model, cv_metric_df = build_ml_model_optuna_dask(
                 x_train, y_train, model_subdir, model_name,
@@ -1507,16 +1453,15 @@ def compare_all_models(
             model = model_dict[model_name]
             model.fit(x_train, y_train)
             cv_metric_df = pd.DataFrame()
-        
+
         trained_models[model_name] = model
-        
+
         # Extract CV validation metrics
         cv_val_r2 = np.nan
         cv_val_rmse = np.nan
         cv_val_mae = np.nan
         cv_train_r2 = np.nan
-        cv_train_rmse = np.nan
-        
+
         if not cv_metric_df.empty and 'Data' in cv_metric_df.columns:
             val_row = cv_metric_df[cv_metric_df['Data'] == 'VALIDATION']
             train_row = cv_metric_df[cv_metric_df['Data'] == 'TRAIN']
@@ -1526,8 +1471,7 @@ def compare_all_models(
                 cv_val_mae = val_row['MAE (%)'].values[0] if 'MAE (%)' in val_row.columns else np.nan
             if not train_row.empty:
                 cv_train_r2 = train_row['R2'].values[0]
-                cv_train_rmse = train_row['RMSE (%)'].values[0]
-        
+
         # Generate full prediction results if we have the data
         if has_full_data:
             pred_df = get_prediction_results(
@@ -1541,7 +1485,7 @@ def compare_all_models(
                 year_col=year_col,
                 gw_basin_col=gw_basin_col
             )
-            
+
             # Calculate detailed metrics
             calc_train_test_metrics(
                 pred_df, cv_metric_df, model_subdir,
@@ -1550,11 +1494,11 @@ def compare_all_models(
                 year_col=year_col,
                 model_name=model_name
             )
-            
+
             # Use metrics from pred_df for comparison
             train_pred = pred_df[pred_df['DATA'] == 'TRAIN']
             test_pred = pred_df[pred_df['DATA'] == 'TEST']
-            
+
             train_r2 = r2_score(train_pred['Actual_GW_mm'], train_pred['Pred_GW_mm'])
             test_r2 = r2_score(test_pred['Actual_GW_mm'], test_pred['Pred_GW_mm'])
             train_rmse = normalized_rmse(train_pred['Actual_GW_mm'].values, train_pred['Pred_GW_mm'].values)
@@ -1565,19 +1509,19 @@ def compare_all_models(
             # Evaluate directly on raw data
             y_pred_train = model.predict(x_train)
             y_pred_test = model.predict(x_test)
-            
+
             train_r2 = r2_score(y_train, y_pred_train)
             test_r2 = r2_score(y_test, y_pred_test)
             train_rmse = normalized_rmse(y_train, y_pred_train)
             test_rmse = normalized_rmse(y_test, y_pred_test)
             train_mae = normalized_mae(y_train, y_pred_train)
             test_mae = normalized_mae(y_test, y_pred_test)
-        
+
         # Calculate overfitting indicators
         overfit_r2 = train_r2 - test_r2
         overfit_rmse = test_rmse - train_rmse
         overfit_val_r2 = cv_train_r2 - cv_val_r2 if not np.isnan(cv_val_r2) else np.nan
-        
+
         results.append({
             'Model': model_name,
             'Train_R2': train_r2,
@@ -1593,26 +1537,26 @@ def compare_all_models(
             'Overfit_RMSE': overfit_rmse,
             'Overfit_Val_R2': overfit_val_r2,
         })
-        
+
         logger.info(f'  Train R2: {train_r2:.4f}, Val R2: {cv_val_r2:.4f}, Test R2: {test_r2:.4f}')
         logger.info(f'  Train RMSE: {train_rmse:.2f}%, Val RMSE: {cv_val_rmse:.2f}%, Test RMSE: {test_rmse:.2f}%')
         logger.info(f'  Overfitting (R2 gap): {overfit_r2:.4f}')
-    
+
     # Create results dataframe
     results_df = pd.DataFrame(results)
     results_df = results_df.sort_values('Test_RMSE')
     results_df.to_csv(f'{model_dir}Model_Comparison.csv', index=False)
-    
+
     # Create comprehensive comparison plots with overfitting analysis
     _create_model_comparison_plots(results_df, model_dir)
-    
+
     logger.info('='*60)
     logger.info(f'Best Model: {results_df.iloc[0]["Model"]}')
     logger.info(f"Test R2: {results_df.iloc[0]['Test_R2']:.4f}")
     logger.info(f"Test RMSE: {results_df.iloc[0]['Test_RMSE']:.2f}%")
     logger.info(f"Overfitting (R2 gap): {results_df.iloc[0]['Overfit_R2']:.4f}")
     logger.info('='*60)
-    
+
     return results_df
 
 
@@ -1635,25 +1579,25 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
         'legend.fontsize': 9,
         'figure.dpi': 150,
     })
-    
+
     n_models = len(results_df)
     x_pos = np.arange(n_models)
     bar_width = 0.25
-    
+
     # =====================================================================
     # Figure 1: Train/Validation/Test R² Comparison with Overfitting
     # =====================================================================
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    
+
     # Plot 1: R² Score Comparison (Train, Val, Test)
     ax = axes[0, 0]
-    bars1 = ax.bar(x_pos - bar_width, results_df['Train_R2'], bar_width, 
+    bars1 = ax.bar(x_pos - bar_width, results_df['Train_R2'], bar_width,
                    label='Train', color='#2ecc71', alpha=0.8, edgecolor='black', linewidth=0.5)
-    bars2 = ax.bar(x_pos, results_df['Val_R2'], bar_width, 
+    bars2 = ax.bar(x_pos, results_df['Val_R2'], bar_width,
                    label='Validation (CV)', color='#3498db', alpha=0.8, edgecolor='black', linewidth=0.5)
-    bars3 = ax.bar(x_pos + bar_width, results_df['Test_R2'], bar_width, 
+    bars3 = ax.bar(x_pos + bar_width, results_df['Test_R2'], bar_width,
                    label='Test', color='#e74c3c', alpha=0.8, edgecolor='black', linewidth=0.5)
-    
+
     ax.set_xticks(x_pos)
     ax.set_xticklabels(results_df['Model'], rotation=45, ha='right')
     ax.set_ylabel('R² Score')
@@ -1662,7 +1606,7 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
     ax.set_ylim(0, 1.05)
     ax.axhline(y=0.9, color='gray', linestyle='--', alpha=0.5, label='Good fit threshold')
     ax.grid(axis='y', alpha=0.3)
-    
+
     # Add value labels on bars
     for bars in [bars1, bars3]:
         for bar in bars:
@@ -1670,31 +1614,31 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
             if not np.isnan(height):
                 ax.annotate(f'{height:.2f}', xy=(bar.get_x() + bar.get_width()/2, height),
                            xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=8)
-    
+
     # Plot 2: NRMSE Comparison (Train, Val, Test)
     ax = axes[0, 1]
-    bars1 = ax.bar(x_pos - bar_width, results_df['Train_RMSE'], bar_width, 
+    bars1 = ax.bar(x_pos - bar_width, results_df['Train_RMSE'], bar_width,
                    label='Train', color='#2ecc71', alpha=0.8, edgecolor='black', linewidth=0.5)
-    bars2 = ax.bar(x_pos, results_df['Val_RMSE'], bar_width, 
+    bars2 = ax.bar(x_pos, results_df['Val_RMSE'], bar_width,
                    label='Validation (CV)', color='#3498db', alpha=0.8, edgecolor='black', linewidth=0.5)
-    bars3 = ax.bar(x_pos + bar_width, results_df['Test_RMSE'], bar_width, 
+    bars3 = ax.bar(x_pos + bar_width, results_df['Test_RMSE'], bar_width,
                    label='Test', color='#e74c3c', alpha=0.8, edgecolor='black', linewidth=0.5)
-    
+
     ax.set_xticks(x_pos)
     ax.set_xticklabels(results_df['Model'], rotation=45, ha='right')
     ax.set_ylabel('NRMSE (%)')
     ax.set_title('NRMSE: Train vs Validation vs Test', fontweight='bold')
     ax.legend(loc='upper right')
     ax.grid(axis='y', alpha=0.3)
-    
+
     # Plot 3: Overfitting Analysis - R² Gap (Train - Test)
     # Thresholds adjusted for groundwater pumping (high uncertainty domain)
     ax = axes[1, 0]
-    colors = ['#e74c3c' if x > 0.15 else '#f39c12' if x > 0.08 else '#2ecc71' 
+    colors = ['#e74c3c' if x > 0.15 else '#f39c12' if x > 0.08 else '#2ecc71'
               for x in results_df['Overfit_R2']]
-    bars = ax.bar(x_pos, results_df['Overfit_R2'], 0.6, color=colors, 
+    bars = ax.bar(x_pos, results_df['Overfit_R2'], 0.6, color=colors,
                   edgecolor='black', linewidth=0.5)
-    
+
     ax.set_xticks(x_pos)
     ax.set_xticklabels(results_df['Model'], rotation=45, ha='right')
     ax.set_ylabel('R² Gap (Train - Test)')
@@ -1704,20 +1648,20 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
     ax.axhline(y=0, color='green', linestyle='-', alpha=0.7, linewidth=2, label='Acceptable')
     ax.legend(loc='upper right')
     ax.grid(axis='y', alpha=0.3)
-    
+
     # Add value labels
     for bar, val in zip(bars, results_df['Overfit_R2']):
         ax.annotate(f'{val:.3f}', xy=(bar.get_x() + bar.get_width()/2, val),
                    xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=9)
-    
+
     # Plot 4: Overfitting Analysis - RMSE Gap (Test - Train)
     # Thresholds adjusted for groundwater pumping (high uncertainty domain)
     ax = axes[1, 1]
-    colors = ['#e74c3c' if x > 15 else '#f39c12' if x > 8 else '#2ecc71' 
+    colors = ['#e74c3c' if x > 15 else '#f39c12' if x > 8 else '#2ecc71'
               for x in results_df['Overfit_RMSE']]
     bars = ax.bar(x_pos, results_df['Overfit_RMSE'], 0.6, color=colors,
                   edgecolor='black', linewidth=0.5)
-    
+
     ax.set_xticks(x_pos)
     ax.set_xticklabels(results_df['Model'], rotation=45, ha='right')
     ax.set_ylabel('NRMSE Gap (Test - Train) %')
@@ -1727,26 +1671,26 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
     ax.axhline(y=0, color='green', linestyle='-', alpha=0.7, linewidth=2, label='Acceptable')
     ax.legend(loc='upper right')
     ax.grid(axis='y', alpha=0.3)
-    
+
     # Add value labels
     for bar, val in zip(bars, results_df['Overfit_RMSE']):
         ax.annotate(f'{val:.1f}%', xy=(bar.get_x() + bar.get_width()/2, val),
                    xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=9)
-    
+
     plt.tight_layout()
     plt.savefig(f'{model_dir}Model_Comparison_TrainValTest.png', dpi=600, bbox_inches='tight')
     plt.close()
-    
+
     # =====================================================================
     # Figure 2: Heatmap of Overfitting Severity
     # =====================================================================
     fig, ax = plt.subplots(figsize=(12, 8))
-    
+
     # Prepare data for heatmap
-    heatmap_data = results_df[['Model', 'Train_R2', 'Val_R2', 'Test_R2', 
+    heatmap_data = results_df[['Model', 'Train_R2', 'Val_R2', 'Test_R2',
                                 'Overfit_R2', 'Train_RMSE', 'Val_RMSE', 'Test_RMSE', 'Overfit_RMSE']].copy()
     heatmap_data = heatmap_data.set_index('Model')
-    
+
     # Normalize for visualization (different scales)
     # Thresholds adjusted for groundwater pumping (high uncertainty domain)
     norm_data = heatmap_data.copy()
@@ -1761,34 +1705,31 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
         norm_data[col] = 1 - (heatmap_data[col] / rmse_max)
     # For Overfit_RMSE: max 25% for GW uncertainty
     norm_data['Overfit_RMSE'] = 1 - np.clip(heatmap_data['Overfit_RMSE'] / 25, 0, 1)
-    
-    # Create custom colormap
-    cmap = sns.diverging_palette(10, 130, as_cmap=True)
-    
+
     # Plot heatmap with original values as annotations
     sns.heatmap(norm_data.T, annot=heatmap_data.T, fmt='.2f', cmap='RdYlGn',
                 linewidths=0.5, ax=ax, cbar_kws={'label': 'Performance (normalized)'})
-    
+
     ax.set_title('Model Performance Heatmap\n(Green = Good, Red = Poor/Overfitting)', fontweight='bold')
     ax.set_xlabel('Model')
     ax.set_ylabel('Metric')
-    
+
     plt.tight_layout()
     plt.savefig(f'{model_dir}Model_Comparison_Heatmap.png', dpi=600, bbox_inches='tight')
     plt.close()
-    
+
     # =====================================================================
     # Figure 3: Line plot showing Train-Val-Test progression
     # =====================================================================
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    
+
     # R2 progression
     ax = axes[0]
     for idx, row in results_df.iterrows():
         model = row['Model']
         values = [row['Train_R2'], row['Val_R2'], row['Test_R2']]
         x_vals = ['Train', 'Validation', 'Test']
-        
+
         # Color based on overfitting severity (adjusted for groundwater uncertainty)
         if row['Overfit_R2'] > 0.15:
             color = '#e74c3c'
@@ -1799,23 +1740,23 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
         else:
             color = '#2ecc71'
             linestyle = '-'
-        
-        ax.plot(x_vals, values, marker='o', label=model, linewidth=2, 
+
+        ax.plot(x_vals, values, marker='o', label=model, linewidth=2,
                 markersize=8, linestyle=linestyle, alpha=0.8)
-    
+
     ax.set_ylabel('R² Score')
     ax.set_title('R² Score Progression: Train → Validation → Test\n(Declining trend = Overfitting)', fontweight='bold')
     ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=9)
     ax.set_ylim(0, 1.05)
     ax.grid(True, alpha=0.3)
-    
+
     # RMSE progression
     ax = axes[1]
     for idx, row in results_df.iterrows():
         model = row['Model']
         values = [row['Train_RMSE'], row['Val_RMSE'], row['Test_RMSE']]
         x_vals = ['Train', 'Validation', 'Test']
-        
+
         # Color based on overfitting severity (adjusted for groundwater uncertainty)
         if row['Overfit_RMSE'] > 15:
             color = '#e74c3c'
@@ -1826,24 +1767,24 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
         else:
             color = '#2ecc71'
             linestyle = '-'
-        
+
         ax.plot(x_vals, values, marker='s', label=model, linewidth=2,
                 markersize=8, linestyle=linestyle, alpha=0.8)
-    
+
     ax.set_ylabel('NRMSE (%)')
     ax.set_title('NRMSE Progression: Train → Validation → Test\n(Increasing trend = Overfitting)', fontweight='bold')
     ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=9)
     ax.grid(True, alpha=0.3)
-    
+
     plt.tight_layout()
     plt.savefig(f'{model_dir}Model_Comparison_Progression.png', dpi=600, bbox_inches='tight')
     plt.close()
-    
+
     # =====================================================================
     # Figure 4: Summary ranking plot
     # =====================================================================
     fig, ax = plt.subplots(figsize=(12, 6))
-    
+
     # Create composite score (lower is better)
     # Penalize both poor test performance and overfitting
     # Weights adjusted for groundwater pumping (tolerating higher uncertainty)
@@ -1855,46 +1796,46 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
         np.abs(results_df_sorted['Overfit_RMSE']) * 1.2  # Penalize RMSE gap (reduced for GW)
     )
     results_df_sorted = results_df_sorted.sort_values('Composite_Score')
-    
+
     # Create horizontal bar chart with ranking
     colors = plt.cm.RdYlGn_r(np.linspace(0.2, 0.8, len(results_df_sorted)))
     y_pos = np.arange(len(results_df_sorted))
-    
-    bars = ax.barh(y_pos, results_df_sorted['Composite_Score'], color=colors, 
+
+    bars = ax.barh(y_pos, results_df_sorted['Composite_Score'], color=colors,
                    edgecolor='black', linewidth=0.5)
-    
+
     ax.set_yticks(y_pos)
     ax.set_yticklabels([f"#{i+1} {m}" for i, m in enumerate(results_df_sorted['Model'])])
     ax.set_xlabel('Composite Score (Lower = Better)')
     ax.set_title('Model Ranking: Composite Score\n(Balancing Test Performance & Overfitting)', fontweight='bold')
     ax.invert_yaxis()
-    
+
     # Add annotations
     for i, (bar, row) in enumerate(zip(bars, results_df_sorted.itertuples())):
         ax.annotate(f'Test R²: {row.Test_R2:.3f}, R² Gap: {row.Overfit_R2:.3f}, RMSE Gap: {row.Overfit_RMSE:.1f}%',
                    xy=(bar.get_width(), bar.get_y() + bar.get_height()/2),
                    xytext=(5, 0), textcoords="offset points",
                    ha='left', va='center', fontsize=8)
-    
+
     ax.grid(axis='x', alpha=0.3)
-    
+
     plt.tight_layout()
     plt.savefig(f'{model_dir}Model_Ranking.png', dpi=600, bbox_inches='tight')
     plt.close()
-    
+
     # ===============================
     # Figure 5: Combined Overfitting Analysis (R² vs RMSE)
     # ===============================
     fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-    
+
     # Plot 5a: Scatter plot of R² Gap vs RMSE Gap
     ax = axes[0]
-    
+
     # Color points based on combined overfitting status
     for i, row in results_df.iterrows():
         r2_gap = row['Overfit_R2']
         rmse_gap = row['Overfit_RMSE']
-        
+
         # Classify based on both metrics (groundwater-adjusted thresholds)
         if r2_gap > 0.15 or rmse_gap > 15:
             color = '#e74c3c'
@@ -1911,82 +1852,82 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
             status = 'Good'
             marker = 'o'
             size = 120
-        
-        ax.scatter(r2_gap, rmse_gap, c=color, marker=marker, s=size, 
+
+        ax.scatter(r2_gap, rmse_gap, c=color, marker=marker, s=size,
                   edgecolor='black', linewidth=1.5, alpha=0.8)
-        ax.annotate(row['Model'], (r2_gap, rmse_gap), fontsize=8, 
+        ax.annotate(row['Model'], (r2_gap, rmse_gap), fontsize=8,
                    xytext=(5, 5), textcoords='offset points')
-    
+
     # Add threshold regions
     ax.axvline(x=0.08, color='orange', linestyle='--', alpha=0.6, linewidth=2)
     ax.axvline(x=0.15, color='red', linestyle='--', alpha=0.6, linewidth=2)
     ax.axhline(y=8, color='orange', linestyle='--', alpha=0.6, linewidth=2)
     ax.axhline(y=15, color='red', linestyle='--', alpha=0.6, linewidth=2)
-    
+
     # Shade regions
     ax.axvspan(0, 0.08, alpha=0.1, color='green', label='Acceptable R²')
     ax.axhspan(0, 8, alpha=0.1, color='green', label='Acceptable RMSE')
-    
+
     ax.set_xlabel('R² Gap (Train - Test)')
     ax.set_ylabel('NRMSE Gap (Test - Train) %')
     ax.set_title('Combined Overfitting Analysis: R² vs RMSE Gap\n(Groundwater Domain Thresholds)', fontweight='bold')
     ax.grid(True, alpha=0.3)
-    
+
     # Custom legend
     from matplotlib.lines import Line2D
     legend_elements = [
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='#2ecc71', 
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#2ecc71',
                markersize=12, markeredgecolor='black', label='Good'),
-        Line2D([0], [0], marker='s', color='w', markerfacecolor='#f39c12', 
+        Line2D([0], [0], marker='s', color='w', markerfacecolor='#f39c12',
                markersize=12, markeredgecolor='black', label='Moderate'),
-        Line2D([0], [0], marker='X', color='w', markerfacecolor='#e74c3c', 
+        Line2D([0], [0], marker='X', color='w', markerfacecolor='#e74c3c',
                markersize=12, markeredgecolor='black', label='Severe')
     ]
     ax.legend(handles=legend_elements, loc='upper right', title='Overfitting Status')
-    
+
     # Plot 5b: Dual bar chart comparing R² and RMSE overfitting
     ax = axes[1]
-    
+
     x = np.arange(len(results_df))
     width = 0.35
-    
+
     # Normalize both metrics to similar scale for comparison
     r2_normalized = results_df['Overfit_R2'] * 100  # Convert to percentage-like scale
     rmse_normalized = results_df['Overfit_RMSE']  # Already in percentage
-    
-    bars1 = ax.bar(x - width/2, r2_normalized, width, label='R² Gap × 100', 
+
+    bars1 = ax.bar(x - width/2, r2_normalized, width, label='R² Gap × 100',
                    color='#3498db', edgecolor='black', linewidth=0.5)
-    bars2 = ax.bar(x + width/2, rmse_normalized, width, label='NRMSE Gap (%)', 
+    bars2 = ax.bar(x + width/2, rmse_normalized, width, label='NRMSE Gap (%)',  # noqa: F841
                    color='#e67e22', edgecolor='black', linewidth=0.5)
-    
+
     ax.set_xticks(x)
     ax.set_xticklabels(results_df['Model'], rotation=45, ha='right')
     ax.set_ylabel('Overfitting Gap (normalized)')
     ax.set_title('R² vs NRMSE Overfitting Comparison\n(Side-by-side)', fontweight='bold')
-    
+
     # Add threshold lines
     ax.axhline(y=8, color='orange', linestyle='--', alpha=0.7, linewidth=2, label='Moderate threshold')
     ax.axhline(y=15, color='red', linestyle='--', alpha=0.7, linewidth=2, label='Severe threshold')
-    
+
     ax.legend(loc='upper right')
     ax.grid(axis='y', alpha=0.3)
-    
+
     plt.tight_layout()
     plt.savefig(f'{model_dir}Combined_Overfitting_Analysis.png', dpi=600, bbox_inches='tight')
     plt.close()
-    
+
     # ===============================
     # Figure 6: Overfitting Summary Table
     # ===============================
     fig, ax = plt.subplots(figsize=(16, len(results_df) * 0.5 + 2))
     ax.axis('off')
-    
+
     # Prepare summary data
     summary_data = []
     for _, row in results_df.iterrows():
         r2_gap = row['Overfit_R2']
         rmse_gap = row['Overfit_RMSE']
-        
+
         # Status determination with groundwater thresholds
         if r2_gap > 0.15 or rmse_gap > 15:
             status = 'SEVERE'
@@ -1994,7 +1935,7 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
             status = 'MODERATE'
         else:
             status = 'GOOD'
-        
+
         summary_data.append([
             row['Model'],
             f"{row['Train_R2']:.3f}",
@@ -2007,10 +1948,10 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
             f"{rmse_gap:.1f}%",
             status
         ])
-    
-    columns = ['Model', 'Train R²', 'Val R²', 'Test R²', 'R² Gap', 
+
+    columns = ['Model', 'Train R²', 'Val R²', 'Test R²', 'R² Gap',
                'Train NRMSE(%)', 'Val NRMSE(%)', 'Test NRMSE(%)', 'NRMSE Gap(%)', 'Status']
-    
+
     table = ax.table(
         cellText=summary_data,
         colLabels=columns,
@@ -2020,7 +1961,7 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
     table.auto_set_font_size(False)
     table.set_fontsize(9)
     table.scale(1.2, 1.5)
-    
+
     # Color cells based on status
     for i, row_data in enumerate(summary_data):
         status = row_data[-1]
@@ -2030,22 +1971,22 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
             color = '#fff3cd'
         else:
             color = '#d4edda'
-        
+
         for j in range(len(columns)):
             table[(i + 1, j)].set_facecolor(color)
-    
+
     # Style header
     for j in range(len(columns)):
         table[(0, j)].set_facecolor('#4a90d9')
         table[(0, j)].set_text_props(color='white', fontweight='bold')
-    
+
     ax.set_title('Model Overfitting Summary Table\n(Groundwater-adjusted thresholds: R² Gap - Moderate >0.08, Severe >0.15; RMSE Gap - Moderate >8%, Severe >15%)',
                 fontsize=11, fontweight='bold', pad=20)
-    
+
     plt.tight_layout()
     plt.savefig(f'{model_dir}Overfitting_Summary_Table.png', dpi=600, bbox_inches='tight')
     plt.close()
-    
+
     logger.info(f'Visualization plots saved to {model_dir}')
 
 
@@ -2084,12 +2025,12 @@ def calc_train_test_metrics(
         yr_df = pred_df[pred_df[year_col] == yr].copy(deep=True)
         year_df_list.append(yr_df)
         year_df_names.append(str(yr))
-    metric_df = pd.DataFrame()
+    metric_parts = []
     for year_df, year_name in zip(year_df_list, year_df_names):
         for data_type in year_df.DATA.unique():
             data_df = year_df[year_df.DATA == data_type]
             data_actual = data_df.Actual_GW_mm.to_numpy().ravel()
-            data_pred = data_df.Pred_GW_mm.to_numpy().ravel()            
+            data_pred = data_df.Pred_GW_mm.to_numpy().ravel()
             r2 = r2_score(data_actual, data_pred)
             adj_r2 = adjusted_r2(data_actual, data_pred, data_df.shape[1])
             mae = normalized_mae(data_actual, data_pred)
@@ -2104,14 +2045,14 @@ def calc_train_test_metrics(
                 'MAE (%)': mae,
                 'MBE (%)': mbe
             }
-            temp_df = pd.DataFrame(data=[temp_dict])
-            metric_df = pd.concat([metric_df, temp_df], ignore_index=True)
+            metric_parts.append(temp_dict)
+    metric_df = pd.DataFrame(metric_parts)
     metric_df = pd.concat([metric_df, cv_metric_df], ignore_index=True)
     metric_df = metric_df.sort_values(by=['Year', 'Data'])
     for col in ['R2', 'Adjusted_R2', 'RMSE (%)', 'MAE (%)', 'MBE (%)']:
         metric_df[col] = metric_df[col].apply(lambda x: round_to_n_nonzero(x, precision))
     metric_df.to_csv(f'{output_dir}Error_Metrics_{model_name}.csv', index=False)
-    
+
 
 def get_grid_search_stats(
         gs_model: Any,
@@ -2135,7 +2076,7 @@ def get_grid_search_stats(
         # get scores for the best trial
         best_trial = gs_model.best_trial
         scores = best_trial.user_attrs
-    metric_df = pd.DataFrame()
+    metric_parts = []
     for data in ['train', 'test']:
         if search_type == 'grid_search':
             r2 = scores[f'mean_{data}_r2'].mean()
@@ -2150,7 +2091,7 @@ def get_grid_search_stats(
             mae = scores[f'{data}_normalized_mae']
             mbe = scores[f'{data}_normalized_mbe']
         data_name = 'VALIDATION' if data == 'test' else 'TRAIN'
-        temp_dict = {
+        metric_parts.append({
             'Year': 'CV',
             'Data': data_name,
             'R2': r2,
@@ -2158,9 +2099,8 @@ def get_grid_search_stats(
             'RMSE (%)': rmse,
             'MAE (%)': mae,
             'MBE (%)': mbe
-        }
-        temp_df = pd.DataFrame(data=[temp_dict])
-        metric_df = pd.concat([metric_df, temp_df], ignore_index=True)
+        })
+    metric_df = pd.DataFrame(metric_parts)
     for col in ['R2', 'Adjusted_R2', 'RMSE (%)', 'MAE (%)', 'MBE (%)']:
         metric_df[col] = metric_df[col].apply(lambda x: round_to_n_nonzero(x, precision))
     logger.info(f'\n{metric_df}')
@@ -2426,7 +2366,7 @@ def get_prediction_results(
         pred_df.Error_GW_mm = pred_df.Actual_GW_mm - pred_df.Pred_GW_mm
     else:
         logger.info('Applying basin-wise bias correction...')
-        gw_pred_df = pd.DataFrame()
+        gw_pred_parts = []
         output_dir = f'{model_dir}Basin_Bias_Correction_{model_name}/'
         makedirs(output_dir)
         for gw_basin in pred_df[gw_basin_col].unique():
@@ -2453,8 +2393,8 @@ def get_prediction_results(
                 basin_df.loc[basin_df.DATA == 'TEST', 'Pred_GW_mm'] += val2
             basin_df['Pred_GW_mm'] = np.abs(basin_df['Pred_GW_mm'])
             basin_df.Error_GW_mm = basin_df.Actual_GW_mm - basin_df.Pred_GW_mm
-            gw_pred_df = pd.concat([gw_pred_df, basin_df])
-        pred_df = gw_pred_df.copy()
+            gw_pred_parts.append(basin_df)
+        pred_df = pd.concat(gw_pred_parts, ignore_index=True)
     pred_df.to_parquet(f'{model_dir}Predictions_{model_name}_BC.parquet', index=False)
     return pred_df
 

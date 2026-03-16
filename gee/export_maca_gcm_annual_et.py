@@ -27,16 +27,26 @@ Usage:
     python export_maca_gcm_annual_et.py --gcm all             # all 5 (default)
 """
 
-import ee
-from openet.refetgee import Daily
-from config import (
-    init_ee, get_az_geometry, create_ic_asset, list_existing_assets,
-    list_pending_task_descriptions, export_image, wait_for_tasks,
-    get_export_parser,
-    ASSET_PREFIX, MACA_SCALE, MACA_BANDS, MACA_SCENARIOS,
-    MACA_REPRESENTATIVE_GCMS, MONTH_NAMES
-)
 import logging
+
+import ee
+from config import (
+    ASSET_PREFIX,
+    MACA_BANDS,
+    MACA_REPRESENTATIVE_GCMS,
+    MACA_SCALE,
+    MACA_SCENARIOS,
+    MONTH_NAMES,
+    create_ic_asset,
+    export_image,
+    get_az_geometry,
+    get_export_parser,
+    init_ee,
+    list_existing_assets,
+    list_pending_task_descriptions,
+    wait_for_tasks,
+)
+from openet.refetgee import Daily
 
 logger = logging.getLogger(__name__)
 

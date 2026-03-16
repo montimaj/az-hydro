@@ -5,19 +5,20 @@ Contains codes for downloading and processing streamflow data from USGS and USBR
 # Author: Dr. Sayantan Majumdar
 # Email: sayantan.majumdar@dri.edu
 
+import logging
 import os
 import shutil
+from glob import glob
+
+import dataretrieval.nwis as nwis
+import geopandas as gpd
 import numpy as np
 import pandas as pd
-import geopandas as gpd
 import rasterio as rio
-import dataretrieval.nwis as nwis
-import logging
 
-from glob import glob
-from sysops import makedirs, az_nodata, copy_file
-from rasterops import write_raster
-from vectorops import shp2raster
+from hydrolibs.rasterops import write_raster
+from hydrolibs.sysops import az_nodata, copy_file, makedirs
+from hydrolibs.vectorops import shp2raster
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,7 @@ def _find_nearest_usbr_site(site_id, usbr_sites):
                 best_sid = ref_sid
         return best_sid
     except Exception:
+        logger.debug('Could not find nearest USBR site, defaulting to %s', usbr_sites[0])
         return usbr_sites[0]
 
 
@@ -434,7 +436,7 @@ def create_streamflow_rasters(
 
     # Reproject CAP to match watershed raster grid if needed
     if cap_file.shape != ws_shape or cap_file.transform != ws_transform:
-        from rasterio.warp import reproject, Resampling
+        from rasterio.warp import Resampling, reproject
         cap_arr = np.zeros(ws_shape, dtype=np.float32)
         reproject(
             source=cap_arr_native,
@@ -452,7 +454,7 @@ def create_streamflow_rasters(
     # Read and align canal density raster if provided
     canal_arr = None
     if canal_density_file and os.path.exists(canal_density_file):
-        from rasterio.warp import reproject, Resampling
+        from rasterio.warp import Resampling, reproject
         cd_file = rio.open(canal_density_file)
         cd_arr_native = cd_file.read(1).astype(np.float32)
         if cd_file.shape != ws_shape or cd_file.transform != ws_transform:

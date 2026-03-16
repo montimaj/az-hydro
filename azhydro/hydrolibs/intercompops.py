@@ -30,23 +30,21 @@ Reitz metadata: HistoricalET_metadata.xml — irrigation in metres/year.
 # Author: Dr. Sayantan Majumdar
 # Email: sayantan.majumdar@dri.edu
 
-import os
 import logging
-import warnings
+import os
+
+import geopandas as gpd
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import geopandas as gpd
 import rasterio as rio
-from rasterio.warp import reproject, Resampling, calculate_default_transform
 from rasterio.features import rasterize
 from rasterio.mask import mask as rio_mask
-from rasterio.transform import from_bounds
+from rasterio.warp import Resampling, reproject
 from shapely.geometry import mapping
 
-import matplotlib.pyplot as plt
-
-from rasterops import read_raster_as_arr, write_raster
-from sysops import makedirs
+from hydrolibs.rasterops import read_raster_as_arr
+from hydrolibs.sysops import makedirs
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +103,7 @@ def _raster_basin_volumes(
                 vol_m3 = float(np.nansum(arr)) * depth_to_m * pixel_area_m2
                 volumes[basin_name] = vol_m3 * M3_TO_AF
             except Exception:
+                logger.debug('Clipping failed for basin %s, setting volume to 0', basin_name)
                 volumes[basin_name] = 0.0
     return volumes
 
@@ -134,6 +133,7 @@ def _raster_basin_means(
                 valid = arr[np.isfinite(arr) & (arr > 0)]
                 means[basin_name] = float(np.mean(valid)) if valid.size > 0 else np.nan
             except Exception:
+                logger.debug('Clipping failed for basin %s, setting mean to NaN', basin_name)
                 means[basin_name] = np.nan
     return means
 
@@ -298,8 +298,6 @@ def load_nhm_basin_volumes(
                     irr_arr = src.read(irr_fraction_band).astype(np.float64)
                     irr_arr[np.isnan(irr_arr)] = 0.0
                     irr_arr = np.clip(irr_arr, 0, 1)
-                    src_transform = src.transform
-                    src_crs = src.crs
                 # Zonal mean per HUC12
                 for idx, row in huc_reproj.iterrows():
                     geom = [mapping(row.geometry)]
@@ -315,7 +313,7 @@ def load_nhm_basin_volumes(
                         if vals.size > 0:
                             irr_counts[huc_reproj.index.get_loc(idx)] += np.mean(vals)
                     except Exception:
-                        pass
+                        logger.debug('Irr fraction clipping failed for HUC at index %s', idx)
                 irr_n_years += 1
 
             if irr_n_years > 0:
@@ -413,8 +411,6 @@ def _reproject_reitz_to_ref(
         with rio.open(ref_raster) as ref_src:
             dst_crs = ref_src.crs
             dst_transform = ref_src.transform
-            dst_width = ref_src.width
-            dst_height = ref_src.height
 
             profile = ref_src.profile.copy()
             profile.update(dtype='float64', nodata=np.nan, count=1)
@@ -1222,7 +1218,7 @@ def _nhm_cu_volume_path(
                     if vals.size > 0:
                         irr_counts[huc_merged.index.get_loc(idx)] += np.mean(vals)
                 except Exception:
-                    pass
+                    logger.debug('Irr fraction clipping failed for HUC at index %s', idx)
             irr_n_years += 1
         if irr_n_years > 0:
             huc_merged['irr_fraction'] = np.clip(
@@ -2495,7 +2491,6 @@ def _plot_cap_srp_time_series(
 
             m3_vals = af_vals * af_to_m3
             mm_vals = m3_vals / total_area * M_TO_MM if total_area > 0 else m3_vals * 0
-            ft_vals = mm_vals * MM_TO_FT
 
             # Row 0: depth
             ax_mm = axes[0]
@@ -2638,7 +2633,6 @@ def _plot_cap_srp_scatter(
     and R² annotation.  An additional panel shows the same data in mm.
     """
     makedirs(output_dir)
-    af_to_m3 = 1.0 / M3_TO_AF
 
     obs_basins = sorted(obs_basin_yearly.keys())
     ml_vals_list, obs_vals_list, labels = [], [], []

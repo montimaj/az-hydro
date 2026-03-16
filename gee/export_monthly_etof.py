@@ -12,13 +12,21 @@ Usage:
     python export_monthly_etof.py [--no-wait]
 """
 
+import logging
+
 import ee
 from config import (
-    init_ee, get_az_geometry, create_ic_asset, list_existing_assets,
-    list_pending_task_descriptions, export_image, wait_for_tasks,
-    ASSET_PREFIX, GRIDMET_SCALE, build_openet_monthly_et_ic
+    ASSET_PREFIX,
+    GRIDMET_SCALE,
+    build_openet_monthly_et_ic,
+    create_ic_asset,
+    export_image,
+    get_az_geometry,
+    init_ee,
+    list_existing_assets,
+    list_pending_task_descriptions,
+    wait_for_tasks,
 )
-import logging
 
 logger = logging.getLogger(__name__)
 

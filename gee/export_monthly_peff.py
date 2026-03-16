@@ -20,14 +20,23 @@ Usage:
     python export_monthly_peff.py [--start-year 1896] [--end-year 2099] [--no-wait]
 """
 
+import logging
+
 import ee
 from config import (
-    init_ee, get_az_geometry, create_ic_asset, list_existing_assets,
-    list_pending_task_descriptions, export_image, wait_for_tasks,
+    ASSET_PREFIX,
+    MACA_MODELS,
+    MACA_SCENARIOS,
+    PRISM_SCALE,
+    create_ic_asset,
+    export_image,
+    get_az_geometry,
     get_export_parser,
-    ASSET_PREFIX, PRISM_SCALE, MACA_BANDS, MACA_MODELS, MACA_SCENARIOS
+    init_ee,
+    list_existing_assets,
+    list_pending_task_descriptions,
+    wait_for_tasks,
 )
-import logging
 
 logger = logging.getLogger(__name__)
 

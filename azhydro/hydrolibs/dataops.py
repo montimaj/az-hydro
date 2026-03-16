@@ -5,27 +5,30 @@ Contains codes for handling Google Earth Engine datasets
 # Author: Dr. Sayantan Majumdar
 # Email: sayantan.majumdar@dri.edu
 
-import ee
 import os
-import time
-import pandas as pd
-import requests
-import subprocess
-import numpy as np
-import geopandas as gpd
-import rasterio as rio
-import swifter
-import joblib
 import pickle
-import sklearn.utils as sk
+import shutil
+import subprocess
+import time
 
+import ee
+import geopandas as gpd
+import joblib
+import numpy as np
+import pandas as pd
+import rasterio as rio
+import requests
+import sklearn.utils as sk
+import swifter  # noqa: F401 — imported for .swifter.apply() side-effect
 from osgeo import gdal
+
 # Suppress GDAL warnings (keep errors only)
 os.environ['CPL_LOG'] = '/dev/null'
 gdal.SetConfigOption('CPL_LOG', '/dev/null')
 gdal.PushErrorHandler('CPLQuietErrorHandler')
 gdal.UseExceptions()
 import logging
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 logging.getLogger('pyogrio').setLevel(logging.ERROR)
@@ -33,20 +36,28 @@ logging.getLogger('rasterio').setLevel(logging.ERROR)
 logging.getLogger('googleapiclient').setLevel(logging.ERROR)
 logging.getLogger('googleapiclient.http').setLevel(logging.ERROR)
 logging.getLogger('google_auth_httplib2').setLevel(logging.ERROR)
+from glob import glob
+from http.client import RemoteDisconnected
+
+from dask import compute, delayed
+from dask.distributed import Client, LocalCluster
+from google.cloud import storage
+from shapely.geometry import Polygon
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
-from sysops import makedirs
-from gwops import create_land_use_data, get_ama_ina_basin_names     
-from rasterops import reproject_raster_gdal, read_raster_as_arr, get_xy_grids_from_raster, \
-    clamp_and_rewrite_raster
-from google.cloud import storage
-from shapely.geometry import Polygon
-from glob import glob
-from dask import delayed, compute
-from dask.distributed import Client, LocalCluster
-from http.client import RemoteDisconnected
 from tqdm import tqdm
+
+from hydrolibs.gwops import create_land_use_data
+from hydrolibs.rasterops import (
+    clamp_and_rewrite_raster,
+    get_xy_grids_from_raster,
+    read_raster_as_arr,
+    reproject_raster_gdal,
+)
+from hydrolibs.sysops import makedirs
+from hydrolibs.visualops import get_ama_ina_basin_names
+
 for _dask_logger in ['dask', 'distributed', 'distributed.worker', 'distributed.worker.state_machine',
                      'distributed.scheduler', 'distributed.nanny', 'dask_jobqueue',
                      'tornado', 'tornado.application']:
@@ -144,7 +155,7 @@ def generate_chunks(input_list: list, num_chunks: int):
 
 
 def get_eto(
-        year: int, 
+        year: int,
         prism_eto_ic: ee.ImageCollection | None = None,
         maca_eto_ic: ee.ImageCollection | None = None,
         return_annual: bool = False
@@ -168,7 +179,7 @@ def get_eto(
     ee.ImageCollection: Monthly ETo ImageCollection for the input year with band 'eto' (in mm) and properties 
     'system:time_start' and 'system:time_end'.
     """
-    
+
     start_year = f'{year}-01-01'
     end_year = f'{year + 1}-01-01'
     if year > 2025:
@@ -186,7 +197,7 @@ def get_eto(
         lambda img: img.rename('eto')
             .set('month', ee.Date(img.get('system:time_start')).get('month'))
             .copyProperties(img, ['system:time_start', 'system:time_end'])
-    )    
+    )
     return monthly_eto if not return_annual else monthly_eto.sum().rename('eto')
 
 
@@ -256,7 +267,7 @@ def download_gee_tif(
     Returns:
         None. The function saves the downloaded data as a GeoTIFF file at the specified local_file_name.
     """
-    
+
     year = int(local_file_name.split('.tif')[0].split('_')[-1])
     band_scale_dict = {
         'annual_et_ensemble_mm': 800 if year < 2000 else 30 if year <= 2025 else 4638.3,
@@ -283,8 +294,8 @@ def download_gee_tif(
     ).reduceResolution(
         reducer=ee.Reducer.mean(),
         maxPixels=max_pixels
-    ).reproject(crs, scale=gee_scale)   
-    
+    ).reproject(crs, scale=gee_scale)
+
     for band, band_name in zip(data_bands, data_band_name_list):
         band = band.rename(band_name)
         band_scale = band_scale_dict[band_name]
@@ -381,7 +392,7 @@ def download_gee_tif(
                 local_file_name,
                 min_val=0,
                 band_descriptions=data_band_name_list
-            )                
+            )
             break  # Success
         except (
                 ee.EEException, requests.exceptions.RequestException,
@@ -398,6 +409,117 @@ def download_gee_tif(
                 logger.warning('Error %s during %s download (attempt %d/%d). Retrying...',
                                e, local_file_name, attempt, max_retries)
         time.sleep(0.01 * attempt)
+
+
+def _get_lulc_image(year, crs, lulc_scenario, usgs_lulc_historical_ic,
+                    lulc_projection_raw_ic, lulc_projection_ensemble_ic, nlcd_ic):
+    """Select the appropriate LULC image for a given year.
+
+    Returns an ee.Image with a single 'lulc' band recoded to
+    1=AGRI, 2=URBAN, 3=SW (0 = masked out).
+    """
+    if year < 1985 or year > 2025:
+        if year < 1985:
+            usgs_lulc_ic = usgs_lulc_historical_ic
+        elif lulc_scenario is not None:
+            usgs_lulc_ic = lulc_projection_raw_ic.filterMetadata(
+                'scenario', 'equals', lulc_scenario
+            )
+        else:
+            usgs_lulc_ic = lulc_projection_ensemble_ic
+        usgs_lulc_year = year if year >= 1938 else 1938
+        usgs_lulc = usgs_lulc_ic \
+            .filterDate(f'{usgs_lulc_year}-01-01', f'{usgs_lulc_year + 1}-01-01') \
+            .first() \
+            .setDefaultProjection(crs=crs, scale=250)
+        usgs_mask = usgs_lulc.eq(13).Or(usgs_lulc.eq(2)).Or(
+            usgs_lulc.eq(6)).Or(usgs_lulc.eq(1))
+        return usgs_lulc.updateMask(usgs_mask).remap(
+            [13, 2, 6, 1],
+            [1, 2, 2, 3]  # 1: AGRI, 2: URBAN, 3: SW
+        ).rename('lulc')
+    else:
+        nlcd_year = year if year <= 2024 else 2024
+        nlcd_img = nlcd_ic.filterDate(
+            f'{nlcd_year}-01-01', f'{nlcd_year + 1}-01-01'
+        ).first()
+        nlcd_mask = nlcd_img.eq(82).Or(
+            nlcd_img.gte(21).And(nlcd_img.lte(24))
+        ).Or(nlcd_img.eq(11))
+        return nlcd_img.updateMask(nlcd_mask).remap(
+            [82, 21, 22, 23, 24, 11],
+            [1, 2, 2, 2, 2, 3]  # 1: AGRI, 2: URBAN, 3: SW
+        ).rename('lulc')
+
+
+def _get_climate_images(year, gcm, prism_ic, prism_hargreaves_eto_ic,
+                        maca_monthly_eto_ic, openet_ic_v2, openet_ic_v2_1,
+                        usgs_adjusted_et_ic, maca_monthly_et_ic, _ASSET_PREFIX):
+    """Return (actual_et, annual_eto, precip, tmmx, tmmn) for a given year."""
+    start_year_gee = f'{year}-01-01'
+    end_year_gee = f'{year + 1}-01-01'
+
+    # --- ET ---
+    openet_ic = openet_ic_v2 if 2000 <= year <= 2024 else openet_ic_v2_1 if year == 2025 else None
+    if 2000 <= year <= 2025:
+        actual_et = openet_ic \
+            .filterDate(start_year_gee, end_year_gee) \
+            .select('et_ensemble_mad').sum()
+    elif year < 2000:
+        actual_et = usgs_adjusted_et_ic \
+            .filterDate(start_year_gee, end_year_gee) \
+            .select('actual_et').sum()
+    else:
+        if gcm is not None:
+            actual_et = ee.Image(
+                f'{_ASSET_PREFIX}/maca_gcm_annual_et/{gcm}_{year}'
+            ).select('actual_et')
+        else:
+            actual_et = maca_monthly_et_ic \
+                .filterDate(start_year_gee, end_year_gee) \
+                .select('actual_et').sum()
+
+    # --- ETo ---
+    if year < 2026:
+        prism_eto_ic = prism_hargreaves_eto_ic.filterDate(start_year_gee, end_year_gee)
+        annual_eto = get_eto(year, prism_eto_ic=prism_eto_ic, return_annual=True)
+    else:
+        if gcm is not None:
+            annual_eto = ee.Image(
+                f'{_ASSET_PREFIX}/maca_gcm_annual_eto/{gcm}_{year}'
+            ).select('eto').rename('annual_eto_mm')
+        else:
+            annual_eto = maca_monthly_eto_ic \
+                .filterDate(start_year_gee, end_year_gee) \
+                .select('eto').sum().rename('annual_eto_mm')
+
+    # --- Precip & Temp ---
+    if year < 2026:
+        precip = prism_ic.select('ppt') \
+            .filterDate(start_year_gee, end_year_gee) \
+            .sum()
+        tmmx = prism_ic.select('tmax') \
+            .filterDate(start_year_gee, end_year_gee) \
+            .mean() \
+            .add(273.15)
+        tmmn = prism_ic.select('tmin') \
+            .filterDate(start_year_gee, end_year_gee) \
+            .mean() \
+            .add(273.15)
+    else:
+        maca_ic = ee.ImageCollection('IDAHO_EPSCOR/MACAv2_METDATA') \
+            .filterDate(start_year_gee, end_year_gee)
+        if gcm is not None:
+            maca_ic = maca_ic.filter(ee.Filter.eq('model', gcm))
+            n_members = 2
+        else:
+            maca_scenarios, maca_models, _ = get_maca_scenarios_models_bands()
+            n_members = len(maca_models) * len(maca_scenarios)
+        precip = maca_ic.select('pr').sum().divide(n_members)
+        tmmx = maca_ic.select('tasmax').mean()
+        tmmn = maca_ic.select('tasmin').mean()
+
+    return actual_et, annual_eto, precip, tmmx, tmmn
 
 
 def download_gee_tile(
@@ -452,7 +574,7 @@ def download_gee_tile(
                 logger.warning('Initialization exception: %s', e)
             retry_ee_init = True
             time.sleep(1)
-    
+
     openet_ic_v2 = ee.ImageCollection('OpenET/ENSEMBLE/CONUS/GRIDMET/MONTHLY/v2_0')
     openet_ic_v2_1 = ee.ImageCollection('projects/openet/assets/ensemble/conus/gridmet/monthly/v2_1')
     prism_ic = ee.ImageCollection('OREGONSTATE/PRISM/ANm') # using 4 km to match MACA future scenarios
@@ -512,62 +634,11 @@ def download_gee_tile(
         irr_mask = irr.updateMask(mask).remap([0], [1])
         start_year_gee = f'{year}-01-01'
         end_year_gee = f'{year + 1}-01-01'
-        openet_ic = openet_ic_v2 if 2000 <= year <= 2024 else openet_ic_v2_1 if year == 2025 else None
-        if 2000 <= year <= 2025:
-            actual_et = openet_ic \
-                .filterDate(start_year_gee, end_year_gee) \
-                .select('et_ensemble_mad').sum()
-        elif year < 2000:
-            # Use USGS Ensemble ET for 1896-1999.
-            actual_et = usgs_adjusted_et_ic \
-                .filterDate(start_year_gee, end_year_gee) \
-                .select('actual_et').sum()
-        else:
-            if gcm is not None:
-                actual_et = ee.Image(
-                    f'{_ASSET_PREFIX}/maca_gcm_annual_et/{gcm}_{year}'
-                ).select('actual_et')
-            else:
-                actual_et = maca_monthly_et_ic \
-                    .filterDate(start_year_gee, end_year_gee) \
-                    .select('actual_et').sum()
-        if year < 2026:
-            prism_eto_ic = prism_hargreaves_eto_ic.filterDate(start_year_gee, end_year_gee)
-            annual_eto = get_eto(year, prism_eto_ic=prism_eto_ic, return_annual=True)
-        else:
-            if gcm is not None:
-                annual_eto = ee.Image(
-                    f'{_ASSET_PREFIX}/maca_gcm_annual_eto/{gcm}_{year}'
-                ).select('eto').rename('annual_eto_mm')
-            else:
-                annual_eto = maca_monthly_eto_ic \
-                    .filterDate(start_year_gee, end_year_gee) \
-                    .select('eto').sum().rename('annual_eto_mm')
-        if year < 2026:
-            precip = prism_ic.select('ppt') \
-                    .filterDate(start_year_gee, end_year_gee) \
-                    .sum()
-            tmmx = prism_ic.select('tmax') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .mean() \
-                .add(273.15)
-            tmmn = prism_ic.select('tmin') \
-                .filterDate(start_year_gee, end_year_gee) \
-                .mean()\
-                .add(273.15)
-        else:
-            maca_ic = ee.ImageCollection('IDAHO_EPSCOR/MACAv2_METDATA') \
-                .filterDate(start_year_gee, end_year_gee)
-            if gcm is not None:
-                maca_ic = maca_ic.filter(ee.Filter.eq('model', gcm))
-                n_members = 2  # rcp45 + rcp85 for a single GCM
-            else:
-                # Flat MACA: sum/N_MEMBERS for precip, mean for temp
-                maca_scenarios, maca_models, _ = get_maca_scenarios_models_bands()
-                n_members = len(maca_models) * len(maca_scenarios)
-            precip = maca_ic.select('pr').sum().divide(n_members)
-            tmmx = maca_ic.select('tasmax').mean()  # already in Kelvin
-            tmmn = maca_ic.select('tasmin').mean()  # already in Kelvin
+        actual_et, annual_eto, precip, tmmx, tmmn = _get_climate_images(
+            year, gcm, prism_ic, prism_hargreaves_eto_ic,
+            maca_monthly_eto_ic, openet_ic_v2, openet_ic_v2_1,
+            usgs_adjusted_et_ic, maca_monthly_et_ic, _ASSET_PREFIX,
+        )
         if gcm is not None and year > 2025:
             peff = ee.Image(
                 f'{_ASSET_PREFIX}/maca_gcm_annual_peff/{gcm}_{year}'
@@ -576,51 +647,20 @@ def download_gee_tile(
             peff = monthly_peff_ic.filterDate(start_year_gee, end_year_gee) \
                     .select('peff').sum().rename('annual_peff_mm')
         if year == 1896:
-            # get mean annual 2000-2023 if year is 1896, and save it for use in other years outside 2000-2024 
+            # get mean annual 2000-2023 if year is 1896, and save it for use in other years outside 2000-2024
             # since PCML data only starts in 2000
-            peff_pcml = get_annual_peff_pcml(1896) 
+            peff_pcml = get_annual_peff_pcml(1896)
             peff_pcml_1896 = peff_pcml
         elif 2000 <= year <= 2024:
             peff_pcml = get_annual_peff_pcml(year)
         else:
             peff_pcml = peff_pcml_1896
-        
-        if year < 1985 or year > 2025:
-            if year < 1985:
-                usgs_lulc_ic = usgs_lulc_historical_ic
-            elif lulc_scenario is not None:
-                usgs_lulc_ic = lulc_projection_raw_ic.filterMetadata(
-                    'scenario', 'equals', lulc_scenario
-                )
-            else:
-                usgs_lulc_ic = lulc_projection_ensemble_ic
-            # Use historical USGS LULC data from 1938-1984.
-            usgs_lulc_year = year if year >= 1938 else 1938
-            usgs_lulc = usgs_lulc_ic \
-                .filterDate(f'{usgs_lulc_year}-01-01', f'{usgs_lulc_year + 1}-01-01') \
-                .first() \
-                .setDefaultProjection(crs=crs, scale=250)
-            usgs_mask_1 = usgs_lulc.eq(13) # cropland
-            usgs_mask_2 = usgs_lulc.eq(2) # developed
-            usgs_mask_3 = usgs_lulc.eq(6) # mining
-            usgs_mask_4 = usgs_lulc.eq(1) # open water
-            usgs_mask = usgs_mask_1.Or(usgs_mask_2).Or(usgs_mask_3).Or(usgs_mask_4)
-            lulc = usgs_lulc.updateMask(usgs_mask).remap(
-                [13, 2, 6, 1],
-                [1, 2, 2, 3] # 1: AGRI, 2: URBAN, 3: SW, 0: other (masked out)
-            ).rename('lulc')
-        else:
-            # Switch to NLCD for 1985-2024. Use 2024 data for 2025.
-            nlcd_year = year if year <= 2024 else 2024
-            nlcd_year = nlcd_ic.filterDate(f'{nlcd_year}-01-01', f'{nlcd_year + 1}-01-01').first()
-            nlcd_mask_1 = nlcd_year.eq(82) # cropland
-            nlcd_mask_2 = nlcd_year.gte(21).And(nlcd_year.lte(24)) # developed
-            nlcd_mask_3 = nlcd_year.eq(11) # open water
-            nlcd_mask = nlcd_mask_1.Or(nlcd_mask_2).Or(nlcd_mask_3)
-            lulc = nlcd_year.updateMask(nlcd_mask).remap(
-                [82, 21, 22, 23, 24, 11],
-                [1, 2, 2, 2, 2, 3] # 1: AGRI, 2: URBAN, 3: SW, 0: other (masked out)
-            ).rename('lulc')
+
+        lulc = _get_lulc_image(
+            year, crs, lulc_scenario,
+            usgs_lulc_historical_ic, lulc_projection_raw_ic,
+            lulc_projection_ensemble_ic, nlcd_ic,
+        )
         if year < 2005:
             gw_fraction = gw_fraction_img_dict['2000']
         elif 2005 <= year < 2010:
@@ -830,14 +870,11 @@ def mosaic_tiles(
 
     def _mosaic_year(year):
         tile_list = glob(f'{input_tile_dir}*{year}.tif')
-        tiles = ' '.join(tile_list)
         merged_tif = f'{output_dir}{output_prefix}_{year}.tif'
         if os.path.exists(merged_tif):
             os.remove(merged_tif)
-        gdal_sys_call = f'{gdal_merge_path} -o {merged_tif} -of GTiff -init 0 {tiles}'
         subprocess.call(
-            gdal_sys_call,
-            shell=True,
+            [gdal_merge_path, '-o', merged_tif, '-of', 'GTiff', '-init', '0'] + tile_list,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
@@ -855,7 +892,9 @@ def mosaic_tiles(
     if not already_mosaicked:
         makedirs(output_dir)
         logger.info('Mosaicking tiles...')
-        gdal_merge_path = f'{os.environ["CONDA_PREFIX"]}/bin/gdal_merge.py'
+        gdal_merge_path = shutil.which('gdal_merge.py')
+        if gdal_merge_path is None:
+            raise FileNotFoundError('gdal_merge.py not found on PATH')
         joblib.Parallel(n_jobs=-1)(
             joblib.delayed(_mosaic_year)(year)
             for year in range(start_year, end_year + 1)
@@ -935,7 +974,7 @@ def create_az_data_parquet(
         makedirs(output_dir)
         if exclude_years is None:
             exclude_years = []
-        data_df = pd.DataFrame()
+        data_df_parts = []
         var_names = [
             'Predictor',
             'GW_Basin',
@@ -997,7 +1036,8 @@ def create_az_data_parquet(
                 df['soil_depth_mm'] = df.soil_depth_cm * 10 # convert from cm to mm
                 df['Year'] = year
                 df = df.drop(columns=['awc_in', 'soil_depth_cm'])
-                data_df = pd.concat([data_df, df])
+                data_df_parts.append(df)
+        data_df = pd.concat(data_df_parts, ignore_index=True) if data_df_parts else pd.DataFrame()
         # Set annual_irr_fraction to 0 where annual_crop_fraction is 0
         data_df.loc[data_df.annual_crop_fraction == 0, 'annual_irr_fraction'] = 0.0
         # Fit a linear regression of annual_irr_fraction on annual_crop_fraction using
@@ -1148,10 +1188,8 @@ def split_data_train_test_ratio(
     if not test_year:
         selection_var = input_df[crop_col].unique()
         selection_label = crop_col
-    x_train_df = pd.DataFrame()
-    x_test_df = pd.DataFrame()
-    y_train_df = pd.DataFrame()
-    y_test_df = pd.DataFrame()
+    x_train_parts, x_test_parts = [], []
+    y_train_parts, y_test_parts = [], []
     for svar in selection_var:
         selected_data = input_df.loc[input_df[selection_label] == svar]
         y = selected_data[pred_attr].to_frame()
@@ -1159,11 +1197,12 @@ def split_data_train_test_ratio(
             selected_data, y, shuffle=shuffle,
             random_state=random_state, test_size=test_size
         )
-        x_train_df = pd.concat([x_train_df, x_train])
-        x_test_df = pd.concat([x_test_df, x_test])
-        y_train_df = pd.concat([y_train_df, y_train])
-        y_test_df = pd.concat([y_test_df, y_test])
-    return x_train_df, x_test_df, y_train_df, y_test_df
+        x_train_parts.append(x_train)
+        x_test_parts.append(x_test)
+        y_train_parts.append(y_train)
+        y_test_parts.append(y_test)
+    return (pd.concat(x_train_parts), pd.concat(x_test_parts),
+            pd.concat(y_train_parts), pd.concat(y_test_parts))
 
 
 def split_data_yearly(
@@ -1188,15 +1227,15 @@ def split_data_yearly(
         tuple[pd.DataFrame, ...]: A tuple of X_train, X_test, y_train, y_test data frames.
     """
     years = input_df[year_col].unique()
-    x_train_df = pd.DataFrame()
-    x_test_df = pd.DataFrame()
+    x_train_parts, x_test_parts = [], []
     for year in years:
         selected_data = input_df.loc[input_df[year_col] == year]
-        x_t = selected_data
         if year not in test_years:
-            x_train_df = pd.concat([x_train_df, x_t])
+            x_train_parts.append(selected_data)
         else:
-            x_test_df = pd.concat([x_test_df, x_t])
+            x_test_parts.append(selected_data)
+    x_train_df = pd.concat(x_train_parts) if x_train_parts else pd.DataFrame()
+    x_test_df = pd.concat(x_test_parts) if x_test_parts else pd.DataFrame()
     y_train_df = x_train_df[pred_attr].to_frame()
     y_test_df = x_test_df[pred_attr].to_frame()
     if shuffle:
@@ -1229,15 +1268,15 @@ def split_spatial(
         tuple[pd.DataFrame, ...]: A tuple of X_train, X_test, y_train, y_test data frames.
     """
     gw_basins = input_df[gw_basin_col].unique()
-    x_train_df = pd.DataFrame()
-    x_test_df = pd.DataFrame()
+    x_train_parts, x_test_parts = [], []
     for gw_basin in gw_basins:
         selected_data = input_df.loc[input_df[gw_basin_col] == gw_basin]
-        x_t = selected_data
         if gw_basin not in test_gw_basins:
-            x_train_df = pd.concat([x_train_df, x_t])
+            x_train_parts.append(selected_data)
         else:
-            x_test_df = pd.concat([x_test_df, x_t])
+            x_test_parts.append(selected_data)
+    x_train_df = pd.concat(x_train_parts) if x_train_parts else pd.DataFrame()
+    x_test_df = pd.concat(x_test_parts) if x_test_parts else pd.DataFrame()
     y_train_df = x_train_df[pred_attr].to_frame()
     y_test_df = x_test_df[pred_attr].to_frame()
     if shuffle:
@@ -1342,7 +1381,7 @@ def process_outliers(
         input_df.loc[invalid_idx, target_attr] = np.nan
         num_outliers = invalid_idx.sum()
     input_df = input_df.dropna()
-    logger.info('Old DF rows = {}, New DF rows = {}'.format(init_rows, input_df.shape[0]))
+    logger.info(f'Old DF rows = {init_rows}, New DF rows = {input_df.shape[0]}')
     logger.info(f'{num_outliers} outliers removed...')
     return input_df
 
@@ -1479,8 +1518,10 @@ def create_train_test_data(
         gw_basin_train.to_parquet(gw_basin_train_file, index=False)
         gw_basin_test.to_parquet(gw_basin_test_file, index=False)
         if scaling:
-            pickle.dump(x_scaler, open(x_scaler_file, mode='wb'))
-            pickle.dump(y_scaler, open(y_scaler_file, mode='wb'))
+            with open(x_scaler_file, 'wb') as f:
+                pickle.dump(x_scaler, f)
+            with open(y_scaler_file, 'wb') as f:
+                pickle.dump(y_scaler, f)
     else:
         x_train = pd.read_parquet(x_train_file)
         x_test = pd.read_parquet(x_test_file)
@@ -1491,8 +1532,10 @@ def create_train_test_data(
         gw_basin_train = pd.read_parquet(gw_basin_train_file)
         gw_basin_test = pd.read_parquet(gw_basin_test_file)
         if scaling:
-            x_scaler = pickle.load(open(x_scaler_file, mode='rb'))
-            y_scaler = pickle.load(open(y_scaler_file, mode='rb'))
+            with open(x_scaler_file, 'rb') as f:
+                x_scaler = pickle.load(f)
+            with open(y_scaler_file, 'rb') as f:
+                y_scaler = pickle.load(f)
     ret_vals = (
         x_train, x_test, y_train.to_numpy().ravel(), y_test.to_numpy().ravel(),
         x_scaler, y_scaler, year_train, year_test, gw_basin_train, gw_basin_test

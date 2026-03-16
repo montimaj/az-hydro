@@ -26,13 +26,13 @@ All sampled values are floored at zero.
 import logging
 from pathlib import Path
 
+import geopandas as gpd
 import numpy as np
 import pandas as pd
-import geopandas as gpd
 import rasterio as rio
 
-from hydrolibs.sysops import makedirs
 from hydrolibs.partitionops import CATEGORIES
+from hydrolibs.sysops import makedirs
 
 logger = logging.getLogger(__name__)
 

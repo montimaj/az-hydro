@@ -22,16 +22,26 @@ Usage:
     python export_maca_monthly_eto.py [--start-year 2026] [--end-year 2099] [--no-wait]
 """
 
-import ee
-from openet.refetgee import Daily
-from config import (
-    init_ee, get_az_geometry, create_ic_asset, list_existing_assets,
-    list_pending_task_descriptions, export_image, wait_for_tasks,
-    get_export_parser,
-    ASSET_PREFIX, MACA_SCALE, MACA_BANDS, MACA_MODELS, MACA_SCENARIOS,
-    MONTH_NAMES
-)
 import logging
+
+import ee
+from config import (
+    ASSET_PREFIX,
+    MACA_BANDS,
+    MACA_MODELS,
+    MACA_SCALE,
+    MACA_SCENARIOS,
+    MONTH_NAMES,
+    create_ic_asset,
+    export_image,
+    get_az_geometry,
+    get_export_parser,
+    init_ee,
+    list_existing_assets,
+    list_pending_task_descriptions,
+    wait_for_tasks,
+)
+from openet.refetgee import Daily
 
 logger = logging.getLogger(__name__)
 

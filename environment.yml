@@ -1,0 +1,24 @@
+name: azhydro
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - gdal
+  - rioxarray
+  - geopandas
+  - lightgbm
+  - py-xgboost
+  - earthengine-api
+  - rasterstats
+  - seaborn
+  - openpyxl
+  - optuna
+  - optuna-dashboard
+  - scikit-explain
+  - catboost
+  - dask-ml
+  - dask-jobqueue
+  - swifter
+  - pyarrow
+  - pip:
+      - openet-refet-gee
