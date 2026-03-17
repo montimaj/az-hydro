@@ -92,10 +92,10 @@ def copy_files(
     Returns:
         None
     """
-    file_list = glob(input_dir + pattern)
+    file_list = glob(os.path.join(input_dir, pattern))
     for f in file_list:
         file_name = f[f.rfind(os.sep) + 1:]
-        outfile = f'{target_dir}{prefix}{file_name}'
+        outfile = os.path.join(target_dir, f'{prefix}{file_name}')
         if verbose:
             logger.info(f'Copying {f} to {outfile} ...')
         shutil.copyfile(f, outfile)

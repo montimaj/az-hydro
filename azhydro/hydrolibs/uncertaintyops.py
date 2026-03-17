@@ -475,13 +475,13 @@ def compute_sigma_maca(
     raster_dir = os.path.join(output_dir, 'Sigma_MACA/Rasters')
     makedirs(raster_dir)
 
-    ref_basin_file = f'{pred_data_dir}GW_Basin_{year_list[0]}.tif'
+    ref_basin_file = os.path.join(pred_data_dir, f'GW_Basin_{year_list[0]}.tif')
     basin_arr, bfile = read_raster_as_arr(ref_basin_file, get_file=True)
     basin_flat = basin_arr.ravel()
     valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
     raster_shape = basin_arr.shape
     bfile.close()
-    ref_raster_file = f'{pred_data_dir}Predictor_{year_list[0]}.tif'
+    ref_raster_file = os.path.join(pred_data_dir, f'Predictor_{year_list[0]}.tif')
 
     pixel_area_m2 = mosaic_res ** 2
     mm_to_m3 = pixel_area_m2 / 1000
@@ -498,9 +498,9 @@ def compute_sigma_maca(
             num_workers=40, worker_memory='1G',
             gee_scale=mosaic_res, verbose=False, gcm=gcm,
         )
-        gcm_mosaic_dir = (
-            f'{os.path.dirname(pred_data_dir.rstrip("/"))}/'
-            f'../GEE_Mosaics_{mosaic_res}m_{gcm}/'
+        gcm_mosaic_dir = os.path.join(
+            os.path.dirname(pred_data_dir.rstrip(os.sep)),
+            '..', f'GEE_Mosaics_{int(mosaic_res)}m_{gcm}'
         )
         dataops.mosaic_tiles(
             gcm_tile_dir, gcm_mosaic_dir,
@@ -524,7 +524,7 @@ def compute_sigma_maca(
         gcm_preds = []
         gcm_cats = []
         for gcm in MACA_REPRESENTATIVE_GCMS:
-            gcm_raster = f'{gcm_mosaic_dirs[gcm]}Predictor_{year}.tif'
+            gcm_raster = os.path.join(gcm_mosaic_dirs[gcm], f'Predictor_{year}.tif')
             gcm_year_df = year_df.copy()
             for col, bidx in zip(MACA_CLIMATE_COLS, MACA_CLIMATE_BAND_INDICES):
                 band_arr = read_raster_as_arr(gcm_raster, band=bidx, get_file=False)
@@ -604,13 +604,13 @@ def compute_sigma_model(
     raster_dir = os.path.join(base_dir, 'Rasters')
     makedirs(raster_dir)
 
-    ref_basin_file = f'{pred_data_dir}GW_Basin_{year_list[0]}.tif'
+    ref_basin_file = os.path.join(pred_data_dir, f'GW_Basin_{year_list[0]}.tif')
     basin_arr, bfile = read_raster_as_arr(ref_basin_file, get_file=True)
     basin_flat = basin_arr.ravel()
     valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
     raster_shape = basin_arr.shape
     bfile.close()
-    ref_raster_file = f'{pred_data_dir}Predictor_{year_list[0]}.tif'
+    ref_raster_file = os.path.join(pred_data_dir, f'Predictor_{year_list[0]}.tif')
 
     pixel_area_m2 = mosaic_res ** 2
     mm_to_m3 = pixel_area_m2 / 1000
@@ -734,13 +734,13 @@ def compute_sigma_irr(
     raster_dir = os.path.join(base_dir, 'Rasters')
     makedirs(raster_dir)
 
-    ref_basin_file = f'{pred_data_dir}GW_Basin_{year_list[0]}.tif'
+    ref_basin_file = os.path.join(pred_data_dir, f'GW_Basin_{year_list[0]}.tif')
     basin_arr, bfile = read_raster_as_arr(ref_basin_file, get_file=True)
     basin_flat = basin_arr.ravel()
     valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
     raster_shape = basin_arr.shape
     bfile.close()
-    ref_raster_file = f'{pred_data_dir}Predictor_{year_list[0]}.tif'
+    ref_raster_file = os.path.join(pred_data_dir, f'Predictor_{year_list[0]}.tif')
 
     pixel_area_m2 = mosaic_res ** 2
     mm_to_m3 = pixel_area_m2 / 1000
@@ -909,13 +909,13 @@ def compute_sigma_lulc(
     raster_dir = os.path.join(base_dir, 'Rasters')
     makedirs(raster_dir)
 
-    ref_basin_file = f'{pred_data_dir}GW_Basin_{year_list[0]}.tif'
+    ref_basin_file = os.path.join(pred_data_dir, f'GW_Basin_{year_list[0]}.tif')
     basin_arr, bfile = read_raster_as_arr(ref_basin_file, get_file=True)
     basin_flat = basin_arr.ravel()
     valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
     raster_shape = basin_arr.shape
     bfile.close()
-    ref_raster_file = f'{pred_data_dir}Predictor_{year_list[0]}.tif'
+    ref_raster_file = os.path.join(pred_data_dir, f'Predictor_{year_list[0]}.tif')
 
     pixel_area_m2 = mosaic_res ** 2
     mm_to_m3 = pixel_area_m2 / 1000
@@ -943,9 +943,9 @@ def compute_sigma_lulc(
             gee_scale=mosaic_res, verbose=False,
             lulc_scenario=scenario,
         )
-        sc_mosaic_dir = (
-            f'{os.path.dirname(pred_data_dir.rstrip("/"))}'
-            f'/../GEE_Mosaics_{mosaic_res}m_LULC_{scenario}/'
+        sc_mosaic_dir = os.path.join(
+            os.path.dirname(pred_data_dir.rstrip(os.sep)),
+            '..', f'GEE_Mosaics_{int(mosaic_res)}m_LULC_{scenario}'
         )
         dataops.mosaic_tiles(
             sc_tile_dir, sc_mosaic_dir,
@@ -969,7 +969,7 @@ def compute_sigma_lulc(
         scenario_preds = []
         scenario_cats = []
         for scenario in USGS_LULC_SCENARIOS:
-            sc_raster = f'{scenario_mosaic_dirs[scenario]}Predictor_{year}.tif'
+            sc_raster = os.path.join(scenario_mosaic_dirs[scenario], f'Predictor_{year}.tif')
             sc_year_df = year_df.copy()
 
             # Read per-scenario LULC class and crop fraction bands
@@ -1076,13 +1076,13 @@ def compute_sigma_gw(
     raster_dir = os.path.join(base_dir, 'Rasters')
     makedirs(raster_dir)
 
-    ref_basin_file = f'{pred_data_dir}GW_Basin_{year_list[0]}.tif'
+    ref_basin_file = os.path.join(pred_data_dir, f'GW_Basin_{year_list[0]}.tif')
     basin_arr, bfile = read_raster_as_arr(ref_basin_file, get_file=True)
     basin_flat = basin_arr.ravel()
     valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
     raster_shape = basin_arr.shape
     bfile.close()
-    ref_raster_file = f'{pred_data_dir}Predictor_{year_list[0]}.tif'
+    ref_raster_file = os.path.join(pred_data_dir, f'Predictor_{year_list[0]}.tif')
 
     pixel_area_m2 = mosaic_res ** 2
     mm_to_m3 = pixel_area_m2 / 1000
@@ -1092,11 +1092,11 @@ def compute_sigma_gw(
     # Band 12 = annual_gw_fraction
     snapshot_gw_fracs = {}
     for snap_year in GW_FRACTION_SNAPSHOTS:
-        raster_file = f'{pred_data_dir}Predictor_{snap_year}.tif'
+        raster_file = os.path.join(pred_data_dir, f'Predictor_{snap_year}.tif')
         if not os.path.exists(raster_file):
             # Fall back to nearest available year
             for fallback in year_list:
-                rf = f'{pred_data_dir}Predictor_{fallback}.tif'
+                rf = os.path.join(pred_data_dir, f'Predictor_{fallback}.tif')
                 if os.path.exists(rf):
                     raster_file = rf
                     break
@@ -1335,13 +1335,13 @@ def compute_sigma_total(
     raster_dir = os.path.join(base_dir, 'Rasters')
     makedirs(raster_dir)
 
-    ref_basin_file = f'{pred_data_dir}GW_Basin_{year_list[0]}.tif'
+    ref_basin_file = os.path.join(pred_data_dir, f'GW_Basin_{year_list[0]}.tif')
     basin_arr, bfile = read_raster_as_arr(ref_basin_file, get_file=True)
     basin_flat = basin_arr.ravel()
     valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
     raster_shape = basin_arr.shape
     bfile.close()
-    ref_raster_file = f'{pred_data_dir}Predictor_{year_list[0]}.tif'
+    ref_raster_file = os.path.join(pred_data_dir, f'Predictor_{year_list[0]}.tif')
 
     pixel_area_m2 = mosaic_res ** 2
     mm_to_m3 = pixel_area_m2 / 1000
@@ -1425,7 +1425,7 @@ def compute_sigma_total(
         sigma_grid = sigma_grid.reshape(raster_shape)
 
         # Compute CV grid from prediction raster
-        pred_file = f'{prediction_raster_dir}Predicted_GW_{year}_mm.tif'
+        pred_file = os.path.join(prediction_raster_dir, f'Predicted_GW_{year}_mm.tif')
         if os.path.exists(pred_file):
             pred_arr = read_raster_as_arr(pred_file, get_file=False)
             with np.errstate(invalid='ignore', divide='ignore'):
@@ -1593,9 +1593,9 @@ def compute_basin_sigma_total(output_dir: str) -> None:
         )
         merged.sort_values(['Year', 'Region'], inplace=True)
         merged[out_cols].to_csv(
-            f'{total_dir}{level}_Sigma_Total.csv', index=False,
+            os.path.join(total_dir, f'{level}_Sigma_Total.csv'), index=False,
         )
-        logger.info(f'  Wrote {total_dir}{level}_Sigma_Total.csv')
+        logger.info(f'  Wrote {total_dir}/{level}_Sigma_Total.csv')
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1632,7 +1632,7 @@ def compute_sigma_cu(
     yearly_stats = {}
 
     for year in range(MACA_FUTURE_START, end_year + 1):
-        ensemble_raster = f'{pred_data_dir}Predictor_{year}.tif'
+        ensemble_raster = os.path.join(pred_data_dir, f'Predictor_{year}.tif')
         if not os.path.exists(ensemble_raster):
             continue
 
@@ -1645,7 +1645,7 @@ def compute_sigma_cu(
         cu_stack, cu_gw_stack, cu_sw_stack = [], [], []
 
         for gcm in MACA_REPRESENTATIVE_GCMS:
-            gcm_raster = f'{gcm_mosaic_dirs[gcm]}Predictor_{year}.tif'
+            gcm_raster = os.path.join(gcm_mosaic_dirs[gcm], f'Predictor_{year}.tif')
             if not os.path.exists(gcm_raster):
                 continue
             with rio.open(gcm_raster) as src:
@@ -1677,7 +1677,7 @@ def compute_sigma_cu(
             sigma_arr = np.nanstd(
                 np.stack(stack), axis=0, ddof=1,
             ).astype(np.float32)
-            out_path = f'{sigma_cu_dir}Sigma_{label}_mm_{year}.tif'
+            out_path = os.path.join(sigma_cu_dir, f'Sigma_{label}_mm_{year}.tif')
             with rio.open(out_path, 'w', **raster_profile) as dst:
                 dst.write(sigma_arr, 1)
 
@@ -1834,7 +1834,7 @@ def run_uncertainty_quantification(
     )
     full_pred_dir = os.path.join(model_dir, 'Full_Prediction_XGB')
     augment_prediction_rasters(
-        sigma_total_raster_dir=f'{unc_dir}Sigma_Total/Rasters/',
+        sigma_total_raster_dir=os.path.join(unc_dir, 'Sigma_Total', 'Rasters'),
         prediction_base_dir=prediction_base_dir,
         start_year=start_year,
         end_year=end_year,
@@ -1864,7 +1864,7 @@ def run_uncertainty_quantification(
 
     # ── Augment CU rasters ──
     augment_cu_rasters(
-        sigma_cu_raster_dir=f'{unc_dir}Sigma_CU/Rasters/',
+        sigma_cu_raster_dir=os.path.join(unc_dir, 'Sigma_CU', 'Rasters'),
         prediction_dir=full_pred_dir,
         start_year=start_year,
         end_year=end_year,
@@ -1941,7 +1941,7 @@ def augment_prediction_rasters(
     }
 
     for unit, subdir in unit_subdirs.items():
-        pred_dir = f'{prediction_base_dir}{subdir}'
+        pred_dir = os.path.join(prediction_base_dir, subdir)
         scale = sigma_scale[unit]
 
         band_descriptions = [
@@ -1951,8 +1951,8 @@ def augment_prediction_rasters(
 
         for year in range(start_year, end_year + 1):
             pred_file = os.path.join(pred_dir, f'Predicted_GW_{year}_{unit}.tif')
-            sigma_file = (
-                f'{sigma_total_raster_dir}Sigma_Total_mm_{year}.tif'
+            sigma_file = os.path.join(
+                sigma_total_raster_dir, f'Sigma_Total_mm_{year}.tif'
             )
 
             if not os.path.exists(pred_file) or not os.path.exists(sigma_file):
@@ -2117,7 +2117,7 @@ def augment_cu_rasters(
             ]
 
             for year in range(start_year, end_year + 1):
-                cu_file = f'{cu_dir}{cu_cat}_{year}_{unit}.tif'
+                cu_file = os.path.join(cu_dir, f'{cu_cat}_{year}_{unit}.tif')
                 if not os.path.exists(cu_file):
                     continue
 
@@ -2126,8 +2126,8 @@ def augment_cu_rasters(
                     profile = src.profile.copy()
 
                 # Read σ_CU in mm, scale to target unit
-                sigma_file = (
-                    f'{sigma_cu_raster_dir}Sigma_{cu_cat}_mm_{year}.tif'
+                sigma_file = os.path.join(
+                    sigma_cu_raster_dir, f'Sigma_{cu_cat}_mm_{year}.tif'
                 )
                 if os.path.exists(sigma_file):
                     with rio.open(sigma_file) as src:
@@ -2177,9 +2177,9 @@ def augment_ie_rasters(
         wd_dir = os.path.join(prediction_dir, f'{wd_cat}_Rasters/Depth_mm')
 
         for year in range(start_year, end_year + 1):
-            ie_file = f'{ie_dir}{ie_cat}_{year}.tif'
-            cu_file = f'{cu_dir}{cu_cat}_{year}_mm.tif'
-            wd_file = f'{wd_dir}{wd_cat}_{year}_mm.tif'
+            ie_file = os.path.join(ie_dir, f'{ie_cat}_{year}.tif')
+            cu_file = os.path.join(cu_dir, f'{cu_cat}_{year}_mm.tif')
+            wd_file = os.path.join(wd_dir, f'{wd_cat}_{year}_mm.tif')
 
             if not (os.path.exists(ie_file) and os.path.exists(cu_file)
                     and os.path.exists(wd_file)):
@@ -2320,7 +2320,7 @@ def _replot_with_uncertainty(
 
     # ── 1. Total pumping ──────────────────────────────────────────────────
     sigma_total = _read_sigma_summary(
-        f'{unc_dir}Sigma_Total/Uncertainty_Summary_Total.csv')
+        os.path.join(unc_dir, 'Sigma_Total', 'Uncertainty_Summary_Total.csv'))
     if sigma_total:
         yearly_preds, actual_data = _read_predictions_csv(
             os.path.join(prediction_dir, 'Full_Period_Time_Series.csv'))
@@ -2378,7 +2378,7 @@ def _replot_with_uncertainty(
 
         # CU categories (use σ_CU for Irrigation_CU, CV approx for others)
         cu_sigma = _read_sigma_summary(
-            f'{unc_dir}Sigma_CU/Uncertainty_Summary_CU.csv')
+            os.path.join(unc_dir, 'Sigma_CU', 'Uncertainty_Summary_CU.csv'))
         cu_titles = {
             'Irrigation_CU': 'Irrigation Consumptive Use',
             'Irrigation_GW_CU': 'Irrigation GW Consumptive Use',
@@ -2387,7 +2387,7 @@ def _replot_with_uncertainty(
         for cu_cat, title in cu_titles.items():
             cu_dir = os.path.join(prediction_dir, cu_cat)
             cu_preds, _ = _read_predictions_csv(
-                f'{cu_dir}Full_Period_Time_Series.csv')
+                os.path.join(cu_dir, 'Full_Period_Time_Series.csv'))
             if not cu_preds:
                 continue
             if cu_cat == 'Irrigation_CU' and cu_sigma:
@@ -2412,7 +2412,7 @@ def _replot_with_uncertainty(
 
     # ── 3. Basin time series (total only) ─────────────────────────────────
     basin_sigma = _read_region_sigma(
-        f'{unc_dir}Sigma_Total/Basin_Sigma_Total.csv')
+        os.path.join(unc_dir, 'Sigma_Total', 'Basin_Sigma_Total.csv'))
     if basin_sigma:
         basin_yearly, actual_basin = _read_basin_yearly(
             os.path.join(prediction_dir, 'Basin_Time_Series', 'Basin_Annual_GW.csv'),
@@ -2427,7 +2427,7 @@ def _replot_with_uncertainty(
 
     # ── 4. Subbasin time series (total only) ──────────────────────────────
     subbasin_sigma = _read_region_sigma(
-        f'{unc_dir}Sigma_Total/Subbasin_Sigma_Total.csv')
+        os.path.join(unc_dir, 'Sigma_Total', 'Subbasin_Sigma_Total.csv'))
     if subbasin_sigma and subbasin_shp and os.path.exists(subbasin_shp):
         subbasin_yearly, actual_subbasin = _read_basin_yearly(
             os.path.join(prediction_dir, 'Subbasin_Time_Series', 'Subbasin_Annual_GW.csv'),
@@ -2880,7 +2880,7 @@ def _replot_from_augmented_rasters(
             plt.tight_layout()
             safe = zone.replace(' ', '_').replace('.', '')
             fig.savefig(
-                f'{plot_dir}{safe}_Time_Series.png', dpi=600,
+                os.path.join(plot_dir, f'{safe}_Time_Series.png'), dpi=600,
                 bbox_inches='tight',
             )
             plt.close()
@@ -2990,7 +2990,7 @@ def _plot_uncertainty_time_series(
     for name, comp in sigma_components.items():
         if not comp:
             continue
-        comp_dir = f'{unc_dir}Sigma_{name}/'
+        comp_dir = os.path.join(unc_dir, f'Sigma_{name}')
         makedirs(comp_dir)
         yearly = {}
         for year in sorted(comp.keys()):
@@ -3030,11 +3030,11 @@ def _plot_component_basin_sigma(
     and writes PNGs into ``{comp_dir}Plots/``.
     """
     apply_journal_style()
-    plot_dir = f'{comp_dir}Plots/'
+    plot_dir = os.path.join(comp_dir, 'Plots')
     makedirs(plot_dir)
 
     for level in ('Basin', 'Subbasin'):
-        csv_path = f'{comp_dir}{level}_Sigma_{comp_name}.csv'
+        csv_path = os.path.join(comp_dir, f'{level}_Sigma_{comp_name}.csv')
         if not os.path.exists(csv_path):
             continue
         df = pd.read_csv(csv_path)
@@ -3116,7 +3116,7 @@ def _plot_component_basin_sigma(
 
             safe_name = region.replace(' ', '_').replace('/', '_')
             fig.savefig(
-                f'{plot_dir}{level}_{safe_name}_Sigma_{comp_name}.png',
+                os.path.join(plot_dir, f'{level}_{safe_name}_Sigma_{comp_name}.png'),
                 dpi=600, bbox_inches='tight',
             )
             plt.close()
@@ -3156,7 +3156,7 @@ def _plot_component_basin_sigma(
         ax1.legend(loc='upper left', fontsize=7, ncol=3, framealpha=0.9)
         plt.tight_layout()
         fig.savefig(
-            f'{plot_dir}{level}_All_Sigma_{comp_name}_Summary.png',
+            os.path.join(plot_dir, f'{level}_All_Sigma_{comp_name}_Summary.png'),
             dpi=600, bbox_inches='tight',
         )
         plt.close()
@@ -3184,11 +3184,11 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
     )
 
     apply_journal_style()
-    plot_dir = f'{unc_dir}Plots/Basin_Sigma/'
+    plot_dir = os.path.join(unc_dir, 'Plots', 'Basin_Sigma')
     makedirs(plot_dir)
 
     for level in ('Basin', 'Subbasin'):
-        csv_path = f'{unc_dir}Sigma_Total/{level}_Sigma_Total.csv'
+        csv_path = os.path.join(unc_dir, 'Sigma_Total', f'{level}_Sigma_Total.csv')
         if not os.path.exists(csv_path):
             continue
         df = pd.read_csv(csv_path)
@@ -3272,7 +3272,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
 
             safe_name = region.replace(' ', '_').replace('/', '_')
             fig.savefig(
-                f'{plot_dir}{level}_{safe_name}_Sigma.png',
+                os.path.join(plot_dir, f'{level}_{safe_name}_Sigma.png'),
                 dpi=600, bbox_inches='tight',
             )
             plt.close()
@@ -3312,7 +3312,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
         ax1.legend(loc='upper left', fontsize=7, ncol=3, framealpha=0.9)
         plt.tight_layout()
         fig.savefig(
-            f'{plot_dir}{level}_All_Sigma_Summary.png',
+            os.path.join(plot_dir, f'{level}_All_Sigma_Summary.png'),
             dpi=600, bbox_inches='tight',
         )
         plt.close()

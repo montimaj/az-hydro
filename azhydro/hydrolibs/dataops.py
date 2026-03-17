@@ -869,7 +869,7 @@ def mosaic_tiles(
     """
 
     def _mosaic_year(year):
-        tile_list = glob(f'{input_tile_dir}*{year}.tif')
+        tile_list = glob(os.path.join(input_tile_dir, f'*{year}.tif'))
         merged_tif = os.path.join(output_dir, f'{output_prefix}_{year}.tif')
         if os.path.exists(merged_tif):
             os.remove(merged_tif)
@@ -988,7 +988,7 @@ def create_az_data_parquet(
             df = pd.DataFrame()
             if year not in exclude_years:
                 for var_name in var_names:
-                    raster_file = f'{input_file_dir}{var_name}_{year}.tif'
+                    raster_file = os.path.join(input_file_dir, f'{var_name}_{year}.tif')
                     if var_name == 'Predictor':
                         for band_num, band_name in enumerate(data_band_names):
                             try:
@@ -1026,8 +1026,8 @@ def create_az_data_parquet(
                         else:
                             df[var_name] = raster_arr
                 # We will later predict GW pumping for years outside 1984-2024
-                gw_file = f'{gw_data_dir}GW_{year}.tif' if 1984 <= year <= 2024 else sorted(
-                    glob(f'{gw_data_dir}GW_*.tif'))[0]
+                gw_file = os.path.join(gw_data_dir, f'GW_{year}.tif') if 1984 <= year <= 2024 else sorted(
+                    glob(os.path.join(gw_data_dir, 'GW_*.tif')))[0]
                 df['gw_pumping_mm'] = read_raster_as_arr(gw_file, get_file=False).ravel()
                 lon_grid, lat_grid = get_xy_grids_from_raster(gw_file)
                 df['easting_m'] = lon_grid.ravel()

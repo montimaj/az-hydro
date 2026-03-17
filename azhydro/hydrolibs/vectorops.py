@@ -374,7 +374,7 @@ def shps2rasters(
     """
 
     def _convert(shp_file):
-        outfile_path = os.path.join(output_dir, shp_file)[shp_file.rfind(os.sep) + 1: shp_file.rfind('.') + 1] + 'tif'
+        outfile_path = os.path.join(output_dir, os.path.splitext(os.path.basename(shp_file))[0] + '.tif')
         shp2raster(
             shp_file,
             outfile_path=outfile_path,

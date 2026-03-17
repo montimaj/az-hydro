@@ -96,7 +96,7 @@ def crop_gw_rasters(
         str: Final cropped raster directory path.
     """
 
-    cropped_dir = f'{output_gw_dir}GW_Cropped/'
+    cropped_dir = os.path.join(output_gw_dir, 'GW_Cropped')
     if not already_cropped:
         makedirs(cropped_dir)
         rops.crop_rasters(
@@ -159,7 +159,7 @@ def preprocess_gw_csv(
 
     if not already_preprocessed:
         makedirs(output_dir)
-        csv_files = glob(f'{input_gw_csv_dir}*.csv')
+        csv_files = glob(os.path.join(input_gw_csv_dir, '*.csv'))
         num_cores = multiprocessing.cpu_count() - 2
         logger.info('Updating Well Registry shapefiles...')
         Parallel(n_jobs=num_cores)(delayed(_process_csv)(f) for f in csv_files)
@@ -193,7 +193,7 @@ def fix_gw_raster_values(
     """
 
     for raster_file in glob(os.path.join(input_raster_dir, gw_pattern)):
-        out_raster = outdir + raster_file[raster_file.rfind(os.sep) + 1:]
+        out_raster = os.path.join(outdir, os.path.basename(raster_file))
         raster_arr, raster_file = rops.read_raster_as_arr(raster_file)
         no_data = rops.az_nodata()
         raster_arr[np.isnan(raster_arr)] = no_data
@@ -239,7 +239,7 @@ def create_gw_volume_rasters(
 
     if not already_created:
         logger.info('Creating GW withdrawal volume (acreft) rasters...')
-        gw_volume_dir_uncorrected = f'{output_gw_dir}Uncorrected_GW_Volumes/'
+        gw_volume_dir_uncorrected = os.path.join(output_gw_dir, 'Uncorrected_GW_Volumes')
         makedirs(gw_volume_dir_uncorrected)
         vops.shps2rasters(
             input_gw_dir,
@@ -293,7 +293,7 @@ def create_gw_depth_rasters(
         nodata = rops.az_nodata()
 
         def _convert_volume_to_depth(gw_volume_file):
-            gw_depth_file = f'{output_gw_dir}{gw_volume_file[gw_volume_file.rfind(os.sep) + 1:]}'
+            gw_depth_file = os.path.join(output_gw_dir, gw_volume_file[gw_volume_file.rfind(os.sep) + 1:])
             gw_vol_arr, gw_vol_ref = rops.read_raster_as_arr(gw_volume_file)
             xres, yres = gw_vol_ref.res
             gw_depth_arr = gw_vol_arr * 1.233 / abs(xres * yres * 1e-6)
@@ -583,7 +583,7 @@ def create_well_density_raster(
     # Save as temp shapefile
     tmp_dir = os.path.join(output_dir, '_well_temp')
     makedirs(tmp_dir)
-    tmp_shp = f'{tmp_dir}wells.shp'
+    tmp_shp = os.path.join(tmp_dir, 'wells.shp')
     gdf[['_count', 'geometry']].to_file(tmp_shp)
 
     # Rasterize: well count per pixel

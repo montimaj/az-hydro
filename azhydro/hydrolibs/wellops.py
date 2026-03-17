@@ -232,7 +232,7 @@ def create_well_package(
     for yi, year in enumerate(range(start_year, end_year + 1)):
         sampled_any = False
         for ci, (cat, mm_dir, prefix) in enumerate(cat_mm_info):
-            raster_path = f'{mm_dir}{prefix}_{year}_mm.tif'
+            raster_path = os.path.join(mm_dir, f'{prefix}_{year}_mm.tif')
             try:
                 with rio.open(raster_path) as src:
                     vals = np.array(

@@ -1622,9 +1622,9 @@ def create_basin_time_series(
             actual_df[['Year', 'Basin', 'Actual_Depth_mm', 'Actual_Volume_AF']],
             on=['Year', 'Basin'], how='left',
         )
-        merged.to_csv(f'{ts_dir}Basin_Annual_GW.csv', index=False)
+        merged.to_csv(os.path.join(ts_dir, 'Basin_Annual_GW.csv'), index=False)
     else:
-        df.to_csv(f'{ts_dir}Basin_Annual_GW.csv', index=False)
+        df.to_csv(os.path.join(ts_dir, 'Basin_Annual_GW.csv'), index=False)
 
     basins = sorted(df.Basin.unique())
     n_basins = len(basins)
@@ -1663,7 +1663,7 @@ def create_basin_time_series(
     ax.grid(True, alpha=0.3, linestyle='--')
     _add_m3_twinx(ax)
     plt.tight_layout()
-    fig.savefig(f'{ts_dir}All_Basins_Time_Series.png', dpi=600, bbox_inches='tight')
+    fig.savefig(os.path.join(ts_dir, 'All_Basins_Time_Series.png'), dpi=600, bbox_inches='tight')
     plt.close()
 
     # --- Individual basin plots (2-panel: depth + volume) -------------------
@@ -1735,10 +1735,10 @@ def create_basin_time_series(
         _add_m3_twinx(ax2)
         plt.tight_layout()
         safe = basin.replace(' ', '_')
-        fig.savefig(f'{ts_dir}{safe}_Time_Series.png', dpi=600, bbox_inches='tight')
+        fig.savefig(os.path.join(ts_dir, f'{safe}_Time_Series.png'), dpi=600, bbox_inches='tight')
         plt.close()
 
-        bdf.to_csv(f'{ts_dir}{safe}_Annual_GW.csv', index=False)
+        bdf.to_csv(os.path.join(ts_dir, f'{safe}_Annual_GW.csv'), index=False)
 
     logger.info(f'Basin time series saved to {ts_dir}')
 
@@ -1774,9 +1774,9 @@ def create_subbasin_time_series(
             actual_df[['Year', 'Subbasin', 'Actual_Depth_mm', 'Actual_Volume_AF']],
             on=['Year', 'Subbasin'], how='left',
         )
-        merged.to_csv(f'{ts_dir}Subbasin_Annual_GW.csv', index=False)
+        merged.to_csv(os.path.join(ts_dir, 'Subbasin_Annual_GW.csv'), index=False)
     else:
-        df.to_csv(f'{ts_dir}Subbasin_Annual_GW.csv', index=False)
+        df.to_csv(os.path.join(ts_dir, 'Subbasin_Annual_GW.csv'), index=False)
 
     # Map sub-basins → parent AMA/INA for grouped plots
     sub_gdf = gpd.read_file(subbasin_shp)
@@ -1835,7 +1835,7 @@ def create_subbasin_time_series(
     plt.suptitle(f'Annual {label}GW Withdrawal by Sub-basin (1896–2099)',
                  fontweight='bold', fontsize=14, y=1.01)
     plt.tight_layout()
-    fig.savefig(f'{ts_dir}Subbasin_Grouped_Time_Series.png', dpi=600,
+    fig.savefig(os.path.join(ts_dir, 'Subbasin_Grouped_Time_Series.png'), dpi=600,
                 bbox_inches='tight')
     plt.close()
 
@@ -1911,9 +1911,9 @@ def create_subbasin_time_series(
         _add_m3_twinx(ax2)
         plt.tight_layout()
         safe = sb.replace(' ', '_').replace('.', '')
-        fig.savefig(f'{ts_dir}{safe}_Time_Series.png', dpi=600, bbox_inches='tight')
+        fig.savefig(os.path.join(ts_dir, f'{safe}_Time_Series.png'), dpi=600, bbox_inches='tight')
         plt.close()
 
-        sdf.to_csv(f'{ts_dir}{safe}_Annual_GW.csv', index=False)
+        sdf.to_csv(os.path.join(ts_dir, f'{safe}_Annual_GW.csv'), index=False)
 
     logger.info(f'Sub-basin time series saved to {ts_dir}')

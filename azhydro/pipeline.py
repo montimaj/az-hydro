@@ -69,7 +69,7 @@ ADWR_SUBBASIN_SHP = os.path.join(OUTPUT_DIR, 'GW_Data', 'Vector_Reproj', 'ADWR_G
 
 GCLOUD_PROJECT = 'azhydro'
 GCLOUD_BUCKET = 'azhydro'
-TILE_SIZE = 10000 if MOSAIC_RASTER_RES == 30 else 80000
+TILE_SIZE = 80000
 FILL_ATTR = 'AF Pumped'
 AF_MAX_THRESHOLD = 5000.  # max per-well AF; ~3,000 gpm sustained year-round
 MAX_GW = None
@@ -254,7 +254,7 @@ def prepare_data(skip_download: bool = True, load_files: bool = True, verbose: b
     )
 
     # GW basin, sub-basin & well density rasters
-    adwr_subbasin_shp = f'{vector_reproj_dir}ADWR_Groundwater_Subbasin.shp'
+    adwr_subbasin_shp = os.path.join(vector_reproj_dir, 'ADWR_Groundwater_Subbasin.shp')
     gwops.create_gw_basin_rasters(
         az_gw_basin,
         GEE_MOSAIC_DIR,
@@ -378,7 +378,7 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
     strategy_dir = os.path.join(MODEL_DIR, 'Model_Evaluation/Random')
     test_year_limits = ((min(YEAR_LIST), max(YEAR_LIST)),)
 
-    data_dir = f'{strategy_dir}data/'
+    data_dir = os.path.join(strategy_dir, 'data')
     ret_vals = dataops.create_train_test_data(
         az_df, data_dir,
         drop_attr=DROP_ATTRS,
@@ -396,7 +396,7 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
      year_train, year_test,
      basin_train, basin_test) = ret_vals
 
-    comparison_dir = f'{strategy_dir}Model_Comparison/'
+    comparison_dir = os.path.join(strategy_dir, 'Model_Comparison')
     comparison_df = mlops.compare_all_models(
         x_train, x_test, y_train, y_test,
         comparison_dir,
@@ -419,14 +419,14 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
 
     # Per-model visualisations
     for model_name in ml_models:
-        bc_pq = f'{comparison_dir}{model_name}/Predictions_{model_name}_BC.parquet'
-        raw_pq = f'{comparison_dir}{model_name}/Predictions_{model_name}.parquet'
+        bc_pq = os.path.join(comparison_dir, model_name, f'Predictions_{model_name}_BC.parquet')
+        raw_pq = os.path.join(comparison_dir, model_name, f'Predictions_{model_name}.parquet')
         pq = bc_pq if os.path.exists(bc_pq) else raw_pq
         if os.path.exists(pq):
             pred_df = pd.read_parquet(pq)
             mlops.generate_model_visualizations(
                 pred_df=pred_df,
-                output_dir=f'{comparison_dir}{model_name}/Visualizations/',
+                output_dir=os.path.join(comparison_dir, model_name, 'Visualizations'),
                 model_name=model_name,
                 test_case='Random',
                 test_year_limits=test_year_limits,
@@ -465,8 +465,8 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
             test_years.extend(range(s, e + 1))
         test_years = tuple(test_years)
 
-        holdout_dir = f'{temporal_dir}{holdout_name}/'
-        data_dir = f'{holdout_dir}data/'
+        holdout_dir = os.path.join(temporal_dir, holdout_name)
+        data_dir = os.path.join(holdout_dir, 'data')
         ret_vals = dataops.create_train_test_data(
             az_df, data_dir,
             drop_attr=DROP_ATTRS,
@@ -490,7 +490,7 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
 
         for model_name in ml_models:
             logger.info(f'  Training {model_name} for {holdout_name}...')
-            model_dir = f'{holdout_dir}{model_name}/'
+            model_dir = os.path.join(holdout_dir, model_name)
             res = _train_and_evaluate(
                 x_train, y_train, x_test, y_test,
                 model_name, model_dir,
@@ -534,7 +534,7 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
 
     # Build results DataFrames
     per_holdout_df = pd.DataFrame(per_holdout_rows).round(4)
-    per_holdout_df.to_csv(f'{temporal_dir}Per_Holdout_Metrics.csv', index=False)
+    per_holdout_df.to_csv(os.path.join(temporal_dir, 'Per_Holdout_Metrics.csv'), index=False)
     logger.info(f'\nPer-holdout metrics:\n{per_holdout_df.to_string(index=False)}')
 
     # Averaged metrics per model across holdouts
@@ -554,7 +554,7 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
         .sort_values('Mean_Test_RMSE')
         .round(4)
     )
-    avg_df.to_csv(f'{temporal_dir}Averaged_Metrics.csv', index=False)
+    avg_df.to_csv(os.path.join(temporal_dir, 'Averaged_Metrics.csv'), index=False)
     logger.info(f'\nAveraged temporal metrics:\n{avg_df.to_string(index=False)}')
 
     # Visualisation: heatmap of Test R² per holdout × model
@@ -636,9 +636,9 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
     for subbasin in subbasins:
         logger.info(f'\n--- Spatial holdout: {subbasin} ---')
         subbasin_safe = subbasin.replace(' ', '_').replace('.', '')
-        holdout_dir = f'{spatial_dir}{subbasin_safe}/'
+        holdout_dir = os.path.join(spatial_dir, subbasin_safe)
 
-        data_dir = f'{holdout_dir}data/'
+        data_dir = os.path.join(holdout_dir, 'data')
         ret_vals = dataops.create_train_test_data(
             az_df, data_dir,
             drop_attr=DROP_ATTRS,
@@ -665,7 +665,7 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
 
         for model_name in ml_models:
             logger.info(f'  Training {model_name} (holdout: {subbasin})...')
-            model_dir = f'{holdout_dir}{model_name}/'
+            model_dir = os.path.join(holdout_dir, model_name)
             res = _train_and_evaluate(
                 x_train, y_train, x_test, y_test,
                 model_name, model_dir,
@@ -703,7 +703,7 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
 
     # Build results DataFrames
     per_subbasin_df = pd.DataFrame(per_subbasin_rows).round(4)
-    per_subbasin_df.to_csv(f'{spatial_dir}Per_Subbasin_Metrics.csv', index=False)
+    per_subbasin_df.to_csv(os.path.join(spatial_dir, 'Per_Subbasin_Metrics.csv'), index=False)
     logger.info(f'\nPer-sub-basin metrics:\n{per_subbasin_df.to_string(index=False)}')
 
     # Averaged metrics per model across sub-basins
@@ -723,7 +723,7 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
         .sort_values('Mean_Test_RMSE')
         .round(4)
     )
-    avg_df.to_csv(f'{spatial_dir}Averaged_Metrics.csv', index=False)
+    avg_df.to_csv(os.path.join(spatial_dir, 'Averaged_Metrics.csv'), index=False)
     logger.info(f'\nAveraged spatial metrics:\n{avg_df.to_string(index=False)}')
 
     # Visualisations
@@ -773,7 +773,7 @@ def _write_multi_unit_rasters(
     }
     for unit, grid in unit_grids.items():
         _, raster_file_obj = read_raster_as_arr(ref_raster_file, get_file=True)
-        out_path = f'{out_dirs[unit]}{prefix}_{year}_{unit}.tif'
+        out_path = os.path.join(out_dirs[unit], f'{prefix}_{year}_{unit}.tif')
         write_raster(
             grid, raster_file_obj,
             raster_file_obj.transform, out_path,
@@ -874,10 +874,10 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     for cat in partops.CATEGORIES:
         base = os.path.join(prediction_dir, f'{cat}_Rasters')
         cat_raster_dirs[cat] = {
-            'mm': f'{base}Depth_mm/',
-            'ft': f'{base}Depth_ft/',
-            'm3': f'{base}Volume_m3/',
-            'AF': f'{base}Volume_AF/',
+            'mm': os.path.join(base, 'Depth_mm'),
+            'ft': os.path.join(base, 'Depth_ft'),
+            'm3': os.path.join(base, 'Volume_m3'),
+            'AF': os.path.join(base, 'Volume_AF'),
         }
         for d in cat_raster_dirs[cat].values():
             makedirs(d)
@@ -888,10 +888,10 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     for cu_cat in CU_CATEGORIES:
         base = os.path.join(prediction_dir, f'{cu_cat}_Rasters')
         cu_raster_dirs[cu_cat] = {
-            'mm': f'{base}Depth_mm/',
-            'ft': f'{base}Depth_ft/',
-            'm3': f'{base}Volume_m3/',
-            'AF': f'{base}Volume_AF/',
+            'mm': os.path.join(base, 'Depth_mm'),
+            'ft': os.path.join(base, 'Depth_ft'),
+            'm3': os.path.join(base, 'Volume_m3'),
+            'AF': os.path.join(base, 'Volume_AF'),
         }
         for d in cu_raster_dirs[cu_cat].values():
             makedirs(d)
@@ -907,7 +907,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     # In create_az_data_parquet, pixels with NaN or 0 in GW_Basin are labelled
     # 'OUTSIDE AZ' and dropped.  The remaining rows — in ravel order — are
     # what appears in az_df for each year.
-    ref_basin_file = f'{PRED_DATA_DIR}GW_Basin_{YEAR_LIST[0]}.tif'
+    ref_basin_file = os.path.join(PRED_DATA_DIR, f'GW_Basin_{YEAR_LIST[0]}.tif')
     basin_arr, basin_file_obj = read_raster_as_arr(ref_basin_file, get_file=True)
     basin_flat = basin_arr.ravel()
     valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
@@ -915,7 +915,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     basin_file_obj.close()
 
     # Reference raster for spatial metadata (CRS, transform)
-    ref_raster_file = f'{PRED_DATA_DIR}Predictor_{YEAR_LIST[0]}.tif'
+    ref_raster_file = os.path.join(PRED_DATA_DIR, f'Predictor_{YEAR_LIST[0]}.tif')
 
     # All AZ basin names (for per-basin summary statistics)
     all_basins = sorted(az_df['GW_Basin'].unique().tolist())
@@ -1083,7 +1083,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         for ie_cat, ie_vals in ie_dict.items():
             ie_grid = _valid_pixels_to_raster(ie_vals, valid_mask, raster_shape)
             _, raster_file_obj = read_raster_as_arr(ref_raster_file, get_file=True)
-            out_path = f'{ie_raster_dirs[ie_cat]}{ie_cat}_{year}.tif'
+            out_path = os.path.join(ie_raster_dirs[ie_cat], f'{ie_cat}_{year}.tif')
             write_raster(
                 ie_grid, raster_file_obj,
                 raster_file_obj.transform, out_path,

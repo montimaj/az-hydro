@@ -388,7 +388,7 @@ def reproject_raster_gdal(
         else:
             year = input_raster_file[input_raster_file.rfind('_') + 1: input_raster_file.rfind('.')]
             tile_num = ''
-            dst_raster_dir_year = f'{dst_raster_dir}{year}/'
+            dst_raster_dir_year = os.path.join(dst_raster_dir, year)
             makedirs(dst_raster_dir_year)
             use_tile_format = outfile_path is None
             if use_tile_format:
@@ -397,9 +397,9 @@ def reproject_raster_gdal(
             for band_name in src_band_dict.keys():
                 band_num, resampling_func, output_dtype = src_band_dict[band_name]
                 if use_tile_format:
-                    outband_path = f'{dst_raster_dir_year}{tile_num}_B{band_num}.tif'
+                    outband_path = os.path.join(dst_raster_dir_year, f'{tile_num}_B{band_num}.tif')
                 else:
-                    outband_path = f'{dst_raster_dir_year}B{band_num}.tif'
+                    outband_path = os.path.join(dst_raster_dir_year, f'B{band_num}.tif')
                 warp_options = gdal.WarpOptions(
                     srcBands=[band_num],
                     dstBands=[1],
@@ -415,7 +415,7 @@ def reproject_raster_gdal(
                 gdal.Warp(outband_path, input_raster_file, options=warp_options)
                 output_bands.append(outband_path)
             if use_tile_format:
-                outfile_path = f'{dst_raster_dir}{tile_num}_{year}.tif'
+                outfile_path = os.path.join(dst_raster_dir, f'{tile_num}_{year}.tif')
             gdal_merge_path = shutil.which('gdal_merge.py')
             if gdal_merge_path is None:
                 raise FileNotFoundError('gdal_merge.py not found on PATH')
@@ -452,40 +452,21 @@ def crop_rasters(
         None.
     """
 
-    Parallel(n_jobs=-1)(
-        delayed(parallel_crop_rasters)(
+    def _crop_one(raster_file):
+        out_raster = os.path.join(outdir, raster_file[raster_file.rfind(os.sep) + 1:])
+        if verbose:
+            logger.info(f'Cropping {raster_file} ...')
+        crop_raster(
             raster_file, input_mask_file,
-            outdir, ext_mask,
-            multi_poly, verbose
-        ) for raster_file in glob(os.path.join(input_raster_dir, pattern))
+            out_raster, ext_mask=ext_mask,
+            multi_poly=multi_poly
+        )
+
+    Parallel(n_jobs=-1)(
+        delayed(_crop_one)(raster_file)
+        for raster_file in glob(os.path.join(input_raster_dir, pattern))
     )
 
-
-def parallel_crop_rasters(
-        input_raster_file,
-        input_mask_file,
-        outdir, ext_mask=True,
-        multi_poly=False, verbose=False
-):
-    """
-    Parallely crop rasters, should be called from #crop_rasters(...)
-    :param input_raster_file: Input raster file
-    :param input_mask_file: Mask file (shapefile) used for cropping
-    :param outdir: Output directory for storing masked rasters
-    :param ext_mask: Set False to extract by geometry only
-    :param multi_poly: Set True if input_mask_file has multiple polygons/features
-    :param verbose: Set True to print system call info
-    :return: None
-    """
-
-    out_raster = outdir + input_raster_file[input_raster_file.rfind(os.sep) + 1:]
-    if verbose:
-        logger.info(f'Cropping {input_raster_file} ...')
-    crop_raster(
-        input_raster_file, input_mask_file,
-        out_raster, ext_mask=ext_mask,
-        multi_poly=multi_poly
-    )
 
 def get_xy_grids_from_raster(
         input_raster_file: str
