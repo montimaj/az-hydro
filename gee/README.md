@@ -1,5 +1,10 @@
 # GEE Asset Export Pipeline
 
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Google Earth Engine](https://img.shields.io/badge/Google%20Earth%20Engine-4285F4?logo=google-earth&logoColor=white)](https://earthengine.google.com/)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-orange.svg)](https://opensource.org/licenses/BSD-3-Clause)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19057936.svg)](https://doi.org/10.5281/zenodo.19057936)
+
 Pre-exports computationally expensive Google Earth Engine (GEE) collections as asset ImageCollections under `projects/azhydro/assets/`. These assets are consumed by `dataops.py` at tile-download time via simple `ee.ImageCollection(...)` loads and `filterDate()` calls, eliminating repeated on-the-fly computation.
 
 ## Prerequisites

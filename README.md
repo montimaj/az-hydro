@@ -1,4 +1,10 @@
 # Improving remote sensing and machine learning-driven groundwater withdrawal estimation in Arizona 
+
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Google Earth Engine](https://img.shields.io/badge/Google%20Earth%20Engine-4285F4?logo=google-earth&logoColor=white)](https://earthengine.google.com/)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-orange.svg)](https://opensource.org/licenses/BSD-3-Clause)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19057936.svg)](https://doi.org/10.5281/zenodo.19057936)
+
 Maintainer: [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majumdar/) [sayantan.majumdar@dri.edu]
 
 ## Abstract
@@ -18,6 +24,7 @@ az-hydro/
 ├── README.md                        # This file
 ├── LICENSE
 ├── environment.yml                  # Conda environment specification
+├── recommendations.md               # Code-review recommendations & resolutions
 ├── ruff.toml                        # Ruff linter configuration
 │
 ├── azhydro/                         # ML pipeline package
@@ -53,7 +60,8 @@ az-hydro/
 │   ├── export_monthly_peff.py
 │   ├── export_openet_reitz_ratio.py
 │   ├── export_prism_hargreaves_eto.py
-│   └── export_usgs_adjusted_et.py
+│   ├── export_usgs_adjusted_et.py
+│   └── js/                          # GEE Code Editor visualization scripts
 │
 ├── tests/                           # Unit tests
 │   ├── conftest.py                  # Shared fixtures

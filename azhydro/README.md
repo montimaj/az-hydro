@@ -1,5 +1,10 @@
 # AZ-Hydro
 
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Google Earth Engine](https://img.shields.io/badge/Google%20Earth%20Engine-4285F4?logo=google-earth&logoColor=white)](https://earthengine.google.com/)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-orange.svg)](https://opensource.org/licenses/BSD-3-Clause)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19057936.svg)](https://doi.org/10.5281/zenodo.19057936)
+
 Maintainers [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majumdar/) [sayantan.majumdar@dri.edu]
 
 ## Citations
@@ -130,7 +135,7 @@ Per-pixel, per-month bias-correction ratios are computed from overlapping observ
 
 ### GEE pre-exported assets
 
-Nine custom ImageCollections are pre-computed via scripts in [`gee/`](../gee/) and stored in GEE under `projects/azhydro/assets/`:
+Twelve custom ImageCollections are pre-computed via scripts in [`gee/`](../gee/) and stored in GEE under `projects/azhydro/assets/`:
 
 | Asset | Description | Years |
 |-------|-------------|-------|
@@ -143,6 +148,9 @@ Nine custom ImageCollections are pre-computed via scripts in [`gee/`](../gee/) a
 | `maca_monthly_et_v2` | MACA ensemble projected actual ET | 2026–2099 |
 | `lulc_projection_ensemble` | USGS 4-scenario LULC mode | 2026–2099 |
 | `monthly_peff_v2` | USDA SCS effective precipitation | 1896–2099 |
+| `maca_gcm_annual_eto` | Per-GCM annual ETo for σ_MACA (370 images) | 2026–2099 |
+| `maca_gcm_annual_et` | Per-GCM annual ET for σ_MACA (370 images) | 2026–2099 |
+| `maca_gcm_annual_peff` | Per-GCM annual Peff for σ_MACA (370 images) | 2026–2099 |
 
 ### Download architecture
 
@@ -1151,12 +1159,6 @@ share to neighbours in invalid pixels.
 
 **Zero floor**: A `np.maximum(all_mm, 0)` clamp is applied after sampling to
 eliminate any negative model artifacts before unit conversion.
-
-### `intercompops.py` — USGS intercomparison
-
-Basin-scale comparison of ML predictions with independent USGS datasets.
-
-**Withdrawal intercomparison** (`run_intercomparison()`):
 
 ### `uncertaintyops.py` — Hybrid uncertainty quantification
 
