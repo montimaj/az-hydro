@@ -925,7 +925,8 @@ written to `{prediction_dir}CU_IE_Intercomparison/`.
 
 Validates ML `Total_SW` predictions at the basin scale against observed
 delivery records from the Central Arizona Project (CAP) and Salt River
-Project (SRP).
+Project (SRP). CAP delivery data were obtained from CAP via a public data
+request; SRP delivery data were obtained from ADWR.
 
 | Source | Basins covered | Years | Filter |
 |---|---|---|---|
@@ -971,7 +972,7 @@ Compares irrigated effective precipitation across three sources:
 |---|---|---|---|
 | **ML Peff (SCS)** | Predictor band 4 × `irr_fraction` | 2000–2024 | 2 km rasters |
 | **ML Peff (PCML)** | Predictor band 5 × `irr_fraction` | 2000–2023 | 2 km rasters |
-| **NHM PPTeff** | USGS NHM HUC12 data ([Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM)) (Mgal/d) | 2000–2020 | HUC12 polygons |
+| **NHM PPTeff** | USGS NHM HUC12 data ([Martin et al., 2023](https://doi.org/10.5066/P9YWR0OJ)) (Mgal/d) | 2000–2020 | HUC12 polygons |
 
 All three datasets are scaled by `annual_irr_fraction` so that volumes
 represent only the irrigated-area contribution.  NHM PPTeff follows the
@@ -1263,7 +1264,7 @@ Basin-scale comparison of ML predictions with independent USGS datasets.
 - Produces per-basin time series, scatter plots, and validation metrics.
 
 **Peff intercomparison** (`run_peff_intercomparison()`):
-- Compares ML Peff (SCS, band 4) and Peff PCML (band 5) with NHM PPTeff ([Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM)).
+- Compares ML Peff (SCS, band 4) and Peff PCML (band 5) with NHM PPTeff ([Martin et al., 2023](https://doi.org/10.5066/P9YWR0OJ)).
 - All three scaled by `irr_fraction` to represent irrigated-area Peff.
 - NHM PPTeff: Mgal/d → m³/yr → depth (mm) → basin volumes (AF).
 - Produces metrics, per-basin tables, time series, and scatter plots.
