@@ -182,6 +182,12 @@ def _build_pred_features(
         if c not in pred.columns:
             pred[c] = 0
     pred = pred[feature_cols]
+    inf_mask = np.isinf(pred.values)
+    nan_mask = pred.isna().values
+    n_inf = int(inf_mask.sum())
+    n_nan = int(nan_mask.sum())
+    if n_inf or n_nan:
+        logger.warning('UQ feature matrix: %d inf, %d NaN values (filled with 0)', n_inf, n_nan)
     return pred.replace([np.inf, -np.inf], np.nan).fillna(0)
 
 
@@ -1152,6 +1158,128 @@ def compute_sigma_gw(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# GW fraction sensitivity analysis
+# ═════════════════════════════════════════════════════════════════════════════
+
+def run_gw_fraction_sensitivity(
+        model,
+        feature_cols: list[str],
+        az_df: pd.DataFrame,
+        drop_attrs: tuple[str, ...],
+        pred_data_dir: str,
+        output_dir: str,
+        start_year: int,
+        end_year: int,
+        year_list: list[int],
+        mosaic_res: int,
+        delta: float = 0.2,
+) -> None:
+    """
+    Sensitivity analysis: effect of ±*delta* shift in ``gw_fraction`` on
+    pumping category volumes.
+
+    The GW fraction in the predictor stack is frozen at the nearest
+    5-yearly USGS snapshot (2000 for years < 2005, 2005 for 2005–2009,
+    2010 for 2010–2014, and 2015 for years ≥ 2015).  This means 1896–2004
+    all use the 2000 snapshot and 2015–2099 all use the 2015 snapshot.
+
+    For each year in [*start_year*, *end_year*], the baseline
+    ``gw_fraction`` is perturbed by +*delta* and −*delta* (clipped to
+    [0, 1]).  The perturbed predictions are partitioned and the resulting
+    category-level AZ-wide volumes (AF) are compared to the baseline.
+
+    Writes ``GW_Fraction_Sensitivity.csv`` with columns:
+        Year, Category, Baseline_AF, Plus_AF, Minus_AF,
+        Delta_Plus_AF, Delta_Minus_AF, Pct_Change_Plus, Pct_Change_Minus
+    """
+    import hydrolibs.partitionops as partops
+    from hydrolibs.sysops import makedirs
+
+    logger.info('Running GW-fraction sensitivity analysis (±%.2f)...', delta)
+    sens_dir = os.path.join(output_dir, 'Sigma_GW')
+    makedirs(sens_dir)
+
+    pixel_area_m2 = mosaic_res ** 2
+    mm_to_m3 = pixel_area_m2 / 1000
+
+    ref_basin_file = os.path.join(pred_data_dir, f'GW_Basin_{year_list[0]}.tif')
+    from hydrolibs.rasterops import read_raster_as_arr
+    basin_arr, bfile = read_raster_as_arr(ref_basin_file, get_file=True)
+    basin_flat = basin_arr.ravel()
+    valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
+    raster_shape = basin_arr.shape
+    bfile.close()
+
+    rows = []
+
+    for year in range(start_year, end_year + 1):
+        year_df = az_df[az_df.Year == year].copy()
+        if year_df.empty:
+            continue
+
+        baseline_gw = year_df['annual_gw_fraction'].values.copy()
+
+        # --- Baseline prediction ---
+        pf_base = _build_pred_features(year_df, feature_cols, drop_attrs)
+        _, cats_base = _predict_total(model, pf_base, year_df, partops,
+                                      raster_shape, valid_mask)
+
+        # --- Plus delta ---
+        plus_df = year_df.copy()
+        plus_df['annual_gw_fraction'] = np.clip(baseline_gw + delta, 0, 1)
+        pf_plus = _build_pred_features(plus_df, feature_cols, drop_attrs)
+        _, cats_plus = _predict_total(model, pf_plus, plus_df, partops,
+                                      raster_shape, valid_mask)
+
+        # --- Minus delta ---
+        minus_df = year_df.copy()
+        minus_df['annual_gw_fraction'] = np.clip(baseline_gw - delta, 0, 1)
+        pf_minus = _build_pred_features(minus_df, feature_cols, drop_attrs)
+        _, cats_minus = _predict_total(model, pf_minus, minus_df, partops,
+                                       raster_shape, valid_mask)
+
+        for cat in partops.CATEGORIES:
+            base_af = float(np.nansum(cats_base[cat])) * mm_to_m3 * M3_TO_AF
+            plus_af = float(np.nansum(cats_plus[cat])) * mm_to_m3 * M3_TO_AF
+            minus_af = float(np.nansum(cats_minus[cat])) * mm_to_m3 * M3_TO_AF
+            d_plus = plus_af - base_af
+            d_minus = minus_af - base_af
+            pct_plus = (d_plus / base_af * 100) if base_af > 0 else 0.0
+            pct_minus = (d_minus / base_af * 100) if base_af > 0 else 0.0
+            rows.append({
+                'Year': year,
+                'Category': cat,
+                'Baseline_AF': round(base_af, 2),
+                'Plus_AF': round(plus_af, 2),
+                'Minus_AF': round(minus_af, 2),
+                'Delta_Plus_AF': round(d_plus, 2),
+                'Delta_Minus_AF': round(d_minus, 2),
+                'Pct_Change_Plus': round(pct_plus, 2),
+                'Pct_Change_Minus': round(pct_minus, 2),
+            })
+
+        if year % 20 == 0 or year == end_year:
+            logger.info('    Sensitivity year %d done', year)
+
+    sens_df = pd.DataFrame(rows)
+    out_csv = os.path.join(sens_dir, 'GW_Fraction_Sensitivity.csv')
+    sens_df.to_csv(out_csv, index=False)
+    logger.info('GW-fraction sensitivity results saved to %s', out_csv)
+
+    # Log summary for key categories
+    for cat in ('Irrigation_GW', 'Irrigation_SW', 'Total_GW', 'Total_SW'):
+        cdf = sens_df[sens_df.Category == cat]
+        if cdf.empty:
+            continue
+        mean_pct_plus = cdf['Pct_Change_Plus'].mean()
+        mean_pct_minus = cdf['Pct_Change_Minus'].mean()
+        logger.info(
+            '  %s: mean %%Δ = %+.1f%% (gw+%.1f), %+.1f%% (gw−%.1f)',
+            cat, mean_pct_plus, delta, mean_pct_minus, delta,
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # σ_total — Quadrature combination
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1653,6 +1781,13 @@ def run_uncertainty_quantification(
 
     # ── σ_gw ──
     sigma_gw, cat_sigma_gw = compute_sigma_gw(
+        model, feature_cols, az_df, drop_attrs,
+        pred_data_dir, unc_dir, start_year, end_year,
+        year_list, mosaic_res,
+    )
+
+    # ── GW fraction sensitivity (±0.2) ──
+    run_gw_fraction_sensitivity(
         model, feature_cols, az_df, drop_attrs,
         pred_data_dir, unc_dir, start_year, end_year,
         year_list, mosaic_res,

@@ -110,9 +110,9 @@ The [`download_gee_data()`](hydrolibs/dataops.py) function downloads 14 bands of
 | `annual_tmmx_K` | Annual mean daily max temperature | K | PRISM (1896–2025), MACA (2026–2099) |
 | `annual_tmmn_K` | Annual mean daily min temperature | K | PRISM (1896–2025), MACA (2026–2099) |
 | `lulc` | Land use/land cover (1=Agriculture, 2=Urban, 3=Surface Water) | categorical | USGS historical (≤1984), NLCD (1985–2025), USGS projections (2026–2099) |
-| `annual_crop_fraction` | Cropland fraction | fraction | Derived from LULC |
-| `annual_irr_fraction` | Irrigated area fraction | binary | IrrMapper RF v1.2 (1985–2025), LULC-derived outside |
-| `annual_gw_fraction` | Groundwater irrigation fraction | fraction | USGS snapshots (2000, 2005, 2010, 2015) |
+| `annual_crop_fraction` | Cropland fraction | fraction | Derived from USGS LULC |
+| `annual_irr_fraction` | Irrigated area fraction | fraction | IrrMapper RF v1.2 (1985–2025), LULC-derived outside |
+| `annual_gw_fraction` | Groundwater irrigation fraction | fraction | [Hung et al., 2025](https://doi.org/10.1038/s41597-025-05920-x) snapshots (2000, 2005, 2010, 2015) |
 | `soil_depth_cm` | Soil depth | cm | CSRL (static) |
 | `awc_in` | Available water capacity (0–152 cm) | inches | SSURGO (static) |
 | `ksat_mean_micromps` | Saturated hydraulic conductivity | μm/s | CSRL (static) |
@@ -360,6 +360,23 @@ The core production step.  Trains a single XGBoost model on **all**
 metered data (1984–2024, no holdout) to maximise the training signal, then
 predicts annual pumping for every 2 km pixel from 1896 to 2099.
 
+**Absolute-value post-processing:** All XGBoost predictions are wrapped in
+`np.abs()` because groundwater pumping depth is physically non-negative.
+Tree-based regressors can produce small negative values near zero
+(numerical noise at the leaf level), and `abs()` ensures physical
+validity.  The same transform is applied consistently in Optuna CV
+scoring, uncertainty ensemble generation, and bias correction, so all
+metrics and CIs are evaluated on the same transformed quantity.
+
+**Temporal extrapolation caveat:** The XGBoost model is trained on 1984–
+2024 metered data and predicts outside this range (1896–1983 hindcast,
+2025 forecast, 2026–2099 projection).  Tree-based regressors cannot
+extrapolate beyond the training range of any individual predictor; they
+instead plateau at the nearest leaf value.  Outputs outside 1984–2024
+should therefore be interpreted as *plausible scenarios under stationary
+predictor–response relationships*, not forecasts.  The further a year is
+from the training window, the less constrained the prediction.
+
 #### 3a. Model training & interpretability
 
 After training, three interpretability diagnostics are generated and saved
@@ -567,6 +584,20 @@ $$\sigma_{\text{gw}}(x, y, t) = \text{std}\bigl[\hat{y}_{2000}, \hat{y}_{2005}, 
 
 This quantifies how sensitive the prediction is to the choice of GW
 fraction snapshot at each pixel.
+
+**Known limitation — σ_gw is a lower bound:** Only 4 snapshot years
+(2000, 2005, 2010, 2015) with 5–15 year gaps are available, so decadal
+oscillations (droughts, extreme-wet periods) between snapshots are
+invisible to the ensemble.  The resulting σ_gw underestimates the true
+temporal variability of GW sourcing fractions.
+
+**GW fraction sensitivity analysis:** A standalone sensitivity test
+(`run_gw_fraction_sensitivity`) perturbs `gw_fraction` by ±0.2 for all
+years (1896–2099) and reports the resulting per-category volume changes
+(AF) to bound the impact of freezing gw_fraction at snapshot values.
+Years < 2005 (all frozen at the 2000 snapshot) and years ≥ 2015 (all
+frozen at the 2015 snapshot) are the most affected.  Results are written
+to `Uncertainty/Sigma_GW/GW_Fraction_Sensitivity.csv`.
 
 ##### σ_total — Quadrature combination
 
@@ -1058,14 +1089,27 @@ ancillary data already in the predictor stack:
 **Known limitation (GW fraction frozen at 2015):** `annual_gw_fraction` uses
 the 2015 USGS Hung et al. snapshot for all years ≥ 2015.  This freezes the
 irrigation GW/SW partitioning for 84 years of projections regardless of
-scenario-driven changes in water supply.  If future USGS snapshots or
-scenario-driven GW fraction projections become available, they can be
-integrated to make the partition dynamic.
+scenario-driven changes in water supply.  A GW-fraction sensitivity analysis
+(`run_gw_fraction_sensitivity`, ±0.2 perturbation) quantifies the volume
+impact of this assumption across all years (1896–2099); results are in
+`Uncertainty/Sigma_GW/GW_Fraction_Sensitivity.csv`.  If future USGS
+snapshots or scenario-driven GW fraction projections become available,
+they can be integrated to make the partition dynamic.
 
 | **Non_Irrigation_GW** | `Non_Irrigation × (1 − sw_fraction)` |
 | **Non_Irrigation_SW** | `Non_Irrigation × sw_fraction` (canal-density proxy) |
 | **Total_GW** | `Irrigation_GW + Non_Irrigation_GW` |
 | **Total_SW** | `Irrigation_SW + Non_Irrigation_SW` |
+
+**Known limitation (SW fraction proxy):** `compute_sw_fraction()` uses
+canal density normalised by the local maximum as a proxy for the
+surface-water share of non-irrigation withdrawals.  Canal density
+(canal segments per pixel) is not a validated proxy for municipal or
+industrial SW sourcing.  Where canal infrastructure is sparse, all
+non-irrigation withdrawal is assigned to groundwater, which may
+overestimate GW dependence in areas served by surface-water utilities.
+When municipal water-delivery records or alternative data become
+available, they can replace this proxy.
 
 Key helpers:
 - **`focal_fill_irr_fraction()`** — fills edge-pixel gaps (`irr_frac < 0.05`)
@@ -1149,7 +1193,16 @@ Key functions:
   `Subbasin_Sigma_Total.csv`.
 - **`compute_sigma_cu()`** — CU inter-GCM spread (5 GCMs, future only).
   Writes per-category σ_CU rasters (Irrigation_CU, Irrigation_GW_CU,
-  Irrigation_SW_CU).
+  Irrigation_SW_CU).  **Known limitation:** `irr_fraction` and
+  `gw_fraction` are fixed from the ensemble-mean predictor raster when
+  computing CU = max(ET_irr − Peff_irr, 0), so σ_CU captures only the
+  inter-GCM ET/Peff spread and not the partitioning uncertainty already
+  quantified in σ_LULC and σ_gw.
+- **`run_gw_fraction_sensitivity()`** — Standalone sensitivity analysis
+  perturbing `gw_fraction` by ±0.2 for all years (1896–2099) and
+  reporting per-category volume changes.  Years < 2005 and ≥ 2015 are
+  most affected since they are frozen at a single snapshot.  Writes
+  `Sigma_GW/GW_Fraction_Sensitivity.csv`.
 - **`augment_prediction_rasters()`** — Rewrites total pumping rasters as
   6-band GeoTIFFs (pred, σ, CV, SNR, lower CI, upper CI) for all 4 units.
 - **`augment_category_rasters()`** — Augments 8 withdrawal category rasters

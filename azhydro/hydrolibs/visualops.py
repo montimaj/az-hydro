@@ -1579,7 +1579,7 @@ def era_shaded_ts(
         ax: plt.Axes,
         years: np.ndarray,
         mean_vals: np.ndarray,
-        std_vals: np.ndarray,
+        std_vals: np.ndarray | None,
         color: str = '#2C3E50',
         label: str | None = None,
 ) -> None:
@@ -1588,8 +1588,9 @@ def era_shaded_ts(
         ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.08)
     ax.plot(years, mean_vals, color=color, linewidth=1.4, marker='.', markersize=3,
             label=label)
-    ax.fill_between(years, mean_vals - std_vals, mean_vals + std_vals,
-                    color=color, alpha=0.18)
+    if std_vals is not None:
+        ax.fill_between(years, mean_vals - std_vals, mean_vals + std_vals,
+                        color=color, alpha=0.18)
 
 
 def create_basin_time_series(
@@ -1672,9 +1673,9 @@ def create_basin_time_series(
         depth_mm = bdf.Mean_Depth_mm.values
         vol_af = bdf.Volume_AF.values
 
-        std_depth = pd.Series(depth_mm).rolling(5, min_periods=1, center=True).std().fillna(0).values
-        std_vol = pd.Series(vol_af).rolling(5, min_periods=1, center=True).std().fillna(0).values
-        sigma_label = '±1σ (5-yr rolling)'
+        std_depth = None
+        std_vol = None
+        sigma_label = None
 
         if sigma_basin_yearly:
             cv_arr = np.array([
@@ -1690,6 +1691,8 @@ def create_basin_time_series(
                 std_depth = 1.96 * cv_arr * np.abs(depth_mm)
                 std_vol = 1.96 * sigma_af
                 sigma_label = '95% CI (model σ)'
+        else:
+            logger.warning('No σ data for basin %s — CI band omitted', basin)
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
         era_shaded_ts(ax1, years, depth_mm, std_depth, color=palette[i])
@@ -1719,8 +1722,9 @@ def create_basin_time_series(
                            label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
             for e in ERA_PERIODS
         ]
-        handles.append(mpatches.Patch(color=palette[i], alpha=0.25,
-                                       label=sigma_label))
+        if sigma_label is not None:
+            handles.append(mpatches.Patch(color=palette[i], alpha=0.25,
+                                           label=sigma_label))
         if actual_df is not None:
             from matplotlib.lines import Line2D
             handles.append(Line2D([], [], color=COLORS['actual'], marker='o',
@@ -1843,9 +1847,9 @@ def create_subbasin_time_series(
         years = sdf.Year.values
         depth_mm = sdf.Mean_Depth_mm.values
         vol_af = sdf.Volume_AF.values
-        std_depth = pd.Series(depth_mm).rolling(5, min_periods=1, center=True).std().fillna(0).values
-        std_vol = pd.Series(vol_af).rolling(5, min_periods=1, center=True).std().fillna(0).values
-        sigma_label = '±1σ (5-yr rolling)'
+        std_depth = None
+        std_vol = None
+        sigma_label = None
 
         if sigma_subbasin_yearly:
             cv_arr = np.array([
@@ -1861,6 +1865,8 @@ def create_subbasin_time_series(
                 std_depth = 1.96 * cv_arr * np.abs(depth_mm)
                 std_vol = 1.96 * sigma_af
                 sigma_label = '95% CI (model σ)'
+        else:
+            logger.warning('No σ data for sub-basin %s — CI band omitted', sb)
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
         parent = sub_to_parent.get(sb, '')
@@ -1892,8 +1898,9 @@ def create_subbasin_time_series(
                            label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
             for e in ERA_PERIODS
         ]
-        handles.append(mpatches.Patch(color=palette_all[i], alpha=0.25,
-                                       label=sigma_label))
+        if sigma_label is not None:
+            handles.append(mpatches.Patch(color=palette_all[i], alpha=0.25,
+                                           label=sigma_label))
         if actual_df is not None:
             from matplotlib.lines import Line2D
             handles.append(Line2D([], [], color=COLORS['actual'], marker='o',

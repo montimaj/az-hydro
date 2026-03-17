@@ -93,18 +93,25 @@ def _raster_basin_volumes(
     depth_to_m = 1.0 / M_TO_MM if depth_unit == 'mm' else 1.0
     volumes = {}
     with rio.open(raster_path) as src:
+        raster_bounds = src.bounds
         for _, row in basin_gdf.iterrows():
             basin_name = row[basin_col]
             geom = [mapping(row.geometry)]
             try:
+                if not row.geometry.intersects(
+                    __import__('shapely.geometry', fromlist=['box']).box(*raster_bounds)
+                ):
+                    logger.warning('Basin %s does not intersect raster extent, setting volume to 0', basin_name)
+                    volumes[basin_name] = 0.0
+                    continue
                 clipped, _ = rio_mask(src, geom, crop=True, nodata=np.nan)
                 arr = clipped[0].astype(np.float64)
                 arr[np.isnan(arr)] = 0.0
                 arr[arr < 0] = 0.0
                 vol_m3 = float(np.nansum(arr)) * depth_to_m * pixel_area_m2
                 volumes[basin_name] = vol_m3 * M3_TO_AF
-            except Exception:
-                logger.debug('Clipping failed for basin %s, setting volume to 0', basin_name)
+            except (ValueError, rio.errors.WindowError) as exc:
+                logger.warning('Clipping failed for basin %s: %s. Setting volume to 0', basin_name, exc)
                 volumes[basin_name] = 0.0
     return volumes
 
@@ -125,16 +132,23 @@ def _raster_basin_means(
     """
     means = {}
     with rio.open(raster_path) as src:
+        raster_bounds = src.bounds
         for _, row in basin_gdf.iterrows():
             basin_name = row[basin_col]
             geom = [mapping(row.geometry)]
             try:
+                if not row.geometry.intersects(
+                    __import__('shapely.geometry', fromlist=['box']).box(*raster_bounds)
+                ):
+                    logger.warning('Basin %s does not intersect raster extent, setting mean to NaN', basin_name)
+                    means[basin_name] = np.nan
+                    continue
                 clipped, _ = rio_mask(src, geom, crop=True, nodata=np.nan)
                 arr = clipped[0].astype(np.float64)
                 valid = arr[np.isfinite(arr) & (arr > 0)]
                 means[basin_name] = float(np.mean(valid)) if valid.size > 0 else np.nan
-            except Exception:
-                logger.debug('Clipping failed for basin %s, setting mean to NaN', basin_name)
+            except (ValueError, rio.errors.WindowError) as exc:
+                logger.warning('Clipping failed for basin %s: %s. Setting mean to NaN', basin_name, exc)
                 means[basin_name] = np.nan
     return means
 

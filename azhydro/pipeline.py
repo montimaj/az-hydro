@@ -977,6 +977,16 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             if c not in pred_features.columns:
                 pred_features[c] = 0
         pred_features = pred_features[feature_cols]
+        inf_counts = np.isinf(pred_features.values).sum(axis=0)
+        nan_counts = pred_features.isna().sum(axis=0).values
+        bad_cols = (inf_counts + nan_counts) > 0
+        if bad_cols.any():
+            for ci, col in enumerate(feature_cols):
+                if bad_cols[ci]:
+                    logger.warning(
+                        'Year %d feature %s: %d inf, %d NaN (filled with 0)',
+                        year, col, int(inf_counts[ci]), int(nan_counts[ci]),
+                    )
         pred_features = pred_features.replace([np.inf, -np.inf], np.nan).fillna(0)
 
         predictions = np.abs(model.predict(pred_features))
@@ -1047,11 +1057,13 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             'Irrigation_SW_Efficiency': cu_sw,
         }
         ie_dict = {}
+        wd_min_threshold = 0.01  # mm — suppress noise from near-zero withdrawals
         for ie_cat, wd_cat in withdrawal_map.items():
             wd_vals = cat_predictions[wd_cat]
             with np.errstate(invalid='ignore', divide='ignore'):
-                ie_vals = np.where(wd_vals > 0,
+                ie_vals = np.where(wd_vals > wd_min_threshold,
                                    cu_for_ie[ie_cat] / wd_vals, np.nan)
+            ie_vals = np.clip(np.where(np.isfinite(ie_vals), ie_vals, np.nan), 0, 1)
             ie_dict[ie_cat] = ie_vals
 
         # Write consumptive use rasters (multiple units)
