@@ -848,6 +848,11 @@ def objective_with_cv(
     params = get_optuna_params_for_model(trial, model_name)
     model = get_model_param_dict(random_state)[0][model_name]
     model.set_params(**params)
+    # Single-threaded model training — cross_validate parallelises across folds
+    if hasattr(model, 'n_jobs'):
+        model.set_params(n_jobs=1)
+    elif hasattr(model, 'thread_count'):
+        model.set_params(thread_count=1)
     cv_results = cross_validate(
         estimator=model,
         X=x_train,
@@ -1201,8 +1206,8 @@ def build_ml_model_optuna_dask(
             )
             study.set_metric_names(['NRMSE_with_Overfitting_Penalty'])
 
-            # Run optimization
-            n_parallel_jobs = n_dask_workers if use_dask else 1
+            # Run optimization — sequential trials since cross_validate already
+            # parallelises across CV folds and saturates all cores
             study.optimize(
                 lambda trial: objective_with_cv_enhanced(
                     trial, x_train, y_train,
@@ -1210,7 +1215,7 @@ def build_ml_model_optuna_dask(
                     alpha, random_state, pruning
                 ),
                 n_trials=n_trials,
-                n_jobs=n_parallel_jobs,
+                n_jobs=1,
                 show_progress_bar=True,
                 gc_after_trial=True
             )
@@ -1280,6 +1285,11 @@ def objective_with_cv_enhanced(
     include_all = model_name in ['GBR', 'ADA', 'BAG', 'CAT']
     model = get_model_param_dict(random_state, include_all_models=include_all)[0][model_name]
     model.set_params(**params)
+    # Single-threaded model training — cross_validate parallelises across folds
+    if hasattr(model, 'n_jobs'):
+        model.set_params(n_jobs=1)
+    elif hasattr(model, 'thread_count'):
+        model.set_params(thread_count=1)
 
     # Cross-validation with early stopping for pruning
     cv_results = cross_validate(
