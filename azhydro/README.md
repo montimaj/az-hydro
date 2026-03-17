@@ -173,7 +173,7 @@ The [`streamflowops`](hydrolibs/streamflowops.py) module handles streamflow data
 #### Data sources
 
 - **USGS NWIS**: Daily mean discharge (parameter 00060) via the `dataretrieval` Python API ([Hodson et al., 2023](https://doi.org/10.5066/P94I5TX3)), resampled to monthly means
-- **USBR CMIP Ensemble**: Monthly modeled streamflow ([Gangopadhyay & Pruitt, 2011](https://www.usbr.gov/watersmart/docs/west-wide-climate-risk-assessments.pdf)) averaged across ~112 climate model runs (scenarios a1b, a2, b1), spanning 1950–2099
+- **USBR CMIP Ensemble**: Monthly modeled streamflow ([Gangopadhyay & Pruitt, 2011](https://www.usbr.gov/watersmart/docs/west-wide-climate-risk-assessments.pdf); [USBR, 2025](https://rise-usbr.opendata.arcgis.com/)) averaged across ~112 climate model runs (scenarios a1b, a2, b1), spanning 1950–2099
 - **Historical Ratio Method**: For sites without USBR projections, per-calendar-month scaling ratios are computed against the nearest USBR-gauged reference site and applied to generate synthetic 1950–2099 projections
 
 #### Gauge network (20 sites)
@@ -1091,7 +1091,7 @@ Key functions:
 
 ### `streamflowops.py` — Streamflow & canal data
 
-Downloads and processes streamflow data from USGS ([Hodson et al., 2023](https://doi.org/10.5066/P94I5TX3)) and USBR ([Gangopadhyay & Pruitt, 2011](https://www.usbr.gov/watersmart/docs/west-wide-climate-risk-assessments.pdf)) sources.
+Downloads and processes streamflow data from USGS ([Hodson et al., 2023](https://doi.org/10.5066/P94I5TX3)) and USBR ([Gangopadhyay & Pruitt, 2011](https://www.usbr.gov/watersmart/docs/west-wide-climate-risk-assessments.pdf); [USBR, 2025](https://rise-usbr.opendata.arcgis.com/)) sources.
 
 Key functions:
 - **`download_streamflow()`** — Downloads monthly streamflow records from
@@ -1406,6 +1406,8 @@ Sohl, T. L., Sayler, K. L., Bouchard, M. A., Reker, R. R., Friesz, A. M., Bennet
 Soil Survey Staff, Natural Resources Conservation Service, United States Department of Agriculture. _Web Soil Survey_. Available online at https://websoilsurvey.nrcs.usda.gov/. 
 
 Suresh, S., Hossain, F., Mishra, V., & Hossain, N. (2026). GRAIN – a Global Registry of Agricultural Irrigation Networks. _Earth System Science Data_, _18_(3), 1855–1875. https://doi.org/10.5194/essd-18-1855-2026.
+
+USBR. (2025). Reclamation Information Sharing Environment (RISE). https://rise-usbr.opendata.arcgis.com/
 
 USDA SCS. (1993). Chapter 2 Irrigation Water Requirements. In Part 623 National Engineering Handbook. _USDA Soil Conservation Service_. https://www.wcc.nrcs.usda.gov/ftpref/wntsc/waterMgt/irrigation/NEH15/ch2.pdf.
 
