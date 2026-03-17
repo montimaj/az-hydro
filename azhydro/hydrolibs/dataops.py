@@ -278,8 +278,8 @@ def download_gee_tif(
         'annual_tmmx_K': 4638.3,
         'annual_tmmn_K': 4638.3,
         'lulc': 30 if 1985 <= year <= 2025 else 250,
-        'soil_depth_cm': 800,
-        'awc_in': 90,
+        'soil_depth_mm': 800,
+        'awc_mm': 90,
         'ksat_mean_micromps': 800,
         'annual_gw_fraction': 60,
         'annual_crop_fraction': 30 if 1985 <= year <= 2025 else 250,
@@ -600,10 +600,10 @@ def download_gee_tile(
     )
     soil_depth = ee.Image(
         'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/land_use/soil_depth'
-    ).rename('soil_depth_cm')
+    ).multiply(10).rename('soil_depth_mm')
     awc = ee.Image(
         'projects/openet/soil/ssurgo_AWC_WTA_0to152cm_composite'
-    ).rename('awc_in')
+    ).multiply(25.4).rename('awc_mm')
     ksat_mean = ee.Image(
         'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/physical/ksat_mean'
     ).rename('ksat_mean_micromps')
@@ -757,8 +757,8 @@ def download_gee_data(
         'annual_tmmx_K',
         'annual_tmmn_K',
         'lulc',
-        'soil_depth_cm',
-        'awc_in',
+        'soil_depth_mm',
+        'awc_mm',
         'ksat_mean_micromps',
         'annual_gw_fraction',
         'annual_crop_fraction',
@@ -1032,10 +1032,7 @@ def create_az_data_parquet(
                 lon_grid, lat_grid = get_xy_grids_from_raster(gw_file)
                 df['easting_m'] = lon_grid.ravel()
                 df['northing_m'] = lat_grid.ravel()
-                df['awc_mm'] = df.awc_in * 25.4 # convert from inches to mm
-                df['soil_depth_mm'] = df.soil_depth_cm * 10 # convert from cm to mm
                 df['Year'] = year
-                df = df.drop(columns=['awc_in', 'soil_depth_cm'])
                 data_df_parts.append(df)
         data_df = pd.concat(data_df_parts, ignore_index=True) if data_df_parts else pd.DataFrame()
         # Set annual_irr_fraction to 0 where annual_crop_fraction is 0

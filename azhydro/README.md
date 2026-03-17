@@ -57,6 +57,15 @@ From the `azhydro/` directory, run the pipeline with:
 python pipeline.py
 ```
 
+> **First-time run:** The default flags (`--skip-download`, `--load-files`) assume
+> GEE tiles and intermediate files already exist on disk. If you are starting
+> from scratch, use `--download --recreate` to fetch the data and build all
+> intermediate files:
+>
+> ```bash
+> python pipeline.py --download --recreate
+> ```
+
 The pipeline supports selective step execution via CLI arguments:
 
 ```bash
@@ -92,6 +101,7 @@ python pipeline.py --download --recreate  # force fresh GEE download and file re
 | `--download` | — | Force GEE tile download. |
 | `--load-files` | `True` | Skip recreating intermediate files that already exist. |
 | `--recreate` | — | Force recreation of intermediate files. |
+| `-v`, `--verbose` | `False` | Enable verbose (DEBUG-level) logging. |
 
 The pipeline executes the selected steps in sequence (details below).
 
@@ -118,8 +128,8 @@ The [`download_gee_data()`](hydrolibs/dataops.py) function downloads 14 bands of
 | `annual_crop_fraction` | Cropland fraction | fraction | Derived from USGS LULC |
 | `annual_irr_fraction` | Irrigated area fraction | fraction | IrrMapper RF v1.2 (1985–2025), LULC-derived outside |
 | `annual_gw_fraction` | Groundwater irrigation fraction | fraction | [Hung et al., 2025](https://doi.org/10.1038/s41597-025-05920-x) snapshots (2000, 2005, 2010, 2015) |
-| `soil_depth_cm` | Soil depth | cm | CSRL (static) |
-| `awc_in` | Available water capacity (0–152 cm) | inches | SSURGO (static) |
+| `soil_depth_mm` | Soil depth | mm | CSRL (static) |
+| `awc_mm` | Available water capacity (0–152 cm) | mm | SSURGO (static) |
 | `ksat_mean_micromps` | Saturated hydraulic conductivity | μm/s | CSRL (static) |
 
 ### Data harmonization
@@ -250,7 +260,8 @@ All paths and modelling parameters are defined once at the top of
 | `START_YEAR` | `1896` | First prediction year. |
 | `END_YEAR` | `2099` | Last prediction year. |
 | `YEAR_LIST` | `1984–2024` | Years with metered pumping data (ADWR). |
-| `MAX_GW` | `3000` | Maximum allowed pumping depth (mm ≈ 10 ft). |
+| `MAX_GW` | `None` | Maximum allowed pumping depth (mm); defaults to 10,000 mm (~32,400 AF per pixel) when `None`. |
+| `AF_MAX_THRESHOLD` | `5000` | Maximum per-well `AF Pumped`; rows exceeding this are dropped from CSVs. |
 | `RANDOM_STATE` | `42` | Seed for reproducibility. |
 | `N_TRIALS` | `100` | Optuna hyperparameter-tuning trials. |
 | `FOLD_COUNT` | `5` | k-fold cross-validation folds. |
@@ -270,10 +281,16 @@ Downloads, mosaics, and aligns all input datasets to a common 2 km grid.
    `dataops.download_gee_data()`, then mosaics them into annual predictor
    rasters with `dataops.mosaic_tiles()`.
 2. **Groundwater data** — Preprocesses ADWR CSV records into per-year
-   shapefiles (`gwops.preprocess_gw_csv()`), reprojects all vectors to a
-   consistent CRS (`gwops.reproject_vectors()`), and creates GW volume →
-   depth → cropped rasters (`gwops.create_gw_volume_rasters()`,
-   `create_gw_depth_rasters()`, `crop_gw_rasters()`).
+   shapefiles (`gwops.preprocess_gw_csv()`).  Per-well `AF Pumped` values
+   exceeding `af_max_threshold` (default **5,000 AF**, roughly the physical
+   ceiling for a single high-capacity well at ~3,000 gpm sustained
+   year-round) are dropped to remove aggregated well-field totals and data
+   entry errors.  Vectors are then reprojected to a
+   consistent CRS (`gwops.reproject_vectors()`), and GW volume →
+   depth → cropped rasters are created (`gwops.create_gw_volume_rasters()`,
+   `create_gw_depth_rasters()`, `crop_gw_rasters()`).  A pixel-level raster
+   cap (default **10,000 mm** ≈ 32,400 AF at 4 km² when `MAX_GW=None`)
+   catches any remaining `gdal_rasterize` artifacts.
 3. **Streamflow & canal density** — `streamflowops.create_canal_density_raster()`
    and `streamflowops.create_streamflow_rasters()` build predictor layers
    from USGS/USBR gauge data and CAP canal geometry.

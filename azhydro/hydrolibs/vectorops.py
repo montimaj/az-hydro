@@ -154,6 +154,7 @@ def add_attribute_well_reg(
         filter_attr: str = 'AMA INA',
         filter_attr_value: str = 'NOT WITHIN ANY AMA OR INA',
         use_only_ama_ina: bool = False,
+        af_max_threshold: float = 5000.,
         **kwargs: dict[str, str]
 ) -> None:
     """
@@ -171,6 +172,7 @@ def add_attribute_well_reg(
         filter_attr (str): Remove specific wells based on this attribute. Set None to disable filtering.
         filter_attr_value (str): Value for filter_attr
         use_only_ama_ina (bool): Set True to use only AMA/INA for model training
+        af_max_threshold (float): Maximum per-well AF Pumped value; rows exceeding this are dropped.
         kwargs (dict (str, str)): Additional variables, which include csv_well_id='Well Id',
                                   csv_mov_id='Movement Type', csv_water_id='Water Type', movement_type='WITHDRAWAL',
                                   water_type='GROUNDWATER', csv_right_type='Right Type', and shp_well_id='REGISTRY_I'
@@ -200,6 +202,11 @@ def add_attribute_well_reg(
     gw_df[csv_well_id] = gw_df[csv_well_id].astype(str).apply(
         lambda x: x.zfill(6) if len(x) == 5 else x
     )
+    af_values = pd.to_numeric(gw_df[fill_attr], errors='coerce')
+    n_dropped = (af_values > af_max_threshold).sum()
+    if n_dropped:
+        logger.info(f'{input_gw_csv_file}: Dropping {n_dropped} row(s) with {fill_attr} > {af_max_threshold:,.0f}')
+        gw_df = gw_df[af_values <= af_max_threshold]
     if kwargs:
         csv_well_id = kwargs.get('csv_well_id', csv_well_id)
         movement_type = kwargs.get('movement_type', movement_type)

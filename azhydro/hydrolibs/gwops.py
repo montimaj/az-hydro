@@ -118,6 +118,7 @@ def preprocess_gw_csv(
         filter_attr_value: str = 'NOT WITHIN ANY AMA OR INA',
         use_only_ama_ina: bool = False,
         already_preprocessed: bool = False,
+        af_max_threshold: float = 5000.,
         **kwargs: dict[str, str]
 ) -> str:
     """
@@ -137,6 +138,7 @@ def preprocess_gw_csv(
         filter_attr_value (str): Value for filter_attr
         use_only_ama_ina (bool): Set True to use only AMA/INA for model training.
         already_preprocessed (bool): Set True to disable preprocessing.
+        af_max_threshold (float): Maximum per-well AF Pumped value; rows exceeding this are dropped.
         kwargs (dict (str, str)): Additional variables, which include csv_well_id='Well Id',
                                   csv_mov_id='Movement Type', csv_water_id='Water Type', movement_type='WITHDRAWAL',
                                   water_type='GROUNDWATER', water_use = 'IRRIGATION', and shp_well_id='REGISTRY_I'. If
@@ -152,7 +154,7 @@ def preprocess_gw_csv(
         vops.add_attribute_well_reg(
             well_registry_file, csv_file, out_shp,
             fill_attr, filter_attr, filter_attr_value,
-            use_only_ama_ina, **kwargs
+            use_only_ama_ina, af_max_threshold, **kwargs
         )
 
     if not already_preprocessed:
@@ -250,7 +252,7 @@ def create_gw_volume_rasters(
         if max_gw:
             max_gw *= xres * yres / 1.233e+6
         else:
-            max_gw = np.inf
+            max_gw = 10_000 * xres * yres / 1.233e+6  # 10,000 mm default cap
         if min_gw:
             min_gw *= xres * yres / 1.233e+6
         else:

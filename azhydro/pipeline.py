@@ -71,7 +71,8 @@ GCLOUD_PROJECT = 'azhydro'
 GCLOUD_BUCKET = 'azhydro'
 TILE_SIZE = 10000 if MOSAIC_RASTER_RES == 30 else 80000
 FILL_ATTR = 'AF Pumped'
-MAX_GW = 3000 if WATER_USE == 'All' else None  # 3000 mm (~10 ft)
+AF_MAX_THRESHOLD = 5000.  # max per-well AF; ~3,000 gpm sustained year-round
+MAX_GW = None
 
 # AMA_CODE → parent AMA/INA name mapping
 AMA_CODE_MAP = {
@@ -92,6 +93,7 @@ RANDOM_STATE = 42
 N_TRIALS = 100
 FOLD_COUNT = 5
 N_DASK_WORKERS = 10
+N_DASK_WORKERS_DATA_PREP = 40 # more workers for data prep since it involves many independent raster operations
 USE_OPTUNA = True
 USE_DASK = True
 INCLUDE_ALL_MODELS = False
@@ -124,7 +126,7 @@ TEMPORAL_HOLDOUTS = {
 # Step 0 — Data preparation (GEE download, GW processing, rasterisation)
 # =============================================================================
 
-def prepare_data(skip_download: bool = True, load_files: bool = True) -> list[str]:
+def prepare_data(skip_download: bool = True, load_files: bool = True, verbose: bool = False) -> list[str]:
     """
     Download GEE data, preprocess GW CSVs, reproject vectors, and create
     all intermediate rasters needed by the ML pipeline.
@@ -135,6 +137,8 @@ def prepare_data(skip_download: bool = True, load_files: bool = True) -> list[st
         If *True*, skip the GEE download (use existing tiles).
     load_files : bool
         If *True*, skip recreating files that already exist on disk.
+    verbose : bool
+        If *True*, enable verbose output for GEE downloads.
 
     Returns
     -------
@@ -165,10 +169,10 @@ def prepare_data(skip_download: bool = True, load_files: bool = True) -> list[st
         END_YEAR,
         skip_download,
         TILE_SIZE,
-        num_workers=40,
+        num_workers=N_DASK_WORKERS_DATA_PREP,
         worker_memory='1G',
         gee_scale=MOSAIC_RASTER_RES,
-        verbose=False,
+        verbose=verbose,
     )
     dataops.mosaic_tiles(
         gee_data_dir,
@@ -186,6 +190,7 @@ def prepare_data(skip_download: bool = True, load_files: bool = True) -> list[st
         fill_attr=FILL_ATTR,
         use_only_ama_ina=False,
         already_preprocessed=load_files,
+        af_max_threshold=AF_MAX_THRESHOLD,
         water_use=WATER_USE,
     )
 
@@ -1431,7 +1436,14 @@ def main() -> None:
         '--recreate', dest='load_files', action='store_false',
         help='Force recreation of intermediate files.',
     )
+    parser.add_argument(
+        '-v', '--verbose', action='store_true', default=False,
+        help='Enable verbose (DEBUG-level) logging.',
+    )
     args = parser.parse_args()
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
 
     run_all = args.steps.lower() == 'all'
     selected = set(s.strip().lower() for s in args.steps.split(',')) if not run_all else set()
@@ -1448,6 +1460,7 @@ def main() -> None:
         data_band_names = prepare_data(
             skip_download=skip_download,
             load_files=load_files,
+            verbose=args.verbose,
         )
 
     # Ensure band names are available for downstream steps
