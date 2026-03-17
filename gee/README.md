@@ -5,7 +5,7 @@
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-orange.svg)](https://opensource.org/licenses/BSD-3-Clause)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19057936.svg)](https://doi.org/10.5281/zenodo.19057936)
 
-Pre-exports computationally expensive [Google Earth Engine](https://earthengine.google.com/) (GEE; [Gorelick et al., 2017](https://doi.org/10.1016/j.rse.2017.06.031)) collections as asset ImageCollections under `projects/azhydro/assets/`. These assets are consumed by `dataops.py` at tile-download time via simple `ee.ImageCollection(...)` loads and `filterDate()` calls, eliminating repeated on-the-fly computation.
+Pre-exports computationally expensive [Google Earth Engine](https://earthengine.google.com/) (GEE; [Gorelick et al., 2017](https://doi.org/10.1016/j.rse.2017.06.031), [Roy et al., 2025](https://doi.org/10.5281/zenodo.17641528)) collections as asset ImageCollections under `projects/azhydro/assets/`. These assets are consumed by `dataops.py` at tile-download time via simple `ee.ImageCollection(...)` loads and `filterDate()` calls, eliminating repeated on-the-fly computation.
 
 ## Prerequisites
 
@@ -145,6 +145,10 @@ Each asset is exported at its native source resolution to avoid resampling artif
 | [USGS LULC](https://doi.org/10.1080/1747423X.2016.1147619) | 250 m |
 
 GEE handles on-the-fly reprojection when these assets are combined at tile-download time in `dataops.py`.
+
+### ScienceBase ingestion
+
+Two external datasets — [Reitz Ensemble ET](https://doi.org/10.5066/P9EZ3VAS) and [USGS LULC](https://doi.org/10.5066/F7KK99RR) (historical + [projections](https://doi.org/10.5066/P95AK9HP)) — are distributed as GeoTIFFs on USGS ScienceBase. These were bulk-uploaded to GEE as ImageCollections (`projects/nwi-usgs/assets/USGS-Reitz-Ensemble-ET` and `projects/nwi-usgs/assets/USGS-LULC-CONUS`) using [geeup (Roy, 2025)](https://doi.org/10.5281/zenodo.18073520) prior to running the export scripts in this project.
 
 ## Detailed Export Logic
 
@@ -474,6 +478,8 @@ Reitz, M., Sanford, W. E., & Saxe, S. (2023). Ensemble Estimation of Historical 
 Reitz, M., Sanford, W. E., & Saxe, S. (2023). Historical evapotranspiration for the conterminous U.S. _U.S. Geological Survey Data Release_. https://doi.org/10.5066/P9EZ3VAS.
 
 Roy, S., Majumdar, S., & Swetnam, T. (2025).  samapriya/awesome-gee-community-datasets: Community Catalog (3.9.0). _Zenodo_. https://doi.org/10.5281/zenodo.17641528.
+
+Roy, S. (2025). samapriya/geeup: geeup: Simple CLI for Earth Engine Uploads (2.0.0). _Zenodo_. https://doi.org/10.5281/zenodo.18073520.
 
 Sohl, T. L., Reker, R., Bouchard, M., Sayler, K., Dornbierer, J., Wika, S., Quenzer, R., & Friesz, A. (2016). Modeled historical land use and land cover for the conterminous United States. _Journal of Land Use Science_, _11_(4), 476–499. https://doi.org/10.1080/1747423X.2016.1147619.
 
