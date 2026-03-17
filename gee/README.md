@@ -5,7 +5,7 @@
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-orange.svg)](https://opensource.org/licenses/BSD-3-Clause)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19057936.svg)](https://doi.org/10.5281/zenodo.19057936)
 
-Pre-exports computationally expensive Google Earth Engine (GEE) collections as asset ImageCollections under `projects/azhydro/assets/`. These assets are consumed by `dataops.py` at tile-download time via simple `ee.ImageCollection(...)` loads and `filterDate()` calls, eliminating repeated on-the-fly computation.
+Pre-exports computationally expensive [Google Earth Engine](https://earthengine.google.com/) (GEE; [Gorelick et al., 2017](https://doi.org/10.1016/j.rse.2017.06.031)) collections as asset ImageCollections under `projects/azhydro/assets/`. These assets are consumed by `dataops.py` at tile-download time via simple `ee.ImageCollection(...)` loads and `filterDate()` calls, eliminating repeated on-the-fly computation.
 
 ## Prerequisites
 
@@ -82,11 +82,11 @@ The export pipeline harmonizes multiple heterogeneous data sources into temporal
     └─────────────────────────────────────────────────────────────┘
 ```
 
-- **1896–1999 (Reitz → OpenET scale):** USGS Reitz Ensemble ET is available as mm/day. It is converted to mm/month, then multiplied by a monthly OpenET/Reitz ratio derived from the 2000–2018 overlap period (228 paired monthly images). The ratio for each calendar month is averaged across all overlapping years to produce 12 climatological ratio grids, ensuring the Reitz ET is scaled to match the magnitude and spatial patterns of OpenET.
+- **1896–1999 (Reitz → OpenET scale):** USGS Reitz Ensemble ET ([Reitz et al., 2023](https://doi.org/10.1029/2022WR034012)) is available as mm/day. It is converted to mm/month, then multiplied by a monthly OpenET/Reitz ratio derived from the 2000–2018 overlap period (228 paired monthly images). The ratio for each calendar month is averaged across all overlapping years to produce 12 climatological ratio grids, ensuring the Reitz ET is scaled to match the magnitude and spatial patterns of OpenET.
 
-- **2000–2025 (OpenET, native):** OpenET Ensemble v2.0/v2.1 (`et_ensemble_mad`) is used directly. Monthly ET is computed by summing all OpenET images within each calendar month.
+- **2000–2025 (OpenET, native):** OpenET Ensemble v2.0/v2.1 ([Melton et al., 2022](https://doi.org/10.1111/1752-1688.12956); [Volk et al., 2024](https://doi.org/10.1038/s44221-023-00181-7)) (`et_ensemble_mad`) is used directly. Monthly ET is computed by summing all OpenET images within each calendar month.
 
-- **2026–2099 (MACA → OpenET scale):** No observational ET exists for the future. Instead, monthly EToF (crop coefficient = ET/ETo) grids are derived from the 2000–2025 OpenET/gridMET overlap. Future monthly ET is then: $\text{ET}_{\text{future}} = \text{EToF} \times \text{MACA ETo}$. This preserves the observed spatial crop-water-demand patterns while allowing the climate signal (ETo) to evolve under future scenarios.
+- **2026–2099 (MACA → OpenET scale):** No observational ET exists for the future. Instead, monthly EToF (crop coefficient = ET/ETo) grids are derived from the 2000–2025 OpenET/gridMET overlap. Future monthly ET is then: $\text{ET}_{\text{future}} = \text{EToF} \times \text{MACA ETo}$, where MACA ETo is from [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312). This preserves the observed spatial crop-water-demand patterns while allowing the climate signal (ETo) to evolve under future scenarios.
 
 ### ETo Harmonization (3 eras)
 
@@ -108,11 +108,11 @@ The export pipeline harmonizes multiple heterogeneous data sources into temporal
     └─────────────────────────────────────────────────────────────┘
 ```
 
-- **1896–1978 (PRISM Hargreaves → gridMET scale):** Daily climate data is unavailable before 1979, so monthly ETo is estimated from PRISM monthly tmax/tmin via the Hargreaves method (`openet.refetgee.Daily` with mid-month DOY). This systematically differs from Penman-Monteith-based gridMET ETo, so a per-pixel, per-month correction ratio is derived from the 1979–2025 overlap (564 paired monthly images) where both Hargreaves and gridMET are available. The corrected ETo is: $\text{ETo}_{\text{corrected}} = \text{Hargreaves PET} \times \overline{R}$, where $\overline{R} = \text{mean}\left(\frac{\text{gridMET ETo}}{\text{Hargreaves PET}}\right)$ over 1979–2025.
+- **1896–1978 (PRISM Hargreaves → gridMET scale):** Daily climate data is unavailable before 1979, so monthly ETo is estimated from [PRISM (Daly et al., 2008)](https://doi.org/10.1002/joc.1688) monthly tmax/tmin via the Hargreaves method (`openet.refetgee.Daily` with mid-month DOY). This systematically differs from Penman-Monteith-based [gridMET (Abatzoglou, 2013)](https://doi.org/10.1002/joc.3413) ETo, so a per-pixel, per-month correction ratio is derived from the 1979–2025 overlap (564 paired monthly images) where both Hargreaves and gridMET are available. The corrected ETo is: $\text{ETo}_{\text{corrected}} = \text{Hargreaves PET} \times \overline{R}$, where $\overline{R} = \text{mean}\left(\frac{\text{gridMET ETo}}{\text{Hargreaves PET}}\right)$ over 1979–2025.
 
-- **1979–2025 (gridMET, native):** gridMET monthly ETo (`projects/openet/assets/reference_et/conus/gridmet/monthly/v1`) is used directly. This is the reference standard to which all other eras are harmonized.
+- **1979–2025 (gridMET, native):** [gridMET (Abatzoglou, 2013)](https://doi.org/10.1002/joc.3413) monthly ETo (`projects/openet/assets/reference_et/conus/gridmet/monthly/v1`) is used directly. This is the reference standard to which all other eras are harmonized.
 
-- **2026–2099 (MACA → gridMET scale):** To preserve the nonlinear response of the Penman-Monteith equation, ETo is computed for every individual MACA image (all 20 GCMs × 2 RCPs) using a flat pipeline. A single `map()` applies `openet.refetgee.Daily.maca()` to every MACA image in the year, then for each month the sum is divided by the number of members (40) to obtain the ensemble-mean monthly ETo. GridMET bias-correction ratios (`projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/`) are then applied: $\text{ETo}_{\text{corrected}} = \frac{1}{N}\sum_{i=1}^{N}\text{ETo}_i \times \text{gridMET ratio}$. This avoids the low bias that results from averaging nonlinear climate inputs before computing ETo. The flat-pipeline approach (single map + reduce instead of 40 separate computation pipelines) keeps the GEE computation graph small enough to avoid out-of-memory errors.
+- **2026–2099 (MACA → gridMET scale):** To preserve the nonlinear response of the Penman-Monteith equation, ETo is computed for every individual [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) image (all 20 GCMs × 2 RCPs) using a flat pipeline. A single `map()` applies `openet.refetgee.Daily.maca()` to every MACA image in the year, then for each month the sum is divided by the number of members (40) to obtain the ensemble-mean monthly ETo. GridMET bias-correction ratios ([Volk et al., 2026](https://doi.org/10.5281/zenodo.18673484); `projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/`) are then applied: $\text{ETo}_{\text{corrected}} = \frac{1}{N}\sum_{i=1}^{N}\text{ETo}_i \times \text{gridMET ratio}$. This avoids the low bias that results from averaging nonlinear climate inputs before computing ETo. The flat-pipeline approach (single map + reduce instead of 40 separate computation pipelines) keeps the GEE computation graph small enough to avoid out-of-memory errors.
 
 ### LULC Harmonization (2 eras)
 
@@ -125,9 +125,9 @@ The export pipeline harmonizes multiple heterogeneous data sources into temporal
     └──────────────────┘   └─────────────────────┘   └──────────────────┘
 ```
 
-- **1938–1984:** USGS Historical LULC (`projects/nwi-usgs/assets/USGS-LULC-CONUS`, scenario = "Historical") is used directly. Years before 1938 use the 1938 classification.
-- **1985–2025:** IrrMapper for irrigation classification and NLCD for urban/developed areas provide observational LULC.
-- **2026–2099:** Four USGS LULC projection scenarios (B1, B2, A1B, A2) are combined via pixel-wise mode to create a single consensus ensemble. Exported as integer (categorical) data.
+- **1938–1984:** USGS Historical LULC ([Sohl et al., 2016](https://doi.org/10.1080/1747423X.2016.1147619); `projects/nwi-usgs/assets/USGS-LULC-CONUS`, scenario = "Historical") is used directly. Years before 1938 use the 1938 classification.
+- **1985–2025:** IrrMapper for irrigation classification and [NLCD (USGS, 2024](https://doi.org/10.5066/P94UXNTS); [Fleckenstein et al., 2026)](https://doi.org/10.1016/j.rse.2026.115347) for urban/developed areas provide observational LULC.
+- **2026–2099:** Four USGS LULC projection scenarios ([Sohl et al., 2014](https://doi.org/10.1890/13-1245.1); B1, B2, A1B, A2) are combined via pixel-wise mode to create a single consensus ensemble. Exported as integer (categorical) data.
 
 ### Join Strategy
 
@@ -139,10 +139,10 @@ Each asset is exported at its native source resolution to avoid resampling artif
 
 | Source | Native Scale |
 |---|---|
-| PRISM / gridMET / MACA | 4,638.3 m (~4 km) |
-| Reitz Ensemble ET | 800 m |
-| OpenET Ensemble | 30 m |
-| USGS LULC | 250 m |
+| [PRISM](https://doi.org/10.1002/joc.1688) / [gridMET](https://doi.org/10.1002/joc.3413) / [MACA](https://doi.org/10.1002/joc.2312) | 4,638.3 m (~4 km) |
+| [Reitz Ensemble ET](https://doi.org/10.5066/P9EZ3VAS) | 800 m |
+| [OpenET Ensemble](https://doi.org/10.1111/1752-1688.12956) | 30 m |
+| [USGS LULC](https://doi.org/10.1080/1747423X.2016.1147619) | 250 m |
 
 GEE handles on-the-fly reprojection when these assets are combined at tile-download time in `dataops.py`.
 
@@ -150,7 +150,7 @@ GEE handles on-the-fly reprojection when these assets are combined at tile-downl
 
 ### 1. gridMET/Hargreaves ETo Ratio (`gridmet_hargreaves_eto_ratio`)
 
-**Purpose:** Bias-correct PRISM Hargreaves ETo (1896–1978) to be consistent with gridMET ETo (1979–2025).
+**Purpose:** Bias-correct [PRISM (Daly et al., 2008)](https://doi.org/10.1002/joc.1688) Hargreaves ETo (1896–1978) to be consistent with [gridMET (Abatzoglou, 2013)](https://doi.org/10.1002/joc.3413) ETo (1979–2025).
 
 **Method:**
 1. Load gridMET monthly ETo for 1979–2025 (`projects/openet/assets/reference_et/conus/gridmet/monthly/v1`).
@@ -165,7 +165,7 @@ GEE handles on-the-fly reprojection when these assets are combined at tile-downl
 
 ### 2. OpenET/Reitz ET Ratio (`openet_reitz_et_ratio`)
 
-**Purpose:** Bias-correct USGS Reitz Ensemble ET (1896–1999) to be consistent with OpenET (2000–2025).
+**Purpose:** Bias-correct USGS [Reitz Ensemble ET (Reitz et al., 2023)](https://doi.org/10.5066/P9EZ3VAS) (1896–1999) to be consistent with [OpenET (Melton et al., 2022)](https://doi.org/10.1111/1752-1688.12956) (2000–2025).
 
 **Method:**
 1. Build monthly OpenET ET for 2000–2018 by summing daily OpenET v2.0 images per month (band `et_ensemble_mad`).
@@ -180,11 +180,11 @@ GEE handles on-the-fly reprojection when these assets are combined at tile-downl
 
 ### 3. Monthly EToF (`monthly_etof`)
 
-**Purpose:** Derive crop coefficient (EToF = ET/ETo) grids for applying to future MACA ETo to estimate future ET.
+**Purpose:** Derive crop coefficient (EToF = ET/ETo) grids for applying to future [MACA (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) ETo to estimate future ET.
 
 **Method:**
-1. Build monthly OpenET ET for 2000–2025 (same as above).
-2. Load gridMET monthly ETo for 2000–2025.
+1. Build monthly [OpenET](https://doi.org/10.1111/1752-1688.12956) ET for 2000–2025 (same as above).
+2. Load [gridMET](https://doi.org/10.1002/joc.3413) monthly ETo for 2000–2025.
 3. Inner join on both `month` AND `year`.
 4. Compute per-pixel EToF: $\text{EToF} = \frac{\text{OpenET ET}}{\text{gridMET ETo}}$.
 5. Average across all years for each month → 12 monthly EToF grids.
@@ -227,10 +227,10 @@ GEE handles on-the-fly reprojection when these assets are combined at tile-downl
 
 ### 6. MACA Monthly ETo (`maca_monthly_eto_v2`)
 
-**Purpose:** Monthly ETo for future scenarios 2026–2099, bias-corrected with gridMET ratios. Computed per-image via a flat pipeline to preserve nonlinear ETo response while keeping the computation graph small.
+**Purpose:** Monthly ETo for future scenarios 2026–2099, bias-corrected with gridMET ratios ([Volk et al., 2026](https://doi.org/10.5281/zenodo.18673484)). Computed per-image via a flat pipeline to preserve nonlinear ETo response while keeping the computation graph small.
 
 **Method:** For each year in 2026–2099:
-1. Load ALL MACA daily images for the year (20 models × 2 scenarios × 365 days ≈ 14,600 images).
+1. Load ALL [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) daily images for the year (20 models × 2 scenarios × 365 days ≈ 14,600 images).
 2. Map `openet.refetgee.Daily.maca()` over the entire collection to compute daily ETo for each image (using NASADEM elevation and pixel latitude).
 3. For each month, sum all daily ETo and divide by `N_MEMBERS` (40) to get the ensemble-mean monthly ETo.
 4. Apply gridMET bias-correction ratios (`projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/{MonthName}`), joined on `month`.
@@ -266,7 +266,7 @@ This approach still preserves per-image nonlinearity: ETo is computed from each 
 **Purpose:** Annual land use/land cover classification for 2026–2099.
 
 **Method:** For each year:
-1. Load USGS LULC projections (`projects/nwi-usgs/assets/USGS-LULC-CONUS`) for all four scenarios: B1, B2, A1B, A2.
+1. Load USGS LULC projections ([Sohl et al., 2014](https://doi.org/10.1890/13-1245.1); `projects/nwi-usgs/assets/USGS-LULC-CONUS`) for all four scenarios: B1, B2, A1B, A2.
 2. Compute pixel-wise mode across the 4 scenarios.
 3. Export as integer (categorical data).
 
@@ -278,7 +278,7 @@ This approach still preserves per-image nonlinearity: ETo is computed from each 
 
 **Dependencies:** `prism_hargreaves_eto` (for 1896–1978) + `maca_monthly_eto_v2` (for 2026–2099)
 
-**Purpose:** Monthly effective precipitation for 1896–2099 using the USDA SCS method.
+**Purpose:** Monthly effective precipitation for 1896–2099 using the [USDA SCS (1993)](https://www.wcc.nrcs.usda.gov/ftpref/wntsc/waterMgt/irrigation/NEH15/ch2.pdf) method ([Muratoglu et al., 2023](https://doi.org/10.1016/j.watres.2023.120011); [Majumdar et al., 2026](https://doi.org/10.5281/zenodo.18706481)).
 
 **Parameters:** `mad_factor = 1`, `rz_depth_m = 2 m` for all months (consistent with UCRB comparisons).
 
@@ -288,8 +288,8 @@ This approach still preserves per-image nonlinearity: ETo is computed from each 
    - 1979–2025: gridMET native monthly ETo
    - 2026–2099: Pre-exported `maca_monthly_eto_v2` asset
 2. **Get monthly precipitation:**
-   - 1896–2025: PRISM (`OREGONSTATE/PRISM/ANm`, band `ppt`)
-   - 2026–2099: Flat MACA pipeline — sum all daily precip images per month, divide by `N_MEMBERS` (40) for ensemble mean
+   - 1896–2025: [PRISM](https://doi.org/10.1002/joc.1688) (`OREGONSTATE/PRISM/ANm`, band `ppt`)
+   - 2026–2099: Flat [MACA](https://doi.org/10.1002/joc.2312) pipeline — sum all daily precip images per month, divide by `N_MEMBERS` (40) for ensemble mean
 3. **Inner join** ETo and precipitation on `month`.
 4. **Compute USDA SCS effective precipitation** (equations 2-84 and 2-85):
    - Convert ETo and precip from mm to inches.
@@ -300,7 +300,7 @@ This approach still preserves per-image nonlinearity: ETo is computed from each 
    - Convert back to mm.
 5. **Export** each of the 12 monthly images.
 
-**Soil data:** AWC from `projects/openet/soil/ssurgo_AWC_WTA_0to152cm_composite` (inches).
+**Soil data:** AWC from [SSURGO](https://websoilsurvey.nrcs.usda.gov/) (`projects/openet/soil/ssurgo_AWC_WTA_0to152cm_composite`) (inches).
 
 **Output:** 2,448 images (`{year}_{month:02d}`), each with band `peff` in mm/month.
 
@@ -450,3 +450,45 @@ Since every day has exactly one image per model/scenario pair, `.mean()` across 
 Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). The Arizona Water Use Dataset (1896–2099): Withdrawals, consumptive use, and irrigation efficiency partitioned by source. _In prep. for Nature Scientific Data_.
 
 Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Where Arizona's Water Goes: Two Centuries of Groundwater and Surface Water Withdrawals, Consumptive Use, and Irrigation Efficiency (1896–2099). _In prep. for AGU Earth's Future_.
+
+### Data References
+
+Abatzoglou, J. T. (2013). Development of gridded surface meteorological data for ecological applications and modelling. _International Journal of Climatology_, _33_(1), 121–131. https://doi.org/10.1002/joc.3413
+
+Abatzoglou, J. T., & Brown, T. J. (2012). A comparison of statistical downscaling methods suited for wildfire applications. _International Journal of Climatology_, _32_(5), 772–780. https://doi.org/10.1002/joc.2312
+
+Daly, C., Halbleib, M., Smith, J. I., Gibson, W. P., Doggett, M. K., Taylor, G. H., Curtis, J., & Pasteris, P. P. (2008). Physiographically sensitive mapping of climatological temperature and precipitation across the conterminous United States. _International Journal of Climatology_, _28_(15), 2031–2064. https://doi.org/10.1002/joc.1688
+
+Fleckenstein, R., Wellington, D., Jin, S., Tollerud, H., Brown, J. F., Dewitz, J., Pastick, N. J., Barber, C. P., O'Brien, A., & Spanier, M. (2026). A framework for integrating spatiotemporal deep learning methods with landsat for annual land cover and impervious surface mapping. _Remote Sensing of Environment_, _338_, 115347. https://doi.org/10.1016/j.rse.2026.115347
+
+Gorelick, N., Hancher, M., Dixon, M., Ilyushchenko, S., Thau, D., & Moore, R. (2017). Google Earth Engine: Planetary-scale geospatial analysis for everyone. _Remote Sensing of Environment_, _202_, 18–27. https://doi.org/10.1016/j.rse.2017.06.031
+
+Majumdar, S., ReVelle, P., Pearson, C., Nozari, S., Minor, B. A., Hasan, M. F., Huntington, J. L., & Smith, R. G. (2026). pyCropWat: A Python Package for Computing Effective Precipitation Using Google Earth Engine Climate Data (v1.2.1). _Zenodo_. https://doi.org/10.5281/zenodo.18706481.
+
+Melton, F., Huntington, J., Grimm, R., Herring, J., Hall, M., Rollison, D., Erickson, T., Allen, R., Anderson, M., Fisher, J. B., Kilic, A., Senay, G. B., Volk, J., Hain, C., Johnson, L., Ruhoff, A., Blankenau, P., Bromley, M., Carrara, W., … Anderson, R. G. (2022). OpenET: Filling a Critical Data Gap in Water Management for the Western United States. _JAWRA Journal of the American Water Resources Association_. https://doi.org/10.1111/1752-1688.12956.
+
+Muratoglu, A., Bilgen, G. K., Angin, I., & Kodal, S. (2023). Performance analyses of effective rainfall estimation methods for accurate quantification of agricultural water footprint. _Water Research_, _238_, 120011. https://doi.org/10.1016/j.watres.2023.120011.
+
+Reitz, M., Sanford, W. E., & Saxe, S. (2023). Ensemble Estimation of Historical Evapotranspiration for the Conterminous U.S. _Water Resources Research_, _59_(6). https://doi.org/10.1029/2022WR034012.
+
+Reitz, M., Sanford, W. E., & Saxe, S. (2023). Historical evapotranspiration for the conterminous U.S. _U.S. Geological Survey Data Release_. https://doi.org/10.5066/P9EZ3VAS.
+
+Roy, S., Majumdar, S., & Swetnam, T. (2025).  samapriya/awesome-gee-community-datasets: Community Catalog (3.9.0). _Zenodo_. https://doi.org/10.5281/zenodo.17641528.
+
+Sohl, T. L., Reker, R., Bouchard, M., Sayler, K., Dornbierer, J., Wika, S., Quenzer, R., & Friesz, A. (2016). Modeled historical land use and land cover for the conterminous United States. _Journal of Land Use Science_, _11_(4), 476–499. https://doi.org/10.1080/1747423X.2016.1147619.
+
+Sohl, T. L., Reker, R., Bouchard, M., Sayler, K., Dornbierer, J., Wika, S., Quenzer, R., & Friesz, A. (2018). Modeled historical land use and land cover for the conterminous United States: 1938-1992. _U.S. Geological Survey data release_. https://doi.org/10.5066/F7KK99RR.
+
+Sohl, T. L., Sayler, K. L., Bouchard, M. A., Reker, R. R., Friesz, A. M., Bennett, S. L., Sleeter, B. M., Sleeter, R. R., Wilson, T., Soulard, C., Knuppe, M., & van Hofwegen, T. (2014). Spatially explicit modeling of 1992–2100 land cover and forest stand age for the conterminous United States. _Ecological Applications_, _24_(5), 1015–1036. https://doi.org/10.1890/13-1245.1.
+
+Sohl, T. L., Sayler, K. L., Bouchard, M. A., Reker, R. R., Friesz, A. M., Bennett, S. L., Sleeter, B. M., Sleeter, R. R., Wilson, T., Soulard, C., Knuppe, M., & van Hofwegen, T. (2018). Conterminous United States Land Cover Projections - 1992 to 2100. _U.S. Geological Survey data release_. https://doi.org/10.5066/P95AK9HP.
+
+Soil Survey Staff, Natural Resources Conservation Service, United States Department of Agriculture. _Web Soil Survey_. Available online at https://websoilsurvey.nrcs.usda.gov/. 
+
+USDA SCS. (1993). Chapter 2 Irrigation Water Requirements. In Part 623 National Engineering Handbook. _USDA Soil Conservation Service_. https://www.wcc.nrcs.usda.gov/ftpref/wntsc/waterMgt/irrigation/NEH15/ch2.pdf
+
+USGS. (2024). Annual NLCD Collection 1 Science Products. _U.S. Geological Survey data release_. https://doi.org/10.5066/P94UXNTS.
+
+Volk, J. M., Huntington, J. L., Melton, F. S., Allen, R., Anderson, M., Fisher, J. B., Kilic, A., Ruhoff, A., Senay, G. B., Minor, B., Morton, C., Ott, T., Johnson, L., de Andrade, B., Carrara, W., Doherty, C. T., Dunkerly, C., Friedrichs, M., Guzman, A., … Yang, Y. (2024). Assessing the accuracy of OpenET satellite-based evapotranspiration data to support water resource and land management applications. _Nature Water_, _2_(2), 193–205. https://doi.org/10.1038/s44221-023-00181-7.
+
+Volk, J., Dunkerly, C., Majumdar, S., Huntington, J., Minor, B., Kim, Y., Morton, C., ReVelle, P., Kilic, A., Melton, F., Allen, R., Pearson, C., Purdy, A., & Caldwell, T. (2026). CONUS Gridded Reference Evapotranspiration Bias Correction: Inputs, Station Validation, and Outputs (gridMET/OpenET) [Data set]. _Zenodo_. https://doi.org/10.5281/zenodo.18673484.
