@@ -1,4 +1,4 @@
-# Improving remote sensing and machine learning-driven groundwater withdrawal estimation in Arizona 
+# AZ-Hydro: Two Centuries of Arizona Water Use — Groundwater and Surface Water Withdrawals, Consumptive Use, and Irrigation Efficiency (1896–2099)
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Google Earth Engine](https://img.shields.io/badge/Google%20Earth%20Engine-4285F4?logo=google-earth&logoColor=white)](https://earthengine.google.com/)
