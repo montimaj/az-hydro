@@ -113,24 +113,24 @@ The project builds a spatially explicit, multi-decadal (1896–2099) dataset for
 
 ### Google Earth Engine (GEE) predictor bands
 
-The [`download_gee_data()`](hydrolibs/dataops.py) function downloads 14 bands of geospatial data from GEE as tiled GeoTIFFs at 2 km resolution over Arizona. Data are harmonized across three temporal eras using overlap-period bias-correction ratios to ensure continuity.
+The [`download_gee_data()`](hydrolibs/dataops.py) function downloads 14 bands of geospatial data from GEE ([Gorelick et al., 2017](https://doi.org/10.1016/j.rse.2017.06.031); [Roy et al., 2025](https://doi.org/10.5281/zenodo.17641528)) as tiled GeoTIFFs at 2 km resolution over Arizona. Data are harmonized across three temporal eras using overlap-period bias-correction ratios to ensure continuity.
 
 | Band | Description | Units | Source |
 |------|-------------|-------|--------|
-| `annual_et_ensemble_mm` | Actual evapotranspiration | mm/yr | Reitz (1896–1999), OpenET (2000–2025), MACA ensemble (2026–2099) |
-| `annual_eto_mm` | Reference evapotranspiration (Penman-Monteith) | mm/yr | PRISM Hargreaves (1896–1978), gridMET (1979–2025), MACA ensemble (2026–2099) |
-| `annual_precip_mm` | Precipitation | mm/yr | PRISM (1896–2025), MACA ensemble (2026–2099) |
-| `annual_peff_mm` | Effective precipitation (USDA SCS method) | mm/yr | Computed from harmonized ETo, precipitation, and soil AWC |
-| `annual_peff_pcml_mm` | Effective precipitation (PCML obs-based, 2000–2024) | mm/yr | PCML model, climatological mean outside 2000–2024 |
-| `annual_tmmx_K` | Annual mean daily max temperature | K | PRISM (1896–2025), MACA (2026–2099) |
-| `annual_tmmn_K` | Annual mean daily min temperature | K | PRISM (1896–2025), MACA (2026–2099) |
-| `lulc` | Land use/land cover (1=Agriculture, 2=Urban, 3=Surface Water) | categorical | USGS historical (≤1984), NLCD (1985–2025), USGS projections (2026–2099) |
+| `annual_et_ensemble_mm` | Actual evapotranspiration | mm/yr | [Reitz et al., 2023](https://doi.org/10.1029/2022WR034012) (1896–1999), [OpenET (Melton et al., 2022](https://doi.org/10.1111/1752-1688.12956); [Volk et al., 2024)](https://doi.org/10.1038/s44221-023-00181-7) (2000–2025), [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) ensemble (2026–2099) |
+| `annual_eto_mm` | Reference evapotranspiration (Penman-Monteith) | mm/yr | [PRISM (Daly et al., 2008)](https://doi.org/10.1002/joc.1688) Hargreaves (1896–1978), [gridMET (Abatzoglou, 2013)](https://doi.org/10.1002/joc.3413) (1979–2025), [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) bias-corrected ([Volk et al., 2026](https://doi.org/10.5281/zenodo.18673484)) ensemble (2026–2099) |
+| `annual_precip_mm` | Precipitation | mm/yr | [PRISM (Daly et al., 2008)](https://doi.org/10.1002/joc.1688) (1896–2025), [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) ensemble (2026–2099) |
+| `annual_peff_mm` | Effective precipitation (USDA SCS method) | mm/yr | [USDA SCS, 1993](https://www.wcc.nrcs.usda.gov/ftpref/wntsc/waterMgt/irrigation/NEH15/ch2.pdf); [Muratoglu et al., 2023](https://doi.org/10.1016/j.watres.2023.120011); [Majumdar et al., 2026](https://doi.org/10.5281/zenodo.18706481) |
+| `annual_peff_pcml_mm` | Effective precipitation (PCML obs-based, 2000–2024) | mm/yr | [Hasan et al., 2025](https://doi.org/10.1016/j.agwat.2025.109821), climatological mean outside 2000–2024 |
+| `annual_tmmx_K` | Annual mean daily max temperature | K | [PRISM (Daly et al., 2008)](https://doi.org/10.1002/joc.1688) (1896–2025), [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) (2026–2099) |
+| `annual_tmmn_K` | Annual mean daily min temperature | K | [PRISM (Daly et al., 2008)](https://doi.org/10.1002/joc.1688) (1896–2025), [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) (2026–2099) |
+| `lulc` | Land use/land cover (1=Agriculture, 2=Urban, 3=Surface Water) | categorical | [USGS historical (Sohl et al., 2016)](https://doi.org/10.1080/1747423X.2016.1147619) (≤1984), [NLCD (USGS, 2024](https://doi.org/10.5066/P94UXNTS); [Fleckenstein et al., 2026)](https://doi.org/10.1016/j.rse.2026.115347) (1985–2025), [USGS LULC Projections (Sohl et al., 2014)](https://doi.org/10.1890/13-1245.1) projections (2026–2099) |
 | `annual_crop_fraction` | Cropland fraction | fraction | Derived from USGS LULC |
-| `annual_irr_fraction` | Irrigated area fraction | fraction | IrrMapper RF v1.2 (1985–2025), LULC-derived outside |
+| `annual_irr_fraction` | Irrigated area fraction | fraction | [IrrMapper (Ketchum et al., 2020](https://doi.org/10.3390/rs12142328); [2023)](https://doi.org/10.1038/s43247-023-01152-2) RF v1.2 (1985–2025), LULC-derived outside |
 | `annual_gw_fraction` | Groundwater irrigation fraction | fraction | [Hung et al., 2025](https://doi.org/10.1038/s41597-025-05920-x) snapshots (2000, 2005, 2010, 2015) |
-| `soil_depth_mm` | Soil depth | mm | CSRL (static) |
-| `awc_mm` | Available water capacity (0–152 cm) | mm | SSURGO (static) |
-| `ksat_mean_micromps` | Saturated hydraulic conductivity | μm/s | CSRL (static) |
+| `soil_depth_mm` | Soil depth | mm | [CSRL (Walkinshaw et al., 2022)](https://casoilresource.lawr.ucdavis.edu/soil-properties/) (static) |
+| `awc_mm` | Available water capacity (0–152 cm) | mm | [SSURGO](https://websoilsurvey.nrcs.usda.gov/) (static) |
+| `ksat_mean_micromps` | Saturated hydraulic conductivity | μm/s | [CSRL (Walkinshaw et al., 2022)](https://casoilresource.lawr.ucdavis.edu/soil-properties/) (static) |
 
 ### Data harmonization
 
@@ -154,7 +154,7 @@ Twelve custom ImageCollections are pre-computed via scripts in [`gee/`](../gee/)
 | `monthly_etof` | Crop coefficient (OpenET / gridMET ETo) | Climatology |
 | `prism_hargreaves_eto` | PRISM-based Hargreaves ETo | 1896–1978 |
 | `usgs_adjusted_et` | Bias-adjusted Reitz actual ET | 1896–1999 |
-| `maca_monthly_eto_v2` | MACA per-model/scenario projected ETo | 2026–2099 |
+| `maca_monthly_eto_v2` | MACA per-model/scenario projected ETo, bias-corrected using [Volk et al., (2026)](https://doi.org/10.5281/zenodo.18673484) | 2026–2099 |
 | `maca_monthly_et_v2` | MACA ensemble projected actual ET | 2026–2099 |
 | `lulc_projection_ensemble` | USGS 4-scenario LULC mode | 2026–2099 |
 | `monthly_peff_v2` | USDA SCS effective precipitation | 1896–2099 |
@@ -172,8 +172,8 @@ The [`streamflowops`](hydrolibs/streamflowops.py) module handles streamflow data
 
 #### Data sources
 
-- **USGS NWIS**: Daily mean discharge (parameter 00060) via the `dataretrieval` Python API, resampled to monthly means
-- **USBR CMIP Ensemble**: Monthly modeled streamflow averaged across ~112 climate model runs (scenarios a1b, a2, b1), spanning 1950–2099
+- **USGS NWIS**: Daily mean discharge (parameter 00060) via the `dataretrieval` Python API ([Hodson et al., 2023](https://doi.org/10.5066/P94I5TX3)), resampled to monthly means
+- **USBR CMIP Ensemble**: Monthly modeled streamflow ([Gangopadhyay & Pruitt, 2011](https://www.usbr.gov/watersmart/docs/west-wide-climate-risk-assessments.pdf)) averaged across ~112 climate model runs (scenarios a1b, a2, b1), spanning 1950–2099
 - **Historical Ratio Method**: For sites without USBR projections, per-calendar-month scaling ratios are computed against the nearest USBR-gauged reference site and applied to generate synthetic 1950–2099 projections
 
 #### Gauge network (20 sites)
@@ -223,8 +223,9 @@ The CAP overlay does not double-count local watershed flows. Salt/Verde watershe
 uniformly to all pixels.  In reality, streamflow is concentrated near
 channels.  The canal-weighted streamflow variant (`Canal_Weighted_Streamflow_*.tif`)
 partially mitigates this by redistributing streamflow proportionally to
-canal density (segment count per pixel), concentrating flow where delivery
-infrastructure exists.  A further refinement could use distance-to-NHD
+canal density (segment count per pixel) derived from the GRAIN dataset
+([Suresh et al., 2026](https://doi.org/10.5194/essd-18-1855-2026)),
+concentrating flow where delivery infrastructure exists.  A further refinement could use distance-to-NHD
 flowlines as a weighting factor, but this data product is not currently
 in the pipeline.
 
@@ -293,7 +294,7 @@ Downloads, mosaics, and aligns all input datasets to a common 2 km grid.
    catches any remaining `gdal_rasterize` artifacts.
 3. **Streamflow & canal density** — `streamflowops.create_canal_density_raster()`
    and `streamflowops.create_streamflow_rasters()` build predictor layers
-   from USGS/USBR gauge data and CAP canal geometry.
+   from USGS/USBR gauge data and GRAIN canal geometry ([Suresh et al., 2026](https://doi.org/10.5194/essd-18-1855-2026)).
 4. **Basin & well rasters** — `gwops.create_gw_basin_rasters()` and
    `gwops.create_well_density_raster()` rasterise ADWR basins, sub-basins,
    and the well registry.
@@ -889,8 +890,8 @@ independent USGS datasets at the Arizona groundwater basin scale:
 | Dataset | Native resolution | Source |
 |---|---|---|
 | ML predictions | 2 km rasters | Pipeline Step 3 |
-| USGS NHM | HUC12 polygons (Mgal/d) | `USGS_NHM_Withdrawals/` |
-| USGS Reitz | 800 m rasters (m/yr) | `USGS_Reitz_Irrigation/` |
+| USGS NHM | HUC12 polygons (Mgal/d) | [Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM); [Martin et al., 2023](https://doi.org/10.5066/P9YWR0OJ) |
+| USGS Reitz | 800 m rasters (m/yr) | [Reitz et al., 2023](https://doi.org/10.5066/P9EZ3VAS) |
 
 Because the three products live at different native resolutions, each is
 aggregated to Arizona groundwater basin totals (volume in AF) for
@@ -908,7 +909,7 @@ All outputs are written to `{prediction_dir}Intercomparison/`.
 #### Step 4b — CU / IE intercomparison (`run_cu_ie_usgs_intercomparison()`)
 
 Compares ML-based Irrigation Consumptive Use and Irrigation Efficiency with
-USGS NHM HUC12-scale data at the basin scale:
+USGS NHM HUC12-scale data ([Martin et al., 2025](https://doi.org/10.1016/j.jhydrol.2025.133909); [Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM)) at the basin scale:
 
 | Product | ML source | USGS source |
 |---|---|---|
@@ -970,7 +971,7 @@ Compares irrigated effective precipitation across three sources:
 |---|---|---|---|
 | **ML Peff (SCS)** | Predictor band 4 × `irr_fraction` | 2000–2024 | 2 km rasters |
 | **ML Peff (PCML)** | Predictor band 5 × `irr_fraction` | 2000–2023 | 2 km rasters |
-| **NHM PPTeff** | USGS NHM HUC12 data (Mgal/d) | 2000–2020 | HUC12 polygons |
+| **NHM PPTeff** | USGS NHM HUC12 data ([Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM)) (Mgal/d) | 2000–2020 | HUC12 polygons |
 
 All three datasets are scaled by `annual_irr_fraction` so that volumes
 represent only the irrigated-area contribution.  NHM PPTeff follows the
@@ -1089,15 +1090,16 @@ Key functions:
 
 ### `streamflowops.py` — Streamflow & canal data
 
-Downloads and processes streamflow data from USGS and USBR sources.
+Downloads and processes streamflow data from USGS ([Hodson et al., 2023](https://doi.org/10.5066/P94I5TX3)) and USBR ([Gangopadhyay & Pruitt, 2011](https://www.usbr.gov/watersmart/docs/west-wide-climate-risk-assessments.pdf)) sources.
 
 Key functions:
 - **`download_streamflow()`** — Downloads monthly streamflow records from
   USGS gauges and retrieves USBR delivery data.
 - **`create_streamflow_rasters()`** — Rasterises annual streamflow volumes
   onto the 2 km grid using watershed polygons.
-- **`create_canal_density_raster()`** — Rasterises CAP canal geometry into
-  a canal-density layer used for SW-fraction estimation.
+- **`create_canal_density_raster()`** — Rasterises canal geometry from the
+  GRAIN dataset ([Suresh et al., 2026](https://doi.org/10.5194/essd-18-1855-2026))
+  into a canal-density layer used for SW-fraction estimation.
 
 ### `partitionops.py` — Water-budget partitioning
 
@@ -1244,12 +1246,12 @@ Key functions:
 Basin-scale comparison of ML predictions with independent USGS datasets.
 
 **Withdrawal intercomparison** (`run_intercomparison()`):
-- Loads ML, NHM, and Reitz data; aggregates to basin volumes (AF).
+- Loads ML, NHM ([Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM); [Martin et al., 2023](https://doi.org/10.5066/P9YWR0OJ)), and Reitz ([Reitz et al., 2023](https://doi.org/10.5066/P9EZ3VAS)) data; aggregates to basin volumes (AF).
 - Computes pairwise RMSD, MAD, Percent Difference.
 - Produces per-basin time series, scatter plots, and spatial difference maps.
 
 **CU / IE intercomparison** (`run_cu_ie_intercomparison()`):
-- Compares ML CU (mm) and IE (ratio) with NHM HUC12 annual data.
+- Compares ML CU (mm) and IE (ratio) with NHM HUC12 annual data ([Martin et al., 2025](https://doi.org/10.1016/j.jhydrol.2025.133909); [Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM)).
 - CU: Mgal/d → m³/yr → depth (mm) → basin volumes (AF).
 - IE: dimensionless ratio → area-weighted basin means.
 - Produces metrics, per-basin tables, time series, and scatter plots.
@@ -1261,7 +1263,7 @@ Basin-scale comparison of ML predictions with independent USGS datasets.
 - Produces per-basin time series, scatter plots, and validation metrics.
 
 **Peff intercomparison** (`run_peff_intercomparison()`):
-- Compares ML Peff (SCS, band 4) and Peff PCML (band 5) with NHM PPTeff.
+- Compares ML Peff (SCS, band 4) and Peff PCML (band 5) with NHM PPTeff ([Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM)).
 - All three scaled by `irr_fraction` to represent irrigated-area Peff.
 - NHM PPTeff: Mgal/d → m³/yr → depth (mm) → basin volumes (AF).
 - Produces metrics, per-basin tables, time series, and scatter plots.
@@ -1349,3 +1351,67 @@ Data/Outputs/
         ├── CAP_SRP_Validation/              # Step 4c — CAP/SRP SW validation
         └── Peff_Intercomparison/            # Step 4d — Peff comparison
 ```
+
+### Data References
+
+Abatzoglou, J. T. (2013). Development of gridded surface meteorological data for ecological applications and modelling. _International Journal of Climatology_, _33_(1), 121–131. https://doi.org/10.1002/joc.3413
+
+Abatzoglou, J. T., & Brown, T. J. (2012). A comparison of statistical downscaling methods suited for wildfire applications. _International Journal of Climatology_, _32_(5), 772–780. https://doi.org/10.1002/joc.2312
+
+Daly, C., Halbleib, M., Smith, J. I., Gibson, W. P., Doggett, M. K., Taylor, G. H., Curtis, J., & Pasteris, P. P. (2008). Physiographically sensitive mapping of climatological temperature and precipitation across the conterminous United States. _International Journal of Climatology_, _28_(15), 2031–2064. https://doi.org/10.1002/joc.1688
+
+Fleckenstein, R., Wellington, D., Jin, S., Tollerud, H., Brown, J. F., Dewitz, J., Pastick, N. J., Barber, C. P., O’Brien, A., & Spanier, M. (2026). A framework for integrating spatiotemporal deep learning methods with landsat for annual land cover and impervious surface mapping. _Remote Sensing of Environment_, _338_, 115347. https://doi.org/10.1016/j.rse.2026.115347
+
+Gangopadhyay, S., & Pruitt, T. (2011). West-Wide Climate Risk Assessments:  Bias-Corrected  and Spatially Downscaled  Surface Water Projections (Technical Memorandum No. 86-68210-2011-01). _U.S. Bureau of Reclamation_. https://www.usbr.gov/watersmart/docs/west-wide-climate-risk-assessments.pdf
+
+Gorelick, N., Hancher, M., Dixon, M., Ilyushchenko, S., Thau, D., & Moore, R. (2017). Google Earth Engine: Planetary-scale geospatial analysis for everyone. _Remote Sensing of Environment_, _202_, 18–27. https://doi.org/10.1016/j.rse.2017.06.031
+
+Hasan, M. F., Smith, R. G., Majumdar, S., Huntington, J. L., Alves Meira Neto, A., & Minor, B. A. (2025). Satellite data and physics-constrained machine learning for estimating effective precipitation in the Western United States and application for monitoring groundwater irrigation. _Agricultural Water Management_, _319_, 109821. https://doi.org/10.1016/j.agwat.2025.109821
+
+Haynes, J.V., Read, A.L., Chan, A.Y., Martin, D.J., Regan, R.S., Henson, W.R., Niswonger, R.G., & Stewart, J.S., 2023, Monthly crop irrigation withdrawals and efficiencies by HUC12 watershed for years 2000-2020 within the conterminous United States (ver. 2.0, September 2024). _U.S. Geological Survey data release_, https://doi.org/10.5066/P9LGISUM.
+
+Hodson, T.O., Hariharan, J.A., Black, S., & Horsburgh, J.S.. (2023). dataretrieval (Python): a Python package for discovering and retrieving water data available from U.S. federal hydrologic web services. _U.S. Geological Survey software release_. https://doi.org/10.5066/P94I5TX3.
+
+Hung, F., Chiarelli, D. D., Famiglietti, J. S., & Müller, M. F. (2025). Downscaled global 60-meter resolution estimates of irrigation water sources (2000–2015). _Scientific Data_, _12_(1), 1632. https://doi.org/10.1038/s41597-025-05920-x
+
+Ketchum, D., Hoylman, Z. H., Huntington, J., Brinkerhoff, D., & Jencso, K. G. (2023). Irrigation intensification impacts sustainability of streamflow in the Western United States. _Communications Earth & Environment_, _4_(1), 479. https://doi.org/10.1038/s43247-023-01152-2
+
+Ketchum, D., Jencso, K., Maneta, M. P., Melton, F., Jones, M. O., & Huntington, J. (2020). IrrMapper: A Machine Learning Approach for High Resolution Mapping of Irrigated Agriculture Across the Western U.S. _Remote Sensing_, _12_(14), 2328. https://doi.org/10.3390/rs12142328
+
+Majumdar, S., ReVelle, P., Pearson, C., Nozari, S., Minor, B. A., Hasan, M. F., Huntington, J. L., & Smith, R. G. (2026). pyCropWat: A Python Package for Computing Effective Precipitation Using Google Earth Engine Climate Data (v1.2.1). _Zenodo_. https://doi.org/10.5281/zenodo.18706481
+
+Martin, D. J., Niswonger, R. G., Regan, R. S., Huntington, J. L., Ott, T., Morton, C., Senay, G. B., Friedrichs, M., Melton, F. S., Haynes, J., Henson, W., Read, A., Xie, Y., Lark, T., & Rush, M. (2025). Estimating irrigation consumptive use for the conterminous United States: coupling satellite-sourced estimates of actual evapotranspiration with a national hydrologic model. _Journal of Hydrology_, _662_, 133909. https://doi.org/10.1016/j.jhydrol.2025.133909
+
+Martin, D.J., Regan, R.S., Haynes, J.V., Read, A.L., Henson, W.R., Stewart, J.S., Brandt, J.T., & Niswonger, R.G. (2023). Irrigation water use reanalysis for the 2000-20 period by HUC12, month, and year for the conterminous United States (ver. 2.0, September 2024). _U.S. Geological Survey data release_. https://doi.org/10.5066/P9YWR0OJ.
+
+Melton, F., Huntington, J., Grimm, R., Herring, J., Hall, M., Rollison, D., Erickson, T., Allen, R., Anderson, M., Fisher, J. B., Kilic, A., Senay, G. B., Volk, J., Hain, C., Johnson, L., Ruhoff, A., Blankenau, P., Bromley, M., Carrara, W., … Anderson, R. G. (2022). OpenET: Filling a Critical Data Gap in Water Management for the Western United States. _JAWRA Journal of the American Water Resources Association_. https://doi.org/10.1111/1752-1688.12956
+
+Muratoglu, A., Bilgen, G. K., Angin, I., & Kodal, S. (2023). Performance analyses of effective rainfall estimation methods for accurate quantification of agricultural water footprint. _Water Research_, _238_, 120011. https://doi.org/10.1016/j.watres.2023.120011
+
+Reitz, M., Sanford, W. E., & Saxe, S. (2023). Ensemble Estimation of Historical Evapotranspiration for the Conterminous U.S. Water Resources Research, 59(6). https://doi.org/10.1029/2022WR034012
+
+Reitz, M., Sanford, W. E., & Saxe, S. (2023). Historical evapotranspiration for the conterminous U.S. _U.S. Geological Survey Data Release_. https://doi.org/10.5066/P9EZ3VAS
+
+Roy, S., Majumdar, S., & Swetnam, T. (2025).  samapriya/awesome-gee-community-datasets: Community Catalog (3.9.0). _Zenodo_. https://doi.org/10.5281/zenodo.17641528
+
+Sohl, T. L., Reker, R., Bouchard, M., Sayler, K., Dornbierer, J., Wika, S., Quenzer, R., & Friesz, A. (2016). Modeled historical land use and land cover for the conterminous United States. _Journal of Land Use Science_, _11_(4), 476–499. https://doi.org/10.1080/1747423X.2016.1147619
+
+Sohl, T. L., Reker, R., Bouchard, M., Sayler, K., Dornbierer, J., Wika, S., Quenzer, R., & Friesz, A. (2018). Modeled historical land use and land cover for the conterminous United States: 1938-1992. _U.S. Geological Survey data release_. https://doi.org/10.5066/F7KK99RR.
+
+Sohl, T. L., Sayler, K. L., Bouchard, M. A., Reker, R. R., Friesz, A. M., Bennett, S. L., Sleeter, B. M., Sleeter, R. R., Wilson, T., Soulard, C., Knuppe, M., & van Hofwegen, T. (2014). Spatially explicit modeling of 1992–2100 land cover and forest stand age for the conterminous United States. _Ecological Applications_, _24_(5), 1015–1036. https://doi.org/10.1890/13-1245.1
+
+Sohl, T. L., Sayler, K. L., Bouchard, M. A., Reker, R. R., Friesz, A. M., Bennett, S. L., Sleeter, B. M., Sleeter, R. R., Wilson, T., Soulard, C., Knuppe, M., & van Hofwegen, T. (2018). Conterminous United States Land Cover Projections - 1992 to 2100. _U.S. Geological Survey data release_. https://doi.org/10.5066/P95AK9HP.
+
+Soil Survey Staff, Natural Resources Conservation Service, United States Department of Agriculture. _Web Soil Survey_. Available online at https://websoilsurvey.nrcs.usda.gov/. 
+
+Suresh, S., Hossain, F., Mishra, V., & Hossain, N. (2026). GRAIN – a Global Registry of Agricultural Irrigation Networks. _Earth System Science Data_, _18_(3), 1855–1875. https://doi.org/10.5194/essd-18-1855-2026
+
+USDA SCS. (1993). Chapter 2 Irrigation Water Requirements. In Part 623 National Engineering Handbook. _USDA Soil Conservation Service_. https://www.wcc.nrcs.usda.gov/ftpref/wntsc/waterMgt/irrigation/NEH15/ch2.pdf
+
+USGS. (2024). Annual NLCD Collection 1 Science Products. _U.S. Geological Survey data release_. https://doi.org/10.5066/P94UXNTS
+
+Volk, J. M., Huntington, J. L., Melton, F. S., Allen, R., Anderson, M., Fisher, J. B., Kilic, A., Ruhoff, A., Senay, G. B., Minor, B., Morton, C., Ott, T., Johnson, L., de Andrade, B., Carrara, W., Doherty, C. T., Dunkerly, C., Friedrichs, M., Guzman, A., … Yang, Y. (2024). Assessing the accuracy of OpenET satellite-based evapotranspiration data to support water resource and land management applications. _Nature Water_, _2_(2), 193–205. https://doi.org/10.1038/s44221-023-00181-7
+
+Volk, J., Dunkerly, C., Majumdar, S., Huntington, J., Minor, B., Kim, Y., Morton, C., ReVelle, P., Kilic, A., Melton, F., Allen, R., Pearson, C., Purdy, A., & Caldwell, T. (2026). CONUS Gridded Reference Evapotranspiration Bias Correction: Inputs, Station Validation, and Outputs (gridMET/OpenET) [Data set]. _Zenodo_. https://doi.org/10.5281/zenodo.18673484
+
+Walkinshaw, M., O’Geen, A. T., & Beaudette, D. E. (2022). Soil Properties. _California Soil Resource Lab_. https://casoilresource.lawr.ucdavis.edu/soil-properties/

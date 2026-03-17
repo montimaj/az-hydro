@@ -10,7 +10,6 @@ Covers:
     - visualops (data-frame construction and plotting helpers)
 """
 import os
-import tempfile
 from unittest.mock import MagicMock
 
 import matplotlib
