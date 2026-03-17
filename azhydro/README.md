@@ -76,6 +76,15 @@ python pipeline.py --steps 3,3b           # prediction + uncertainty quantificat
 python pipeline.py --download --recreate  # force fresh GEE download and file recreation
 ```
 
+Step 0 supports fine-grained sub-step control via `--skip-prep`:
+
+```bash
+python pipeline.py --steps 0 --skip-prep gee               # skip GEE download & mosaic
+python pipeline.py --steps 0 --skip-prep gw-csv,gw-rasters # skip GW CSV and raster creation
+python pipeline.py --recreate --skip-prep streamflow        # recreate everything except streamflow
+python pipeline.py --skip-prep gee,vectors,reproject        # skip multiple sub-steps
+```
+
 #### Available steps
 
 | Step | Description |
@@ -92,6 +101,18 @@ python pipeline.py --download --recreate  # force fresh GEE download and file re
 | `4c` | CAP/SRP surface-water validation |
 | `4d` | Effective precipitation intercomparison |
 
+#### Step 0 sub-steps
+
+| Sub-step | Description |
+|----------|-------------|
+| `gee` | GEE tile download & mosaic |
+| `gw-csv` | GW CSV → per-year shapefiles |
+| `vectors` | Reproject vectors |
+| `gw-rasters` | GW volume → depth → cropped rasters |
+| `streamflow` | Canal density & streamflow rasters |
+| `basin-rasters` | GW basin, sub-basin & well density rasters |
+| `reproject` | Reproject GEE mosaics to match GW grid |
+
 #### CLI flags
 
 | Flag | Default | Description |
@@ -101,6 +122,7 @@ python pipeline.py --download --recreate  # force fresh GEE download and file re
 | `--download` | — | Force GEE tile download. |
 | `--load-files` | `True` | Skip recreating intermediate files that already exist. |
 | `--recreate` | — | Force recreation of intermediate files. |
+| `--skip-prep` | — | Comma-separated Step 0 sub-steps to skip. |
 | `-v`, `--verbose` | `False` | Enable verbose (DEBUG-level) logging. |
 
 The pipeline executes the selected steps in sequence (details below).
@@ -525,6 +547,12 @@ $$\sigma_{\text{MACA}}(x, y, t) = \text{std}\bigl[\hat{y}_{\text{GCM}_1}, \ldots
 For historical years (1896–2025), σ_MACA = 0 because observations replace
 GCM projections.
 
+**Climate input spread diagnostics.**  During the σ_MACA loop, the AZ-mean
+values of ET, ETo, and Peff are recorded for each GCM and year.  A 3-panel
+ribbon plot (`Climate_Input_Spread.png`) and per-variable CSVs are saved
+to `Sigma_MACA/Climate_Input_Spread/`, showing how the raw climate inputs
+diverge across the 5 GCMs before they propagate through the XGBoost model.
+
 ##### σ_model — XGBoost seed ensemble (all years, 1896–2099)
 
 Ten XGBoost models are trained on the full metered dataset (1984–2024) with
@@ -654,6 +682,11 @@ A temporal average `Mean_CV.tif` is also computed across all years.
 Full_Prediction_XGB/Uncertainty/
 ├── Sigma_MACA/
 │   ├── Rasters/Sigma_MACA_mm_{year}.tif
+│   ├── Climate_Input_Spread/
+│   │   ├── Climate_Input_Spread.png         # 3-panel ribbon plot (ET, ETo, Peff)
+│   │   ├── annual_et_ensemble_mm.csv        # Per-GCM AZ-mean ET by year
+│   │   ├── annual_eto_mm.csv                # Per-GCM AZ-mean ETo by year
+│   │   └── annual_peff_mm.csv               # Per-GCM AZ-mean Peff by year
 │   ├── Basin_Sigma_MACA.csv
 │   ├── Subbasin_Sigma_MACA.csv
 │   └── Uncertainty_Summary_MACA.csv
@@ -1195,7 +1228,9 @@ Key functions:
   `subbasin_shp` parameters for basin/sub-basin shapefiles.
 - **`compute_sigma_maca()`** — Inter-GCM climate spread (5 GCMs, future
   only).  Returns per-year total σ, per-category σ, and per-GCM mosaic
-  directories (reused by σ_CU).
+  directories (reused by σ_CU).  Also records per-GCM AZ-mean values of
+  ET, ETo, and Peff and generates input spread CSVs and a 3-panel ribbon
+  plot (`Climate_Input_Spread/`).
 - **`compute_sigma_model()`** — XGBoost 10-seed ensemble spread (all
   years).  Parallelised via Dask + Optuna.  Returns per-year total σ and
   per-category σ.

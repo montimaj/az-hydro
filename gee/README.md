@@ -29,7 +29,10 @@ The scripts use the GEE high-volume endpoint (`https://earthengine-highvolume.go
 | `lulc_projection_ensemble` | 74 | 2026–2099 | `landcover` | 250 | `export_lulc_ensemble.py` |
 | `monthly_peff_v2` | 2,448 | 1896–2099 | `peff` | 4638.3 | `export_monthly_peff.py` |
 | `maca_gcm_annual_eto` | 370 | 2026–2099 | `eto` | 4638.3 | `export_maca_gcm_annual_eto.py` |
+| `lulc_stratified_etof` | 12 | — (monthly climatology) | `etof_agri`, `etof_urban`, `etof_sw`, `etof_other` | 4638.3 | `export_lulc_stratified_etof.py` |
+| `maca_monthly_et_v3` | 888 | 2026–2099 | `actual_et` | 4638.3 | `export_maca_monthly_et_v3.py` |
 | `maca_gcm_annual_et` | 370 | 2026–2099 | `actual_et` | 4638.3 | `export_maca_gcm_annual_et.py` |
+| `maca_gcm_annual_et_v2` | 370 | 2026–2099 | `actual_et` | 4638.3 | `export_maca_gcm_annual_et_v2.py` |
 | `maca_gcm_annual_peff` | 370 | 2026–2099 | `peff` | 4638.3 | `export_maca_gcm_annual_peff.py` |
 
 ## Dependency Graph
@@ -41,20 +44,23 @@ Level 1 (no dependencies — can run in parallel):
   ├── export_gridmet_hargreaves_ratio.py
   ├── export_openet_reitz_ratio.py
   ├── export_monthly_etof.py
-  └── export_lulc_ensemble.py
+  ├── export_lulc_ensemble.py
+  └── export_lulc_stratified_etof.py
 
 Level 2 (depends on Level 1):
   ├── export_prism_hargreaves_eto.py    ← needs gridmet_hargreaves_eto_ratio
   ├── export_usgs_adjusted_et.py        ← needs openet_reitz_et_ratio
   └── export_maca_monthly_eto.py        ← no custom dep (uses gridMET ratios)
 
-Level 3 (depends on Level 2):
+Level 3 (depends on Level 1 + Level 2):
   ├── export_maca_monthly_et.py         ← needs monthly_etof + maca_monthly_eto_v2
+  ├── export_maca_monthly_et_v3.py      ← needs lulc_stratified_etof + lulc_ensemble + maca_monthly_eto_v2
   └── export_monthly_peff.py            ← needs prism_hargreaves_eto + maca_monthly_eto_v2
 
-Level 4 — per-GCM uncertainty (no inter-level deps; uses gridMET ratios + etof):
+Level 4 — per-GCM uncertainty (uses gridMET ratios + etof):
   ├── export_maca_gcm_annual_eto.py     ← 5 representative GCMs (370 images)
   ├── export_maca_gcm_annual_et.py      ← computes monthly ETo×EToF internally
+  ├── export_maca_gcm_annual_et_v2.py   ← LULC-varying EToF version
   └── export_maca_gcm_annual_peff.py    ← computes monthly USDA SCS Peff internally
 ```
 
@@ -340,11 +346,64 @@ Computes bias-corrected monthly ETo internally (same as §10), multiplies by mon
 
 **Output:** 370 images (`{model}_{year}`), band `actual_et` (mm/year), properties `model` + `year`.
 
+#### 11b. Per-GCM Annual ET v2 — LULC-varying EToF (`maca_gcm_annual_et_v2`)
+
+Same as §11, but replaces the static (climatological) EToF with LULC-varying EToF composited from per-class climatologies (see §13) using the projected LULC map for each year (see §8). This allows the crop coefficient to evolve with projected land-use change.
+
+**Output:** 370 images (`{model}_{year}`), band `actual_et` (mm/year), properties `model` + `year`.
+
 #### 12. Per-GCM Annual Peff (`maca_gcm_annual_peff`)
 
 Computes bias-corrected monthly ETo + per-GCM precip internally, applies the nonlinear USDA SCS formula per month (same as §9), sums to annual. Only 2026–2099 because historical Peff uses PRISM/gridMET observations equally for all GCMs.
 
 **Output:** 370 images (`{model}_{year}`), band `peff` (mm/year), properties `model` + `year`.
+
+---
+
+### 13. LULC-Stratified EToF (`lulc_stratified_etof_*`)
+
+**Purpose:** Per-LULC-class monthly EToF climatologies. These are composited at export time by `build_lulc_varying_etof()` (in `config.py`) to produce a spatially varying EToF that reflects projected land-use change.
+
+**Method:**
+1. Classify NLCD pixels into 4 classes: AGRI (class 82 → Cultivated Crops), URBAN (classes 21–24 → Developed), SW (class 11 → Open Water), OTHER (all remaining).
+2. For each class and month, compute $\text{EToF}_{\text{class}} = \frac{\text{OpenET ET}}{\text{gridMET ETo}}$ masked to pixels of that class.
+3. Average across years (2000–2024) to produce a monthly climatology.
+
+**Output:** 4 bands × 12 months = 12 images (`lulc_stratified_etof/month_01` through `month_12`), each with bands `etof_agri`, `etof_urban`, `etof_sw`, `etof_other`.
+
+---
+
+### 14. MACA Monthly ET v3 — LULC-varying EToF (`maca_monthly_et_v3`)
+
+**Dependencies:** `lulc_stratified_etof` + `lulc_projection_ensemble` + `maca_monthly_eto_v2`
+
+**Purpose:** Monthly ET for 2026–2099 using LULC-varying EToF instead of the static climatological EToF used in v2. This allows the crop coefficient to evolve with projected land-use change — e.g., pixels converting from agriculture to urban receive the urban-class EToF.
+
+**Method:** For each year and month:
+1. Load pre-exported MACA monthly ETo.
+2. Call `build_lulc_varying_etof(year, month)`: loads the projected LULC for that year, then composites the 4 per-class EToF climatologies into a single EToF grid.
+3. Multiply: $\text{ET} = \text{MACA ETo} \times \text{EToF}_{\text{LULC}}(\text{year}, \text{month})$.
+4. Export.
+
+**Output:** 888 images (`{year}_{month:02d}`), each with band `actual_et` in mm/month.
+
+## Assets Used by the `azhydro` Pipeline
+
+Not all exported assets are consumed at tile-download time. The intermediate ratio/climatology assets (Levels 1–2) exist only to produce the final harmonized collections. The table below lists the assets actually loaded by `dataops.py`:
+
+| Asset Collection | Variable | Years | Used For |
+|---|---|---|---|
+| `prism_hargreaves_eto` | ETo | 1896–1978 | Historical reference ET |
+| `usgs_adjusted_et` | ET | 1896–1999 | Historical actual ET |
+| `maca_monthly_eto_v2` | ETo | 2026–2099 | Future reference ET (ensemble) |
+| `maca_monthly_et_v3` | ET | 2026–2099 | Future actual ET (LULC-varying EToF) |
+| `lulc_projection_ensemble` | LULC | 2026–2099 | Future land-use classification |
+| `monthly_peff_v2` | Peff | 1896–2099 | Effective precipitation (all eras) |
+| `maca_gcm_annual_et_v2` | ET | 2026–2099 | Per-GCM ET for σ_MACA uncertainty |
+| `maca_gcm_annual_eto` | ETo | 2026–2099 | Per-GCM ETo for σ_MACA uncertainty |
+| `maca_gcm_annual_peff` | Peff | 2026–2099 | Per-GCM Peff for σ_MACA uncertainty |
+
+Assets **not** listed (e.g., `gridmet_hargreaves_eto_ratio`, `openet_reitz_et_ratio`, `monthly_etof`, `lulc_stratified_etof`, `maca_monthly_et_v2`, `maca_gcm_annual_et`) are either intermediate products consumed only by downstream export scripts or superseded by newer versions.
 
 ## Usage
 
@@ -386,6 +445,11 @@ python export_maca_gcm_annual_eto.py                          # all 5 GCMs
 python export_maca_gcm_annual_eto.py --gcm HadGEM2-ES365      # single GCM
 python export_maca_gcm_annual_et.py --gcm CCSM4
 python export_maca_gcm_annual_peff.py --start-year 2050 --end-year 2099
+
+# LULC-varying EToF exports
+python export_lulc_stratified_etof.py
+python export_maca_monthly_et_v3.py --start-year 2026 --end-year 2050
+python export_maca_gcm_annual_et_v2.py --gcm HadGEM2-ES365
 ```
 
 ### Resumability

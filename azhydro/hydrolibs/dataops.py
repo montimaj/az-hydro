@@ -472,7 +472,7 @@ def _get_climate_images(year, gcm, prism_ic, prism_hargreaves_eto_ic,
     else:
         if gcm is not None:
             actual_et = ee.Image(
-                f'{_ASSET_PREFIX}/maca_gcm_annual_et/{gcm}_{year}'
+                f'{_ASSET_PREFIX}/maca_gcm_annual_et_v2/{gcm}_{year}'
             ).select('actual_et')
         else:
             actual_et = maca_monthly_et_ic \
@@ -584,7 +584,7 @@ def download_gee_tile(
     prism_hargreaves_eto_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/prism_hargreaves_eto')
     usgs_adjusted_et_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/usgs_adjusted_et')
     maca_monthly_eto_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_eto_v2')
-    maca_monthly_et_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_et_v2')
+    maca_monthly_et_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_et_v3')
     lulc_projection_ensemble_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/lulc_projection_ensemble')
     lulc_projection_raw_ic = ee.ImageCollection('projects/nwi-usgs/assets/USGS-LULC-CONUS')
     monthly_peff_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/monthly_peff_v2')
@@ -1080,7 +1080,7 @@ def create_az_data_parquet(
                 lambda x: oid_to_name.get(x, 'NO_SUBBASIN')
                 if not np.isnan(x) else 'NO_SUBBASIN'
             )
-            logger.info('GW_Subbasin unique values: %s',
+            logger.debug('GW_Subbasin unique values: %s',
                         sorted(data_df.GW_Subbasin.unique()))
 
         data_df.to_parquet(data_parquet, index=False)
@@ -1465,10 +1465,14 @@ def create_train_test_data(
         if year_list and year_col in input_df.columns:
             input_df = input_df[input_df[year_col].isin(year_list)]
         cols_before = set(input_df.columns)
-        input_df = input_df.replace([np.inf, -np.inf], np.nan).dropna(axis=1)
+        input_df = input_df.replace([np.inf, -np.inf], np.nan).dropna(axis=1, how='all')
         dropped_cols = sorted(cols_before - set(input_df.columns))
         if dropped_cols:
             logger.info(f'Dropped {len(dropped_cols)} all-NaN columns after year filter: {dropped_cols}')
+        n_before = len(input_df)
+        input_df = input_df.dropna()
+        if len(input_df) < n_before:
+            logger.info(f'Dropped {n_before - len(input_df)} rows with NaN values')
         input_df = input_df[input_df[pred_attr] > 0] if water_use == 'IRRIGATION' else input_df
         if outlier_op is not None:
             input_df = process_outliers(

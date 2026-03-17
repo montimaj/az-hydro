@@ -62,7 +62,7 @@ GEE_MOSAIC_DIR = os.path.join(OUTPUT_DIR, f'GEE_Mosaics_{int(MOSAIC_RASTER_RES)}
 GW_DEPTH_RASTER_DIR = os.path.join(OUTPUT_DIR, f'GW/Rasters/GW_Depths_{WNAME}_{int(MOSAIC_RASTER_RES)}m')
 PRED_DATA_DIR = os.path.join(OUTPUT_DIR, f'Predictor_Data_{WNAME}_{int(MOSAIC_RASTER_RES)}m')
 MODEL_DIR = os.path.join(OUTPUT_DIR, f'ML_Model_{WNAME}_{int(MOSAIC_RASTER_RES)}m')
-GW_CROPPED_RASTER_DIR = os.path.join(GW_DEPTH_RASTER_DIR, 'Cropped')
+GW_CROPPED_RASTER_DIR = os.path.join(GW_DEPTH_RASTER_DIR, 'GW_Cropped')
 
 AZ_GW_BASIN = os.path.join(OUTPUT_DIR, 'GW_Data', 'Vector_Reproj', 'Groundwater_Basin.shp')
 ADWR_SUBBASIN_SHP = os.path.join(OUTPUT_DIR, 'GW_Data', 'Vector_Reproj', 'ADWR_Groundwater_Subbasin.shp')
@@ -105,7 +105,6 @@ DROP_ATTRS = (
     'Year',
     'GW_Basin',
     'GW_Subbasin',
-    'easting_m',
     'SW',
     'GW_Basin_Type',
     'annual_peff_pcml_mm',
@@ -126,7 +125,12 @@ TEMPORAL_HOLDOUTS = {
 # Step 0 — Data preparation (GEE download, GW processing, rasterisation)
 # =============================================================================
 
-def prepare_data(skip_download: bool = True, load_files: bool = True, verbose: bool = False) -> list[str]:
+def prepare_data(
+        skip_download: bool = True,
+        load_files: bool = True,
+        verbose: bool = False,
+        skip_prep: set[str] | None = None,
+) -> list[str]:
     """
     Download GEE data, preprocess GW CSVs, reproject vectors, and create
     all intermediate rasters needed by the ML pipeline.
@@ -139,12 +143,17 @@ def prepare_data(skip_download: bool = True, load_files: bool = True, verbose: b
         If *True*, skip recreating files that already exist on disk.
     verbose : bool
         If *True*, enable verbose output for GEE downloads.
+    skip_prep : set[str] or None
+        Sub-step names to skip: ``gee``, ``gw-csv``, ``vectors``,
+        ``gw-rasters``, ``streamflow``, ``basin-rasters``, ``reproject``.
 
     Returns
     -------
     list[str]
         GEE data band names (needed by ``create_az_data``).
     """
+    if skip_prep is None:
+        skip_prep = set()
     logger.info('='*60)
     logger.info('Step 0: Data preparation')
     logger.info('='*60)
@@ -160,6 +169,7 @@ def prepare_data(skip_download: bool = True, load_files: bool = True, verbose: b
     )
 
     # GEE download & mosaic
+    skip_gee = load_files or 'gee' in skip_prep
     gee_data_dir, data_band_names = dataops.download_gee_data(
         az_state_raw,
         GCLOUD_PROJECT,
@@ -167,7 +177,7 @@ def prepare_data(skip_download: bool = True, load_files: bool = True, verbose: b
         INPUT_DIR,
         START_YEAR,
         END_YEAR,
-        skip_download,
+        skip_download or 'gee' in skip_prep,
         TILE_SIZE,
         num_workers=N_DASK_WORKERS_DATA_PREP,
         worker_memory='1G',
@@ -179,17 +189,18 @@ def prepare_data(skip_download: bool = True, load_files: bool = True, verbose: b
         GEE_MOSAIC_DIR,
         START_YEAR,
         END_YEAR,
-        already_mosaicked=load_files,
+        already_mosaicked=skip_gee,
     )
 
     # GW CSV → per-year shapefiles
+    skip_gw_csv = load_files or 'gw-csv' in skip_prep
     ref_gw_file = gwops.preprocess_gw_csv(
         well_reg_file,
         gw_csv_dir,
         output_gw_vector_dir,
         fill_attr=FILL_ATTR,
         use_only_ama_ina=False,
-        already_preprocessed=load_files,
+        already_preprocessed=skip_gw_csv,
         af_max_threshold=AF_MAX_THRESHOLD,
         water_use=WATER_USE,
     )
@@ -199,7 +210,7 @@ def prepare_data(skip_download: bool = True, load_files: bool = True, verbose: b
         VECTOR_DIR,
         vector_reproj_dir,
         ref_file=ref_gw_file,
-        already_reprojected=load_files,
+        already_reprojected=load_files or 'vectors' in skip_prep,
     )
     well_reg_file = az_vector_reproj['Well_Registry']
     az_gw_basin = az_vector_reproj['Groundwater_Basin']
@@ -208,28 +219,30 @@ def prepare_data(skip_download: bool = True, load_files: bool = True, verbose: b
     az_state = az_vector_reproj['AZ']
 
     # GW volume → depth → cropped rasters
+    skip_gw_rasters = load_files or 'gw-rasters' in skip_prep
     gwops.create_gw_volume_rasters(
         output_gw_vector_dir,
         output_gw_volume_dir,
         value_field=FILL_ATTR,
         xres=MOSAIC_RASTER_RES,
         yres=MOSAIC_RASTER_RES,
-        already_created=load_files,
+        already_created=skip_gw_rasters,
         max_gw=MAX_GW,
     )
     gwops.create_gw_depth_rasters(
         output_gw_volume_dir,
         GW_DEPTH_RASTER_DIR,
-        already_created=load_files,
+        already_created=skip_gw_rasters,
     )
     gwops.crop_gw_rasters(
         GW_DEPTH_RASTER_DIR,
         GW_DEPTH_RASTER_DIR,
         az_state_file=az_state,
-        already_cropped=load_files,
+        already_cropped=skip_gw_rasters,
     )
 
     # Canal density & streamflow rasters
+    skip_streamflow = load_files or 'streamflow' in skip_prep
     canal_density_file = streamflowops.create_canal_density_raster(
         grain_parquet=grain_parquet,
         az_boundary_file=az_state,
@@ -238,7 +251,7 @@ def prepare_data(skip_download: bool = True, load_files: bool = True, verbose: b
         yres=MOSAIC_RASTER_RES,
         start_year=START_YEAR,
         end_year=END_YEAR,
-        already_created=load_files,
+        already_created=skip_streamflow,
     )
     streamflowops.create_streamflow_rasters(
         watershed_geojson=az_sw_watershed,
@@ -250,10 +263,11 @@ def prepare_data(skip_download: bool = True, load_files: bool = True, verbose: b
         start_year=START_YEAR,
         end_year=END_YEAR,
         canal_density_file=canal_density_file,
-        already_created=load_files,
+        already_created=skip_streamflow,
     )
 
     # GW basin, sub-basin & well density rasters
+    skip_basin = load_files or 'basin-rasters' in skip_prep
     adwr_subbasin_shp = os.path.join(vector_reproj_dir, 'ADWR_Groundwater_Subbasin.shp')
     gwops.create_gw_basin_rasters(
         az_gw_basin,
@@ -262,7 +276,7 @@ def prepare_data(skip_download: bool = True, load_files: bool = True, verbose: b
         yres=MOSAIC_RASTER_RES,
         start_year=START_YEAR,
         end_year=END_YEAR,
-        already_created=load_files,
+        already_created=skip_basin,
         subbasin_vector=adwr_subbasin_shp,
     )
     gwops.create_well_density_raster(
@@ -272,7 +286,7 @@ def prepare_data(skip_download: bool = True, load_files: bool = True, verbose: b
         yres=MOSAIC_RASTER_RES,
         start_year=START_YEAR,
         end_year=END_YEAR,
-        already_created=load_files,
+        already_created=skip_basin,
     )
 
     # Reproject GEE mosaics to match GW raster grid
@@ -280,7 +294,7 @@ def prepare_data(skip_download: bool = True, load_files: bool = True, verbose: b
         GEE_MOSAIC_DIR,
         PRED_DATA_DIR,
         GW_CROPPED_RASTER_DIR,
-        already_reprojected=load_files,
+        already_reprojected=load_files or 'reproject' in skip_prep,
     )
 
     logger.info('Step 0 complete.')
@@ -292,7 +306,7 @@ def prepare_data(skip_download: bool = True, load_files: bool = True, verbose: b
 # =============================================================================
 
 
-def create_az_data(data_band_names: list[str]) -> pd.DataFrame:
+def create_az_data(data_band_names: list[str], load_files: bool = True) -> pd.DataFrame:
     """
     Build the AZ predictor dataframe for years START_YEAR to END_YEAR.
 
@@ -313,12 +327,12 @@ def create_az_data(data_band_names: list[str]) -> pd.DataFrame:
         AZ_GW_BASIN,
         start_year=START_YEAR,
         end_year=END_YEAR,
-        load_parquet=True,
+        load_parquet=load_files,
         subbasin_vector=ADWR_SUBBASIN_SHP,
     )
-    logger.info(f'AZ data shape: {az_df.shape}')
-    logger.info(f'Year range: {az_df.Year.min()} – {az_df.Year.max()}')
-    logger.info(f'Columns: {list(az_df.columns)}')
+    logger.debug(f'AZ data shape: {az_df.shape}')
+    logger.debug(f'Year range: {az_df.Year.min()} – {az_df.Year.max()}')
+    logger.debug(f'Columns: {list(az_df.columns)}')
 
     # EDA
     vizops.explore_az_data(az_df, os.path.join(MODEL_DIR, 'EDA'))
@@ -1398,6 +1412,15 @@ Pipeline steps (comma-separated or 'all'):
   4b   CU / IE intercomparison
   4c   CAP/SRP surface-water validation
   4d   Effective precipitation intercomparison
+
+Step 0 sub-steps (use with --skip-prep to skip individual sub-steps):
+  gee           GEE tile download & mosaic
+  gw-csv        GW CSV -> per-year shapefiles
+  vectors       Reproject vectors
+  gw-rasters    GW volume -> depth -> cropped rasters
+  streamflow    Canal density & streamflow rasters
+  basin-rasters GW basin, sub-basin & well density rasters
+  reproject     Reproject GEE mosaics to match GW grid
 """
 
 
@@ -1440,6 +1463,14 @@ def main() -> None:
         '-v', '--verbose', action='store_true', default=False,
         help='Enable verbose (DEBUG-level) logging.',
     )
+    parser.add_argument(
+        '--skip-prep', type=str, default='',
+        help=(
+            'Comma-separated Step 0 sub-steps to skip: '
+            'gee, gw-csv, vectors, gw-rasters, streamflow, '
+            'basin-rasters, reproject.'
+        ),
+    )
     args = parser.parse_args()
 
     if args.verbose:
@@ -1449,6 +1480,7 @@ def main() -> None:
     selected = set(s.strip().lower() for s in args.steps.split(',')) if not run_all else set()
     skip_download = args.skip_download
     load_files = args.load_files
+    skip_prep = set(s.strip().lower() for s in args.skip_prep.split(',') if s.strip())
 
     data_band_names = None
 
@@ -1461,6 +1493,7 @@ def main() -> None:
             skip_download=skip_download,
             load_files=load_files,
             verbose=args.verbose,
+            skip_prep=skip_prep,
         )
 
     # Ensure band names are available for downstream steps
@@ -1479,7 +1512,7 @@ def main() -> None:
     def get_az_df():
         nonlocal az_df
         if az_df is None:
-            az_df = create_az_data(data_band_names)
+            az_df = create_az_data(data_band_names, load_files=load_files)
         return az_df
 
     # Step 1

@@ -1074,6 +1074,7 @@ def get_variable_name_dict() -> dict[str, str]:
         'annual_precip_mm': 'Annual Precipitation (mm)',
         'annual_peff_mm': 'Annual USDA-SCS Effective Precipitation (mm)',
         'annual_peff_pcml_mm': 'Annual PCML Effective Precipitation (mm)',
+        'annual_cu_mm': 'Annual Consumptive Use (mm) [ET − Peff]',
         'annual_tmmx_K': 'Annual Maximum Air Temperature (K)',
         'annual_tmmn_K': 'Annual Minimum Air Temperature (K)',
         'AGRI': 'Agricultural Density',
@@ -1150,16 +1151,24 @@ def explore_az_data(
 
     df = az_df.copy()
     df['Era'] = df[year_col].apply(_assign_era)
+    # Merge single-year Forecast (2025) into Historical for cleaner EDA plots
+    df['Era'] = df['Era'].replace({'Forecast': 'Historical'})
 
     basin_type_map = {0: 'AMA', 1: 'INA', 2: 'Other'}
     df['Basin_Type_Label'] = df[basin_type_col].map(basin_type_map)
+
+    # Derived EDA column: Consumptive Use = max(ET − Peff, 0)
+    if 'annual_et_ensemble_mm' in df.columns and 'annual_peff_mm' in df.columns:
+        df['annual_cu_mm'] = (df['annual_et_ensemble_mm'] - df['annual_peff_mm']).clip(lower=0)
 
     numeric_cols = [
         c for c in df.select_dtypes(include='number').columns
         if c not in (year_col, basin_type_col) and c not in skip_cols
     ]
 
-    era_order = list(ERA_PERIODS.keys())
+    eda_periods = {k: v for k, v in ERA_PERIODS.items() if k != 'Forecast'}
+    eda_periods['Historical'] = (ERA_PERIODS['Historical'][0], ERA_PERIODS['Forecast'][1])
+    era_order = list(eda_periods.keys())
     era_palette = [ERA_COLORS[e] for e in era_order]
 
     logger.info(f'Generating exploratory plots for {len(numeric_cols)} columns …')
@@ -1183,28 +1192,24 @@ def explore_az_data(
 
         # ── 1. Time series (mean ± std per year), shaded by era ──────────
         yearly = col_df.groupby(year_col)[col].agg(['mean', 'std']).reset_index()
-        yearly['Era'] = yearly[year_col].apply(_assign_era)
+        yearly['Era'] = yearly[year_col].apply(_assign_era).replace({'Forecast': 'Historical'})
 
         fig, ax = plt.subplots(figsize=figsize_ts)
-        for era in era_order:
-            mask = yearly['Era'] == era
-            if not mask.any():
-                continue
-            sub = yearly[mask]
-            ax.plot(sub[year_col], sub['mean'], color=ERA_COLORS[era], lw=1.5)
-            ax.fill_between(
-                sub[year_col],
-                sub['mean'] - sub['std'],
-                sub['mean'] + sub['std'],
-                color=ERA_COLORS[era], alpha=0.18,
-            )
+        yearly = yearly.sort_values(year_col)
+        ax.plot(yearly[year_col], yearly['mean'], color='#2C3E50', lw=1.5)
+        ax.fill_between(
+            yearly[year_col],
+            yearly['mean'] - yearly['std'],
+            yearly['mean'] + yearly['std'],
+            color='#2C3E50', alpha=0.15,
+        )
         # shade era backgrounds
-        for era, (s, e) in ERA_PERIODS.items():
-            ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.06)
+        for era, (s, e) in eda_periods.items():
+            ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
         ax.set_xlabel('Year')
         ax.set_ylabel(label)
         ax.set_title(f'{label} — Annual Mean ± Std')
-        handles = [mpatches.Patch(color=ERA_COLORS[e], label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
+        handles = [mpatches.Patch(color=ERA_COLORS[e], label=f'{e} ({eda_periods[e][0]}–{eda_periods[e][1]})')
                    for e in era_order]
         ax.legend(handles=handles, loc='best', fontsize=9)
         plt.tight_layout()
@@ -1216,7 +1221,7 @@ def explore_az_data(
         for bt_label, bt_df in col_df.groupby('Basin_Type_Label'):
             yt = bt_df.groupby(year_col)[col].mean().reset_index()
             ax.plot(yt[year_col], yt[col], label=bt_label, lw=1.3)
-        for era, (s, e) in ERA_PERIODS.items():
+        for era, (s, e) in eda_periods.items():
             ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.06)
         ax.set_xlabel('Year')
         ax.set_ylabel(label)
@@ -1264,14 +1269,8 @@ def explore_az_data(
         plt.close()
 
         # ── 6. Boxplot by GW_Basin ───────────────────────────────────────
-        if col == 'gw_pumping_mm':
-            # Show all AMA/INA basins for pumping
-            basin_df = col_df[col_df[gw_basin_col].isin(ama_ina_basins)]
-            basin_list = sorted(basin_df[gw_basin_col].unique())
-        else:
-            top_basins = col_df[gw_basin_col].value_counts().head(10).index.tolist()
-            basin_df = col_df[col_df[gw_basin_col].isin(top_basins)]
-            basin_list = top_basins
+        basin_df = col_df[col_df[gw_basin_col].isin(ama_ina_basins)]
+        basin_list = sorted(basin_df[gw_basin_col].unique())
         fig, ax = plt.subplots(figsize=(16, 7))
         sns.boxplot(
             data=basin_df, x=gw_basin_col, y=col,
@@ -1279,8 +1278,7 @@ def explore_az_data(
             hue='Era', hue_order=era_order,
             palette=ERA_COLORS, ax=ax, fliersize=1,
         )
-        title_suffix = 'AMA/INA Basins' if col == 'gw_pumping_mm' else 'top 10'
-        ax.set_title(f'{label} — by GW Basin ({title_suffix}) & Era')
+        ax.set_title(f'{label} — by GW Basin (AMA/INA) & Era')
         ax.set_xlabel('GW Basin')
         ax.tick_params(axis='x', rotation=35)
         ax.legend(loc='best', fontsize=8)

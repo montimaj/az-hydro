@@ -84,6 +84,9 @@ MACA_CLIMATE_COLS = [
 # 1-based band indices in Predictor_{year}.tif matching MACA_CLIMATE_COLS
 MACA_CLIMATE_BAND_INDICES = [1, 2, 3, 4, 6, 7]
 
+# Subset of MACA_CLIMATE_COLS for which to plot inter-GCM input spread
+_INPUT_SPREAD_COLS = ['annual_et_ensemble_mm', 'annual_eto_mm', 'annual_peff_mm']
+
 # 10-seed ensemble for model uncertainty
 MODEL_SEEDS = [42, 123, 456, 789, 1024, 2048, 3072, 4096, 5120, 6144]
 
@@ -515,6 +518,10 @@ def compute_sigma_maca(
     cat_sigma_maca: dict[str, dict[int, np.ndarray]] = {
         c: {} for c in partops.CATEGORIES
     }
+    # Per-GCM AZ-mean climate values for input-spread plots
+    climate_spread: dict[str, dict[int, list[float]]] = {
+        col: {} for col in _INPUT_SPREAD_COLS
+    }
 
     for year in range(MACA_FUTURE_START, end_year + 1):
         year_df = az_df[az_df.Year == year].copy()
@@ -528,7 +535,12 @@ def compute_sigma_maca(
             gcm_year_df = year_df.copy()
             for col, bidx in zip(MACA_CLIMATE_COLS, MACA_CLIMATE_BAND_INDICES):
                 band_arr = read_raster_as_arr(gcm_raster, band=bidx, get_file=False)
-                gcm_year_df[col] = band_arr.ravel()[valid_mask]
+                vals = band_arr.ravel()[valid_mask]
+                gcm_year_df[col] = vals
+                if col in climate_spread:
+                    climate_spread[col].setdefault(year, []).append(
+                        float(np.nanmean(vals))
+                    )
 
             pf = _build_pred_features(gcm_year_df, feature_cols, drop_attrs)
             pred, cat = _predict_total(model, pf, gcm_year_df, partops,
@@ -560,8 +572,86 @@ def compute_sigma_maca(
 
     _save_summary(yearly_stats, os.path.join(output_dir, 'Sigma_MACA'), 'MACA')
     _write_basin_sigma_csv(basin_accum, os.path.join(output_dir, 'Sigma_MACA'), 'MACA')
+    _save_climate_input_spread(climate_spread, os.path.join(output_dir, 'Sigma_MACA'))
+    _plot_climate_input_spread(climate_spread, os.path.join(output_dir, 'Sigma_MACA'))
     logger.info('  σ_MACA complete.')
     return sigma_maca, cat_sigma_maca, gcm_mosaic_dirs
+
+
+def _save_climate_input_spread(
+        climate_spread: dict[str, dict[int, list[float]]],
+        sigma_maca_dir: str,
+) -> None:
+    """Save per-GCM AZ-mean climate values to CSV (one file per variable)."""
+    from hydrolibs.sysops import makedirs
+
+    out_dir = os.path.join(sigma_maca_dir, 'Climate_Input_Spread')
+    makedirs(out_dir)
+    for col, year_vals in climate_spread.items():
+        rows = []
+        for year in sorted(year_vals):
+            for i, val in enumerate(year_vals[year]):
+                rows.append({
+                    'Year': year,
+                    'GCM': MACA_REPRESENTATIVE_GCMS[i],
+                    'AZ_Mean_mm': round(val, 4),
+                })
+        df = pd.DataFrame(rows)
+        df.to_csv(os.path.join(out_dir, f'{col}.csv'), index=False)
+
+
+def _plot_climate_input_spread(
+        climate_spread: dict[str, dict[int, list[float]]],
+        sigma_maca_dir: str,
+) -> None:
+    """Plot per-GCM input climate spread (ET, ETo, Peff) as ribbon + lines."""
+    import matplotlib.pyplot as plt
+
+    from hydrolibs.sysops import makedirs
+    from hydrolibs.visualops import apply_journal_style
+
+    apply_journal_style()
+    plot_dir = os.path.join(sigma_maca_dir, 'Climate_Input_Spread')
+    makedirs(plot_dir)
+
+    labels = {
+        'annual_et_ensemble_mm': 'ET (mm)',
+        'annual_eto_mm': 'ETo (mm)',
+        'annual_peff_mm': 'P_eff (mm)',
+    }
+    gcm_colors = ['#2980B9', '#27AE60', '#E74C3C', '#8E44AD', '#E67E22']
+
+    fig, axes = plt.subplots(len(climate_spread), 1, figsize=(14, 4 * len(climate_spread)),
+                             sharex=True)
+    if len(climate_spread) == 1:
+        axes = [axes]
+
+    for ax, (col, year_vals) in zip(axes, climate_spread.items()):
+        years = np.array(sorted(year_vals))
+        matrix = np.array([year_vals[y] for y in years])  # (n_years, n_gcms)
+        ens_mean = matrix.mean(axis=1)
+        ens_min = matrix.min(axis=1)
+        ens_max = matrix.max(axis=1)
+
+        ax.fill_between(years, ens_min, ens_max, alpha=0.20, color='#2980B9',
+                         label='GCM range')
+        for gi, gcm in enumerate(MACA_REPRESENTATIVE_GCMS):
+            ax.plot(years, matrix[:, gi], lw=0.7, alpha=0.5,
+                    color=gcm_colors[gi], label=gcm)
+        ax.plot(years, ens_mean, lw=2, color='k', label='Ensemble mean')
+
+        ax.set_ylabel(labels.get(col, col), fontweight='bold')
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.legend(fontsize=7, ncol=3, loc='upper left')
+
+    axes[-1].set_xlabel('Year', fontweight='bold')
+    fig.suptitle('Inter-GCM Climate Input Spread (AZ Mean)',
+                 fontweight='bold', fontsize=14, y=1.01)
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, 'Climate_Input_Spread.png'),
+                dpi=600, bbox_inches='tight')
+    plt.close(fig)
+    logger.info('  Saved climate input spread plot and CSVs.')
 
 
 # ═════════════════════════════════════════════════════════════════════════════
