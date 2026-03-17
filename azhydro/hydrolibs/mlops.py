@@ -337,6 +337,32 @@ def normalized_mbe(
     return nmbe
 
 
+# --- Abs-wrapped scoring functions for CV/Optuna --------------------------
+# Production code applies ``np.abs()`` after ``model.predict()`` to ensure
+# non-negative pumping values.  These wrappers apply the same transform
+# inside cross-validation scorers so that hyperparameter tuning optimises
+# the same quantity that is reported at evaluation time.
+
+def _abs_r2_score(y: np.array, y_pred: np.array) -> float:
+    return r2_score(y, np.abs(y_pred))
+
+
+def _abs_adjusted_r2(y: np.array, y_pred: np.array, p: int) -> float:
+    return adjusted_r2(y, np.abs(y_pred), p)
+
+
+def _abs_normalized_rmse(y: np.array, y_pred: np.array) -> float:
+    return normalized_rmse(y, np.abs(y_pred))
+
+
+def _abs_normalized_mae(y: np.array, y_pred: np.array) -> float:
+    return normalized_mae(y, np.abs(y_pred))
+
+
+def _abs_normalized_mbe(y: np.array, y_pred: np.array) -> float:
+    return normalized_mbe(y, np.abs(y_pred))
+
+
 def get_feature_dict(get_units: bool = False) -> dict[str, str] | tuple[dict[str, str], dict[str, str]]:
     """
     Get feature name dictionary for better visualization.
@@ -453,8 +479,8 @@ def compute_perm_imp(
             )
             plt.xlabel(f'{model_name} Feature Importance')
             plt.tight_layout()
-            plt.savefig(f'{output_dir}F_IMP_{model_name}.png', dpi=600)
-            imp_df.to_csv(f'{output_dir}F_IMP_{model_name}.csv', index=False)
+            plt.savefig(os.path.join(output_dir, f'F_IMP_{model_name}.png'), dpi=600)
+            imp_df.to_csv(os.path.join(output_dir, f'F_IMP_{model_name}.csv'), index=False)
         perm_scorer = scoring_metrics[scoring_metric]
         train_result = permutation_importance(
             model, x_train.to_numpy(), y_train, n_repeats=10, random_state=random_state, n_jobs=-1, scoring=perm_scorer
@@ -482,7 +508,7 @@ def compute_perm_imp(
                 ax.set_xlabel(f"Increase in {scoring_metric.split('_')[1].upper()} (%)")
                 ax.axvline(x=0, color="k", linestyle="--")
                 ax.figure.tight_layout()
-                plt.savefig(f'{output_dir}{model_name}_{name}_PI.png', dpi=600)
+                plt.savefig(os.path.join(output_dir, f'{model_name}_{name}_PI.png'), dpi=600)
                 plt.clf()
         return train_importances, test_importances
     return None
@@ -541,7 +567,7 @@ def compute_ale_plots(
             display_units=feature_dict_units
         )
         plt.tight_layout()
-        plt.savefig(f'{output_dir}{model_name}_ALE_{data_type}.png', dpi=600)
+        plt.savefig(os.path.join(output_dir, f'{model_name}_ALE_{data_type}.png'), dpi=600)
         plt.clf()
         # ale_var_1d_reg = explainer.ale_variance(ale_1d_reg)
         # explainer.plot_importance(
@@ -622,7 +648,7 @@ def compute_shap_plots(
         max_display=max_display, show=False,
     )
     plt.tight_layout()
-    plt.savefig(f'{output_dir}{model_name}_SHAP_Summary.png', dpi=600)
+    plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Summary.png'), dpi=600)
     plt.clf()
     plt.close()
 
@@ -633,12 +659,12 @@ def compute_shap_plots(
         plot_type='bar', max_display=max_display, show=False,
     )
     plt.tight_layout()
-    plt.savefig(f'{output_dir}{model_name}_SHAP_Bar.png', dpi=600)
+    plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Bar.png'), dpi=600)
     plt.clf()
     plt.close()
 
     # 3. Dependence plots for top N features
-    dep_dir = f'{output_dir}Dependence/'
+    dep_dir = os.path.join(output_dir, 'Dependence')
     makedirs(dep_dir)
     mean_abs_shap = np.abs(shap_values).mean(axis=0)
     top_indices = np.argsort(mean_abs_shap)[::-1][:n_dependence]
@@ -653,7 +679,7 @@ def compute_shap_plots(
         )
         plt.tight_layout()
         safe_name = feat_name.replace('/', '_').replace(' ', '_')
-        plt.savefig(f'{dep_dir}{model_name}_SHAP_Dep_{safe_name}.png', dpi=600)
+        plt.savefig(os.path.join(dep_dir, f'{model_name}_SHAP_Dep_{safe_name}.png'), dpi=600)
         plt.clf()
         plt.close()
 
@@ -672,7 +698,7 @@ def compute_shap_plots(
     plt.figure(figsize=(12, 8))
     shap.waterfall_plot(explanation[median_idx], max_display=max_display, show=False)
     plt.tight_layout()
-    plt.savefig(f'{output_dir}{model_name}_SHAP_Waterfall.png', dpi=600)
+    plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Waterfall.png'), dpi=600)
     plt.clf()
     plt.close()
 
@@ -716,8 +742,8 @@ def build_ml_model(
     Returns:
         tuple[Any, pd.DataFrame]: Trained model object and dataframe containing CV stats.
     """
-    model_file = model_dir + model_name
-    metric_csv = f'{model_dir}CV_Metrics_{model_name}.csv'
+    model_file = os.path.join(model_dir, model_name)
+    metric_csv = os.path.join(model_dir, f'CV_Metrics_{model_name}.csv')
     if not load_model:
         dask_client = None
         cv_lib = 'sklearn'
@@ -738,52 +764,54 @@ def build_ml_model(
             logger.info('Waiting for dask workers...')
             dask_client.wait_for_workers(1)
             cv_lib = 'dask_ml'
-        model_dict, param_dict = get_model_param_dict(random_state, use_dask)
-        if not tune_params:
-            param_dict = {model_name: {}}
-        model = model_dict[model_name]
-        cv = RepeatedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
-        if stratified_kfold:
-            stratify_labels = kwargs['stratify_labels'].to_numpy().ravel()
-            cv = RepeatedStratifiedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
-            cv = cv.split(x_train, stratify_labels)
-        makedirs(make_proper_dir_name(model_dir))
-        logger.info(f'Searching best params for {model_name}...')
-        scoring_metrics = {
-            'r2': 'r2',
-            'adjusted_r2': make_scorer(adjusted_r2, p=x_train.shape[1], greater_is_better=True),
-            'normalized_rmse': make_scorer(normalized_rmse, greater_is_better=False),
-            'normalized_mae': make_scorer(normalized_mae, greater_is_better=False),
-            'normalized_mbe': make_scorer(normalized_mbe, greater_is_better=False)
-        }
-        main_scorer = 'normalized_rmse'
-        cv_func_dict = {
-            'dask_ml': {1: DaskRCV, 0: DaskGCV},
-            'sklearn': {1: RandomizedSearchCV, 0: GridSearchCV}
-        }
-        cv_func = cv_func_dict[cv_lib][int(randomized_search)]
-        if randomized_search:
-            model_grid = cv_func(
-                estimator=model, param_distributions=param_dict[model_name],
-                scoring=scoring_metrics, n_jobs=-1, cv=cv, refit=main_scorer,
-                return_train_score=True, random_state=random_state
-            )
-        else:
-            model_grid = cv_func(
-                estimator=model, param_grid=param_dict[model_name],
-                scoring=scoring_metrics, n_jobs=-1, cv=cv, refit=main_scorer,
-                return_train_score=True
-            )
-        model_grid.fit(x_train, y_train)
-        metric_df = get_grid_search_stats(model_grid, metric_csv)
-        logger.info(f'Best params: {model_grid.best_params_}')
-        model = model_dict[model_name]
-        model.set_params(**model_grid.best_params_)
-        model.fit(x_train, y_train)
-        with open(model_file, 'wb') as f:
-            pickle.dump(model, f)
-        if dask_client:
-            dask_client.close()
+        try:
+            model_dict, param_dict = get_model_param_dict(random_state, use_dask)
+            if not tune_params:
+                param_dict = {model_name: {}}
+            model = model_dict[model_name]
+            cv = RepeatedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
+            if stratified_kfold:
+                stratify_labels = kwargs['stratify_labels'].to_numpy().ravel()
+                cv = RepeatedStratifiedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
+                cv = cv.split(x_train, stratify_labels)
+            makedirs(make_proper_dir_name(model_dir))
+            logger.info(f'Searching best params for {model_name}...')
+            scoring_metrics = {
+                'r2': make_scorer(_abs_r2_score),
+                'adjusted_r2': make_scorer(_abs_adjusted_r2, p=x_train.shape[1], greater_is_better=True),
+                'normalized_rmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
+                'normalized_mae': make_scorer(_abs_normalized_mae, greater_is_better=False),
+                'normalized_mbe': make_scorer(_abs_normalized_mbe, greater_is_better=False)
+            }
+            main_scorer = 'normalized_rmse'
+            cv_func_dict = {
+                'dask_ml': {1: DaskRCV, 0: DaskGCV},
+                'sklearn': {1: RandomizedSearchCV, 0: GridSearchCV}
+            }
+            cv_func = cv_func_dict[cv_lib][int(randomized_search)]
+            if randomized_search:
+                model_grid = cv_func(
+                    estimator=model, param_distributions=param_dict[model_name],
+                    scoring=scoring_metrics, n_jobs=-1, cv=cv, refit=main_scorer,
+                    return_train_score=True, random_state=random_state
+                )
+            else:
+                model_grid = cv_func(
+                    estimator=model, param_grid=param_dict[model_name],
+                    scoring=scoring_metrics, n_jobs=-1, cv=cv, refit=main_scorer,
+                    return_train_score=True
+                )
+            model_grid.fit(x_train, y_train)
+            metric_df = get_grid_search_stats(model_grid, metric_csv)
+            logger.info(f'Best params: {model_grid.best_params_}')
+            model = model_dict[model_name]
+            model.set_params(**model_grid.best_params_)
+            model.fit(x_train, y_train)
+            with open(model_file, 'wb') as f:
+                pickle.dump(model, f)
+        finally:
+            if dask_client:
+                dask_client.close()
     else:
         with open(model_file, 'rb') as f:
             model = pickle.load(f)
@@ -817,79 +845,8 @@ def objective_with_cv(
     Returns:
         float: Mean negative normalized RMSE across cross-validation folds.
     """
+    params = get_optuna_params_for_model(trial, model_name)
     model = get_model_param_dict(random_state)[0][model_name]
-    if model_name == 'XGB':
-        params = {
-            'eta': trial.suggest_float('eta', 0.01, 0.1),
-            'max_depth': trial.suggest_categorical('max_depth', [0, 16, 20]),
-            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-            'colsample_bynode': trial.suggest_float('colsample_bynode', 0.6, 1.0),
-            'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.6, 1.0),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
-            'gamma': trial.suggest_float('gamma', 0.0, 1.0),
-            'min_child_weight': trial.suggest_int('min_child_weight', 10, 100, step=10),
-            'n_estimators': trial.suggest_int('n_estimators', 300, 600, step=100),
-            'grow_policy': trial.suggest_categorical('grow_policy', ['depthwise', 'lossguide'])
-        }
-    elif model_name == 'XGBRF':
-        params = {
-            'eta': trial.suggest_float('eta', 0.01, 0.1),
-            'max_depth': trial.suggest_categorical('max_depth', [0, 16, 20, 32, 64]),
-            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-            'colsample_bynode': trial.suggest_float('colsample_bynode', 0.6, 1.0),
-            'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.6, 1.0),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
-            'gamma': trial.suggest_float('gamma', 0.0, 1.0),
-            'min_child_weight': trial.suggest_int('min_child_weight', 10, 100, step=10),
-            'num_parallel_tree': trial.suggest_int('num_parallel_tree', 300, 600, step=100),
-            'grow_policy': trial.suggest_categorical('grow_policy', ['depthwise', 'lossguide'])
-        }
-    elif model_name == 'LGBM':
-        params = {
-            'n_estimators': trial.suggest_int('n_estimators', 300, 600),
-            'max_depth': trial.suggest_categorical('max_depth', [-1, 16, 20, 32, 64]),
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1),
-            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-            'colsample_bynode': trial.suggest_float('colsample_bynode', 0.6, 1.0),
-            'path_smooth': trial.suggest_float('path_smooth', 0.1, 0.5),
-            'num_leaves': trial.suggest_categorical('num_leaves', [31, 32, 63, 127]),
-            'min_child_samples': trial.suggest_int('min_child_samples', 10, 50, step=10)
-        }
-    elif model_name == 'RF':
-        params = {
-            'n_estimators': trial.suggest_int('n_estimators', 300, 600),
-            'max_features': trial.suggest_categorical('max_features', [None, 10, 8, 15]),
-            'max_depth': trial.suggest_categorical('max_depth', [None, 16, 20, 32, 64]),
-            'max_samples': trial.suggest_categorical('max_samples', [None, 0.8, 0.9, 1.0]),
-            'max_leaf_nodes': trial.suggest_categorical('max_leaf_nodes', [None, 31, 63, 128]),
-            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 5)
-        }
-    elif model_name == 'ETR':
-        params = {
-            'n_estimators': trial.suggest_int('n_estimators', 300, 600),
-            'max_features': trial.suggest_categorical('max_features', [None, 10, 8, 15]),
-            'max_depth': trial.suggest_categorical('max_depth', [None, 16, 20, 32, 64]),
-            'max_samples': trial.suggest_categorical('max_samples', [None, 0.8, 0.9, 1.0]),
-            'max_leaf_nodes': trial.suggest_categorical('max_leaf_nodes', [None, 31, 63, 128]),
-            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 5)
-        }
-    elif model_name == 'HGBR':
-        params = {
-            'max_iter': trial.suggest_int('max_iter', 300, 600),
-            'max_depth': trial.suggest_categorical('max_depth', [None, 16, 20, 32, 64]),
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1),
-            'max_leaf_nodes': trial.suggest_int('max_leaf_nodes', 31, 128),
-            'max_bins': trial.suggest_categorical('max_bins', [31, 63, 127, 255]),
-            'l2_regularization': trial.suggest_float('l2_regularization', 0.0, 1.0),
-        }
-    else:
-        raise ValueError(f"Unknown model name: {model_name}")
-
     model.set_params(**params)
     cv_results = cross_validate(
         estimator=model,
@@ -964,11 +921,11 @@ def build_ml_model_optuna(
 
     if not load_model:
         scoring_metrics = {
-            'r2': 'r2',
-            'adjusted_r2': make_scorer(adjusted_r2, p=x_train.shape[1], greater_is_better=True),
-            'normalized_rmse': make_scorer(normalized_rmse, greater_is_better=False),
-            'normalized_mae': make_scorer(normalized_mae, greater_is_better=False),
-            'normalized_mbe': make_scorer(normalized_mbe, greater_is_better=False)
+            'r2': make_scorer(_abs_r2_score),
+            'adjusted_r2': make_scorer(_abs_adjusted_r2, p=x_train.shape[1], greater_is_better=True),
+            'normalized_rmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
+            'normalized_mae': make_scorer(_abs_normalized_mae, greater_is_better=False),
+            'normalized_mbe': make_scorer(_abs_normalized_mbe, greater_is_better=False)
         }
         cv = RepeatedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
         if stratified_kfold:
@@ -976,7 +933,7 @@ def build_ml_model_optuna(
             cv = RepeatedStratifiedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
             cv = cv.split(x_train, stratify_labels)
         optuna.logging.set_verbosity(optuna.logging.WARNING)
-        optuna_storage = f'{model_dir}optuna_study_{model_name}.db'
+        optuna_storage = os.path.join(model_dir, f'optuna_study_{model_name}.db')
         if os.path.isfile(optuna_storage):
             study = optuna.load_study(
                 study_name=f'Optuna_{model_name}',
@@ -1006,16 +963,16 @@ def build_ml_model_optuna(
         model = model_dict[model_name]
         model.set_params(**best_params)
         model.fit(x_train, y_train)
-        model_file = model_dir + model_name
+        model_file = os.path.join(model_dir, model_name)
         with open(model_file, 'wb') as f:
             pickle.dump(model, f)
-        metric_csv = f'{model_dir}CV_Metrics_{model_name}.csv'
+        metric_csv = os.path.join(model_dir, f'CV_Metrics_{model_name}.csv')
         metric_df = get_grid_search_stats(study, metric_csv, search_type='optuna')
     else:
-        model_file = model_dir + model_name
+        model_file = os.path.join(model_dir, model_name)
         with open(model_file, 'rb') as f:
             model = pickle.load(f)
-        metric_csv = f'{model_dir}CV_Metrics_{model_name}.csv'
+        metric_csv = os.path.join(model_dir, f'CV_Metrics_{model_name}.csv')
         metric_df = pd.read_csv(metric_csv)
     return model, metric_df
 
@@ -1187,11 +1144,11 @@ def build_ml_model_optuna_dask(
 
     if not load_model:
         scoring_metrics = {
-            'r2': 'r2',
-            'adjusted_r2': make_scorer(adjusted_r2, p=x_train.shape[1], greater_is_better=True),
-            'normalized_rmse': make_scorer(normalized_rmse, greater_is_better=False),
-            'normalized_mae': make_scorer(normalized_mae, greater_is_better=False),
-            'normalized_mbe': make_scorer(normalized_mbe, greater_is_better=False)
+            'r2': make_scorer(_abs_r2_score),
+            'adjusted_r2': make_scorer(_abs_adjusted_r2, p=x_train.shape[1], greater_is_better=True),
+            'normalized_rmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
+            'normalized_mae': make_scorer(_abs_normalized_mae, greater_is_better=False),
+            'normalized_mbe': make_scorer(_abs_normalized_mbe, greater_is_better=False)
         }
         cv = RepeatedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
         if stratified_kfold:
@@ -1200,7 +1157,7 @@ def build_ml_model_optuna_dask(
             cv = cv.split(x_train, stratify_labels)
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
-        optuna_storage = f'{model_dir}optuna_study_{model_name}.db'
+        optuna_storage = os.path.join(model_dir, f'optuna_study_{model_name}.db')
 
         # Setup Dask cluster if needed
         dask_client = None
@@ -1273,16 +1230,16 @@ def build_ml_model_optuna_dask(
         model.set_params(**best_params)
         model.fit(x_train, y_train)
 
-        model_file = model_dir + model_name
+        model_file = os.path.join(model_dir, model_name)
         with open(model_file, 'wb') as f:
             pickle.dump(model, f)
-        metric_csv = f'{model_dir}CV_Metrics_{model_name}.csv'
+        metric_csv = os.path.join(model_dir, f'CV_Metrics_{model_name}.csv')
         metric_df = get_grid_search_stats(study, metric_csv, search_type='optuna')
     else:
-        model_file = model_dir + model_name
+        model_file = os.path.join(model_dir, model_name)
         with open(model_file, 'rb') as f:
             model = pickle.load(f)
-        metric_csv = f'{model_dir}CV_Metrics_{model_name}.csv'
+        metric_csv = os.path.join(model_dir, f'CV_Metrics_{model_name}.csv')
         metric_df = pd.read_csv(metric_csv)
 
     return model, metric_df
@@ -1358,11 +1315,13 @@ def objective_with_cv_enhanced(
     beta = 0.5 * alpha
     trial_obj = test_mean_rmse + alpha * abs(train_mean_rmse - test_mean_rmse) + beta * test_std_rmse
 
-    # Report for pruning
+    # Report per-fold metrics at incremental steps for pruning
     if pruning:
-        trial.report(trial_obj, 0)
-        if trial.should_prune():
-            raise optuna.TrialPruned()
+        fold_rmses = -cv_results['test_normalized_rmse']
+        for step, fold_rmse in enumerate(fold_rmses):
+            trial.report(fold_rmse, step)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
 
     return trial_obj
 
@@ -1440,7 +1399,7 @@ def compare_all_models(
     # Train individual models
     for model_name in model_names:
         logger.info(f'Training {model_name}...')
-        model_subdir = f'{model_dir}{model_name}/'
+        model_subdir = os.path.join(model_dir, model_name)
 
         if use_optuna:
             model, cv_metric_df = build_ml_model_optuna_dask(
@@ -1492,7 +1451,8 @@ def compare_all_models(
                 use_ama_ina=use_ama_ina,
                 gw_basin_col=gw_basin_col,
                 year_col=year_col,
-                model_name=model_name
+                model_name=model_name,
+                n_features=x_train.shape[1]
             )
 
             # Use metrics from pred_df for comparison
@@ -1545,7 +1505,7 @@ def compare_all_models(
     # Create results dataframe
     results_df = pd.DataFrame(results)
     results_df = results_df.sort_values('Test_RMSE')
-    results_df.to_csv(f'{model_dir}Model_Comparison.csv', index=False)
+    results_df.to_csv(os.path.join(model_dir, 'Model_Comparison.csv'), index=False)
 
     # Create comprehensive comparison plots with overfitting analysis
     _create_model_comparison_plots(results_df, model_dir)
@@ -1678,7 +1638,7 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
                    xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=9)
 
     plt.tight_layout()
-    plt.savefig(f'{model_dir}Model_Comparison_TrainValTest.png', dpi=600, bbox_inches='tight')
+    plt.savefig(os.path.join(model_dir, 'Model_Comparison_TrainValTest.png'), dpi=600, bbox_inches='tight')
     plt.close()
 
     # =====================================================================
@@ -1715,7 +1675,7 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
     ax.set_ylabel('Metric')
 
     plt.tight_layout()
-    plt.savefig(f'{model_dir}Model_Comparison_Heatmap.png', dpi=600, bbox_inches='tight')
+    plt.savefig(os.path.join(model_dir, 'Model_Comparison_Heatmap.png'), dpi=600, bbox_inches='tight')
     plt.close()
 
     # =====================================================================
@@ -1777,7 +1737,7 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(f'{model_dir}Model_Comparison_Progression.png', dpi=600, bbox_inches='tight')
+    plt.savefig(os.path.join(model_dir, 'Model_Comparison_Progression.png'), dpi=600, bbox_inches='tight')
     plt.close()
 
     # =====================================================================
@@ -1820,7 +1780,7 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
     ax.grid(axis='x', alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(f'{model_dir}Model_Ranking.png', dpi=600, bbox_inches='tight')
+    plt.savefig(os.path.join(model_dir, 'Model_Ranking.png'), dpi=600, bbox_inches='tight')
     plt.close()
 
     # ===============================
@@ -1913,7 +1873,7 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
     ax.grid(axis='y', alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(f'{model_dir}Combined_Overfitting_Analysis.png', dpi=600, bbox_inches='tight')
+    plt.savefig(os.path.join(model_dir, 'Combined_Overfitting_Analysis.png'), dpi=600, bbox_inches='tight')
     plt.close()
 
     # ===============================
@@ -1984,7 +1944,7 @@ def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> 
                 fontsize=11, fontweight='bold', pad=20)
 
     plt.tight_layout()
-    plt.savefig(f'{model_dir}Overfitting_Summary_Table.png', dpi=600, bbox_inches='tight')
+    plt.savefig(os.path.join(model_dir, 'Overfitting_Summary_Table.png'), dpi=600, bbox_inches='tight')
     plt.close()
 
     logger.info(f'Visualization plots saved to {model_dir}')
@@ -1998,7 +1958,8 @@ def calc_train_test_metrics(
         gw_basin_col: str = 'GW_Basin',
         year_col: str = 'Year',
         model_name: str = 'LGBM',
-        precision: int = 2
+        precision: int = 2,
+        n_features: int | None = None
 ) -> None:
     """Calculate train and test metrics from the prediction data frames.
 
@@ -2012,6 +1973,7 @@ def calc_train_test_metrics(
         year_col (str): Name of the year column.
         model_name (str): Name of the model.
         precision (int): Floating point precision to use.
+        n_features (int or None): Number of model features for adjusted R². Falls back to column count if None.
 
     Returns
         None
@@ -2032,7 +1994,8 @@ def calc_train_test_metrics(
             data_actual = data_df.Actual_GW_mm.to_numpy().ravel()
             data_pred = data_df.Pred_GW_mm.to_numpy().ravel()
             r2 = r2_score(data_actual, data_pred)
-            adj_r2 = adjusted_r2(data_actual, data_pred, data_df.shape[1])
+            p = n_features if n_features is not None else data_df.shape[1]
+            adj_r2 = adjusted_r2(data_actual, data_pred, p)
             mae = normalized_mae(data_actual, data_pred)
             rmse = normalized_rmse(data_actual, data_pred)
             mbe = normalized_mbe(data_actual, data_pred)
@@ -2051,7 +2014,7 @@ def calc_train_test_metrics(
     metric_df = metric_df.sort_values(by=['Year', 'Data'])
     for col in ['R2', 'Adjusted_R2', 'RMSE (%)', 'MAE (%)', 'MBE (%)']:
         metric_df[col] = metric_df[col].apply(lambda x: round_to_n_nonzero(x, precision))
-    metric_df.to_csv(f'{output_dir}Error_Metrics_{model_name}.csv', index=False)
+    metric_df.to_csv(os.path.join(output_dir, f'Error_Metrics_{model_name}.csv'), index=False)
 
 
 def get_grid_search_stats(
@@ -2114,6 +2077,7 @@ def perform_bias_correction(
         model_name: str,
         output_dir: str,
         error_gw_col: str = 'Error_GW_mm',
+        n_features: int | None = None,
 ) -> tuple[float, float] | tuple[np.array, np.array]:
     """
     Apply bias correction to the model predictions.
@@ -2138,9 +2102,10 @@ def perform_bias_correction(
     b_roe = np.mean(train_data_ecdf.Actual_GW_mm) - m_roe * np.mean(train_data_ecdf.Pred_GW_mm)
     train_data_ecdf['BC_GW_mm'] = np.abs(m_roe * train_data_ecdf.Pred_GW_mm + b_roe)
     train_r2_ecdf = r2_score(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm)
-    train_adj_r2_ecdf = adjusted_r2(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm, train_data_ecdf.shape[1])
+    _p = n_features if n_features is not None else train_data_ecdf.shape[1]
+    train_adj_r2_ecdf = adjusted_r2(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm, _p)
     train_r2 = r2_score(train_data_ecdf.Actual_GW_mm, train_data_ecdf.Pred_GW_mm)
-    train_adj_r2 = adjusted_r2(train_data_ecdf.Actual_GW_mm, train_data_ecdf.Pred_GW_mm, train_data_ecdf.shape[1])
+    train_adj_r2 = adjusted_r2(train_data_ecdf.Actual_GW_mm, train_data_ecdf.Pred_GW_mm, _p)
     train_rmse_ecdf = normalized_rmse(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm)
     train_rmse = normalized_rmse(train_data_ecdf.Actual_GW_mm, train_data_ecdf.Pred_GW_mm)
     train_mae_ecdf = normalized_mae(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm)
@@ -2156,7 +2121,7 @@ def perform_bias_correction(
     plt.ylabel('ECDF')
     plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
     plt.tight_layout()
-    plt.savefig(output_dir + 'ECDF_Train.png', dpi=600)
+    plt.savefig(os.path.join(output_dir, 'ECDF_Train.png'), dpi=600)
     plt.clf()
     test_data_ecdf['BC_GW_mm'] = np.abs(m_roe * test_data_ecdf.Pred_GW_mm + b_roe)
     plot_ecdf_test_df = test_data_ecdf.filter(like="_GW", axis="columns")
@@ -2165,12 +2130,12 @@ def perform_bias_correction(
     plt.ylabel('ECDF')
     plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
     plt.ylim(0, 1.1)
-    plt.savefig(output_dir + 'ECDF_Test.png', dpi=600)
+    plt.savefig(os.path.join(output_dir, 'ECDF_Test.png'), dpi=600)
     plt.close()
     test_r2_ecdf = r2_score(test_data_ecdf.Actual_GW_mm, test_data_ecdf.BC_GW_mm)
-    test_adj_r2_ecdf = adjusted_r2(test_data_ecdf.Actual_GW_mm, test_data_ecdf.BC_GW_mm, test_data_ecdf.shape[1])
+    test_adj_r2_ecdf = adjusted_r2(test_data_ecdf.Actual_GW_mm, test_data_ecdf.BC_GW_mm, _p)
     test_r2 = r2_score(test_data_ecdf.Actual_GW_mm, test_data_ecdf.Pred_GW_mm)
-    test_adj_r2 = adjusted_r2(test_data_ecdf.Actual_GW_mm, test_data_ecdf.Pred_GW_mm, test_data_ecdf.shape[1])
+    test_adj_r2 = adjusted_r2(test_data_ecdf.Actual_GW_mm, test_data_ecdf.Pred_GW_mm, _p)
     test_rmse_ecdf = normalized_rmse(test_data_ecdf.Actual_GW_mm, test_data_ecdf.BC_GW_mm)
     test_rmse = normalized_rmse(test_data_ecdf.Actual_GW_mm, test_data_ecdf.Pred_GW_mm)
     test_mae_ecdf = normalized_mae(test_data_ecdf.Actual_GW_mm, test_data_ecdf.BC_GW_mm)
@@ -2187,7 +2152,7 @@ def perform_bias_correction(
             'Train MBE (%)': [train_mbe, train_mbe_ecdf],
         }
     ).round(2)
-    metrics_df_train_linear.to_csv(output_dir + 'Train_Metrics_Linear.csv', index=False)
+    metrics_df_train_linear.to_csv(os.path.join(output_dir, 'Train_Metrics_Linear.csv'), index=False)
     metrics_df_test_linear = pd.DataFrame(
         data={
             'Model': [model_name, f'BC{model_name}'],
@@ -2198,7 +2163,7 @@ def perform_bias_correction(
             'Test MBE (%)': [test_mbe, test_mbe_ecdf],
         }
     ).round(2)
-    metrics_df_test_linear.to_csv(output_dir + 'Test_Metrics_Linear.csv', index=False)
+    metrics_df_test_linear.to_csv(os.path.join(output_dir, 'Test_Metrics_Linear.csv'), index=False)
     model_dict, _ = get_model_param_dict(random_state=42, use_dask=False)
     model = model_dict[model_name]
     drop_cols = ['Year', 'DATA', 'Actual_GW_mm', 'Pred_GW_mm'] + [error_gw_col]
@@ -2214,14 +2179,14 @@ def perform_bias_correction(
     test_data_ecdf_ml['BC_GW_mm'] = np.abs(test_data_ecdf_ml.Pred_GW_mm + residuals_pred_test)
     train_r2_ml = r2_score(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
     train_adj_r2_ml = adjusted_r2(
-        train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm, train_data_ecdf_ml.shape[1]
+        train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm, x_train_data.shape[1]
     )
     train_rmse_ml = normalized_rmse(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
     train_mae_ml = normalized_mae(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
     train_mbe_ml = normalized_mbe(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
     test_r2_ml = r2_score(test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm)
     test_adj_r2_ml = adjusted_r2(
-        test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm, test_data_ecdf_ml.shape[1]
+        test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm, x_train_data.shape[1]
     )
     test_rmse_ml = normalized_rmse(test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm)
     test_mae_ml = normalized_mae(test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm)
@@ -2235,7 +2200,7 @@ def perform_bias_correction(
     plt.ylabel('ECDF')
     plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
     plt.tight_layout()
-    plt.savefig(output_dir + 'ECDF_Train_ML.png', dpi=600)
+    plt.savefig(os.path.join(output_dir, 'ECDF_Train_ML.png'), dpi=600)
     plt.clf()
     plot_ecdf_test_df_ml = test_data_ecdf_ml.filter(like="_GW", axis="columns")
     sns.ecdfplot(data=plot_ecdf_test_df_ml, hue_order=hue_order)
@@ -2243,7 +2208,7 @@ def perform_bias_correction(
     plt.ylabel('ECDF')
     plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
     plt.ylim(0, 1.1)
-    plt.savefig(output_dir + 'ECDF_Test_ML.png', dpi=600)
+    plt.savefig(os.path.join(output_dir, 'ECDF_Test_ML.png'), dpi=600)
     plt.clf()
 
     metric_df_train_ml = pd.DataFrame(
@@ -2256,7 +2221,7 @@ def perform_bias_correction(
             'Train MBE (%)': [train_mbe, train_mbe_ml],
         }
     ).round(2)
-    metric_df_train_ml.to_csv(output_dir + 'Train_Metrics_ML.csv', index=False)
+    metric_df_train_ml.to_csv(os.path.join(output_dir, 'Train_Metrics_ML.csv'), index=False)
     metric_df_test_ml = pd.DataFrame(
         data={
             'Model': [model_name, f'BC{model_name}'],
@@ -2267,10 +2232,11 @@ def perform_bias_correction(
             'Test MBE (%)': [test_mbe, test_mbe_ml],
         }
     ).round(2)
-    metric_df_test_ml.to_csv(output_dir + 'Test_Metrics_ML.csv', index=False)
-    if test_rmse < test_rmse_ecdf and test_rmse < test_rmse_ml:
+    metric_df_test_ml.to_csv(os.path.join(output_dir, 'Test_Metrics_ML.csv'), index=False)
+    # Select bias correction method based on TRAIN RMSE to avoid test-set snooping
+    if train_rmse <= train_rmse_ecdf and train_rmse <= train_rmse_ml:
         return 1, 0
-    if test_rmse_ecdf < test_rmse_ml:
+    if train_rmse_ecdf < train_rmse_ml:
         return m_roe, b_roe
     else:
         return residuals_pred_train, residuals_pred_test
@@ -2343,7 +2309,7 @@ def get_prediction_results(
     test_df['Actual_GW_mm'] = y_test
     test_df['Error_GW_mm'] = test_df['Actual_GW_mm'] - test_df['Pred_GW_mm']
     pred_df = pd.concat([train_df, test_df])
-    pred_df.to_parquet(f'{model_dir}Predictions_{model_name}.parquet', index=False)
+    pred_df.to_parquet(os.path.join(model_dir, f'Predictions_{model_name}.parquet'), index=False)
     if apply_bias_correction == 0:
         return pred_df
     elif model_name not in ['LGBM', 'DRF', 'ETR', 'RF', 'XGB', 'XGBRF', 'HGBR']:
@@ -2351,12 +2317,13 @@ def get_prediction_results(
         return pred_df
     elif apply_bias_correction == 1:
         logger.info('Applying global bias correction...')
-        output_dir = f'{model_dir}Global_Bias_Correction_{model_name}/'
+        output_dir = os.path.join(model_dir, f'Global_Bias_Correction_{model_name}')
         makedirs(make_proper_dir_name(output_dir))
         train_df = train_df.drop(columns=[gw_basin_col])
         test_df = test_df.drop(columns=[gw_basin_col])
         val1, val2 = perform_bias_correction(
-            train_df, test_df, model_name, output_dir
+            train_df, test_df, model_name, output_dir,
+            n_features=x_train.shape[1]
         )
         if isinstance(val1, float):
             pred_df.Pred_GW_mm = np.abs(val1 * pred_df.Pred_GW_mm + val2)
@@ -2367,10 +2334,10 @@ def get_prediction_results(
     else:
         logger.info('Applying basin-wise bias correction...')
         gw_pred_parts = []
-        output_dir = f'{model_dir}Basin_Bias_Correction_{model_name}/'
+        output_dir = os.path.join(model_dir, f'Basin_Bias_Correction_{model_name}')
         makedirs(output_dir)
         for gw_basin in pred_df[gw_basin_col].unique():
-            bias_dir = f'{output_dir}{gw_basin}/'
+            bias_dir = os.path.join(output_dir, gw_basin)
             makedirs(bias_dir)
             basin_df = pred_df[pred_df[gw_basin_col] == gw_basin].copy(deep=True)
             basin_df_train = basin_df[basin_df.DATA == 'TRAIN'].copy(deep=True).dropna()
@@ -2384,7 +2351,8 @@ def get_prediction_results(
                     basin_df_train.drop(columns=[gw_basin_col]),
                     basin_df_test.drop(columns=[gw_basin_col]),
                     model_name,
-                    bias_dir
+                    bias_dir,
+                    n_features=x_train.shape[1]
                 )
             if isinstance(val1, float):
                 basin_df.Pred_GW_mm = np.abs(val1 * basin_df.Pred_GW_mm + val2)
@@ -2395,7 +2363,7 @@ def get_prediction_results(
             basin_df.Error_GW_mm = basin_df.Actual_GW_mm - basin_df.Pred_GW_mm
             gw_pred_parts.append(basin_df)
         pred_df = pd.concat(gw_pred_parts, ignore_index=True)
-    pred_df.to_parquet(f'{model_dir}Predictions_{model_name}_BC.parquet', index=False)
+    pred_df.to_parquet(os.path.join(model_dir, f'Predictions_{model_name}_BC.parquet'), index=False)
     return pred_df
 
 

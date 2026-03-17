@@ -148,7 +148,7 @@ def preprocess_gw_csv(
     """
 
     def _process_csv(csv_file):
-        out_shp = f'{output_dir}{csv_file[csv_file.rfind(os.sep) + 1:csv_file.rfind(".")]}.shp'
+        out_shp = os.path.join(output_dir, f'{csv_file[csv_file.rfind(os.sep) + 1:csv_file.rfind(".")]}.shp')
         vops.add_attribute_well_reg(
             well_registry_file, csv_file, out_shp,
             fill_attr, filter_attr, filter_attr_value,
@@ -162,7 +162,7 @@ def preprocess_gw_csv(
         logger.info('Updating Well Registry shapefiles...')
         Parallel(n_jobs=num_cores)(delayed(_process_csv)(f) for f in csv_files)
 
-    ref_file = glob(f'{output_dir}*.shp')[0]
+    ref_file = glob(os.path.join(output_dir, '*.shp'))[0]
     return ref_file
 
 
@@ -190,7 +190,7 @@ def fix_gw_raster_values(
         None.
     """
 
-    for raster_file in glob(input_raster_dir + gw_pattern):
+    for raster_file in glob(os.path.join(input_raster_dir, gw_pattern)):
         out_raster = outdir + raster_file[raster_file.rfind(os.sep) + 1:]
         raster_arr, raster_file = rops.read_raster_as_arr(raster_file)
         no_data = rops.az_nodata()
@@ -301,7 +301,7 @@ def create_gw_depth_rasters(
                 outfile_path=gw_depth_file, no_data_value=nodata
             )
 
-        volume_files = glob(gw_volume_dir + gw_pattern)
+        volume_files = glob(os.path.join(gw_volume_dir, gw_pattern))
         num_cores = min(multiprocessing.cpu_count() - 1, len(volume_files))
         Parallel(n_jobs=num_cores)(
             delayed(_convert_volume_to_depth)(f) for f in volume_files
@@ -344,7 +344,7 @@ def create_gw_basin_rasters(
     if not already_created:
         year_list = range(start_year + 1, end_year + 1)
         makedirs(output_dir)
-        az_gw_basin_sy_tif = f'{output_dir}GW_Basin_{start_year}.tif'
+        az_gw_basin_sy_tif = os.path.join(output_dir, f'GW_Basin_{start_year}.tif')
         vops.shp2raster(
             gw_basin_vector,
             az_gw_basin_sy_tif,
@@ -354,7 +354,7 @@ def create_gw_basin_rasters(
         )
 
         if subbasin_vector is not None:
-            az_gw_subbasin_sy_tif = f'{output_dir}GW_Subbasin_{start_year}.tif'
+            az_gw_subbasin_sy_tif = os.path.join(output_dir, f'GW_Subbasin_{start_year}.tif')
             vops.shp2raster(
                 subbasin_vector,
                 az_gw_subbasin_sy_tif,
@@ -364,14 +364,14 @@ def create_gw_basin_rasters(
             )
 
         for year in year_list:
-            az_gw_basin_tif = f'{output_dir}GW_Basin_{year}.tif'
+            az_gw_basin_tif = os.path.join(output_dir, f'GW_Basin_{year}.tif')
             copy_file(
                 az_gw_basin_sy_tif,
                 az_gw_basin_tif,
                 verbose=verbose
             )
             if subbasin_vector is not None:
-                az_gw_subbasin_tif = f'{output_dir}GW_Subbasin_{year}.tif'
+                az_gw_subbasin_tif = os.path.join(output_dir, f'GW_Subbasin_{year}.tif')
                 copy_file(
                     az_gw_subbasin_sy_tif,
                     az_gw_subbasin_tif,
@@ -407,7 +407,9 @@ def create_land_use_data(
         gaussian_lu_arr = flt.gaussian_filter(lu_arr, sigma=smoothing, order=0)
         gaussian_lu_arr = np.abs(gaussian_lu_arr)
         gaussian_lu_arr -= np.min(gaussian_lu_arr)
-        gaussian_lu_arr /= np.ptp(gaussian_lu_arr)
+        ptp = np.ptp(gaussian_lu_arr)
+        if ptp > 0:
+            gaussian_lu_arr /= ptp
         input_df[cdl_label] = gaussian_lu_arr.ravel()
     return input_df
 
@@ -559,7 +561,7 @@ def create_well_density_raster(
         str: Path to the base well density raster.
     """
 
-    base_raster = f'{output_dir}Well_Density_{start_year}.tif'
+    base_raster = os.path.join(output_dir, f'Well_Density_{start_year}.tif')
     if already_created:
         logger.info('Well density rasters already created, skipping...')
         return base_raster
@@ -577,7 +579,7 @@ def create_well_density_raster(
     gdf['_count'] = 1.0
 
     # Save as temp shapefile
-    tmp_dir = f'{output_dir}_well_temp/'
+    tmp_dir = os.path.join(output_dir, '_well_temp')
     makedirs(tmp_dir)
     tmp_shp = f'{tmp_dir}wells.shp'
     gdf[['_count', 'geometry']].to_file(tmp_shp)
@@ -592,7 +594,7 @@ def create_well_density_raster(
 
     # Copy for each year
     for year in range(start_year + 1, end_year + 1):
-        out_file = f'{output_dir}Well_Density_{year}.tif'
+        out_file = os.path.join(output_dir, f'Well_Density_{year}.tif')
         copy_file(base_raster, out_file, verbose=False)
 
     # Clean up temp files

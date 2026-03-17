@@ -20,7 +20,7 @@ from joblib import Parallel, delayed
 from osgeo import gdal
 from rasterio.mask import mask
 from rasterio.plot import plotting_extent
-from shapely.geometry import Point, mapping
+from shapely.geometry import mapping
 
 from hydrolibs.sysops import az_nodata, makedirs
 
@@ -93,26 +93,35 @@ def write_raster(
         None
     """
     if ref_file:
-        raster_file = rio.open(ref_file)
-        transform_ = raster_file.transform
-    crs = raster_file.crs
-    if out_crs:
-        crs = out_crs
+        with rio.open(ref_file) as ref:
+            transform_ = ref.transform
+            ref_crs = ref.crs
+            ref_count = ref.count
+        raster_file = None
+    else:
+        ref_crs = raster_file.crs
+        ref_count = raster_file.count
+    crs = out_crs if out_crs else ref_crs
     if num_bands is None:
-        num_bands = raster_file.count
+        num_bands = ref_count
+    height = raster_data.shape[-2]
+    width = raster_data.shape[-1]
     with rio.open(
             outfile_path,
             'w',
             driver='GTiff',
-            height=raster_data.shape[0],
-            width=raster_data.shape[1],
+            height=height,
+            width=width,
             dtype=raster_data.dtype,
             crs=crs,
             transform=transform_,
             count=num_bands,
             nodata=no_data_value
     ) as dst:
-        dst.write(raster_data, num_bands)
+        if raster_data.ndim == 3:
+            dst.write(raster_data)
+        else:
+            dst.write(raster_data, 1)
 
 
 def clamp_and_rewrite_raster(
@@ -178,22 +187,18 @@ def crop_raster(
     if multi_poly:
         mask_shp_file = gpd.read_file(input_mask_path)
         raster_arr, raster_file = read_raster_as_arr(input_raster_file)
-        for idx, value in np.ndenumerate(raster_arr):
-            gx, gy = raster_file.xy(idx[0], idx[1])
-            gp = Point(gx, gy)
-            check_flag = False
-            for poly in mask_shp_file['geometry']:
-                if poly.contains(gp):
-                    check_flag = True
-                    break
-            if not check_flag:
-                raster_arr[idx] = np.nan
+        geometries = [geom for geom in mask_shp_file.geometry if geom is not None]
+        masked_arr, masked_transform = mask(
+            raster_file, geometries, crop=False, nodata=np.nan, all_touched=True
+        )
+        raster_arr = np.squeeze(masked_arr)
         no_data_value = az_nodata()
         raster_arr[np.isnan(raster_arr)] = no_data_value
         write_raster(
             raster_arr, raster_file, transform_=raster_file.transform,
             outfile_path=outfile_path, no_data_value=no_data_value
         )
+        raster_file.close()
     else:
         if ext_mask:
             src_raster_file = gdal.Open(input_raster_file)
@@ -220,12 +225,12 @@ def crop_raster(
         else:
             shape_file = gpd.read_file(input_mask_path)
             shape_file_geom = mapping(shape_file['geometry'][0])
-            raster_file = rio.open(input_raster_file)
-            raster_crop, raster_transform = mask(raster_file, [shape_file_geom], crop=True)
-            shape_extent = plotting_extent(raster_crop[0], raster_transform)
-            raster_crop = np.squeeze(raster_crop)
-            write_raster(raster_crop, raster_file, transform_=raster_transform, outfile_path=outfile_path,
-                         no_data_value=raster_file.nodata)
+            with rio.open(input_raster_file) as raster_file:
+                raster_crop, raster_transform = mask(raster_file, [shape_file_geom], crop=True)
+                shape_extent = plotting_extent(raster_crop[0], raster_transform)
+                raster_crop = np.squeeze(raster_crop)
+                write_raster(raster_crop, raster_file, transform_=raster_transform, outfile_path=outfile_path,
+                             no_data_value=raster_file.nodata)
             if plot_fig:
                 fig, ax = plt.subplots(figsize=(10, 8))
                 raster_plot = ax.imshow(raster_crop[0], extent=shape_extent)
@@ -452,7 +457,7 @@ def crop_rasters(
             raster_file, input_mask_file,
             outdir, ext_mask,
             multi_poly, verbose
-        ) for raster_file in glob(input_raster_dir + pattern)
+        ) for raster_file in glob(os.path.join(input_raster_dir, pattern))
     )
 
 

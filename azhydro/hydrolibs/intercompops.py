@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 # ── Unit-conversion constants ────────────────────────────────────────────────
 MGAL_D_TO_M3_YR = 3785.41178 * 365.25  # 1 Mgal/d → m³/yr
+MGAL_TO_M3 = 3785.41178                # 1 Mgal → m³
 M3_TO_AF = 1 / 1233.48184              # m³ → acre-feet
 M_TO_MM = 1000.0                        # metres → millimetres
 MM_TO_FT = 1.0 / 304.8                 # millimetres → feet
@@ -527,7 +528,7 @@ def load_reitz_basin_volumes(
             out_tif, basin_reproj, basin_col, pixel_area_m2, depth_unit='mm',
         )
 
-        # Per-year basin volumes from reprojected rasters
+        # Per-year basin volumes from reprojected rasters (on-disk units are metres)
         yearly_vols = {}
         for year in range(start_yr, end_yr + 1):
             reproj_path = os.path.join(
@@ -1065,12 +1066,14 @@ def _load_nhm_annual_csv_to_basins(
     mode: str = 'volume',
     predictor_dir: str | None = None,
     irr_fraction_band: int = 14,
+    raster_label: str = 'CU',
 ) -> dict:
     """
     Generic loader for NHM annual HUC12 CSVs (CU or IE).
 
-    For ``mode='volume'`` (CU): values are total annual Mgal — converted to
-    depth (mm), rasterised, and aggregated to basin volumes in AF.  Returns
+    For ``mode='volume'`` (CU): values are rates in Mgal/day — converted to
+    annual volume (m³), then to depth (mm), rasterised, and aggregated to
+    basin volumes in AF.  Returns
     ``{'mean': {basin: AF}, 'yearly': {year: {basin: AF}}}``.
 
     For ``mode='ratio'`` (IE): values are dimensionless ratios — the mean
@@ -1101,6 +1104,8 @@ def _load_nhm_annual_csv_to_basins(
     irr_fraction_band : int
         Band number in predictor rasters for irrigated fraction
         (used only when ``mode='volume'``).
+    raster_label : str
+        Label used in intermediate raster filenames (default ``'CU'``).
 
     Returns
     -------
@@ -1158,6 +1163,7 @@ def _load_nhm_annual_csv_to_basins(
             ref_raster, ref_crs, ref_transform, ref_shape,
             pixel_area_m2, start_yr, end_yr, output_dir,
             predictor_dir, irr_fraction_band,
+            raster_label=raster_label,
         )
     else:
         return _nhm_ie_ratio_path(
@@ -1172,19 +1178,21 @@ def _nhm_cu_volume_path(
     ref_raster, ref_crs, ref_transform, ref_shape,
     pixel_area_m2, start_yr, end_yr, output_dir,
     predictor_dir, irr_fraction_band,
+    raster_label='CU',
 ) -> dict:
     """Process NHM CU CSV into basin volumes (AF)."""
-    # Annual total per HUC12: values are in Mgal/yr → m³
+    # Annual CSV values are rates in Mgal/day; convert to annual m³
     annual_records = []
     for _, row in df_az.iterrows():
         year = int(row['Year'])
+        ndays = 366 if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) else 365
         for huc_id in az_cols:
             val = row[huc_id]
-            # Values are in Mgal/d; convert to m³/yr
+            # Mgal/d × days → Mgal; × 3785.41178 → m³
             annual_records.append({
                 'huc12': huc_id,
                 'year': year,
-                'volume_m3': val * MGAL_D_TO_M3_YR,
+                'volume_m3': val * ndays * MGAL_TO_M3,
             })
 
     ann_df = pd.DataFrame(annual_records)
@@ -1248,14 +1256,14 @@ def _nhm_cu_volume_path(
     else:
         nhm_raster = np.zeros(ref_shape, dtype=np.float64)
 
-    out_tif = os.path.join(output_dir, 'NHM_mean_annual_CU_mm.tif')
+    out_tif = os.path.join(output_dir, f'NHM_mean_annual_{raster_label}_mm.tif')
     with rio.open(ref_raster) as ref_src:
         profile = ref_src.profile.copy()
     profile.update(dtype='float64', nodata=np.nan, count=1)
     nhm_raster[nhm_raster == 0] = np.nan
     with rio.open(out_tif, 'w', **profile) as dst:
         dst.write(nhm_raster, 1)
-    logger.info(f'  Wrote NHM CU raster: {out_tif}')
+    logger.info(f'  Wrote NHM {raster_label} raster: {out_tif}')
 
     # Basin volumes
     basin_vols = _raster_basin_volumes(
@@ -2281,6 +2289,495 @@ def run_cu_ie_intercomparison(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Effective Precipitation Intercomparison (ML Peff vs ML Peff PCML vs NHM)
+# ═════════════════════════════════════════════════════════════════════════════
+
+_PEFF_COLORS = {'ML_Peff': '#2C3E50', 'ML_Peff_PCML': '#8E44AD', 'NHM_Peff': '#27AE60'}
+_PEFF_MARKERS = {'ML_Peff': 'o', 'ML_Peff_PCML': 'D', 'NHM_Peff': 's'}
+
+
+def _load_ml_peff_to_basins(
+    predictor_dir: str,
+    basin_gdf: gpd.GeoDataFrame,
+    basin_col: str,
+    year_range: tuple[int, int],
+    output_dir: str,
+    peff_band: int,
+    irr_fraction_band: int = 14,
+    label: str = 'Peff',
+) -> dict:
+    """Extract Peff from predictor rasters, scale by ``irr_fraction``,
+    and aggregate to basin volumes (AF).
+
+    For each year the irrigated-area effective precipitation depth is
+    ``depth = Peff_mm × irr_fraction``.  The scaled depth is written as
+    a single-band raster, then aggregated to basin volumes.
+
+    Returns ``{'mean': {basin: AF}, 'yearly': {year: {basin: AF}}}``.
+    """
+    makedirs(output_dir)
+    start_yr, end_yr = year_range
+    ref_raster = None
+    mean_depth = None
+    n_years = 0
+
+    for year in range(start_yr, end_yr + 1):
+        pred_file = os.path.join(predictor_dir, f'Predictor_{year}.tif')
+        if not os.path.isfile(pred_file):
+            continue
+
+        with rio.open(pred_file) as src:
+            peff_arr = src.read(peff_band).astype(np.float64)
+            irr_arr = src.read(irr_fraction_band).astype(np.float64)
+            if ref_raster is None:
+                ref_raster = pred_file
+
+        peff_arr[np.isnan(peff_arr)] = 0.0
+        peff_arr[peff_arr < 0] = 0.0
+        irr_arr[np.isnan(irr_arr)] = 0.0
+        irr_arr = np.clip(irr_arr, 0, 1)
+
+        scaled = peff_arr * irr_arr
+
+        # Write per-year raster
+        out_tif = os.path.join(output_dir, f'ML_{label}_{year}_mm.tif')
+        with rio.open(ref_raster) as ref_src:
+            yr_profile = ref_src.profile.copy()
+        yr_profile.update(dtype='float64', nodata=np.nan, count=1)
+        tmp = scaled.copy()
+        tmp[tmp == 0] = np.nan
+        with rio.open(out_tif, 'w', **yr_profile) as dst:
+            dst.write(tmp, 1)
+
+        if mean_depth is None:
+            mean_depth = scaled.copy()
+        else:
+            mean_depth += scaled
+        n_years += 1
+
+    if n_years == 0 or ref_raster is None:
+        logger.warning(f'No predictor rasters found for {label}')
+        return {
+            'mean': {b: 0.0 for b in basin_gdf[basin_col]},
+            'yearly': {},
+        }
+
+    mean_depth /= n_years
+
+    with rio.open(ref_raster) as src:
+        ref_crs = src.crs
+        pixel_area_m2 = abs(src.transform.a * src.transform.e)
+
+    basin_reproj = (
+        basin_gdf.to_crs(ref_crs) if basin_gdf.crs != ref_crs else basin_gdf
+    )
+
+    # Write mean-annual raster
+    out_mean = os.path.join(output_dir, f'ML_mean_annual_{label}_mm.tif')
+    with rio.open(ref_raster) as ref_src:
+        profile = ref_src.profile.copy()
+    profile.update(dtype='float64', nodata=np.nan, count=1)
+    tmp = mean_depth.copy()
+    tmp[tmp == 0] = np.nan
+    with rio.open(out_mean, 'w', **profile) as dst:
+        dst.write(tmp, 1)
+    logger.info(f'Wrote ML mean-annual {label} raster: {out_mean}')
+
+    basin_vols = _raster_basin_volumes(
+        out_mean, basin_reproj, basin_col, pixel_area_m2, depth_unit='mm',
+    )
+
+    # Per-year basin volumes
+    yearly_vols = {}
+    for year in range(start_yr, end_yr + 1):
+        raster_path = os.path.join(output_dir, f'ML_{label}_{year}_mm.tif')
+        if os.path.isfile(raster_path):
+            yearly_vols[year] = _raster_basin_volumes(
+                raster_path, basin_reproj, basin_col,
+                pixel_area_m2, depth_unit='mm',
+            )
+
+    return {'mean': basin_vols, 'yearly': yearly_vols}
+
+
+def _plot_peff_time_series(
+    all_sources: dict,
+    basin_names: list[str],
+    basin_areas_m2: dict[str, float],
+    output_dir: str,
+) -> None:
+    """Per-basin time series of irrigated effective precipitation.
+
+    Each basin gets a figure with two rows:
+        Row 0: Depth (mm / ft)
+        Row 1: Volume (AF / m³)
+    An additional 'AZ Total' figure sums across all basins.
+    """
+    makedirs(output_dir)
+    af_to_m3 = 1.0 / M3_TO_AF
+    targets = list(basin_names) + ['AZ_Total']
+
+    for basin in targets:
+        fig, axes = plt.subplots(2, 1, figsize=(10, 8), constrained_layout=True)
+        title = basin.replace('_', ' ')
+        fig.suptitle(f'{title} — Effective Precipitation (irrigated)',
+                     fontsize=14, fontweight='bold')
+
+        for source_key, src_data in all_sources.items():
+            yearly = src_data.get('yearly', {})
+            years = sorted(yearly.keys())
+            if not years:
+                continue
+
+            if basin == 'AZ_Total':
+                af_vals = np.array([
+                    sum(yearly[yr].values()) for yr in years
+                ])
+                total_area = sum(basin_areas_m2.values())
+            else:
+                af_vals = np.array([
+                    yearly[yr].get(basin, 0.0) for yr in years
+                ])
+                total_area = basin_areas_m2.get(basin, 1.0)
+
+            m3_vals = af_vals * af_to_m3
+            mm_vals = (
+                m3_vals / total_area * M_TO_MM if total_area > 0
+                else m3_vals * 0
+            )
+
+            label = source_key.replace('_', ' ')
+            color = _PEFF_COLORS.get(source_key, '#333333')
+            marker = _PEFF_MARKERS.get(source_key, 'o')
+
+            axes[0].plot(years, mm_vals, label=label, color=color,
+                         marker=marker, markersize=3, linewidth=1.2)
+            axes[1].plot(years, af_vals, label=label, color=color,
+                         marker=marker, markersize=3, linewidth=1.2)
+
+        axes[0].set_ylabel('Depth (mm)')
+        axes[0].grid(True, alpha=0.3, linestyle='--')
+        axes[0].legend(fontsize=9)
+        ax_ft = axes[0].twinx()
+        lo, hi = axes[0].get_ylim()
+        ax_ft.set_ylim(lo * MM_TO_FT, hi * MM_TO_FT)
+        ax_ft.set_ylabel('Depth (ft)')
+
+        axes[1].set_ylabel('Volume (AF)')
+        axes[1].set_xlabel('Year')
+        axes[1].grid(True, alpha=0.3, linestyle='--')
+        axes[1].legend(fontsize=9)
+        ax_m3 = axes[1].twinx()
+        lo, hi = axes[1].get_ylim()
+        ax_m3.set_ylim(lo * af_to_m3, hi * af_to_m3)
+        ax_m3.set_ylabel('Volume (m³)')
+
+        clean_name = basin.replace(' ', '_').replace('/', '_')
+        out_path = os.path.join(output_dir, f'TS_Peff_{clean_name}.png')
+        fig.savefig(out_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+
+    logger.info(f'Peff time series plots saved to {output_dir}')
+
+
+def _plot_peff_scatter(
+    all_sources: dict,
+    basin_names: list[str],
+    basin_areas_m2: dict[str, float],
+    output_dir: str,
+) -> None:
+    """Pairwise scatter plots of mean-annual Peff per-basin volumes."""
+    makedirs(output_dir)
+    af_to_m3 = 1.0 / M3_TO_AF
+
+    source_keys = list(all_sources.keys())
+    pairs = [
+        (source_keys[i], source_keys[j])
+        for i in range(len(source_keys))
+        for j in range(i + 1, len(source_keys))
+    ]
+    n_pairs = len(pairs)
+
+    fig, axes = plt.subplots(
+        2, n_pairs, figsize=(7 * n_pairs, 10),
+        constrained_layout=True, squeeze=False,
+    )
+    fig.suptitle('Effective Precipitation — Per-Basin Scatter',
+                 fontsize=14, fontweight='bold')
+
+    for col_i, (src_a, src_b) in enumerate(pairs):
+        mean_a = all_sources[src_a]['mean']
+        mean_b = all_sources[src_b]['mean']
+
+        af_a = np.array([mean_a.get(b, 0.0) for b in basin_names])
+        af_b = np.array([mean_b.get(b, 0.0) for b in basin_names])
+        areas = np.array([basin_areas_m2.get(b, 1.0) for b in basin_names])
+        mm_a = af_a * af_to_m3 / areas * M_TO_MM
+        mm_b = af_b * af_to_m3 / areas * M_TO_MM
+
+        label_a = src_a.replace('_', ' ')
+        label_b = src_b.replace('_', ' ')
+
+        for row_i, (vals_x, vals_y, unit) in enumerate([
+            (af_a, af_b, 'AF'), (mm_a, mm_b, 'mm'),
+        ]):
+            ax = axes[row_i, col_i]
+
+            ax.scatter(vals_x, vals_y, s=30, alpha=0.7,
+                       edgecolors='white', linewidths=0.5)
+
+            lo = min(vals_x.min(), vals_y.min(), 0)
+            hi = max(vals_x.max(), vals_y.max()) * 1.05
+            ax.plot([lo, hi], [lo, hi], 'k--', lw=1, label='1:1')
+
+            if len(vals_x) > 1 and np.std(vals_x) > 0:
+                z = np.polyfit(vals_x, vals_y, 1)
+                x_fit = np.linspace(lo, hi, 100)
+                ax.plot(x_fit, np.polyval(z, x_fit), 'r-', lw=1.2,
+                        label=f'y={z[0]:.2f}x+{z[1]:.1f}')
+
+                ss_res = np.sum((vals_y - np.polyval(z, vals_x)) ** 2)
+                ss_tot = np.sum((vals_y - np.mean(vals_y)) ** 2)
+                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+                ax.set_title(f'{label_a} vs {label_b}  (R²={r2:.3f})',
+                             fontsize=11, fontweight='bold')
+            else:
+                ax.set_title(f'{label_a} vs {label_b}', fontsize=11)
+
+            ax.set_xlabel(f'{label_a} ({unit})')
+            ax.set_ylabel(f'{label_b} ({unit})')
+            ax.legend(fontsize=8, loc='upper left')
+            ax.grid(True, alpha=0.3, linestyle='--')
+            ax.set_aspect('equal', adjustable='box')
+            ax.set_xlim(lo, hi)
+            ax.set_ylim(lo, hi)
+
+    out_path = os.path.join(output_dir, 'Scatter_Peff.png')
+    fig.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    logger.info(f'Peff scatter plot saved to {out_path}')
+
+
+def run_peff_intercomparison(
+    predictor_dir: str,
+    nhm_peff_csv: str,
+    huc12_geojson: str,
+    basin_shp: str,
+    basin_col: str,
+    output_dir: str,
+    ref_raster: str | None = None,
+    peff_band: int = 4,
+    peff_pcml_band: int = 5,
+    irr_fraction_band: int = 14,
+    ml_year_range: tuple[int, int] = (2000, 2024),
+    ml_pcml_year_range: tuple[int, int] = (2000, 2023),
+    nhm_year_range: tuple[int, int] = (2000, 2020),
+) -> pd.DataFrame:
+    """
+    Compare irrigated effective precipitation across three sources:
+
+        1. **ML Peff** — SCS formula-based (predictor band 4 × irr_fraction)
+        2. **ML Peff PCML** — observation-based (predictor band 5 × irr_fraction)
+        3. **NHM Peff** — USGS NHM PPTeff HUC12 data (Mgal/day → basin AF)
+
+    All three datasets are scaled by ``annual_irr_fraction`` so that
+    volumes represent only the irrigated-area contribution.
+
+    Parameters
+    ----------
+    predictor_dir : str
+        Directory with ``Predictor_YYYY.tif`` multi-band rasters.
+    nhm_peff_csv : str
+        Path to NHM PPTeff CSV
+        (``PPTeff_HUC12_Tot_annual_2000_2020.csv``).
+    huc12_geojson : str
+        Path to ``AZ_HUC12.geojson``.
+    basin_shp : str
+        Shapefile or GeoJSON for Arizona groundwater basins.
+    basin_col : str
+        Column in *basin_shp* identifying each basin.
+    output_dir : str
+        Root output directory.
+    ref_raster : str or None
+        Reference raster for CRS/grid.  Defaults to the first predictor.
+    peff_band : int
+        Band index for ``annual_peff_mm`` (default 4).
+    peff_pcml_band : int
+        Band index for ``annual_peff_pcml_mm`` (default 5).
+    irr_fraction_band : int
+        Band index for ``annual_irr_fraction`` (default 14).
+    ml_year_range : tuple[int, int]
+        Year range for ML Peff (default 2000-2024).
+    ml_pcml_year_range : tuple[int, int]
+        Year range for ML Peff PCML (default 2000-2023).
+    nhm_year_range : tuple[int, int]
+        Year range for NHM PPTeff (default 2000-2020).
+
+    Returns
+    -------
+    pd.DataFrame
+        Summary metrics table.
+    """
+    makedirs(output_dir)
+    logger.info('=' * 60)
+    logger.info('Effective Precipitation Intercomparison')
+    logger.info('=' * 60)
+
+    # ── Load basins ──────────────────────────────────────────────────────
+    basin_gdf = gpd.read_file(basin_shp)
+    logger.info(f'Loaded {len(basin_gdf)} basins from {basin_shp}')
+
+    # ── Determine reference raster ───────────────────────────────────────
+    if ref_raster is None:
+        for yr in range(ml_year_range[0], ml_year_range[1] + 1):
+            candidate = os.path.join(predictor_dir, f'Predictor_{yr}.tif')
+            if os.path.isfile(candidate):
+                ref_raster = candidate
+                break
+    if ref_raster is None:
+        raise FileNotFoundError(
+            f'No Predictor rasters found in {predictor_dir}'
+        )
+    logger.info(f'Reference raster: {ref_raster}')
+    with rio.open(ref_raster) as _src:
+        ref_crs = _src.crs
+
+    basin_reproj = (
+        basin_gdf.to_crs(ref_crs)
+        if basin_gdf.crs != ref_crs else basin_gdf
+    )
+    basin_names = sorted(basin_gdf[basin_col].unique().tolist())
+    basin_areas_m2 = {
+        row[basin_col]: row.geometry.area
+        for _, row in basin_reproj.iterrows()
+    }
+    af_to_m3 = 1.0 / M3_TO_AF
+
+    # ── 1. ML Peff (SCS) ────────────────────────────────────────────────
+    logger.info('--- Loading ML Peff (SCS formula) ---')
+    ml_peff_out = os.path.join(output_dir, 'ML_Peff_Rasters/')
+    ml_peff = _load_ml_peff_to_basins(
+        predictor_dir, basin_gdf, basin_col, ml_year_range,
+        ml_peff_out, peff_band=peff_band,
+        irr_fraction_band=irr_fraction_band, label='Peff',
+    )
+
+    # ── 2. ML Peff PCML ─────────────────────────────────────────────────
+    logger.info('--- Loading ML Peff PCML (observation-based) ---')
+    ml_pcml_out = os.path.join(output_dir, 'ML_Peff_PCML_Rasters/')
+    ml_peff_pcml = _load_ml_peff_to_basins(
+        predictor_dir, basin_gdf, basin_col, ml_pcml_year_range,
+        ml_pcml_out, peff_band=peff_pcml_band,
+        irr_fraction_band=irr_fraction_band, label='Peff_PCML',
+    )
+
+    # ── 3. NHM PPTeff ────────────────────────────────────────────────────
+    logger.info('--- Loading USGS NHM PPTeff ---')
+    nhm_peff_out = os.path.join(output_dir, 'NHM_Peff_Rasters/')
+    nhm_peff = _load_nhm_annual_csv_to_basins(
+        nhm_peff_csv, huc12_geojson, basin_gdf, basin_col,
+        ref_raster, nhm_year_range, nhm_peff_out,
+        mode='volume',
+        predictor_dir=predictor_dir,
+        irr_fraction_band=irr_fraction_band,
+        raster_label='Peff',
+    )
+
+    # ── 4. Compute metrics ───────────────────────────────────────────────
+    all_sources = {
+        'ML_Peff': ml_peff,
+        'ML_Peff_PCML': ml_peff_pcml,
+        'NHM_Peff': nhm_peff,
+    }
+    all_metrics = []
+    pairs = [
+        ('ML_Peff', 'NHM_Peff'),
+        ('ML_Peff_PCML', 'NHM_Peff'),
+        ('ML_Peff', 'ML_Peff_PCML'),
+    ]
+    for label_a, label_b in pairs:
+        m = _compute_metrics(
+            basin_names,
+            all_sources[label_a]['mean'],
+            all_sources[label_b]['mean'],
+            label_a, label_b,
+            basin_areas_m2=basin_areas_m2,
+        )
+        m['Category'] = 'Effective_Precipitation'
+        all_metrics.append(m)
+        logger.info(
+            f'  {m["Pair"]}: RMSD={m["RMSD_AF"]:.2f} AF '
+            f'({m["RMSD_m3"]:.2f} m³), '
+            f'MAD={m["MAD_AF"]:.2f} AF, PctDiff={m["Pct_Diff"]:.2f}%'
+        )
+
+    metrics_df = pd.DataFrame(all_metrics)
+    metrics_csv = os.path.join(output_dir, 'peff_intercomparison_metrics.csv')
+    metrics_df.to_csv(metrics_csv, index=False)
+    logger.info(f'Peff metrics saved to {metrics_csv}')
+
+    # ── 5. Per-basin comparison table ────────────────────────────────────
+    rows = []
+    for basin in basin_names:
+        area = basin_areas_m2.get(basin, 1.0)
+        row = {'Basin': basin}
+        for src_key in ('ML_Peff', 'ML_Peff_PCML', 'NHM_Peff'):
+            af_val = all_sources[src_key]['mean'].get(basin, 0.0)
+            row[f'{src_key}_mm'] = round(af_val * af_to_m3 / area * M_TO_MM, 4)
+            row[f'{src_key}_AF'] = round(af_val, 2)
+        rows.append(row)
+    basin_df = pd.DataFrame(rows)
+    basin_csv = os.path.join(output_dir, 'peff_per_basin.csv')
+    basin_df.to_csv(basin_csv, index=False)
+    logger.info(f'Per-basin Peff saved to {basin_csv}')
+
+    # ── 6. Time series CSV ───────────────────────────────────────────────
+    ts_rows = []
+    for src_key, src_data in all_sources.items():
+        yearly = src_data.get('yearly', {})
+        for year in sorted(yearly.keys()):
+            for basin in basin_names:
+                af_val = yearly[year].get(basin, 0.0)
+                area = basin_areas_m2.get(basin, 1.0)
+                ts_rows.append({
+                    'Source': src_key,
+                    'Year': year,
+                    'Basin': basin,
+                    'Volume_mm': round(
+                        af_val * af_to_m3 / area * M_TO_MM, 4,
+                    ),
+                    'Volume_AF': round(af_val, 2),
+                })
+    ts_df = pd.DataFrame(ts_rows)
+    ts_csv = os.path.join(output_dir, 'peff_time_series.csv')
+    ts_df.to_csv(ts_csv, index=False)
+    logger.info(f'Peff time series saved to {ts_csv}')
+
+    # ── 7. Time series plots ─────────────────────────────────────────────
+    plot_dir = os.path.join(output_dir, 'Time_Series/')
+    _plot_peff_time_series(
+        all_sources, basin_names, basin_areas_m2, plot_dir,
+    )
+
+    # ── 8. Scatter plots ─────────────────────────────────────────────────
+    scatter_dir = os.path.join(output_dir, 'Scatter/')
+    _plot_peff_scatter(
+        all_sources, basin_names, basin_areas_m2, scatter_dir,
+    )
+
+    # ── Summary ──────────────────────────────────────────────────────────
+    logger.info('\n' + '=' * 60)
+    logger.info('Peff Intercomparison Summary')
+    logger.info('=' * 60)
+    logger.info(f'\n{metrics_df.to_string(index=False)}')
+    logger.info(f'\nML Peff year range: {ml_year_range}')
+    logger.info(f'ML Peff PCML year range: {ml_pcml_year_range}')
+    logger.info(f'NHM Peff year range: {nhm_year_range}')
+
+    return metrics_df
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # CAP/SRP Surface Water Validation
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -2338,8 +2835,33 @@ def _load_cap_srp_annual_sw(
     cap_df = pd.read_excel(cap_xlsx)
     # Keep only direct-use deliveries (null recharge facility)
     cap_df = cap_df[cap_df['Recharge Facility'].isna()].copy()
-    # Drop rows with unmappable AMA (e.g. 'Multiple', NaN)
-    cap_df = cap_df[cap_df['AMA'].isin(_CAP_AMA_TO_BASIN)]
+    # Log excluded volume from unmappable AMA records
+    mappable_mask = cap_df['AMA'].isin(_CAP_AMA_TO_BASIN)
+    excluded = cap_df[~mappable_mask]
+    if not excluded.empty:
+        n_mult = int((excluded['AMA'] == 'Multiple').sum())
+        n_nan = int(excluded['AMA'].isna().sum())
+        n_other = len(excluded) - n_mult - n_nan
+        vol_mult = excluded.loc[
+            excluded['AMA'] == 'Multiple', 'Delivery AF'
+        ].sum()
+        vol_nan = excluded.loc[
+            excluded['AMA'].isna(), 'Delivery AF'
+        ].sum()
+        vol_total = excluded['Delivery AF'].sum()
+        logger.warning(
+            'CAP validation: excluded %d records (%.0f AF) with '
+            'unmappable AMA — %d "Multiple" (%.0f AF), %d NaN '
+            '(%.0f AF)%s. These cannot be assigned to a single '
+            'basin and represent a systematic undercount in '
+            'per-basin comparisons.',
+            len(excluded), vol_total,
+            n_mult, vol_mult,
+            n_nan, vol_nan,
+            f', {n_other} other ({vol_total - vol_mult - vol_nan:.0f} AF)'
+            if n_other else '',
+        )
+    cap_df = cap_df[mappable_mask].copy()
     cap_df['Basin'] = cap_df['AMA'].map(_CAP_AMA_TO_BASIN)
     cap_annual = (
         cap_df.groupby(['Basin', 'Year'])['Delivery AF']

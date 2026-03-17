@@ -24,6 +24,7 @@ All sampled values are floored at zero.
 """
 
 import logging
+import os
 from pathlib import Path
 
 import geopandas as gpd
@@ -100,7 +101,8 @@ def _compute_capacity_weights(
     if 'PUMPRATE' in wells.columns:
         pump = pd.to_numeric(wells['PUMPRATE'], errors='coerce').values
         use_pump = ~has_hist & np.isfinite(pump) & (pump > 0)
-        raw_weight[use_pump] = pump[use_pump]
+        # Convert GPM to AF/yr to match the AF/yr units of historical pumping
+        raw_weight[use_pump] = pump[use_pump] * 1.6133
         logger.info(f'  Capacity weights: {use_pump.sum()} wells using '
                     f'PUMPRATE fallback')
 
@@ -166,7 +168,7 @@ def create_well_package(
         Path to the written GeoPackage file.
     """
     makedirs(output_dir)
-    out_gpkg = f'{output_dir}Well_Package.gpkg'
+    out_gpkg = os.path.join(output_dir, 'Well_Package.gpkg')
 
     # ---- Load well registry ----
     wells = gpd.read_file(well_registry_file)

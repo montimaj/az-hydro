@@ -13,6 +13,7 @@ This module provides comprehensive visualization functions for:
 
 import logging
 import multiprocessing
+import os
 from typing import Any
 
 import geopandas as gpd
@@ -137,43 +138,98 @@ def compute_confidence_interval(
     return mean, mean - ci, mean + ci
 
 
+def _basin_block_bootstrap(
+        values: np.ndarray,
+        basin_labels: np.ndarray,
+        n_bootstrap: int = 1000,
+        confidence: float = 0.95,
+        seed: int = 42
+) -> tuple[float, float]:
+    """
+    Basin-level block bootstrap CI for the sum statistic.
+
+    Resamples entire basins with replacement to respect within-basin
+    spatial autocorrelation. Each bootstrap replicate draws n_basins
+    basins (with replacement), sums their per-basin totals, and the
+    percentile interval is computed from the bootstrap distribution.
+
+    Args:
+        values: Per-pixel values for one year.
+        basin_labels: Corresponding basin label for each pixel.
+        n_bootstrap: Number of bootstrap replicates.
+        confidence: Confidence level.
+        seed: Random seed for reproducibility.
+
+    Returns:
+        Tuple of (lower_ci, upper_ci).
+    """
+    unique_basins = np.unique(basin_labels)
+    n_basins = len(unique_basins)
+    basin_sums = np.array([np.sum(values[basin_labels == b]) for b in unique_basins])
+
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n_basins, size=(n_bootstrap, n_basins))
+    bootstrap_totals = basin_sums[idx].sum(axis=1)
+
+    alpha = 1 - confidence
+    lower = np.percentile(bootstrap_totals, alpha / 2 * 100)
+    upper = np.percentile(bootstrap_totals, (1 - alpha / 2) * 100)
+    return lower, upper
+
+
 def aggregate_yearly_data(
         df: pd.DataFrame,
         year_col: str,
         value_col: str,
         aggregation: str = 'sum',
-        confidence: float = 0.95
+        confidence: float = 0.95,
+        basin_col: str | None = None
 ) -> pd.DataFrame:
     """
     Aggregate data by year with confidence intervals.
-    
+
+    When ``basin_col`` is provided and aggregation is ``'sum'``, a
+    basin-level block bootstrap is used instead of pixel-level i.i.d.
+    resampling.  This accounts for within-basin spatial autocorrelation
+    and produces more conservative (wider) CIs suitable for publication.
+
     Args:
         df: Input dataframe.
         year_col: Name of year column.
         value_col: Name of value column to aggregate.
         aggregation: Aggregation method ('sum', 'mean').
         confidence: Confidence level for CI.
-        
+        basin_col: Optional basin column for block bootstrap.
+            When provided with aggregation='sum', basins are resampled
+            as spatial blocks instead of individual pixels.
+
     Returns:
         DataFrame with year, mean, lower_ci, upper_ci columns.
     """
     years = sorted(df[year_col].unique())
     results = []
+    rng = np.random.default_rng(42)
 
     for year in years:
-        year_data = df[df[year_col] == year][value_col].values
+        year_mask = df[year_col] == year
+        year_data = df.loc[year_mask, value_col].values
 
         if aggregation == 'sum':
-            # For sum, we compute total and bootstrap CI
             total = np.sum(year_data)
-            # Bootstrap for CI of sum
-            n_bootstrap = 1000
-            bootstrap_sums = []
-            for _ in range(n_bootstrap):
-                sample = np.random.choice(year_data, size=len(year_data), replace=True)
-                bootstrap_sums.append(np.sum(sample))
-            lower = np.percentile(bootstrap_sums, (1 - confidence) / 2 * 100)
-            upper = np.percentile(bootstrap_sums, (1 + confidence) / 2 * 100)
+
+            if basin_col is not None:
+                basin_labels = df.loc[year_mask, basin_col].values
+                lower, upper = _basin_block_bootstrap(
+                    year_data, basin_labels, confidence=confidence
+                )
+            else:
+                # Pixel-level bootstrap (fallback for per-basin plots)
+                n_bootstrap = 1000
+                idx = rng.integers(0, len(year_data), size=(n_bootstrap, len(year_data)))
+                bootstrap_sums = year_data[idx].sum(axis=1)
+                lower = np.percentile(bootstrap_sums, (1 - confidence) / 2 * 100)
+                upper = np.percentile(bootstrap_sums, (1 + confidence) / 2 * 100)
+
             results.append({
                 'year': year,
                 'value': total,
@@ -295,12 +351,14 @@ def create_time_series_plot_journal(
         df_plot[f'Actual_{unit}'] = df_plot[actual_col] * factor
         df_plot[f'Pred_{unit}'] = df_plot[pred_col] * factor
 
-        # Aggregate by year
+        # Aggregate by year (basin block bootstrap for AZ-wide sums)
         actual_agg = aggregate_yearly_data(
-            df_plot, year_col, f'Actual_{unit}', aggregation, confidence
+            df_plot, year_col, f'Actual_{unit}', aggregation, confidence,
+            basin_col=gw_basin_col
         )
         pred_agg = aggregate_yearly_data(
-            df_plot, year_col, f'Pred_{unit}', aggregation, confidence
+            df_plot, year_col, f'Pred_{unit}', aggregation, confidence,
+            basin_col=gw_basin_col
         )
 
         # Create figure
@@ -390,7 +448,7 @@ def create_time_series_plot_journal(
 
         # Save figure
         plt.tight_layout()
-        fig.savefig(f'{output_dir}TS_{model_name}_{test_case}_{unit}_{aggregation}.png',
+        fig.savefig(os.path.join(output_dir, f'TS_{model_name}_{test_case}_{unit}_{aggregation}.png'),
                    dpi=600, bbox_inches='tight')
         plt.close()
 
@@ -527,7 +585,7 @@ def create_basin_time_series_plot(
     basin_clean = basin_name.replace(' ', '_').replace('/', '_')
 
     plt.tight_layout()
-    fig.savefig(f'{output_dir}TS_{model_name}_{test_case}_{basin_clean}_{unit}.png',
+    fig.savefig(os.path.join(output_dir, f'TS_{model_name}_{test_case}_{basin_clean}_{unit}.png'),
                dpi=600, bbox_inches='tight')
     plt.close()
 
@@ -558,7 +616,7 @@ def create_all_basin_plots_parallel(
         n_jobs: Number of parallel jobs (-1 for all cores).
     """
     basins = pred_df[gw_basin_col].unique().tolist()
-    basin_dir = f'{output_dir}Basins/'
+    basin_dir = os.path.join(output_dir, 'Basins')
     makedirs(basin_dir)
 
     if n_jobs == -1:
@@ -629,7 +687,10 @@ def create_model_comparison_time_series(
         first_df = first_df[first_df[gw_basin_col].isin(ama_ina_basins)]
 
     first_df[f'Actual_{unit}'] = first_df[actual_col] * factor
-    actual_agg = aggregate_yearly_data(first_df, year_col, f'Actual_{unit}', 'sum', 0.95)
+    actual_agg = aggregate_yearly_data(
+        first_df, year_col, f'Actual_{unit}', 'sum', 0.95,
+        basin_col=gw_basin_col
+    )
 
     years = actual_agg['year'].values
     min_year, max_year = years.min(), years.max()
@@ -659,7 +720,10 @@ def create_model_comparison_time_series(
             df = df[df[gw_basin_col].isin(ama_ina_basins)]
 
         df[f'Pred_{unit}'] = df[pred_col] * factor
-        pred_agg = aggregate_yearly_data(df, year_col, f'Pred_{unit}', 'sum', 0.95)
+        pred_agg = aggregate_yearly_data(
+            df, year_col, f'Pred_{unit}', 'sum', 0.95,
+            basin_col=gw_basin_col
+        )
 
         ax.plot(
             pred_agg['year'],
@@ -684,7 +748,7 @@ def create_model_comparison_time_series(
     ax.set_xlim(min_year - 0.5, max_year + 0.5)
 
     plt.tight_layout()
-    fig.savefig(f'{output_dir}TS_Model_Comparison_{test_case}_{unit}.png',
+    fig.savefig(os.path.join(output_dir, f'TS_Model_Comparison_{test_case}_{unit}.png'),
                dpi=600, bbox_inches='tight')
     plt.close()
 
@@ -760,7 +824,7 @@ def create_train_test_scatter(
     plt.suptitle(f'{model_name} - {test_case}', fontweight='bold', fontsize=14, y=1.02)
     plt.tight_layout()
 
-    fig.savefig(f'{output_dir}Scatter_{model_name}_{test_case}.png',
+    fig.savefig(os.path.join(output_dir, f'Scatter_{model_name}_{test_case}.png'),
                dpi=600, bbox_inches='tight')
     plt.close()
 
@@ -830,7 +894,7 @@ def create_residual_plot(
     plt.suptitle(f'{model_name} - {test_case}', fontweight='bold', fontsize=14, y=1.02)
     plt.tight_layout()
 
-    fig.savefig(f'{output_dir}Residuals_{model_name}_{test_case}.png',
+    fig.savefig(os.path.join(output_dir, f'Residuals_{model_name}_{test_case}.png'),
                dpi=600, bbox_inches='tight')
     plt.close()
 
@@ -1144,7 +1208,7 @@ def explore_az_data(
                    for e in era_order]
         ax.legend(handles=handles, loc='best', fontsize=9)
         plt.tight_layout()
-        plt.savefig(f'{output_dir}{safe}_timeseries.png')
+        plt.savefig(os.path.join(output_dir, f'{safe}_timeseries.png'))
         plt.close()
 
         # ── 2. Time series grouped by Basin Type ─────────────────────────
@@ -1159,7 +1223,7 @@ def explore_az_data(
         ax.set_title(f'{label} — Annual Mean by Basin Type')
         ax.legend(loc='best', fontsize=9)
         plt.tight_layout()
-        plt.savefig(f'{output_dir}{safe}_timeseries_by_basin_type.png')
+        plt.savefig(os.path.join(output_dir, f'{safe}_timeseries_by_basin_type.png'))
         plt.close()
 
         # ── 3. Boxplot by Era ────────────────────────────────────────────
@@ -1171,7 +1235,7 @@ def explore_az_data(
         )
         ax.set_title(f'{label} — Distribution by Era')
         plt.tight_layout()
-        plt.savefig(f'{output_dir}{safe}_boxplot_era.png')
+        plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_era.png'))
         plt.close()
 
         # ── 4. Violin plot by Era ────────────────────────────────────────
@@ -1182,7 +1246,7 @@ def explore_az_data(
         )
         ax.set_title(f'{label} — Violin by Era')
         plt.tight_layout()
-        plt.savefig(f'{output_dir}{safe}_violin_era.png')
+        plt.savefig(os.path.join(output_dir, f'{safe}_violin_era.png'))
         plt.close()
 
         # ── 5. Boxplot by GW_Basin_Type ──────────────────────────────────
@@ -1196,7 +1260,7 @@ def explore_az_data(
         ax.set_xlabel('Basin Type')
         ax.legend(loc='best', fontsize=9)
         plt.tight_layout()
-        plt.savefig(f'{output_dir}{safe}_boxplot_basin_type.png')
+        plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_basin_type.png'))
         plt.close()
 
         # ── 6. Boxplot by GW_Basin ───────────────────────────────────────
@@ -1221,7 +1285,7 @@ def explore_az_data(
         ax.tick_params(axis='x', rotation=35)
         ax.legend(loc='best', fontsize=8)
         plt.tight_layout()
-        plt.savefig(f'{output_dir}{safe}_boxplot_gw_basin.png')
+        plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_gw_basin.png'))
         plt.close()
 
     logger.info(f'Exploratory plots saved to {output_dir}')
@@ -1248,7 +1312,7 @@ def plot_loo_heatmap(
     ax.set_title(title, fontweight='bold')
     ax.set_ylabel('')
     plt.tight_layout()
-    fig.savefig(f'{output_dir}LOO_Heatmap_R2.png', dpi=600)
+    fig.savefig(os.path.join(output_dir, 'LOO_Heatmap_R2.png'), dpi=600)
     plt.close()
 
 
@@ -1281,7 +1345,7 @@ def plot_loo_bar(
     axes[1].tick_params(axis='x', rotation=45)
 
     plt.tight_layout()
-    fig.savefig(f'{output_dir}LOO_Averaged_Metrics.png', dpi=600)
+    fig.savefig(os.path.join(output_dir, 'LOO_Averaged_Metrics.png'), dpi=600)
     plt.close()
 
 
@@ -1309,7 +1373,7 @@ def create_cross_strategy_summary(all_results: dict, output_dir: str) -> None:
                     'Overfit_R2': row['Mean_Overfit_R2'],
                 })
     summary_df = pd.DataFrame(rows)
-    summary_df.to_csv(f'{output_dir}Cross_Strategy_Summary.csv', index=False)
+    summary_df.to_csv(os.path.join(output_dir, 'Cross_Strategy_Summary.csv'), index=False)
 
     apply_journal_style()
     strategies = summary_df.Strategy.unique()
@@ -1335,7 +1399,7 @@ def create_cross_strategy_summary(all_results: dict, output_dir: str) -> None:
     axes[0].legend()
     plt.suptitle('Cross-Strategy Model Comparison', fontweight='bold', fontsize=14)
     plt.tight_layout()
-    fig.savefig(f'{output_dir}Cross_Strategy_Comparison.png', dpi=600)
+    fig.savefig(os.path.join(output_dir, 'Cross_Strategy_Comparison.png'), dpi=600)
     plt.close()
     logger.info(f'Cross-strategy summary saved to {output_dir}')
 
@@ -1420,7 +1484,7 @@ def create_full_period_time_series(
     _add_m3_twinx(ax2)
 
     plt.tight_layout()
-    fig.savefig(f'{output_dir}Full_Period_Time_Series.png', dpi=600, bbox_inches='tight')
+    fig.savefig(os.path.join(output_dir, 'Full_Period_Time_Series.png'), dpi=600, bbox_inches='tight')
     plt.close()
 
     ts_df = pd.DataFrame({
@@ -1447,7 +1511,7 @@ def create_full_period_time_series(
         ts_df['Sigma_Volume_AF'] = ts_df['Year'].map(
             lambda y: sigma_data.get(y, {}).get('Volume_AF', np.nan))
         ts_df['Sigma_Volume_m3'] = ts_df['Sigma_Volume_AF'] * _AF_TO_M3
-    ts_df.to_csv(f'{output_dir}Full_Period_Time_Series.csv', index=False)
+    ts_df.to_csv(os.path.join(output_dir, 'Full_Period_Time_Series.csv'), index=False)
     logger.info('Full-period time series saved.')
 
 
@@ -1486,7 +1550,7 @@ def create_era_summary_maps(
     _add_m3_twinx(ax)
 
     plt.tight_layout()
-    fig.savefig(f'{output_dir}Era_Summary_Bar.png', dpi=600, bbox_inches='tight')
+    fig.savefig(os.path.join(output_dir, 'Era_Summary_Bar.png'), dpi=600, bbox_inches='tight')
     plt.close()
     logger.info('Era summary bar chart saved.')
 
@@ -1540,7 +1604,7 @@ def create_basin_time_series(
     """Per-basin annual GW withdrawal time series with era shading + uncertainty."""
     apply_journal_style()
     label = f'{title_prefix} ' if title_prefix else ''
-    ts_dir = f'{output_dir}Basin_Time_Series/'
+    ts_dir = os.path.join(output_dir, 'Basin_Time_Series')
     makedirs(ts_dir)
 
     df = build_annual_df(basin_yearly, 'Basin')
@@ -1689,7 +1753,7 @@ def create_subbasin_time_series(
     """Per-sub-basin annual GW withdrawal time series with era shading + uncertainty."""
     apply_journal_style()
     label = f'{title_prefix} ' if title_prefix else ''
-    ts_dir = f'{output_dir}Subbasin_Time_Series/'
+    ts_dir = os.path.join(output_dir, 'Subbasin_Time_Series')
     makedirs(ts_dir)
 
     df = build_annual_df(subbasin_yearly, 'Subbasin')

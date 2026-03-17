@@ -28,6 +28,7 @@ import argparse
 import logging
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
@@ -99,15 +100,34 @@ def main():
     for level in levels_to_run:
         logger.info(f'# Level {level}')
         logger.info('#' * 60)
-        for script, desc in LEVELS[level]:
-            logger.info(f'  -> {desc}')
-            rc = run_script(script, extra)
-            if rc != 0:
-                failed_scripts.append(script)
-                if not args.keep_going:
-                    logger.error(f'{script} failed (exit code {rc}). '
-                                 f'Stopping. Use --keep-going to continue.')
-                    sys.exit(rc)
+        scripts = LEVELS[level]
+        if level == 1:
+            # Level 1 scripts are independent — run in parallel
+            logger.info(f'  Running {len(scripts)} independent scripts in parallel...')
+            with ThreadPoolExecutor(max_workers=len(scripts)) as pool:
+                futures = {
+                    pool.submit(run_script, script, extra): script
+                    for script, desc in scripts
+                }
+                for future in as_completed(futures):
+                    script = futures[future]
+                    rc = future.result()
+                    if rc != 0:
+                        failed_scripts.append(script)
+                        if not args.keep_going:
+                            logger.error(f'{script} failed (exit code {rc}). '
+                                         f'Stopping. Use --keep-going to continue.')
+                            sys.exit(rc)
+        else:
+            for script, desc in scripts:
+                logger.info(f'  -> {desc}')
+                rc = run_script(script, extra)
+                if rc != 0:
+                    failed_scripts.append(script)
+                    if not args.keep_going:
+                        logger.error(f'{script} failed (exit code {rc}). '
+                                     f'Stopping. Use --keep-going to continue.')
+                        sys.exit(rc)
 
     if failed_scripts:
         logger.warning(f'Completed with failures: {failed_scripts}')

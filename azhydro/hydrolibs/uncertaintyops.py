@@ -6,6 +6,13 @@ quadrature into a total pixel-level uncertainty (σ_total):
 
     σ_total = √(σ_MACA² + σ_model² + σ_irr² + σ_gw² + σ_LULC²)
 
+Each component is computed at both the **total** pumping level and for
+each of the 8 **withdrawal categories** (Irrigation, Non_Irrigation,
+Irrigation_GW, Irrigation_SW, Non_Irrigation_GW, Non_Irrigation_SW,
+Total_GW, Total_SW).  Per-category σ is derived by partitioning every
+ensemble member's prediction *before* computing std, so partition-fraction
+uncertainty (irr_fraction, gw_fraction) is properly propagated.
+
 Components
 ----------
 σ_MACA  : Inter-GCM climate spread (5 representative GCMs), future only.
@@ -17,6 +24,24 @@ Components
 σ_LULC  : Inter-scenario LULC projection spread (B1, B2, A1B, A2),
            future only (2026-2099).  Perturbs AGRI, URBAN, crop fraction,
            and irrigation fraction end-to-end.
+
+Confidence-interval methodology
+-------------------------------
+Components are classified as **sample-based** or **scenario-based**:
+
+*Sample-based* (σ_model, σ_gw): the ensemble members are random draws
+from a larger population (random seeds, temporal snapshots).  Their CIs
+use Student's t-distribution critical values (t_{0.025, df}) instead of
+the normal z = 1.96, because the small sample size under-estimates the
+true population σ.  The t-correction is applied by inflating σ by
+t/z *before* quadrature, so all downstream code uses a single multiplier
+(CI_Z = 1.96).
+
+*Scenario-based* (σ_MACA, σ_LULC, σ_irr): the ensemble spans
+deliberately chosen structural alternatives (GCMs, LULC projections,
+irrigation mapping methods).  The spread is a lower bound on structural
+uncertainty, not a sample from a random population.  These components
+retain z = 1.96 (scale = 1.0).
 
 Author: Dr. Sayantan Majumdar (sayantan.majumdar@dri.edu)
 """
@@ -82,6 +107,41 @@ ET_BAND_INDEX = 1              # annual_et_ensemble_mm
 PEFF_BAND_INDEX = 4            # annual_peff_mm
 IRR_FRACTION_BAND_INDEX = 14   # annual_irr_fraction
 
+# ── 95 % CI multiplier and t-distribution corrections ────────────────────
+# The normal approximation z = 1.96 is the default 95 % CI multiplier.
+# For *sample-based* components (σ_model, σ_GW), where the ensemble is a
+# random draw from a larger population, t-distribution critical values are
+# more appropriate given the small sample sizes.
+# For *scenario-based* components (σ_MACA, σ_LULC, σ_irr), the ensemble
+# members span structural choices rather than a random sample, so z = 1.96
+# is retained (the resulting CI is a lower bound on structural range).
+CI_Z = 1.96
+
+# t_{0.025, df} critical values (two-tailed 95 %)
+T_CRIT_MODEL = 2.2622   # df = len(MODEL_SEEDS) − 1 = 9
+T_CRIT_GW = 3.1824      # df = len(GW_FRACTION_SNAPSHOTS) − 1 = 3
+
+# Scale factors applied to sample-based σ before quadrature so that the
+# final ± CI_Z × σ_total interval reflects t-corrected CIs.
+T_SCALE_MODEL = T_CRIT_MODEL / CI_Z   # ≈ 1.154
+T_SCALE_GW = T_CRIT_GW / CI_Z         # ≈ 1.624
+
+COMPONENT_T_SCALE = {
+    'MACA': 1.0,           # scenario-based — no correction
+    'Model': T_SCALE_MODEL,  # sample-based (10 seeds)
+    'Irr': 1.0,             # half-range of 2 scenarios — no correction
+    'LULC': 1.0,            # scenario-based — no correction
+    'GW': T_SCALE_GW,       # sample-based (4 Hung et al. snapshots)
+}
+
+COMPONENT_N = {
+    'MACA': len(MACA_REPRESENTATIVE_GCMS),   # 5
+    'Model': len(MODEL_SEEDS),               # 10
+    'Irr': 2,                                # 2 (half-range, not std)
+    'LULC': len(USGS_LULC_SCENARIOS),        # 4
+    'GW': len(GW_FRACTION_SNAPSHOTS),         # 4
+}
+
 # Category / CU / IE raster groups
 CU_CATEGORIES = ('Irrigation_CU', 'Irrigation_GW_CU', 'Irrigation_SW_CU')
 IE_CATEGORIES = (
@@ -127,10 +187,48 @@ def _build_pred_features(
 
 def _predict_total(model, pred_features, year_df, partops,
                    raster_shape, valid_mask):
-    """Predict and partition, returning total pumping (1-D array)."""
+    """Predict and partition, returning total pumping and category dict.
+
+    Returns
+    -------
+    tuple[np.ndarray, dict[str, np.ndarray]]
+        (total_1d, categories) where total = Irrigation + Non_Irrigation
+        and categories is the full dict from ``partition_predictions``.
+    """
     raw = np.abs(model.predict(pred_features))
     cat = partops.partition_predictions(raw, year_df, raster_shape, valid_mask)
-    return cat['Irrigation'] + cat['Non_Irrigation']
+    return cat['Irrigation'] + cat['Non_Irrigation'], cat
+
+
+def _compute_category_sigmas(
+        member_cats: list[dict[str, np.ndarray]],
+        mode: str = 'std',
+) -> dict[str, np.ndarray]:
+    """Compute per-category σ from ensemble member category dicts.
+
+    Parameters
+    ----------
+    member_cats : list of dicts
+        Each dict maps category name → 1-D prediction array.
+    mode : {'std', 'half_range'}
+        'std' — ``np.nanstd`` with ``ddof=1`` (3+ members).
+        'half_range' — ``|a − b| / 2`` (2 counterfactual members).
+    """
+    cat_sigmas: dict[str, np.ndarray] = {}
+    for cat_name in member_cats[0]:
+        if mode == 'half_range':
+            cat_sigmas[cat_name] = (
+                np.abs(member_cats[0][cat_name] - member_cats[1][cat_name])
+                / 2.0
+            ).astype(np.float32)
+        else:
+            stack = np.stack(
+                [mc[cat_name] for mc in member_cats], axis=0,
+            )
+            cat_sigmas[cat_name] = np.nanstd(
+                stack, axis=0, ddof=1,
+            ).astype(np.float32)
+    return cat_sigmas
 
 
 def _pixel_stats(pred_vals, mm_to_m3, m3_to_af):
@@ -180,7 +278,7 @@ def _save_summary(yearly_dict, output_dir, label=''):
     df = pd.DataFrame.from_dict(yearly_dict, orient='index')
     df.index.name = 'Year'
     suffix = f'_{label}' if label else ''
-    df.to_csv(f'{output_dir}Uncertainty_Summary{suffix}.csv')
+    df.to_csv(os.path.join(output_dir, f'Uncertainty_Summary{suffix}.csv'))
     return df
 
 
@@ -195,8 +293,8 @@ def _write_augmented_raster(pred_arr, sigma_arr, out_path, profile,
         snr = np.where(
             sigma_arr > 0, abs_pred / sigma_arr, np.nan,
         ).astype(np.float32)
-    lower_ci = (pred_arr - 1.96 * sigma_arr).astype(np.float32)
-    upper_ci = (pred_arr + 1.96 * sigma_arr).astype(np.float32)
+    lower_ci = (pred_arr - CI_Z * sigma_arr).astype(np.float32)
+    upper_ci = (pred_arr + CI_Z * sigma_arr).astype(np.float32)
 
     profile.update(count=6, dtype=np.float32, nodata=np.nan)
     with rio.open(out_path, 'w', **profile) as dst:
@@ -312,10 +410,10 @@ def _write_basin_sigma_csv(
                     'Mean_Volume_AF': round(mean_af, 2),
                     'Sigma_Volume_AF': round(std_af, 2),
                     'CV': round(cv, 6),
-                    'Lower_95CI_m3': round(mean_m3 - 1.96 * std_m3, 2),
-                    'Upper_95CI_m3': round(mean_m3 + 1.96 * std_m3, 2),
-                    'Lower_95CI_AF': round(mean_af - 1.96 * std_af, 2),
-                    'Upper_95CI_AF': round(mean_af + 1.96 * std_af, 2),
+                    'Lower_95CI_m3': round(mean_m3 - CI_Z * std_m3, 2),
+                    'Upper_95CI_m3': round(mean_m3 + CI_Z * std_m3, 2),
+                    'Lower_95CI_AF': round(mean_af - CI_Z * std_af, 2),
+                    'Upper_95CI_AF': round(mean_af + CI_Z * std_af, 2),
                     'N_Members': len(vols),
                 })
         if rows:
@@ -324,7 +422,7 @@ def _write_basin_sigma_csv(
                 'basin', 'Basin'
             )
             df.to_csv(
-                f'{output_dir}{cap_level}_Sigma_{label}.csv',
+                os.path.join(output_dir, f'{cap_level}_Sigma_{label}.csv'),
                 index=False,
             )
 
@@ -357,9 +455,10 @@ def compute_sigma_maca(
 
     Returns
     -------
-    tuple[dict[int, np.ndarray], dict[str, str]]
-        (sigma_maca, gcm_mosaic_dirs) — per-year σ arrays and the
-        per-GCM mosaic directory paths (reused by σ_CU).
+    tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]], dict[str, str]]
+        (sigma_maca, cat_sigma_maca, gcm_mosaic_dirs) — per-year total σ
+        arrays, per-category per-year σ arrays, and the per-GCM mosaic
+        directory paths (reused by σ_CU).
     """
     import hydrolibs.dataops as dataops
     import hydrolibs.partitionops as partops
@@ -367,7 +466,7 @@ def compute_sigma_maca(
     from hydrolibs.sysops import makedirs
 
     logger.info('Computing σ_MACA (inter-GCM climate uncertainty)...')
-    raster_dir = f'{output_dir}Sigma_MACA/Rasters/'
+    raster_dir = os.path.join(output_dir, 'Sigma_MACA/Rasters')
     makedirs(raster_dir)
 
     ref_basin_file = f'{pred_data_dir}GW_Basin_{year_list[0]}.tif'
@@ -386,7 +485,7 @@ def compute_sigma_maca(
     for gcm in MACA_REPRESENTATIVE_GCMS:
         logger.info(f'  Preparing per-GCM tiles for {gcm}...')
         gcm_tile_dir, _ = dataops.download_gee_data(
-            f'{vector_dir}AZ.geojson',
+            os.path.join(vector_dir, 'AZ.geojson'),
             gcloud_project, gcloud_bucket, input_dir,
             start_year=MACA_FUTURE_START, end_year=end_year,
             skip_download=skip_download, tile_size=tile_size,
@@ -407,6 +506,9 @@ def compute_sigma_maca(
     sigma_maca = {}
     yearly_stats = {}
     basin_accum = {'basin': {}, 'subbasin': {}}
+    cat_sigma_maca: dict[str, dict[int, np.ndarray]] = {
+        c: {} for c in partops.CATEGORIES
+    }
 
     for year in range(MACA_FUTURE_START, end_year + 1):
         year_df = az_df[az_df.Year == year].copy()
@@ -414,6 +516,7 @@ def compute_sigma_maca(
             continue
 
         gcm_preds = []
+        gcm_cats = []
         for gcm in MACA_REPRESENTATIVE_GCMS:
             gcm_raster = f'{gcm_mosaic_dirs[gcm]}Predictor_{year}.tif'
             gcm_year_df = year_df.copy()
@@ -422,20 +525,25 @@ def compute_sigma_maca(
                 gcm_year_df[col] = band_arr.ravel()[valid_mask]
 
             pf = _build_pred_features(gcm_year_df, feature_cols, drop_attrs)
-            pred = _predict_total(model, pf, gcm_year_df, partops,
-                                  raster_shape, valid_mask)
+            pred, cat = _predict_total(model, pf, gcm_year_df, partops,
+                                       raster_shape, valid_mask)
             gcm_preds.append(pred)
+            gcm_cats.append(cat)
 
         gcm_stack = np.stack(gcm_preds, axis=0)
         std = np.nanstd(gcm_stack, axis=0, ddof=1)
         sigma_maca[year] = std
+
+        cat_std = _compute_category_sigmas(gcm_cats)
+        for c in partops.CATEGORIES:
+            cat_sigma_maca[c][year] = cat_std[c]
 
         bv, sbv = _aggregate_member_volumes(gcm_preds, year_df, mm_to_m3)
         _accumulate_basin_sigma(basin_accum, year, bv, sbv)
 
         _write_std_raster(std, basin_flat, valid_mask, raster_shape,
                           ref_raster_file,
-                          f'{raster_dir}Sigma_MACA_mm_{year}.tif',
+                          os.path.join(raster_dir, f'Sigma_MACA_mm_{year}.tif'),
                           read_raster_as_arr, write_raster)
 
         yearly_stats[year] = _pixel_stats(std, mm_to_m3, M3_TO_AF)
@@ -444,10 +552,10 @@ def compute_sigma_maca(
             logger.info(f'    Year {year}: mean σ_MACA = '
                         f'{yearly_stats[year]["Mean_Depth_mm"]:.2f} mm')
 
-    _save_summary(yearly_stats, f'{output_dir}Sigma_MACA/', 'MACA')
-    _write_basin_sigma_csv(basin_accum, f'{output_dir}Sigma_MACA/', 'MACA')
+    _save_summary(yearly_stats, os.path.join(output_dir, 'Sigma_MACA'), 'MACA')
+    _write_basin_sigma_csv(basin_accum, os.path.join(output_dir, 'Sigma_MACA'), 'MACA')
     logger.info('  σ_MACA complete.')
-    return sigma_maca, gcm_mosaic_dirs
+    return sigma_maca, cat_sigma_maca, gcm_mosaic_dirs
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -469,15 +577,16 @@ def compute_sigma_model(
         n_trials: int = 100,
         n_dask_workers: int = 10,
         use_dask: bool = True,
-) -> dict[int, np.ndarray]:
+) -> tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]:
     """
     Compute σ_model: per-pixel std of predictions across a 10-seed
     XGBoost ensemble.
 
     Returns
     -------
-    dict[int, np.ndarray]
-        year → 1-D array of σ_model values (valid-pixel length).
+    tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]
+        (sigma_model, cat_sigma_model) — per-year total σ and
+        per-category per-year σ arrays.
     """
     import hydrolibs.mlops as mlops
     import hydrolibs.partitionops as partops
@@ -485,8 +594,8 @@ def compute_sigma_model(
     from hydrolibs.sysops import makedirs
 
     logger.info('Computing σ_model (seed-ensemble uncertainty)...')
-    base_dir = f'{output_dir}Sigma_Model/'
-    raster_dir = f'{base_dir}Rasters/'
+    base_dir = os.path.join(output_dir, 'Sigma_Model')
+    raster_dir = os.path.join(base_dir, 'Rasters')
     makedirs(raster_dir)
 
     ref_basin_file = f'{pred_data_dir}GW_Basin_{year_list[0]}.tif'
@@ -504,9 +613,9 @@ def compute_sigma_model(
     models = []
     model_name = 'XGB'
     for seed in MODEL_SEEDS:
-        seed_dir = f'{base_dir}Model_seed{seed}/'
+        seed_dir = os.path.join(base_dir, f'Model_seed{seed}')
         makedirs(seed_dir)
-        model_file = f'{seed_dir}{model_name}'
+        model_file = os.path.join(seed_dir, f'{model_name}')
         if os.path.exists(model_file):
             logger.info(f'  Loading seed={seed} model...')
             with open(model_file, 'rb') as f:
@@ -526,6 +635,9 @@ def compute_sigma_model(
     sigma_model = {}
     yearly_stats = {}
     basin_accum = {'basin': {}, 'subbasin': {}}
+    cat_sigma_model: dict[str, dict[int, np.ndarray]] = {
+        c: {} for c in partops.CATEGORIES
+    }
 
     for year in range(start_year, end_year + 1):
         year_df = az_df[az_df.Year == year].copy()
@@ -534,21 +646,27 @@ def compute_sigma_model(
 
         pf = _build_pred_features(year_df, feature_cols, drop_attrs)
         seed_preds = []
+        seed_cats = []
         for m in models:
-            pred = _predict_total(m, pf, year_df, partops,
-                                  raster_shape, valid_mask)
+            pred, cat = _predict_total(m, pf, year_df, partops,
+                                       raster_shape, valid_mask)
             seed_preds.append(pred)
+            seed_cats.append(cat)
 
         seed_stack = np.stack(seed_preds, axis=0)
         std = np.nanstd(seed_stack, axis=0, ddof=1)
         sigma_model[year] = std
+
+        cat_std = _compute_category_sigmas(seed_cats)
+        for c in partops.CATEGORIES:
+            cat_sigma_model[c][year] = cat_std[c]
 
         bv, sbv = _aggregate_member_volumes(seed_preds, year_df, mm_to_m3)
         _accumulate_basin_sigma(basin_accum, year, bv, sbv)
 
         _write_std_raster(std, basin_flat, valid_mask, raster_shape,
                           ref_raster_file,
-                          f'{raster_dir}Sigma_Model_mm_{year}.tif',
+                          os.path.join(raster_dir, f'Sigma_Model_mm_{year}.tif'),
                           read_raster_as_arr, write_raster)
 
         yearly_stats[year] = _pixel_stats(std, mm_to_m3, M3_TO_AF)
@@ -560,7 +678,7 @@ def compute_sigma_model(
     _save_summary(yearly_stats, base_dir, 'Model')
     _write_basin_sigma_csv(basin_accum, base_dir, 'Model')
     logger.info('  σ_model complete.')
-    return sigma_model
+    return sigma_model, cat_sigma_model
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -578,7 +696,7 @@ def compute_sigma_irr(
         end_year: int,
         year_list: list[int],
         mosaic_res: int,
-) -> dict[int, np.ndarray]:
+) -> tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]:
     """
     Compute σ_irr: uncertainty from irrigation fraction estimation.
 
@@ -595,8 +713,9 @@ def compute_sigma_irr(
 
     Returns
     -------
-    dict[int, np.ndarray]
-        year → 1-D array of σ_irr values (valid-pixel length).
+    tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]
+        (sigma_irr, cat_sigma_irr) — per-year total σ and
+        per-category per-year σ arrays.
     """
     from sklearn.linear_model import LinearRegression
 
@@ -605,8 +724,8 @@ def compute_sigma_irr(
     from hydrolibs.sysops import makedirs
 
     logger.info('Computing σ_irr (irrigation fraction uncertainty)...')
-    base_dir = f'{output_dir}Sigma_Irr/'
-    raster_dir = f'{base_dir}Rasters/'
+    base_dir = os.path.join(output_dir, 'Sigma_Irr')
+    raster_dir = os.path.join(base_dir, 'Rasters')
     makedirs(raster_dir)
 
     ref_basin_file = f'{pred_data_dir}GW_Basin_{year_list[0]}.tif'
@@ -641,6 +760,9 @@ def compute_sigma_irr(
     sigma_irr = {}
     yearly_stats = {}
     basin_accum = {'basin': {}, 'subbasin': {}}
+    cat_sigma_irr: dict[str, dict[int, np.ndarray]] = {
+        c: {} for c in partops.CATEGORIES
+    }
 
     # Only cover historical years; future years are handled by σ_LULC
     irr_end_year = min(end_year, 2025)
@@ -664,18 +786,22 @@ def compute_sigma_irr(
 
             # Predict with original (IrrMapper) irr fraction
             pf_orig = _build_pred_features(year_df, feature_cols, drop_attrs)
-            pred_orig = _predict_total(model, pf_orig, year_df, partops,
-                                       raster_shape, valid_mask)
+            pred_orig, cat_orig = _predict_total(model, pf_orig, year_df,
+                                                 partops, raster_shape,
+                                                 valid_mask)
 
             # Predict with regression irr fraction
             alt_df = year_df.copy()
             alt_df['annual_irr_fraction'] = irr_frac_reg
             pf_alt = _build_pred_features(alt_df, feature_cols, drop_attrs)
-            pred_alt = _predict_total(model, pf_alt, alt_df, partops,
-                                      raster_shape, valid_mask)
+            pred_alt, cat_alt = _predict_total(model, pf_alt, alt_df, partops,
+                                               raster_shape, valid_mask)
 
             std = np.abs(pred_orig - pred_alt) / 2.0
             irr_members = [pred_orig, pred_alt]
+            cat_std = _compute_category_sigmas(
+                [cat_orig, cat_alt], mode='half_range',
+            )
         else:
             # Outside IrrMapper era: constant σ from regression RMSE
             # propagated through the model's sensitivity to irr_fraction.
@@ -687,26 +813,34 @@ def compute_sigma_irr(
             df_plus = year_df.copy()
             df_plus['annual_irr_fraction'] = irr_plus
             pf_plus = _build_pred_features(df_plus, feature_cols, drop_attrs)
-            pred_plus = _predict_total(model, pf_plus, df_plus, partops,
-                                       raster_shape, valid_mask)
+            pred_plus, cat_plus = _predict_total(model, pf_plus, df_plus,
+                                                 partops, raster_shape,
+                                                 valid_mask)
 
             df_minus = year_df.copy()
             df_minus['annual_irr_fraction'] = irr_minus
             pf_minus = _build_pred_features(df_minus, feature_cols, drop_attrs)
-            pred_minus = _predict_total(model, pf_minus, df_minus, partops,
-                                        raster_shape, valid_mask)
+            pred_minus, cat_minus = _predict_total(model, pf_minus, df_minus,
+                                                   partops, raster_shape,
+                                                   valid_mask)
 
             std = np.abs(pred_plus - pred_minus) / 2.0
             irr_members = [pred_plus, pred_minus]
+            cat_std = _compute_category_sigmas(
+                [cat_plus, cat_minus], mode='half_range',
+            )
 
         sigma_irr[year] = std
+
+        for c in partops.CATEGORIES:
+            cat_sigma_irr[c][year] = cat_std[c]
 
         bv, sbv = _aggregate_member_volumes(irr_members, year_df, mm_to_m3)
         _accumulate_basin_sigma(basin_accum, year, bv, sbv)
 
         _write_std_raster(std, basin_flat, valid_mask, raster_shape,
                           ref_raster_file,
-                          f'{raster_dir}Sigma_Irr_mm_{year}.tif',
+                          os.path.join(raster_dir, f'Sigma_Irr_mm_{year}.tif'),
                           read_raster_as_arr, write_raster)
 
         yearly_stats[year] = _pixel_stats(std, mm_to_m3, M3_TO_AF)
@@ -718,7 +852,7 @@ def compute_sigma_irr(
     _save_summary(yearly_stats, base_dir, 'Irr')
     _write_basin_sigma_csv(basin_accum, base_dir, 'Irr')
     logger.info('  σ_irr complete.')
-    return sigma_irr
+    return sigma_irr, cat_sigma_irr
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -741,7 +875,7 @@ def compute_sigma_lulc(
         end_year: int,
         year_list: list[int],
         skip_download: bool = False,
-) -> dict[int, np.ndarray]:
+) -> tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]:
     """
     Compute σ_LULC: per-pixel std of predictions across 4 USGS LULC
     projection scenarios (B1, B2, A1B, A2) for future years (2026-2099).
@@ -752,8 +886,9 @@ def compute_sigma_lulc(
 
     Returns
     -------
-    dict[int, np.ndarray]
-        year → 1-D array of σ_LULC values (valid-pixel length).
+    tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]
+        (sigma_lulc, cat_sigma_lulc) — per-year total σ and
+        per-category per-year σ arrays.
     """
     from sklearn.linear_model import LinearRegression
 
@@ -764,8 +899,8 @@ def compute_sigma_lulc(
     from hydrolibs.sysops import makedirs
 
     logger.info('Computing σ_LULC (inter-scenario LULC uncertainty)...')
-    base_dir = f'{output_dir}Sigma_LULC/'
-    raster_dir = f'{base_dir}Rasters/'
+    base_dir = os.path.join(output_dir, 'Sigma_LULC')
+    raster_dir = os.path.join(base_dir, 'Rasters')
     makedirs(raster_dir)
 
     ref_basin_file = f'{pred_data_dir}GW_Basin_{year_list[0]}.tif'
@@ -794,7 +929,7 @@ def compute_sigma_lulc(
     for scenario in USGS_LULC_SCENARIOS:
         logger.info(f'  Preparing per-scenario tiles for {scenario}...')
         sc_tile_dir, _ = dataops.download_gee_data(
-            f'{vector_dir}AZ.geojson',
+            os.path.join(vector_dir, 'AZ.geojson'),
             gcloud_project, gcloud_bucket, input_dir,
             start_year=MACA_FUTURE_START, end_year=end_year,
             skip_download=skip_download, tile_size=tile_size,
@@ -816,6 +951,9 @@ def compute_sigma_lulc(
     sigma_lulc = {}
     yearly_stats = {}
     basin_accum = {'basin': {}, 'subbasin': {}}
+    cat_sigma_lulc: dict[str, dict[int, np.ndarray]] = {
+        c: {} for c in partops.CATEGORIES
+    }
 
     for year in range(MACA_FUTURE_START, end_year + 1):
         year_df = az_df[az_df.Year == year].copy()
@@ -823,6 +961,7 @@ def compute_sigma_lulc(
             continue
 
         scenario_preds = []
+        scenario_cats = []
         for scenario in USGS_LULC_SCENARIOS:
             sc_raster = f'{scenario_mosaic_dirs[scenario]}Predictor_{year}.tif'
             sc_year_df = year_df.copy()
@@ -857,13 +996,18 @@ def compute_sigma_lulc(
             sc_year_df['annual_irr_fraction'] = irr_frac
 
             pf = _build_pred_features(sc_year_df, feature_cols, drop_attrs)
-            pred = _predict_total(model, pf, sc_year_df, partops,
-                                  raster_shape, valid_mask)
+            pred, cat = _predict_total(model, pf, sc_year_df, partops,
+                                       raster_shape, valid_mask)
             scenario_preds.append(pred)
+            scenario_cats.append(cat)
 
         sc_stack = np.stack(scenario_preds, axis=0)
         std = np.nanstd(sc_stack, axis=0, ddof=1)
         sigma_lulc[year] = std
+
+        cat_std = _compute_category_sigmas(scenario_cats)
+        for c in partops.CATEGORIES:
+            cat_sigma_lulc[c][year] = cat_std[c]
 
         bv, sbv = _aggregate_member_volumes(
             scenario_preds, year_df, mm_to_m3,
@@ -872,7 +1016,7 @@ def compute_sigma_lulc(
 
         _write_std_raster(std, basin_flat, valid_mask, raster_shape,
                           ref_raster_file,
-                          f'{raster_dir}Sigma_LULC_mm_{year}.tif',
+                          os.path.join(raster_dir, f'Sigma_LULC_mm_{year}.tif'),
                           read_raster_as_arr, write_raster)
 
         yearly_stats[year] = _pixel_stats(std, mm_to_m3, M3_TO_AF)
@@ -884,7 +1028,7 @@ def compute_sigma_lulc(
     _save_summary(yearly_stats, base_dir, 'LULC')
     _write_basin_sigma_csv(basin_accum, base_dir, 'LULC')
     logger.info('  σ_LULC complete.')
-    return sigma_lulc
+    return sigma_lulc, cat_sigma_lulc
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -902,7 +1046,7 @@ def compute_sigma_gw(
         end_year: int,
         year_list: list[int],
         mosaic_res: int,
-) -> dict[int, np.ndarray]:
+) -> tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]:
     """
     Compute σ_gw: uncertainty from the stepped GW-fraction assignment.
 
@@ -913,16 +1057,17 @@ def compute_sigma_gw(
 
     Returns
     -------
-    dict[int, np.ndarray]
-        year → 1-D array of σ_gw values (valid-pixel length).
+    tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]
+        (sigma_gw, cat_sigma_gw) — per-year total σ and
+        per-category per-year σ arrays.
     """
     import hydrolibs.partitionops as partops
     from hydrolibs.rasterops import read_raster_as_arr, write_raster
     from hydrolibs.sysops import makedirs
 
     logger.info('Computing σ_gw (GW fraction inter-snapshot uncertainty)...')
-    base_dir = f'{output_dir}Sigma_GW/'
-    raster_dir = f'{base_dir}Rasters/'
+    base_dir = os.path.join(output_dir, 'Sigma_GW')
+    raster_dir = os.path.join(base_dir, 'Rasters')
     makedirs(raster_dir)
 
     ref_basin_file = f'{pred_data_dir}GW_Basin_{year_list[0]}.tif'
@@ -957,6 +1102,9 @@ def compute_sigma_gw(
     sigma_gw = {}
     yearly_stats = {}
     basin_accum = {'basin': {}, 'subbasin': {}}
+    cat_sigma_gw: dict[str, dict[int, np.ndarray]] = {
+        c: {} for c in partops.CATEGORIES
+    }
 
     for year in range(start_year, end_year + 1):
         year_df = az_df[az_df.Year == year].copy()
@@ -964,17 +1112,23 @@ def compute_sigma_gw(
             continue
 
         snapshot_preds = []
+        snapshot_cats = []
         for snap_year in GW_FRACTION_SNAPSHOTS:
             alt_df = year_df.copy()
             alt_df['annual_gw_fraction'] = snapshot_gw_fracs[snap_year]
             pf = _build_pred_features(alt_df, feature_cols, drop_attrs)
-            pred = _predict_total(model, pf, alt_df, partops,
-                                  raster_shape, valid_mask)
+            pred, cat = _predict_total(model, pf, alt_df, partops,
+                                       raster_shape, valid_mask)
             snapshot_preds.append(pred)
+            snapshot_cats.append(cat)
 
         snap_stack = np.stack(snapshot_preds, axis=0)
         std = np.nanstd(snap_stack, axis=0, ddof=1)
         sigma_gw[year] = std
+
+        cat_std = _compute_category_sigmas(snapshot_cats)
+        for c in partops.CATEGORIES:
+            cat_sigma_gw[c][year] = cat_std[c]
 
         bv, sbv = _aggregate_member_volumes(snapshot_preds, year_df,
                                             mm_to_m3)
@@ -982,7 +1136,7 @@ def compute_sigma_gw(
 
         _write_std_raster(std, basin_flat, valid_mask, raster_shape,
                           ref_raster_file,
-                          f'{raster_dir}Sigma_GW_mm_{year}.tif',
+                          os.path.join(raster_dir, f'Sigma_GW_mm_{year}.tif'),
                           read_raster_as_arr, write_raster)
 
         yearly_stats[year] = _pixel_stats(std, mm_to_m3, M3_TO_AF)
@@ -994,7 +1148,7 @@ def compute_sigma_gw(
     _save_summary(yearly_stats, base_dir, 'GW')
     _write_basin_sigma_csv(basin_accum, base_dir, 'GW')
     logger.info('  σ_gw complete.')
-    return sigma_gw
+    return sigma_gw, cat_sigma_gw
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1010,7 +1164,8 @@ def compute_sigma_total(
         year_list: list[int],
         mosaic_res: int,
         prediction_raster_dir: str = '',
-) -> dict[int, np.ndarray]:
+        cat_sigma_components: dict[str, dict[str, dict[int, np.ndarray]]] | None = None,
+) -> tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]:
     """
     Combine independent uncertainty components via quadrature.
 
@@ -1019,6 +1174,9 @@ def compute_sigma_total(
     Each annual raster is written with two bands:
         Band 1 — σ_total (mm)
         Band 2 — CV  (σ_total / prediction, dimensionless)
+
+    Per-category σ_total rasters are also written when
+    *cat_sigma_components* is provided.
 
     A temporal mean-CV raster across all years is also written.
 
@@ -1030,18 +1188,23 @@ def compute_sigma_total(
     prediction_raster_dir : str
         Directory containing total-pumping prediction rasters named
         ``Predicted_GW_{year}_mm.tif``.  Required for CV computation.
+    cat_sigma_components : dict or None
+        Mapping of component name → {category → {year → 1-D std array}}.
+        When provided, per-category σ_total is computed via quadrature
+        and written as ``Sigma_Total_{cat}_mm_{year}.tif``.
 
     Returns
     -------
-    dict[int, np.ndarray]
-        year → 1-D array of σ_total values.
+    tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]
+        (sigma_total, cat_sigma_total) — per-year total σ arrays and
+        per-category per-year σ_total arrays.
     """
     from hydrolibs.rasterops import read_raster_as_arr, write_raster
     from hydrolibs.sysops import makedirs
 
     logger.info('Computing σ_total (quadrature combination)...')
-    base_dir = f'{output_dir}Sigma_Total/'
-    raster_dir = f'{base_dir}Rasters/'
+    base_dir = os.path.join(output_dir, 'Sigma_Total')
+    raster_dir = os.path.join(base_dir, 'Rasters')
     makedirs(raster_dir)
 
     ref_basin_file = f'{pred_data_dir}GW_Basin_{year_list[0]}.tif'
@@ -1062,6 +1225,12 @@ def compute_sigma_total(
 
     sigma_total = {}
     yearly_stats = {}
+
+    # Per-category σ_total via quadrature
+    import hydrolibs.partitionops as partops
+    cat_sigma_total: dict[str, dict[int, np.ndarray]] = {
+        c: {} for c in partops.CATEGORIES
+    }
 
     # Also track per-component contribution
     contribution_records = []
@@ -1084,18 +1253,43 @@ def compute_sigma_total(
                 if variance_sum is None:
                     n_pixels = len(std_arr)
                     variance_sum = np.zeros(n_pixels, dtype=np.float64)
-                variance_sum += std_arr.astype(np.float64) ** 2
+                # Scale sample-based σ by t/z before quadrature
+                t_scale = COMPONENT_T_SCALE.get(name, 1.0)
+                variance_sum += (std_arr.astype(np.float64) * t_scale) ** 2
                 year_contributions[f'Mean_Sigma_{name}_mm'] = round(
                     float(np.nanmean(std_arr)), 4
                 )
             else:
                 year_contributions[f'Mean_Sigma_{name}_mm'] = 0.0
+        for name in sigma_components:
+            year_contributions[f'N_{name}'] = COMPONENT_N.get(name, 0)
 
         if variance_sum is None:
             continue
 
         total_std = np.sqrt(variance_sum).astype(np.float32)
         sigma_total[year] = total_std
+
+        # Per-category σ_total via quadrature
+        if cat_sigma_components:
+            for cat_name in partops.CATEGORIES:
+                cat_var = np.zeros(n_pixels, dtype=np.float64)
+                for comp_name in cat_sigma_components:
+                    cat_comp = cat_sigma_components[comp_name].get(cat_name, {})
+                    if year in cat_comp:
+                        t_sc = COMPONENT_T_SCALE.get(comp_name, 1.0)
+                        cat_var += (cat_comp[year].astype(np.float64) * t_sc) ** 2
+                cat_total_std = np.sqrt(cat_var).astype(np.float32)
+                cat_sigma_total[cat_name][year] = cat_total_std
+                _write_std_raster(
+                    cat_total_std, basin_flat, valid_mask, raster_shape,
+                    ref_raster_file,
+                    os.path.join(
+                        raster_dir,
+                        f'Sigma_Total_{cat_name}_mm_{year}.tif',
+                    ),
+                    read_raster_as_arr, write_raster,
+                )
 
         # Build σ_total grid
         sigma_grid = np.full(basin_flat.shape[0], np.nan, dtype=np.float32)
@@ -1125,7 +1319,7 @@ def compute_sigma_total(
         # Write 2-band raster (σ_total, CV)
         _write_sigma_cv_raster(
             sigma_grid, cv_grid, ref_raster_file,
-            f'{raster_dir}Sigma_Total_mm_{year}.tif',
+            os.path.join(raster_dir, f'Sigma_Total_mm_{year}.tif'),
             read_raster_as_arr,
         )
 
@@ -1143,7 +1337,7 @@ def compute_sigma_total(
 
     # Per-component contribution table
     contrib_df = pd.DataFrame(contribution_records)
-    contrib_df.to_csv(f'{base_dir}Component_Contributions.csv', index=False)
+    contrib_df.to_csv(os.path.join(base_dir, 'Component_Contributions.csv'), index=False)
 
     # Write temporal mean CV raster
     if cv_sum is not None and np.any(cv_count > 0):
@@ -1156,14 +1350,14 @@ def compute_sigma_total(
         _, rfile = read_raster_as_arr(ref_raster_file, get_file=True)
         write_raster(
             mean_cv, rfile, rfile.transform,
-            f'{base_dir}Mean_CV.tif',
+            os.path.join(base_dir, 'Mean_CV.tif'),
             no_data_value=np.nan, num_bands=1,
         )
         rfile.close()
         logger.info(f'  Mean CV raster written to {base_dir}Mean_CV.tif')
 
     logger.info('  σ_total complete.')
-    return sigma_total
+    return sigma_total, cat_sigma_total
 
 
 def compute_basin_sigma_total(output_dir: str) -> None:
@@ -1175,14 +1369,14 @@ def compute_basin_sigma_total(output_dir: str) -> None:
     into ``Sigma_Total/``.
     """
     component_labels = ('MACA', 'Model', 'Irr', 'LULC', 'GW')
-    total_dir = f'{output_dir}Sigma_Total/'
+    total_dir = os.path.join(output_dir, 'Sigma_Total')
 
     for level in ('Basin', 'Subbasin'):
         merged = None
         found_components = []
         for comp in component_labels:
             csv_path = (
-                f'{output_dir}Sigma_{comp}/{level}_Sigma_{comp}.csv'
+                os.path.join(output_dir, f'Sigma_{comp}/{level}_Sigma_{comp}.csv')
             )
             if not os.path.exists(csv_path):
                 continue
@@ -1204,17 +1398,26 @@ def compute_basin_sigma_total(output_dir: str) -> None:
         if merged is None or not found_components:
             continue
 
-        # Quadrature: σ_total = √(Σ σ_i²)
+        # Quadrature: σ_total = √(Σ (t_scale_i · σ_i)²)
+        # Sample-based components (Model, GW) are inflated by t/z before
+        # quadrature so the final ± CI_Z × σ_total is t-corrected.
         sigma_af_cols = [f'Sigma_{c}_AF' for c in found_components]
         sigma_m3_cols = [f'Sigma_{c}_m3' for c in found_components]
         merged[sigma_af_cols] = merged[sigma_af_cols].fillna(0)
         merged[sigma_m3_cols] = merged[sigma_m3_cols].fillna(0)
 
+        scaled_var_af = pd.DataFrame(index=merged.index, dtype=np.float64)
+        scaled_var_m3 = pd.DataFrame(index=merged.index, dtype=np.float64)
+        for comp in found_components:
+            t_scale = COMPONENT_T_SCALE.get(comp, 1.0)
+            scaled_var_af[comp] = (merged[f'Sigma_{comp}_AF'] * t_scale) ** 2
+            scaled_var_m3[comp] = (merged[f'Sigma_{comp}_m3'] * t_scale) ** 2
+
         merged['Sigma_Total_AF'] = np.sqrt(
-            (merged[sigma_af_cols] ** 2).sum(axis=1)
+            scaled_var_af.sum(axis=1)
         ).round(2)
         merged['Sigma_Total_m3'] = np.sqrt(
-            (merged[sigma_m3_cols] ** 2).sum(axis=1)
+            scaled_var_m3.sum(axis=1)
         ).round(2)
 
         # Mean volume: average of component means (they should be similar)
@@ -1232,17 +1435,24 @@ def compute_basin_sigma_total(output_dir: str) -> None:
                 np.nan,
             ).round(6)
         merged['Lower_95CI_m3'] = (
-            merged['Mean_Volume_m3'] - 1.96 * merged['Sigma_Total_m3']
+            merged['Mean_Volume_m3'] - CI_Z * merged['Sigma_Total_m3']
         ).round(2)
         merged['Upper_95CI_m3'] = (
-            merged['Mean_Volume_m3'] + 1.96 * merged['Sigma_Total_m3']
+            merged['Mean_Volume_m3'] + CI_Z * merged['Sigma_Total_m3']
         ).round(2)
         merged['Lower_95CI_AF'] = (
-            merged['Mean_Volume_AF'] - 1.96 * merged['Sigma_Total_AF']
+            merged['Mean_Volume_AF'] - CI_Z * merged['Sigma_Total_AF']
         ).round(2)
         merged['Upper_95CI_AF'] = (
-            merged['Mean_Volume_AF'] + 1.96 * merged['Sigma_Total_AF']
+            merged['Mean_Volume_AF'] + CI_Z * merged['Sigma_Total_AF']
         ).round(2)
+
+        # Ensemble size metadata (constant per component)
+        n_cols = []
+        for comp in found_components:
+            col = f'N_{comp}'
+            merged[col] = COMPONENT_N.get(comp, 0)
+            n_cols.append(col)
 
         out_cols = (
             ['Year', 'Region']
@@ -1251,6 +1461,7 @@ def compute_basin_sigma_total(output_dir: str) -> None:
             + ['Mean_Volume_m3', 'Mean_Volume_AF', 'CV',
                'Lower_95CI_m3', 'Upper_95CI_m3',
                'Lower_95CI_AF', 'Upper_95CI_AF']
+            + n_cols
         )
         merged.sort_values(['Year', 'Region'], inplace=True)
         merged[out_cols].to_csv(
@@ -1284,7 +1495,7 @@ def compute_sigma_cu(
     from hydrolibs.sysops import makedirs
 
     logger.info('Computing σ_CU (consumptive-use inter-GCM spread)...')
-    sigma_cu_dir = f'{output_dir}Sigma_CU/Rasters/'
+    sigma_cu_dir = os.path.join(output_dir, 'Sigma_CU/Rasters')
     makedirs(sigma_cu_dir)
 
     pixel_area_m2 = mosaic_res ** 2
@@ -1353,7 +1564,7 @@ def compute_sigma_cu(
             logger.info(f'    Year {year}: mean σ_CU = '
                         f'{yearly_stats[year]["Mean_Depth_mm"]:.2f} mm')
 
-    _save_summary(yearly_stats, f'{output_dir}Sigma_CU/', 'CU')
+    _save_summary(yearly_stats, os.path.join(output_dir, 'Sigma_CU'), 'CU')
     logger.info('  σ_CU complete.')
 
 
@@ -1403,11 +1614,11 @@ def run_uncertainty_quantification(
     logger.info('Step 3b: Hybrid Uncertainty Quantification')
     logger.info('=' * 60)
 
-    unc_dir = f'{model_dir}Full_Prediction_XGB/Uncertainty/'
+    unc_dir = os.path.join(model_dir, 'Full_Prediction_XGB/Uncertainty')
     makedirs(unc_dir)
 
     # ── σ_MACA ──
-    sigma_maca, gcm_mosaic_dirs = compute_sigma_maca(
+    sigma_maca, cat_sigma_maca, gcm_mosaic_dirs = compute_sigma_maca(
         model, feature_cols, az_df, drop_attrs,
         pred_data_dir, unc_dir, input_dir, vector_dir,
         mosaic_res, gcloud_project, gcloud_bucket,
@@ -1416,7 +1627,7 @@ def run_uncertainty_quantification(
     )
 
     # ── σ_model ──
-    sigma_model = compute_sigma_model(
+    sigma_model, cat_sigma_model = compute_sigma_model(
         x_train, y_train, feature_cols, az_df,
         drop_attrs, pred_data_dir, unc_dir,
         start_year, end_year, year_list, mosaic_res,
@@ -1425,14 +1636,14 @@ def run_uncertainty_quantification(
     )
 
     # ── σ_irr (historical only, 1896-2025) ──
-    sigma_irr = compute_sigma_irr(
+    sigma_irr, cat_sigma_irr = compute_sigma_irr(
         model, feature_cols, az_df, drop_attrs,
         pred_data_dir, unc_dir, start_year, end_year,
         year_list, mosaic_res,
     )
 
     # ── σ_LULC (future only, 2026-2099 — subsumes σ_irr) ──
-    sigma_lulc = compute_sigma_lulc(
+    sigma_lulc, cat_sigma_lulc = compute_sigma_lulc(
         model, feature_cols, az_df, drop_attrs,
         pred_data_dir, unc_dir, input_dir, vector_dir,
         mosaic_res, gcloud_project, gcloud_bucket,
@@ -1441,7 +1652,7 @@ def run_uncertainty_quantification(
     )
 
     # ── σ_gw ──
-    sigma_gw = compute_sigma_gw(
+    sigma_gw, cat_sigma_gw = compute_sigma_gw(
         model, feature_cols, az_df, drop_attrs,
         pred_data_dir, unc_dir, start_year, end_year,
         year_list, mosaic_res,
@@ -1455,13 +1666,21 @@ def run_uncertainty_quantification(
         'LULC': sigma_lulc,
         'GW': sigma_gw,
     }
+    cat_sigma_components = {
+        'MACA': cat_sigma_maca,
+        'Model': cat_sigma_model,
+        'Irr': cat_sigma_irr,
+        'LULC': cat_sigma_lulc,
+        'GW': cat_sigma_gw,
+    }
     prediction_raster_dir = (
-        f'{model_dir}Full_Prediction_XGB/Predicted_Rasters/Depth_mm/'
+        os.path.join(model_dir, 'Full_Prediction_XGB/Predicted_Rasters/Depth_mm')
     )
     compute_sigma_total(
         sigma_components, pred_data_dir, unc_dir,
         start_year, end_year, year_list, mosaic_res,
         prediction_raster_dir=prediction_raster_dir,
+        cat_sigma_components=cat_sigma_components,
     )
 
     # ── Basin / sub-basin σ_total (quadrature of per-component CSVs) ──
@@ -1476,9 +1695,9 @@ def run_uncertainty_quantification(
 
     # ── Augment prediction rasters with uncertainty bands ──
     prediction_base_dir = (
-        f'{model_dir}Full_Prediction_XGB/Predicted_Rasters/'
+        os.path.join(model_dir, 'Full_Prediction_XGB/Predicted_Rasters')
     )
-    full_pred_dir = f'{model_dir}Full_Prediction_XGB/'
+    full_pred_dir = os.path.join(model_dir, 'Full_Prediction_XGB')
     augment_prediction_rasters(
         sigma_total_raster_dir=f'{unc_dir}Sigma_Total/Rasters/',
         prediction_base_dir=prediction_base_dir,
@@ -1489,8 +1708,10 @@ def run_uncertainty_quantification(
 
     # ── Augment category rasters (Irrigation, Non_Irrigation, …) ──
     augment_category_rasters(
-        prediction_base_dir=prediction_base_dir,
         prediction_dir=full_pred_dir,
+        sigma_total_raster_dir=os.path.join(
+            unc_dir, 'Sigma_Total/Rasters/',
+        ),
         start_year=start_year,
         end_year=end_year,
         mosaic_res=mosaic_res,
@@ -1555,8 +1776,8 @@ def augment_prediction_rasters(
         2. σ_total (unit)
         3. CV  (σ / |pred|)
         4. SNR (|pred| / σ)
-        5. Lower 95 % CI  (pred − 1.96·σ)
-        6. Upper 95 % CI  (pred + 1.96·σ)
+        5. Lower 95 % CI  (pred − CI_Z·σ)
+        6. Upper 95 % CI  (pred + CI_Z·σ)
 
     σ_total rasters are stored in mm; they are scaled to the target unit
     before writing.
@@ -1594,7 +1815,7 @@ def augment_prediction_rasters(
         ]
 
         for year in range(start_year, end_year + 1):
-            pred_file = f'{pred_dir}Predicted_GW_{year}_{unit}.tif'
+            pred_file = os.path.join(pred_dir, f'Predicted_GW_{year}_{unit}.tif')
             sigma_file = (
                 f'{sigma_total_raster_dir}Sigma_Total_mm_{year}.tif'
             )
@@ -1616,8 +1837,8 @@ def augment_prediction_rasters(
                     sigma_arr > 0, abs_pred / sigma_arr, np.nan,
                 ).astype(np.float32)
 
-            lower_ci = (pred_arr - 1.96 * sigma_arr).astype(np.float32)
-            upper_ci = (pred_arr + 1.96 * sigma_arr).astype(np.float32)
+            lower_ci = (pred_arr - CI_Z * sigma_arr).astype(np.float32)
+            upper_ci = (pred_arr + CI_Z * sigma_arr).astype(np.float32)
 
             # Read spatial metadata from the original prediction raster
             with rio.open(pred_file) as src:
@@ -1642,8 +1863,8 @@ def augment_prediction_rasters(
 
 
 def augment_category_rasters(
-        prediction_base_dir: str,
         prediction_dir: str,
+        sigma_total_raster_dir: str,
         start_year: int,
         end_year: int,
         mosaic_res: int | float,
@@ -1651,11 +1872,14 @@ def augment_category_rasters(
     """
     Augment per-category rasters with uncertainty bands.
 
-    Each category is a linear fraction of the total prediction, so
-    σ_cat = (category / total) × σ_total.  Reads the already-augmented
-    total rasters (band 2 = σ_total) to derive per-category σ.
+    Per-category σ_total rasters are read from *sigma_total_raster_dir*
+    (written by ``compute_sigma_total``).  These are computed via
+    quadrature over per-category ensemble spreads, so each category's
+    uncertainty is derived directly from the ensemble — not approximated
+    by linear scaling of the total σ.
     """
     import hydrolibs.partitionops as partops
+    from hydrolibs.rasterops import read_raster_as_arr
 
     logger.info('Augmenting category rasters with uncertainty bands...')
 
@@ -1664,10 +1888,22 @@ def augment_category_rasters(
         'm3': 'Volume_m3/', 'AF': 'Volume_AF/',
     }
 
+    pixel_area_m2 = mosaic_res ** 2
+    mm_to_ft = 1 / 304.8
+    mm_to_m3 = pixel_area_m2 / 1000
+    m3_to_af = 1 / 1233.48
+
+    sigma_scale = {
+        'mm': 1.0,
+        'ft': mm_to_ft,
+        'm3': mm_to_m3,
+        'AF': mm_to_m3 * m3_to_af,
+    }
+
     for cat in partops.CATEGORIES:
         for unit, subdir in unit_subdirs.items():
-            total_dir = f'{prediction_base_dir}{subdir}'
-            cat_dir = f'{prediction_dir}{cat}_Rasters/{subdir}'
+            cat_dir = os.path.join(prediction_dir, f'{cat}_Rasters/{subdir}')
+            scale = sigma_scale[unit]
 
             band_descriptions = [
                 f'prediction_{unit}', f'sigma_{unit}', 'CV', 'SNR',
@@ -1675,29 +1911,25 @@ def augment_category_rasters(
             ]
 
             for year in range(start_year, end_year + 1):
-                total_file = f'{total_dir}Predicted_GW_{year}_{unit}.tif'
-                cat_file = f'{cat_dir}{cat}_{year}_{unit}.tif'
+                cat_file = os.path.join(cat_dir, f'{cat}_{year}_{unit}.tif')
+                sigma_cat_file = os.path.join(
+                    sigma_total_raster_dir,
+                    f'Sigma_Total_{cat}_mm_{year}.tif',
+                )
 
-                if not os.path.exists(total_file) or \
-                        not os.path.exists(cat_file):
+                if not os.path.exists(cat_file) or \
+                        not os.path.exists(sigma_cat_file):
                     continue
-
-                # Total raster is 6-band (augmented): band 1=pred, band 2=σ
-                with rio.open(total_file) as src:
-                    total_pred = src.read(1)
-                    total_sigma = src.read(2)
 
                 with rio.open(cat_file) as src:
                     cat_pred = src.read(1)
                     profile = src.profile.copy()
 
-                # σ_cat = (cat / total) × σ_total
-                with np.errstate(invalid='ignore', divide='ignore'):
-                    frac = np.where(
-                        np.abs(total_pred) > 0,
-                        cat_pred / total_pred, 0.0,
-                    ).astype(np.float32)
-                sigma_cat = (np.abs(frac) * total_sigma).astype(np.float32)
+                # Read per-category σ_total (mm) and scale to target unit
+                sigma_mm = read_raster_as_arr(
+                    sigma_cat_file, get_file=False,
+                )
+                sigma_cat = (sigma_mm * scale).astype(np.float32)
 
                 _write_augmented_raster(
                     cat_pred, sigma_cat, cat_file, profile,
@@ -1741,7 +1973,7 @@ def augment_cu_rasters(
 
     for cu_cat in CU_CATEGORIES:
         for unit, subdir in unit_subdirs.items():
-            cu_dir = f'{prediction_dir}{cu_cat}_Rasters/{subdir}'
+            cu_dir = os.path.join(prediction_dir, f'{cu_cat}_Rasters/{subdir}')
             scale = sigma_scale[unit]
 
             band_descriptions = [
@@ -1805,9 +2037,9 @@ def augment_ie_rasters(
         cu_cat = IE_CU_MAP[ie_cat]
         wd_cat = IE_WITHDRAWAL_MAP[ie_cat]
 
-        ie_dir = f'{prediction_dir}{ie_cat}_Rasters/'
-        cu_dir = f'{prediction_dir}{cu_cat}_Rasters/Depth_mm/'
-        wd_dir = f'{prediction_dir}{wd_cat}_Rasters/Depth_mm/'
+        ie_dir = os.path.join(prediction_dir, f'{ie_cat}_Rasters')
+        cu_dir = os.path.join(prediction_dir, f'{cu_cat}_Rasters/Depth_mm')
+        wd_dir = os.path.join(prediction_dir, f'{wd_cat}_Rasters/Depth_mm')
 
         for year in range(start_year, end_year + 1):
             ie_file = f'{ie_dir}{ie_cat}_{year}.tif'
@@ -1956,7 +2188,7 @@ def _replot_with_uncertainty(
         f'{unc_dir}Sigma_Total/Uncertainty_Summary_Total.csv')
     if sigma_total:
         yearly_preds, actual_data = _read_predictions_csv(
-            f'{prediction_dir}Full_Period_Time_Series.csv')
+            os.path.join(prediction_dir, 'Full_Period_Time_Series.csv'))
         if yearly_preds:
             vizops.create_full_period_time_series(
                 yearly_preds, prediction_dir,
@@ -1968,7 +2200,7 @@ def _replot_with_uncertainty(
     # ── 2. Category products (approximate σ via CV_total) ─────────────────
     if sigma_total:
         yearly_preds_total, _ = _read_predictions_csv(
-            f'{prediction_dir}Full_Period_Time_Series.csv')
+            os.path.join(prediction_dir, 'Full_Period_Time_Series.csv'))
         cv_total = {}
         if yearly_preds_total:
             for y, s in sigma_total.items():
@@ -1988,9 +2220,9 @@ def _replot_with_uncertainty(
             'Total_SW': 'Total SW',
         }
         for cat, title in cat_titles.items():
-            cat_dir = f'{prediction_dir}{cat}/'
+            cat_dir = os.path.join(prediction_dir, cat)
             cat_preds, _ = _read_predictions_csv(
-                f'{cat_dir}Full_Period_Time_Series.csv')
+                os.path.join(cat_dir, 'Full_Period_Time_Series.csv'))
             if not cat_preds:
                 continue
             cat_sigma = {}
@@ -2018,7 +2250,7 @@ def _replot_with_uncertainty(
             'Irrigation_SW_CU': 'Irrigation SW Consumptive Use',
         }
         for cu_cat, title in cu_titles.items():
-            cu_dir = f'{prediction_dir}{cu_cat}/'
+            cu_dir = os.path.join(prediction_dir, cu_cat)
             cu_preds, _ = _read_predictions_csv(
                 f'{cu_dir}Full_Period_Time_Series.csv')
             if not cu_preds:
@@ -2048,7 +2280,7 @@ def _replot_with_uncertainty(
         f'{unc_dir}Sigma_Total/Basin_Sigma_Total.csv')
     if basin_sigma:
         basin_yearly, actual_basin = _read_basin_yearly(
-            f'{prediction_dir}Basin_Time_Series/Basin_Annual_GW.csv',
+            os.path.join(prediction_dir, 'Basin_Time_Series', 'Basin_Annual_GW.csv'),
             'Basin')
         if basin_yearly:
             vizops.create_basin_time_series(
@@ -2063,7 +2295,7 @@ def _replot_with_uncertainty(
         f'{unc_dir}Sigma_Total/Subbasin_Sigma_Total.csv')
     if subbasin_sigma and subbasin_shp and os.path.exists(subbasin_shp):
         subbasin_yearly, actual_subbasin = _read_basin_yearly(
-            f'{prediction_dir}Subbasin_Time_Series/Subbasin_Annual_GW.csv',
+            os.path.join(prediction_dir, 'Subbasin_Time_Series', 'Subbasin_Annual_GW.csv'),
             'Subbasin')
         if subbasin_yearly:
             vizops.create_subbasin_time_series(
@@ -2101,7 +2333,7 @@ def _replot_from_augmented_rasters(
         Band 6 — upper 95 % CI
 
     Volume σ is obtained from the CI bands:
-    ``σ_V = (Σ upper_CI − Σ lower_CI) / (2 × 1.96)``,
+    ``σ_V = (Σ upper_CI − Σ lower_CI) / (2 × CI_Z)``,
     which corresponds to a spatially-correlated (conservative) bound.
     """
     import matplotlib.patches as mpatches
@@ -2145,7 +2377,7 @@ def _replot_from_augmented_rasters(
         sigma_depth = float(np.nanmean(sigma[valid]))
         lower_vol = float(np.nansum(lower_ci[valid])) * mm_to_m3 * m3_to_af
         upper_vol = float(np.nansum(upper_ci[valid])) * mm_to_m3 * m3_to_af
-        sigma_vol_af = abs(upper_vol - lower_vol) / (2 * 1.96)
+        sigma_vol_af = abs(upper_vol - lower_vol) / (2 * CI_Z)
 
         prediction = {
             'Mean_Depth_mm': round(mean_mm, 4),
@@ -2197,7 +2429,7 @@ def _replot_from_augmented_rasters(
                 upper_vol = (
                     float(np.nansum(upper[valid])) * mm_to_m3 * m3_to_af
                 )
-                sigma_vol_af = abs(upper_vol - lower_vol) / (2 * 1.96)
+                sigma_vol_af = abs(upper_vol - lower_vol) / (2 * CI_Z)
                 cv = (
                     sigma_vol_af / abs(vol_af) if abs(vol_af) > 0 else 0.0
                 )
@@ -2265,7 +2497,7 @@ def _replot_from_augmented_rasters(
         sigma_subbasin_yearly = {}
 
         for year in range(start_year, end_year + 1):
-            raster_file = f'{raster_dir}{file_pattern.format(year=year)}'
+            raster_file = os.path.join(raster_dir, f'{file_pattern.format(year=year)}')
             if not os.path.exists(raster_file):
                 continue
 
@@ -2294,15 +2526,15 @@ def _replot_from_augmented_rasters(
         if not yearly_preds:
             return
 
-        out_dir = f'{prediction_dir}{out_subdir}'
+        out_dir = os.path.join(prediction_dir, f'{out_subdir}')
 
         # Read actual observed data before overwriting CSVs
         actual = _read_actual_from_csv(
-            f'{out_dir}Full_Period_Time_Series.csv')
+            os.path.join(out_dir, 'Full_Period_Time_Series.csv'))
         actual_basin = _read_actual_region(
-            f'{out_dir}Basin_Time_Series/Basin_Annual_GW.csv', 'Basin')
+            os.path.join(out_dir, 'Basin_Time_Series', 'Basin_Annual_GW.csv'), 'Basin')
         actual_subbasin = _read_actual_region(
-            f'{out_dir}Subbasin_Time_Series/Subbasin_Annual_GW.csv',
+            os.path.join(out_dir, 'Subbasin_Time_Series', 'Subbasin_Annual_GW.csv'),
             'Subbasin')
 
         vizops.create_full_period_time_series(
@@ -2345,7 +2577,7 @@ def _replot_from_augmented_rasters(
         subbasin_mean, subbasin_sigma = {}, {}
 
         for year in range(start_year, end_year + 1):
-            raster_file = f'{raster_dir}{file_pattern.format(year=year)}'
+            raster_file = os.path.join(raster_dir, f'{file_pattern.format(year=year)}')
             if not os.path.exists(raster_file):
                 continue
             with rio.open(raster_file) as src:
@@ -2409,7 +2641,7 @@ def _replot_from_augmented_rasters(
         if not yearly_mean:
             return
 
-        out_dir = f'{prediction_dir}{out_subdir}'
+        out_dir = os.path.join(prediction_dir, f'{out_subdir}')
         makedirs(out_dir)
 
         # ---- AZ-wide efficiency time series with 95 % CI -----------------
@@ -2424,7 +2656,7 @@ def _replot_from_augmented_rasters(
         ax.plot(years, means, color='#2C3E50', linewidth=1.5, marker='.',
                 markersize=3, label='Predicted')
         ax.fill_between(
-            years, means - 1.96 * sigs, means + 1.96 * sigs,
+            years, means - CI_Z * sigs, means + CI_Z * sigs,
             alpha=0.2, color='#D5DBDB', label='95 % CI', zorder=1,
         )
         ax.set_xlabel('Year', fontweight='bold')
@@ -2449,7 +2681,7 @@ def _replot_from_augmented_rasters(
         ax.grid(True, alpha=0.3, linestyle='--')
         plt.tight_layout()
         fig.savefig(
-            f'{out_dir}Full_Period_Time_Series.png', dpi=600,
+            os.path.join(out_dir, 'Full_Period_Time_Series.png'), dpi=600,
             bbox_inches='tight',
         )
         plt.close()
@@ -2457,18 +2689,18 @@ def _replot_from_augmented_rasters(
             'Year': years,
             'Mean_Efficiency': means,
             'Sigma_Efficiency': sigs,
-        }).to_csv(f'{out_dir}Full_Period_Time_Series.csv', index=False)
+        }).to_csv(os.path.join(out_dir, 'Full_Period_Time_Series.csv'), index=False)
 
         # ---- Per-basin IE plots -------------------------------------------
         _plot_ie_per_zone(
             basin_mean, basin_sigma, 'Basin',
-            f'{out_dir}Basin_Time_Series/', title_prefix,
+            os.path.join(out_dir, 'Basin_Time_Series'), title_prefix,
         )
 
         # ---- Per-sub-basin IE plots ---------------------------------------
         _plot_ie_per_zone(
             subbasin_mean, subbasin_sigma, 'Subbasin',
-            f'{out_dir}Subbasin_Time_Series/', title_prefix,
+            os.path.join(out_dir, 'Subbasin_Time_Series'), title_prefix,
         )
 
         logger.info(f'  {label}: efficiency time series with CI complete.')
@@ -2498,7 +2730,7 @@ def _replot_from_augmented_rasters(
             ax.plot(zyears, zmeans, color='#2C3E50', linewidth=1.5,
                     marker='.', markersize=3, label='Predicted')
             ax.fill_between(
-                zyears, zmeans - 1.96 * zsigs, zmeans + 1.96 * zsigs,
+                zyears, zmeans - CI_Z * zsigs, zmeans + CI_Z * zsigs,
                 alpha=0.2, color='#D5DBDB', label='95 % CI',
             )
             ax.set_xlabel('Year', fontweight='bold')
@@ -2523,7 +2755,7 @@ def _replot_from_augmented_rasters(
     # ══════════════════════════════════════════════════════════════════════
     _process_group(
         'Total Pumping',
-        f'{prediction_dir}Predicted_Rasters/Depth_mm/',
+        os.path.join(prediction_dir, 'Predicted_Rasters/Depth_mm'),
         'Predicted_GW_{year}_mm.tif',
         '',
     )
@@ -2544,7 +2776,7 @@ def _replot_from_augmented_rasters(
     for cat, title in cat_titles.items():
         _process_group(
             cat,
-            f'{prediction_dir}{cat}_Rasters/Depth_mm/',
+            os.path.join(prediction_dir, f'{cat}_Rasters/Depth_mm'),
             f'{cat}_{{year}}_mm.tif',
             f'{cat}/',
             title_prefix=title,
@@ -2561,7 +2793,7 @@ def _replot_from_augmented_rasters(
     for cu_cat, title in cu_titles.items():
         _process_group(
             cu_cat,
-            f'{prediction_dir}{cu_cat}_Rasters/Depth_mm/',
+            os.path.join(prediction_dir, f'{cu_cat}_Rasters/Depth_mm'),
             f'{cu_cat}_{{year}}_mm.tif',
             f'{cu_cat}/',
             title_prefix=title,
@@ -2578,7 +2810,7 @@ def _replot_from_augmented_rasters(
     for ie_cat, title in ie_titles.items():
         _process_ie_group(
             ie_cat,
-            f'{prediction_dir}{ie_cat}_Rasters/',
+            os.path.join(prediction_dir, f'{ie_cat}_Rasters'),
             f'{ie_cat}_{{year}}.tif',
             f'{ie_cat}/',
             title_prefix=title,

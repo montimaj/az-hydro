@@ -56,16 +56,16 @@ OUTPUT_DIR = '../Data/Outputs/'
 
 WATER_USE = 'All'
 WNAME = 'All_Wells' if WATER_USE == 'All' else 'Irr_Wells'
-VECTOR_DIR = f'{INPUT_DIR}GW_Data/'
+VECTOR_DIR = os.path.join(INPUT_DIR, 'GW_Data')
 MOSAIC_RASTER_RES = 2000
-GEE_MOSAIC_DIR = f'{OUTPUT_DIR}GEE_Mosaics_{int(MOSAIC_RASTER_RES)}m/'
-GW_DEPTH_RASTER_DIR = f'{OUTPUT_DIR}GW/Rasters/GW_Depths_{WNAME}_{int(MOSAIC_RASTER_RES)}m/'
-PRED_DATA_DIR = f'{OUTPUT_DIR}Predictor_Data_{WNAME}_{int(MOSAIC_RASTER_RES)}m/'
-MODEL_DIR = f'{OUTPUT_DIR}ML_Model_{WNAME}_{int(MOSAIC_RASTER_RES)}m/'
-GW_CROPPED_RASTER_DIR = f'{GW_DEPTH_RASTER_DIR}Cropped/'
+GEE_MOSAIC_DIR = os.path.join(OUTPUT_DIR, f'GEE_Mosaics_{int(MOSAIC_RASTER_RES)}m')
+GW_DEPTH_RASTER_DIR = os.path.join(OUTPUT_DIR, f'GW/Rasters/GW_Depths_{WNAME}_{int(MOSAIC_RASTER_RES)}m')
+PRED_DATA_DIR = os.path.join(OUTPUT_DIR, f'Predictor_Data_{WNAME}_{int(MOSAIC_RASTER_RES)}m')
+MODEL_DIR = os.path.join(OUTPUT_DIR, f'ML_Model_{WNAME}_{int(MOSAIC_RASTER_RES)}m')
+GW_CROPPED_RASTER_DIR = os.path.join(GW_DEPTH_RASTER_DIR, 'Cropped')
 
-AZ_GW_BASIN = f'{OUTPUT_DIR}GW_Data/Vector_Reproj/Groundwater_Basin.shp'
-ADWR_SUBBASIN_SHP = f'{OUTPUT_DIR}GW_Data/Vector_Reproj/ADWR_Groundwater_Subbasin.shp'
+AZ_GW_BASIN = os.path.join(OUTPUT_DIR, 'GW_Data', 'Vector_Reproj', 'Groundwater_Basin.shp')
+ADWR_SUBBASIN_SHP = os.path.join(OUTPUT_DIR, 'GW_Data', 'Vector_Reproj', 'ADWR_Groundwater_Subbasin.shp')
 
 GCLOUD_PROJECT = 'azhydro'
 GCLOUD_BUCKET = 'azhydro'
@@ -145,14 +145,14 @@ def prepare_data(skip_download: bool = True, load_files: bool = True) -> list[st
     logger.info('Step 0: Data preparation')
     logger.info('='*60)
 
-    az_state_raw = f'{VECTOR_DIR}AZ.geojson'
-    well_reg_file = f'{VECTOR_DIR}Well_Registry_2024/Well_Registry.shp'
-    gw_csv_dir = f'{VECTOR_DIR}Meter Data/'
-    grain_parquet = f'{VECTOR_DIR}GRAIN_v.1.0/GeoParquet/us-west_GRAIN_v.1.0.parquet'
-    output_gw_vector_dir = f'{OUTPUT_DIR}GW/Vectors/{WNAME}/'
-    vector_reproj_dir = f'{OUTPUT_DIR}GW_Data/Vector_Reproj/'
+    az_state_raw = os.path.join(VECTOR_DIR, 'AZ.geojson')
+    well_reg_file = os.path.join(VECTOR_DIR, 'Well_Registry_2024', 'Well_Registry.shp')
+    gw_csv_dir = os.path.join(VECTOR_DIR, 'Meter Data')
+    grain_parquet = os.path.join(VECTOR_DIR, 'GRAIN_v.1.0', 'GeoParquet', 'us-west_GRAIN_v.1.0.parquet')
+    output_gw_vector_dir = os.path.join(OUTPUT_DIR, f'GW/Vectors/{WNAME}')
+    vector_reproj_dir = os.path.join(OUTPUT_DIR, 'GW_Data/Vector_Reproj')
     output_gw_volume_dir = (
-        f'{OUTPUT_DIR}GW/Rasters/GW_Volumes_{WNAME}_{int(MOSAIC_RASTER_RES)}m/'
+        os.path.join(OUTPUT_DIR, f'GW/Rasters/GW_Volumes_{WNAME}_{int(MOSAIC_RASTER_RES)}m')
     )
 
     # GEE download & mosaic
@@ -238,7 +238,7 @@ def prepare_data(skip_download: bool = True, load_files: bool = True) -> list[st
     streamflowops.create_streamflow_rasters(
         watershed_geojson=az_sw_watershed,
         cap_service_area_geojson=cap_service_area,
-        sites_csv=f'{VECTOR_DIR}Streamflow/sites.csv',
+        sites_csv=os.path.join(VECTOR_DIR, 'Streamflow', 'sites.csv'),
         output_dir=GEE_MOSAIC_DIR,
         xres=MOSAIC_RASTER_RES,
         yres=MOSAIC_RASTER_RES,
@@ -316,7 +316,7 @@ def create_az_data(data_band_names: list[str]) -> pd.DataFrame:
     logger.info(f'Columns: {list(az_df.columns)}')
 
     # EDA
-    vizops.explore_az_data(az_df, f'{MODEL_DIR}EDA/')
+    vizops.explore_az_data(az_df, os.path.join(MODEL_DIR, 'EDA'))
     return az_df
 
 
@@ -370,7 +370,7 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
         get_model_names_only=True,
         include_all_models=INCLUDE_ALL_MODELS,
     )
-    strategy_dir = f'{MODEL_DIR}Model_Evaluation/Random/'
+    strategy_dir = os.path.join(MODEL_DIR, 'Model_Evaluation/Random')
     test_year_limits = ((min(YEAR_LIST), max(YEAR_LIST)),)
 
     data_dir = f'{strategy_dir}data/'
@@ -448,7 +448,7 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
         get_model_names_only=True,
         include_all_models=INCLUDE_ALL_MODELS,
     )
-    temporal_dir = f'{MODEL_DIR}Model_Evaluation/Temporal_LOO/'
+    temporal_dir = os.path.join(MODEL_DIR, 'Model_Evaluation/Temporal_LOO')
     makedirs(temporal_dir)
 
     per_holdout_rows = []  # per-holdout per-model metrics
@@ -506,7 +506,7 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
             )
             mlops.generate_model_visualizations(
                 pred_df=pred_df,
-                output_dir=f'{model_dir}Visualizations/',
+                output_dir=os.path.join(model_dir, 'Visualizations'),
                 model_name=model_name,
                 test_case=holdout_name,
                 test_year_limits=test_year_limits,
@@ -623,7 +623,7 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
         logger.warning(f'Skipping sub-basins with no data: {skipped}')
     logger.info(f'Sub-basins to evaluate ({len(subbasins)}): {subbasins}')
 
-    spatial_dir = f'{MODEL_DIR}Model_Evaluation/Spatial_LOO/'
+    spatial_dir = os.path.join(MODEL_DIR, 'Model_Evaluation/Spatial_LOO')
     makedirs(spatial_dir)
 
     per_subbasin_rows = []
@@ -793,13 +793,13 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     logger.info('='*60)
 
     model_name = 'XGB'
-    prediction_dir = f'{MODEL_DIR}Full_Prediction_{model_name}/'
+    prediction_dir = os.path.join(MODEL_DIR, f'Full_Prediction_{model_name}')
     makedirs(prediction_dir)
 
     # ---- 3a. Train on ALL 1984-2024 metered data (no holdout) ----
     # Step 2 already provides thorough LOO evaluation; here we maximise
     # training data for the best possible full-period predictions.
-    data_dir = f'{prediction_dir}data/'
+    data_dir = os.path.join(prediction_dir, 'data')
     ret_vals = dataops.create_train_test_data(
         az_df, data_dir,
         drop_attr=DROP_ATTRS,
@@ -821,7 +821,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                 f'({YEAR_LIST[0]}-{YEAR_LIST[-1]}, all years)...')
     model, _ = mlops.build_ml_model_optuna_dask(
         x_train, y_train,
-        f'{prediction_dir}Model/',
+        os.path.join(prediction_dir, 'Model'),
         model_name, RANDOM_STATE,
         n_trials=N_TRIALS,
         n_dask_workers=N_DASK_WORKERS,
@@ -829,7 +829,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     )
 
     # ---- Model interpretability plots ----
-    interp_dir = f'{prediction_dir}Model_Interpretability/'
+    interp_dir = os.path.join(prediction_dir, 'Model_Interpretability')
 
     # Feature importance + permutation importance
     mlops.compute_perm_imp(
@@ -854,12 +854,12 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     logger.info('Predicting pumping for all years 1896-2099...')
 
     feature_cols = list(x_train.columns)
-    raster_dir = f'{prediction_dir}Predicted_Rasters/'
+    raster_dir = os.path.join(prediction_dir, 'Predicted_Rasters')
     raster_dirs = {
-        'mm': f'{raster_dir}Depth_mm/',
-        'ft': f'{raster_dir}Depth_ft/',
-        'm3': f'{raster_dir}Volume_m3/',
-        'AF': f'{raster_dir}Volume_AF/',
+        'mm': os.path.join(raster_dir, 'Depth_mm'),
+        'ft': os.path.join(raster_dir, 'Depth_ft'),
+        'm3': os.path.join(raster_dir, 'Volume_m3'),
+        'AF': os.path.join(raster_dir, 'Volume_AF'),
     }
     for d in raster_dirs.values():
         makedirs(d)
@@ -867,7 +867,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     # Category-specific raster directories
     cat_raster_dirs = {}
     for cat in partops.CATEGORIES:
-        base = f'{prediction_dir}{cat}_Rasters/'
+        base = os.path.join(prediction_dir, f'{cat}_Rasters')
         cat_raster_dirs[cat] = {
             'mm': f'{base}Depth_mm/',
             'ft': f'{base}Depth_ft/',
@@ -881,7 +881,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     CU_CATEGORIES = ('Irrigation_CU', 'Irrigation_GW_CU', 'Irrigation_SW_CU')
     cu_raster_dirs = {}
     for cu_cat in CU_CATEGORIES:
-        base = f'{prediction_dir}{cu_cat}_Rasters/'
+        base = os.path.join(prediction_dir, f'{cu_cat}_Rasters')
         cu_raster_dirs[cu_cat] = {
             'mm': f'{base}Depth_mm/',
             'ft': f'{base}Depth_ft/',
@@ -895,7 +895,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     IE_CATEGORIES = ('Irrigation_Efficiency', 'Irrigation_GW_Efficiency', 'Irrigation_SW_Efficiency')
     ie_raster_dirs = {}
     for ie_cat in IE_CATEGORIES:
-        ie_raster_dirs[ie_cat] = f'{prediction_dir}{ie_cat}_Rasters/'
+        ie_raster_dirs[ie_cat] = os.path.join(prediction_dir, f'{ie_cat}_Rasters')
         makedirs(ie_raster_dirs[ie_cat])
 
     # Build a valid-pixel mask from the GW_Basin raster (same for all years).
@@ -1182,7 +1182,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         'Total_SW':           'Total SW',
     }
     for cat, title in CAT_TITLES.items():
-        cat_dir = f'{prediction_dir}{cat}/'
+        cat_dir = os.path.join(prediction_dir, cat)
         vizops.create_era_summary_maps(
             cat_yearly[cat], cat_dir,
             title_prefix=title,
@@ -1194,20 +1194,20 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         'Irrigation_SW_CU': 'Irrigation SW Consumptive Use',
     }
     for cu_cat, title in CU_TITLES.items():
-        cu_dir = f'{prediction_dir}{cu_cat}/'
+        cu_dir = os.path.join(prediction_dir, cu_cat)
         vizops.create_era_summary_maps(
             cu_yearly[cu_cat], cu_dir,
             title_prefix=title,
         )
 
     # ---- 3d. Well package (per-well annual withdrawals as GeoPackage) ----
-    well_registry_file = f'{OUTPUT_DIR}GW_Data/Vector_Reproj/Well_Registry.shp'
-    gw_vector_dir = f'{OUTPUT_DIR}GW/Vectors/{WNAME}/'
+    well_registry_file = os.path.join(OUTPUT_DIR, 'GW_Data', 'Vector_Reproj', 'Well_Registry.shp')
+    gw_vector_dir = os.path.join(OUTPUT_DIR, f'GW/Vectors/{WNAME}')
     wellops.create_well_package(
         well_registry_file,
         raster_dirs=raster_dirs,
         cat_raster_dirs=cat_raster_dirs,
-        output_dir=f'{prediction_dir}Well_Package/',
+        output_dir=os.path.join(prediction_dir, 'Well_Package'),
         ref_raster_file=ref_raster_file,
         pixel_area_m2=pixel_area_m2,
         start_year=START_YEAR,
@@ -1239,16 +1239,16 @@ def run_usgs_intercomparison() -> pd.DataFrame:
     logger.info('Step 4: USGS Intercomparison')
     logger.info('='*60)
 
-    prediction_dir = f'{MODEL_DIR}Full_Prediction_XGB/'
-    ml_pred_dir = f'{prediction_dir}Predicted_Rasters/Depth_mm/'
-    irr_gw_dir = f'{prediction_dir}Irrigation_GW_Rasters/Depth_mm/'
-    irr_sw_dir = f'{prediction_dir}Irrigation_SW_Rasters/Depth_mm/'
+    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_XGB')
+    ml_pred_dir = os.path.join(prediction_dir, 'Predicted_Rasters/Depth_mm')
+    irr_gw_dir = os.path.join(prediction_dir, 'Irrigation_GW_Rasters/Depth_mm')
+    irr_sw_dir = os.path.join(prediction_dir, 'Irrigation_SW_Rasters/Depth_mm')
 
-    nhm_dir = f'{INPUT_DIR}USGS WU/USGS_NHM_Withdrawals/'
-    reitz_base_dir = f'{INPUT_DIR}USGS WU/USGS_Reitz_Irrigation/'
-    huc12_geojson = f'{INPUT_DIR}GEE_Data/AZ_HUC12.geojson'
+    nhm_dir = os.path.join(INPUT_DIR, 'USGS WU/USGS_NHM_Withdrawals')
+    reitz_base_dir = os.path.join(INPUT_DIR, 'USGS WU/USGS_Reitz_Irrigation')
+    huc12_geojson = os.path.join(INPUT_DIR, 'GEE_Data', 'AZ_HUC12.geojson')
 
-    output_dir = f'{prediction_dir}Intercomparison/'
+    output_dir = os.path.join(prediction_dir, 'Intercomparison')
 
     return intercompops.run_intercomparison(
         ml_pred_dir=ml_pred_dir,
@@ -1278,15 +1278,15 @@ def run_cu_ie_usgs_intercomparison() -> pd.DataFrame:
     logger.info('Step 4b: CU / IE Intercomparison')
     logger.info('=' * 60)
 
-    prediction_dir = f'{MODEL_DIR}Full_Prediction_XGB/'
-    irr_cu_dir = f'{prediction_dir}Irrigation_CU_Rasters/Depth_mm/'
-    irr_ie_dir = f'{prediction_dir}Irrigation_Efficiency_Rasters/'
+    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_XGB')
+    irr_cu_dir = os.path.join(prediction_dir, 'Irrigation_CU_Rasters/Depth_mm')
+    irr_ie_dir = os.path.join(prediction_dir, 'Irrigation_Efficiency_Rasters')
 
-    nhm_cu_csv = f'{INPUT_DIR}USGS WU/USGS_NHM_CUIrr/Irr_CU_HUC12_Tot_annual_2000_2020.csv'
-    nhm_ie_csv = f'{INPUT_DIR}USGS WU/USGS_NHM_Withdrawals/IR_HUC12_Eff_annual_2000_2020.csv'
-    huc12_geojson = f'{INPUT_DIR}GEE_Data/AZ_HUC12.geojson'
+    nhm_cu_csv = os.path.join(INPUT_DIR, 'USGS WU', 'USGS_NHM_CUIrr', 'Irr_CU_HUC12_Tot_annual_2000_2020.csv')
+    nhm_ie_csv = os.path.join(INPUT_DIR, 'USGS WU', 'USGS_NHM_Withdrawals', 'IR_HUC12_Eff_annual_2000_2020.csv')
+    huc12_geojson = os.path.join(INPUT_DIR, 'GEE_Data', 'AZ_HUC12.geojson')
 
-    output_dir = f'{prediction_dir}CU_IE_Intercomparison/'
+    output_dir = os.path.join(prediction_dir, 'CU_IE_Intercomparison')
 
     return intercompops.run_cu_ie_intercomparison(
         irr_cu_dir=irr_cu_dir,
@@ -1315,18 +1315,50 @@ def run_cap_srp_sw_validation() -> pd.DataFrame:
     logger.info('Step 4c: CAP/SRP Total SW Validation')
     logger.info('=' * 60)
 
-    prediction_dir = f'{MODEL_DIR}Full_Prediction_XGB/'
-    total_sw_dir = f'{prediction_dir}Total_SW_Rasters/Depth_mm/'
+    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_XGB')
+    total_sw_dir = os.path.join(prediction_dir, 'Total_SW_Rasters/Depth_mm')
 
-    cap_xlsx = f'{VECTOR_DIR}CAP/CAP Delivery Data DRI Request.xlsx'
-    srp_xlsx = f'{VECTOR_DIR}SRP/SRP WATER DELVS HISTORY.xlsx'
+    cap_xlsx = os.path.join(VECTOR_DIR, 'CAP', 'CAP Delivery Data DRI Request.xlsx')
+    srp_xlsx = os.path.join(VECTOR_DIR, 'SRP', 'SRP WATER DELVS HISTORY.xlsx')
 
-    output_dir = f'{prediction_dir}CAP_SRP_Validation/'
+    output_dir = os.path.join(prediction_dir, 'CAP_SRP_Validation')
 
     return intercompops.run_cap_srp_validation(
         cap_xlsx=cap_xlsx,
         srp_xlsx=srp_xlsx,
         total_sw_dir=total_sw_dir,
+        basin_shp=AZ_GW_BASIN,
+        basin_col='BASIN_NAME',
+        output_dir=output_dir,
+    )
+
+
+def run_peff_usgs_intercomparison() -> pd.DataFrame:
+    """
+    Compare irrigated effective precipitation from ML predictions
+    (SCS-based and PCML-based) with USGS NHM PPTeff data.
+
+    Returns
+    -------
+    pd.DataFrame
+        Summary metrics for Peff intercomparisons.
+    """
+    logger.info('=' * 60)
+    logger.info('Step 4d: Effective Precipitation Intercomparison')
+    logger.info('=' * 60)
+
+    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_XGB')
+    nhm_peff_csv = os.path.join(
+        INPUT_DIR, 'USGS WU', 'USGS_NHM_CUIrr',
+        'PPTeff_HUC12_Tot_annual_2000_2020.csv',
+    )
+    huc12_geojson = os.path.join(INPUT_DIR, 'GEE_Data', 'AZ_HUC12.geojson')
+    output_dir = os.path.join(prediction_dir, 'Peff_Intercomparison')
+
+    return intercompops.run_peff_intercomparison(
+        predictor_dir=PRED_DATA_DIR,
+        nhm_peff_csv=nhm_peff_csv,
+        huc12_geojson=huc12_geojson,
         basin_shp=AZ_GW_BASIN,
         basin_col='BASIN_NAME',
         output_dir=output_dir,
@@ -1348,6 +1380,7 @@ Pipeline steps (comma-separated or 'all'):
   4    USGS intercomparison
   4b   CU / IE intercomparison
   4c   CAP/SRP surface-water validation
+  4d   Effective precipitation intercomparison
 """
 
 
@@ -1408,7 +1441,7 @@ def main() -> None:
     # Ensure band names are available for downstream steps
     if data_band_names is None:
         _, data_band_names = dataops.download_gee_data(
-            f'{VECTOR_DIR}AZ.geojson',
+            os.path.join(VECTOR_DIR, 'AZ.geojson'),
             GCLOUD_PROJECT, GCLOUD_BUCKET,
             INPUT_DIR,
             START_YEAR, END_YEAR,
@@ -1451,7 +1484,7 @@ def main() -> None:
                 'Temporal_LOO': temporal_results,
                 'Spatial_LOO': spatial_results,
             },
-            f'{MODEL_DIR}Model_Evaluation/',
+            os.path.join(MODEL_DIR, 'Model_Evaluation'),
         )
 
     # Step 3
@@ -1503,6 +1536,10 @@ def main() -> None:
     # Step 4c — CAP/SRP total surface water validation
     if should_run('4c'):
         run_cap_srp_sw_validation()
+
+    # Step 4d — Effective precipitation intercomparison
+    if should_run('4d'):
+        run_peff_usgs_intercomparison()
 
     logger.info('\n' + '='*60)
     logger.info('Pipeline complete!')

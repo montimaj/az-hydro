@@ -397,7 +397,7 @@ def create_streamflow_rasters(
         logger.info('Streamflow rasters already created, skipping...')
         return
 
-    streamflow_dir = f'{output_dir}Streamflow/'
+    streamflow_dir = os.path.join(output_dir, 'Streamflow')
     makedirs(streamflow_dir)
     download_streamflow(
         sites_csv=sites_csv,

@@ -76,6 +76,7 @@ python pipeline.py --download --recreate  # force fresh GEE download and file re
 | `4`  | USGS intercomparison |
 | `4b` | CU / IE intercomparison |
 | `4c` | CAP/SRP surface-water validation |
+| `4d` | Effective precipitation intercomparison |
 
 #### CLI flags
 
@@ -200,6 +201,15 @@ Sites with USBR IDs (9 sites) have direct modeled projections. The remaining 11 
 
 The CAP overlay does not double-count local watershed flows. Salt/Verde watershed pixels in the Phoenix AMA correctly receive both their local watershed streamflow (from SRP source gauges) and imported CAP water (from Colorado River gauges), reflecting the dual water supply in those areas.
 
+**Known limitation:** Within each watershed, streamflow depth is assigned
+uniformly to all pixels.  In reality, streamflow is concentrated near
+channels.  The canal-weighted streamflow variant (`Canal_Weighted_Streamflow_*.tif`)
+partially mitigates this by redistributing streamflow proportionally to
+canal density (segment count per pixel), concentrating flow where delivery
+infrastructure exists.  A further refinement could use distance-to-NHD
+flowlines as a weighting factor, but this data product is not currently
+in the pipeline.
+
 ---
 
 ## Pipeline overview (`pipeline.py`)
@@ -214,7 +224,7 @@ Step 0  ─  Data Preparation
 Step 1  ─  Create AZ Predictor DataFrame
 Step 2  ─  Model Evaluation (3 strategies: Random, Temporal LOO, Spatial LOO)
 Step 3  ─  Full-Period XGBoost Prediction (1896–2099)
-Step 4  ─  USGS Intercomparison (Withdrawals, CU, IE)
+Step 4  ─  USGS Intercomparison (Withdrawals, CU, IE, Peff)
 ```
 
 ### Configuration constants
@@ -428,6 +438,23 @@ quadrature:
 $$\sigma_{\text{total}} = \sqrt{\sigma_{\text{MACA}}^2 + \sigma_{\text{model}}^2 + \sigma_{\text{irr}}^2 + \sigma_{\text{LULC}}^2 + \sigma_{\text{gw}}^2}$$
 
 Each component isolates a specific source of prediction uncertainty.
+Every ensemble member's total prediction is also partitioned into the 8
+withdrawal categories *before* computing std, yielding per-category σ for
+each component.  Per-category σ_total is then obtained by the same
+quadrature formula applied category-wise.
+
+**Sample-based vs scenario-based components.**  σ_model (10 random seeds)
+and σ_gw (4 Hung et al. temporal snapshots) are *sample-based*: their
+ensemble members are random draws from a larger population, so
+Student's t-distribution critical values are used instead of z = 1.96
+to account for small-N estimation uncertainty
+(t₉ = 2.262 for σ_model, t₃ = 3.182 for σ_gw).
+The t-correction is applied by inflating σ by t/z *before* quadrature,
+so all downstream CI computation uses a single multiplier (z = 1.96).
+σ_MACA, σ_LULC, and σ_irr are *scenario-based*: their spread bounds
+structural uncertainty rather than estimating population variance, so
+they retain z = 1.96 (scale = 1.0).  Ensemble sizes (N) are reported
+in all σ_total CSVs.
 
 ##### σ_MACA — Inter-GCM climate spread (future only, 2026–2099)
 
@@ -544,6 +571,17 @@ fraction snapshot at each pixel.
 ##### σ_total — Quadrature combination
 
 The five components are assumed independent and combined in quadrature.
+Sample-based σ (Model, GW) are scaled by t/z before squaring, so the
+resulting σ_total already incorporates the t-correction.
+
+**Independence assumption.**  The quadrature formula assumes all five
+components are mutually uncorrelated.  In practice, σ_MACA and σ_LULC
+both perturb future-year predictors and may share structural correlations
+(e.g. a hot-dry climate scenario also affects land use).  The combined
+σ_total should therefore be interpreted as an approximate bound; true
+combined uncertainty could be modestly larger or smaller depending on
+the sign of inter-component correlations.
+
 For each year the output is a 2-band raster:
 
 | Band | Description |
@@ -641,7 +679,7 @@ This augmentation is applied to:
 | Product | σ source | Units augmented | Details |
 |---------|----------|----------------|---------|
 | **Total pumping** (32 rasters/yr) | σ_total × unit scale | mm, ft, m³, AF | σ_total computed in mm, scaled by conversion factor per unit |
-| **8 withdrawal categories** (256 rasters/yr) | σ_cat = (cat/total) × σ_total | mm, ft, m³, AF | Fraction of total is computed per-pixel; CV is preserved |
+| **8 withdrawal categories** (256 rasters/yr) | σ_cat via quadrature of per-category ensemble spreads | mm, ft, m³, AF | Each ensemble member is partitioned before computing std |
 | **3 CU categories** (48 rasters/yr) | σ_CU (inter-GCM spread) | mm, ft, m³, AF | σ_CU in mm, scaled to target unit |
 | **3 IE categories** (12 rasters/yr) | Ratio error propagation | dimensionless | $\sigma_{\text{IE}} = \text{IE} \times \sqrt{\text{CV}_{\text{CU}}^2 + \text{CV}_{\text{wd}}^2}$ |
 
@@ -655,14 +693,18 @@ the same conversion factors as the predictions are applied:
 | m³ | pixel_area_m² / 1000 = 4,000,000 / 1000 = 4000 |
 | AF | 4000 / 1233.48 ≈ 3.2428 |
 
-**Category uncertainty:** Because each category is a linear fraction of
-the total prediction (`cat = frac × total`), and the fractions (irr_frac,
-gw_frac, sw_frac) come from external data treated as fixed inputs:
+**Category uncertainty:** Each UQ ensemble function partitions every
+member’s total prediction into the 8 withdrawal categories *before*
+computing std.  This produces per-category σ for each component (MACA,
+Model, Irr, LULC, GW), which are then combined via quadrature:
 
-$$\sigma_{\text{cat}} = f_{\text{cat}} \times \sigma_{\text{total}}$$
+$$\sigma_{\text{cat}} = \sqrt{\sum_i \sigma_{\text{cat},i}^2}$$
 
-where $f_{\text{cat}} = \text{cat}_{\text{pixel}} / \text{total}_{\text{pixel}}$.
-CV and SNR are identical to the total (the fraction cancels in the ratio).
+where $\sigma_{\text{cat},i}$ is the per-category std from the $i$-th
+UQ component’s ensemble.  This correctly propagates partition-fraction
+uncertainty (σ_irr and σ_gw perturb `irr_fraction` and `gw_fraction`
+respectively, so per-category spreads differ from simple linear scaling
+of the total σ).
 
 **IE uncertainty:** IE = CU / withdrawal is a ratio of two uncertain
 quantities.  Standard ratio error propagation gives:
@@ -864,6 +906,29 @@ overlay), a scatter plot of ML vs observed AF per basin-year with 1:1 line
 and R², metrics CSV, and time series CSV, written to
 `{prediction_dir}CAP_SRP_Validation/`.
 
+#### Step 4d — Effective precipitation intercomparison (`run_peff_usgs_intercomparison()`)
+
+Compares irrigated effective precipitation across three sources:
+
+| Source | Description | Years | Resolution |
+|---|---|---|---|
+| **ML Peff (SCS)** | Predictor band 4 × `irr_fraction` | 2000–2024 | 2 km rasters |
+| **ML Peff (PCML)** | Predictor band 5 × `irr_fraction` | 2000–2023 | 2 km rasters |
+| **NHM PPTeff** | USGS NHM HUC12 data (Mgal/d) | 2000–2020 | HUC12 polygons |
+
+All three datasets are scaled by `annual_irr_fraction` so that volumes
+represent only the irrigated-area contribution.  NHM PPTeff follows the
+same CSV → rasterise → basin-aggregate pipeline as NHM CU, with irrigated-
+area scaling for the volume-to-depth conversion.
+
+The intercomparison produces:
+- Pairwise metrics (RMSD, MAD, Percent Difference) in AF, m³, and mm.
+- Per-basin comparison table.
+- Time series CSVs and per-basin time series plots (depth and volume).
+- Pairwise scatter plots with 1:1 lines and linear fits.
+
+All outputs are written to `{prediction_dir}Peff_Intercomparison/`.
+
 ---
 
 ## Library modules (`hydrolibs/`)
@@ -923,6 +988,13 @@ Key functions:
 - **`create_cross_strategy_summary()`** — Side-by-side comparison of Random,
   Temporal LOO, and Spatial LOO results.
 
+**Basin block bootstrap CI:** For AZ-wide time series sums,
+`aggregate_yearly_data()` uses a basin-level block bootstrap that resamples
+entire groundwater basins with replacement (via `_basin_block_bootstrap`),
+preserving within-basin spatial autocorrelation and producing more
+conservative CIs.  Per-basin plots fall back to pixel-level resampling
+since data is already filtered to a single basin.
+
 ### `gwops.py` — Groundwater data processing
 
 Handles ADWR groundwater withdrawal records and raster generation.
@@ -937,8 +1009,27 @@ Key functions:
 - **`crop_gw_rasters()`** — Clips GW rasters to the Arizona boundary.
 - **`create_gw_basin_rasters()`** — Rasterises ADWR basin and sub-basin
   polygons.
+- **`create_land_use_data()`** — Gaussian-filters the LULC raster to
+  produce continuous AGRI, SW, and URBAN density features.  **Known design
+  choice:** The density features are independently min–max normalised to
+  [0, 1] within each year, so the model sees only within-year spatial
+  patterns, not temporal magnitude trends.  This is partially mitigated by
+  `annual_crop_fraction` and `annual_irr_fraction`, which provide
+  year-to-year magnitude signals.
 - **`create_well_density_raster()`** — Creates a well-count-per-pixel
-  raster from the Well Registry.
+  raster from the Well Registry.  **Known limitation:** A single raster
+  is computed from the current (2024) ADWR Well Registry and replicated
+  for all years (1896–2099).  In reality, well density has changed over
+  time — fewer wells existed in early hindcast years, and future
+  projections may see wells retired, decommissioned, or newly drilled.
+  Because the pipeline uses well density primarily as a spatial
+  mask (pixels with zero wells are set to NaN in the partitioning step),
+  the main effect is that hindcast years may include predictions at pixels
+  where wells did not yet exist, while projection years may retain
+  predictions at pixels where wells have been retired, or miss pixels
+  where new wells are drilled.  If historical well drilling records or
+  future well siting projections become available, time-varying well
+  density rasters could be created.
 
 ### `streamflowops.py` — Streamflow & canal data
 
@@ -963,6 +1054,14 @@ ancillary data already in the predictor stack:
 | **Non_Irrigation** | `total − Irrigation` |
 | **Irrigation_GW** | `Irrigation × gw_fraction` (USGS GW-fraction snapshots) |
 | **Irrigation_SW** | `Irrigation − Irrigation_GW` |
+
+**Known limitation (GW fraction frozen at 2015):** `annual_gw_fraction` uses
+the 2015 USGS Hung et al. snapshot for all years ≥ 2015.  This freezes the
+irrigation GW/SW partitioning for 84 years of projections regardless of
+scenario-driven changes in water supply.  If future USGS snapshots or
+scenario-driven GW fraction projections become available, they can be
+integrated to make the partition dynamic.
+
 | **Non_Irrigation_GW** | `Non_Irrigation × (1 − sw_fraction)` |
 | **Non_Irrigation_SW** | `Non_Irrigation × sw_fraction` (canal-density proxy) |
 | **Total_GW** | `Irrigation_GW + Non_Irrigation_GW` |
@@ -1029,18 +1128,22 @@ Key functions:
   with uncertainty bounds via zonal statistics.  Accepts `basin_shp` and
   `subbasin_shp` parameters for basin/sub-basin shapefiles.
 - **`compute_sigma_maca()`** — Inter-GCM climate spread (5 GCMs, future
-  only).  Also returns per-GCM mosaic directories reused by σ_CU.
+  only).  Returns per-year total σ, per-category σ, and per-GCM mosaic
+  directories (reused by σ_CU).
 - **`compute_sigma_model()`** — XGBoost 10-seed ensemble spread (all
-  years).  Parallelised via Dask + Optuna.
+  years).  Parallelised via Dask + Optuna.  Returns per-year total σ and
+  per-category σ.
 - **`compute_sigma_irr()`** — Irrigation fraction sensitivity (historical
-  only, 1896–2025).  Uses IrrMapper vs regression finite-difference.
+  only, 1896–2025).  Uses IrrMapper vs regression finite-difference with
+  half-range mode.  Returns per-year total σ and per-category σ.
 - **`compute_sigma_lulc()`** — LULC projection spread (4 USGS scenarios,
   future only, 2026–2099).  Re-derives the full LULC → crop_frac →
-  irr_frac chain per scenario.
+  irr_frac chain per scenario.  Returns per-year total σ and per-category σ.
 - **`compute_sigma_gw()`** — GW fraction snapshot spread (4 USGS
-  snapshots, all years).
+  snapshots, all years).  Returns per-year total σ and per-category σ.
 - **`compute_sigma_total()`** — Quadrature combination of all five
-  components.  Writes 2-band rasters (σ, CV) and temporal Mean_CV.tif.
+  components for both total and per-category σ.  Writes 2-band total σ
+  rasters (σ, CV), per-category σ rasters, and temporal Mean_CV.tif.
 - **`compute_basin_sigma_total()`** — Reads per-component basin/sub-basin
   σ CSVs and combines via quadrature into `Basin_Sigma_Total.csv` /
   `Subbasin_Sigma_Total.csv`.
@@ -1050,7 +1153,8 @@ Key functions:
 - **`augment_prediction_rasters()`** — Rewrites total pumping rasters as
   6-band GeoTIFFs (pred, σ, CV, SNR, lower CI, upper CI) for all 4 units.
 - **`augment_category_rasters()`** — Augments 8 withdrawal category rasters
-  using per-pixel fraction scaling of σ_total.
+  using per-category σ_total rasters computed directly from ensemble
+  spreads (not fraction-scaled from total σ).
 - **`augment_cu_rasters()`** — Augments 3 CU category rasters using σ_CU.
 - **`augment_ie_rasters()`** — Augments 3 IE rasters using ratio error
   propagation from augmented CU and withdrawal CV bands.
@@ -1083,6 +1187,12 @@ Basin-scale comparison of ML predictions with independent USGS datasets.
 - Filters CAP to direct-use only; SRP to Surface Water (+ optional Spill
   Water sensitivity).
 - Produces per-basin time series, scatter plots, and validation metrics.
+
+**Peff intercomparison** (`run_peff_intercomparison()`):
+- Compares ML Peff (SCS, band 4) and Peff PCML (band 5) with NHM PPTeff.
+- All three scaled by `irr_fraction` to represent irrigated-area Peff.
+- NHM PPTeff: Mgal/d → m³/yr → depth (mm) → basin volumes (AF).
+- Produces metrics, per-basin tables, time series, and scatter plots.
 
 ### `rasterops.py` — Raster I/O utilities
 
@@ -1157,12 +1267,13 @@ Data/Outputs/
         │   ├── Sigma_Irr/                   #   Irrigation fraction spread
         │   ├── Sigma_LULC/                  #   LULC projection spread
         │   ├── Sigma_GW/                    #   GW fraction spread
-        │   ├── Sigma_Total/                 #   Quadrature combination (σ + CV)
+        │   ├── Sigma_Total/                 #   Quadrature combination (σ, CV, per-category σ)
         │   ├── Sigma_CU/                    #   CU inter-GCM spread
         │   └── Plots/                       #   Time-series plots
         ├── Visualizations/                  # Time series & era summary maps
         ├── Well_Package/                    # Per-well GeoPackage
         ├── Intercomparison/                 # Step 4a — withdrawal comparison
         ├── CU_IE_Intercomparison/           # Step 4b — CU/IE comparison
-        └── CAP_SRP_Validation/              # Step 4c — CAP/SRP SW validation
+        ├── CAP_SRP_Validation/              # Step 4c — CAP/SRP SW validation
+        └── Peff_Intercomparison/            # Step 4d — Peff comparison
 ```

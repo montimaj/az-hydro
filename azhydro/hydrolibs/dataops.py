@@ -116,7 +116,7 @@ def create_fishnet(
         The fishnet as a gpd.GeoDataFrame.
     """
 
-    fishnet_file = f'{output_dir}AZ_Polygons_{fishnet_size}{fishnet_unit}.geojson'
+    fishnet_file = os.path.join(output_dir, f'AZ_Polygons_{fishnet_size}{fishnet_unit}.geojson')
     if os.path.exists(fishnet_file):
         return gpd.read_file(fishnet_file)
     gdf = input_gdf.to_crs(fishnet_crs)
@@ -610,7 +610,7 @@ def download_gee_tile(
     ee_geom = ee.Geometry.Rectangle(tile_values[1:])
     peff_pcml_1896 = None
     for year in year_list:
-        local_file_name = f'{download_dir}Tile_{tile_values[0]}_{year}.tif'
+        local_file_name = os.path.join(download_dir, f'Tile_{tile_values[0]}_{year}.tif')
         if os.path.exists(local_file_name):
             try:
                 tile_arr, tile_rio = read_raster_as_arr(local_file_name)
@@ -747,7 +747,7 @@ def download_gee_data(
 
     gcm_suffix = f'_{gcm}' if gcm is not None else ''
     lulc_suffix = f'_LULC_{lulc_scenario}' if lulc_scenario is not None else ''
-    data_dir = f'{download_dir}GEE_Data/GEE_Tiles_{int(gee_scale)}m{gcm_suffix}{lulc_suffix}/'
+    data_dir = os.path.join(download_dir, f'GEE_Data/GEE_Tiles_{int(gee_scale)}m{gcm_suffix}{lulc_suffix}')
     data_band_names = [
         'annual_et_ensemble_mm',
         'annual_eto_mm',
@@ -775,7 +775,7 @@ def download_gee_data(
         area_gdf = gpd.read_file(geom_file)
         ee_geom = ee.Geometry.Rectangle(area_gdf.to_crs(gee_crs).total_bounds.tolist())
         huc12_path = 'AZ_HUC12.geojson'
-        huc12_local_path = f'{download_dir}GEE_Data/{huc12_path}'
+        huc12_local_path = os.path.join(download_dir, 'GEE_Data', f'{huc12_path}')
         if not os.path.exists(huc12_local_path):
             huc12_fc = ee.FeatureCollection('USGS/WBD/2017/HUC12').filterBounds(ee_geom)
             task = ee.batch.Export.table.toCloudStorage(
@@ -799,7 +799,7 @@ def download_gee_data(
         fishnet_gdf = create_fishnet(
             area_gdf,
             fishnet_size=tile_size,
-            output_dir=f'{download_dir}/GW_Data/'
+            output_dir=os.path.join(download_dir, 'GW_Data')
         ).to_crs(gee_crs)
         tile_val_list = []
         for _, tile in fishnet_gdf.iterrows():
@@ -870,7 +870,7 @@ def mosaic_tiles(
 
     def _mosaic_year(year):
         tile_list = glob(f'{input_tile_dir}*{year}.tif')
-        merged_tif = f'{output_dir}{output_prefix}_{year}.tif'
+        merged_tif = os.path.join(output_dir, f'{output_prefix}_{year}.tif')
         if os.path.exists(merged_tif):
             os.remove(merged_tif)
         subprocess.call(
@@ -922,10 +922,10 @@ def reproject_gee_mosaics(
 
     if not already_reprojected:
         makedirs(output_dir)
-        gee_mosaics = glob(gee_mosaic_dir + '*.tif')
-        gw_ref = glob(gw_data_dir + '*.tif')[0]
+        gee_mosaics = glob(os.path.join(gee_mosaic_dir, '*.tif'))
+        gw_ref = glob(os.path.join(gw_data_dir, '*.tif'))[0]
         for gee_mosaic in gee_mosaics:
-            gee_mosaic_reproj = f'{output_dir}{gee_mosaic[gee_mosaic.rfind(os.sep) + 1:]}'
+            gee_mosaic_reproj = os.path.join(output_dir, f'{gee_mosaic[gee_mosaic.rfind(os.sep) + 1:]}')
             reproject_raster_gdal(
                 gee_mosaic,
                 gee_mosaic_reproj,
@@ -969,7 +969,7 @@ def create_az_data_parquet(
         pd.DataFrame: Output dataframe.
     """
 
-    data_parquet = f'{output_dir}AZ_Data.parquet'
+    data_parquet = os.path.join(output_dir, 'AZ_Data.parquet')
     if not load_parquet:
         makedirs(output_dir)
         if exclude_years is None:
@@ -1239,10 +1239,8 @@ def split_data_yearly(
     y_train_df = x_train_df[pred_attr].to_frame()
     y_test_df = x_test_df[pred_attr].to_frame()
     if shuffle:
-        x_train_df = sk.shuffle(x_train_df, random_state=random_state)
-        y_train_df = sk.shuffle(y_train_df, random_state=random_state)
-        x_test_df = sk.shuffle(x_test_df, random_state=random_state)
-        y_test_df = sk.shuffle(y_test_df, random_state=random_state)
+        x_train_df, y_train_df = sk.shuffle(x_train_df, y_train_df, random_state=random_state)
+        x_test_df, y_test_df = sk.shuffle(x_test_df, y_test_df, random_state=random_state)
     return x_train_df, x_test_df, y_train_df, y_test_df
 
 
@@ -1280,10 +1278,8 @@ def split_spatial(
     y_train_df = x_train_df[pred_attr].to_frame()
     y_test_df = x_test_df[pred_attr].to_frame()
     if shuffle:
-        x_train_df = sk.shuffle(x_train_df, random_state=random_state)
-        y_train_df = sk.shuffle(y_train_df, random_state=random_state)
-        x_test_df = sk.shuffle(x_test_df, random_state=random_state)
-        y_test_df = sk.shuffle(y_test_df, random_state=random_state)
+        x_train_df, y_train_df = sk.shuffle(x_train_df, y_train_df, random_state=random_state)
+        x_test_df, y_test_df = sk.shuffle(x_test_df, y_test_df, random_state=random_state)
     return x_train_df, x_test_df, y_train_df, y_test_df
 
 
@@ -1451,28 +1447,32 @@ def create_train_test_data(
         for future analyses.
     """
     makedirs(output_dir)
-    x_train_file = output_dir + 'X_train.parquet'
-    x_test_file = output_dir + 'X_test.parquet'
-    y_train_file = output_dir + 'y_train.parquet'
-    y_test_file = output_dir + 'y_test.parquet'
-    year_train_file = output_dir + 'Year_train.parquet'
-    year_test_file = output_dir + 'Year_test.parquet'
-    gw_basin_train_file = output_dir + 'GW_Basin_train.parquet'
-    gw_basin_test_file = output_dir + 'GW_Basin_test.parquet'
+    x_train_file = os.path.join(output_dir, 'X_train.parquet')
+    x_test_file = os.path.join(output_dir, 'X_test.parquet')
+    y_train_file = os.path.join(output_dir, 'y_train.parquet')
+    y_test_file = os.path.join(output_dir, 'y_test.parquet')
+    year_train_file = os.path.join(output_dir, 'Year_train.parquet')
+    year_test_file = os.path.join(output_dir, 'Year_test.parquet')
+    gw_basin_train_file = os.path.join(output_dir, 'GW_Basin_train.parquet')
+    gw_basin_test_file = os.path.join(output_dir, 'GW_Basin_test.parquet')
     x_scaler_file, x_scaler, y_scaler_file, y_scaler = [None] * 4
     if scaling:
-        x_scaler_file = output_dir + 'x_scaler'
-        y_scaler_file = output_dir + 'y_scaler'
+        x_scaler_file = os.path.join(output_dir, 'x_scaler')
+        y_scaler_file = os.path.join(output_dir, 'y_scaler')
     if not already_created:
         if use_ama_ina:
             ama_ina_basins = get_ama_ina_basin_names()
             ama_ina_basins = [b for b in ama_ina_basins if b not in drop_gw_basins]
             input_df = input_df[input_df[gw_basin_col].isin(ama_ina_basins)]
         drop_attr = [attr for attr in drop_attr]
-        input_df = input_df.replace([np.inf, -np.inf], np.nan).dropna(axis=1)
-        input_df = input_df[input_df[pred_attr] > 0] if water_use == 'IRRIGATION' else input_df
         if year_list and year_col in input_df.columns:
             input_df = input_df[input_df[year_col].isin(year_list)]
+        cols_before = set(input_df.columns)
+        input_df = input_df.replace([np.inf, -np.inf], np.nan).dropna(axis=1)
+        dropped_cols = sorted(cols_before - set(input_df.columns))
+        if dropped_cols:
+            logger.info(f'Dropped {len(dropped_cols)} all-NaN columns after year filter: {dropped_cols}')
+        input_df = input_df[input_df[pred_attr] > 0] if water_use == 'IRRIGATION' else input_df
         if outlier_op is not None:
             input_df = process_outliers(
                 input_df, pred_attr,
@@ -1486,7 +1486,7 @@ def create_train_test_data(
             drop_attr.remove(gw_basin_col)
         drop_attr = list(set(drop_attr).intersection(input_df.columns.tolist()))
         input_df = input_df.drop(columns=drop_attr)
-        input_df.to_parquet(output_dir + 'Cleaned_AZ_GW_Data.parquet', index=False)
+        input_df.to_parquet(os.path.join(output_dir, 'Cleaned_AZ_GW_Data.parquet'), index=False)
         x_train, x_test, y_train, y_test = split_data_train_test(
             input_df, pred_attr=pred_attr,
             test_size=test_size,

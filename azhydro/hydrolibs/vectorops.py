@@ -28,6 +28,12 @@ from hydrolibs.sysops import az_nodata
 logger = logging.getLogger(__name__)
 from shapely.geometry import Point
 
+# Sentinel values for GDAL additive rasterization (initValues=0).
+# After rasterize, exact-zero pixels have no wells and are set to NaN.
+# These tiny values keep well-occupied pixels distinguishable from zero.
+UNMETERED_WELL_SENTINEL = -1e-16   # well exists but no meter data (outside AMA/INA)
+ZERO_PUMPING_SENTINEL = 1e-10      # metered well reporting zero withdrawal
+
 
 def reproject_vector(
         input_vector_file: str,
@@ -128,10 +134,9 @@ def csvs2shps(
         None.
     """
 
-    for file in glob(input_dir + pattern):
-        outfile_path = output_dir + '{}.shp'.format(
-            file[file.rfind(os.sep) + 1: file.rfind('.')]
-        )
+    for file in glob(os.path.join(input_dir, pattern)):
+        basename = file[file.rfind(os.sep) + 1: file.rfind('.')]
+        outfile_path = os.path.join(output_dir, f'{basename}.shp')
         csv2shp(
             file,
             outfile_path=outfile_path,
@@ -226,8 +231,8 @@ def add_attribute_well_reg(
     if not use_only_ama_ina:
         well_reg_schema = fiona.open(input_well_reg_file).schema
         well_reg_schema['properties'][fill_attr] = 'float:24.20'
-        well_reg_gdf.loc[well_reg_gdf['AMA'] == filter_attr_value, fill_attr] = -1e-16
-        well_reg_gdf.loc[well_reg_gdf[fill_attr] == 0., fill_attr] = 1e-10
+        well_reg_gdf.loc[well_reg_gdf['AMA'] == filter_attr_value, fill_attr] = UNMETERED_WELL_SENTINEL
+        well_reg_gdf.loc[well_reg_gdf[fill_attr] == 0., fill_attr] = ZERO_PUMPING_SENTINEL
         well_reg_gdf.to_file(out_gw_shp_file, schema=well_reg_schema, engine='fiona')
     else:
         well_reg_gdf.to_file(out_gw_shp_file)
@@ -362,7 +367,7 @@ def shps2rasters(
     """
 
     def _convert(shp_file):
-        outfile_path = output_dir + shp_file[shp_file.rfind(os.sep) + 1: shp_file.rfind('.') + 1] + 'tif'
+        outfile_path = os.path.join(output_dir, shp_file)[shp_file.rfind(os.sep) + 1: shp_file.rfind('.') + 1] + 'tif'
         shp2raster(
             shp_file,
             outfile_path=outfile_path,
@@ -375,4 +380,4 @@ def shps2rasters(
         )
 
     num_cores = multiprocessing.cpu_count() - 2
-    Parallel(n_jobs=num_cores)(delayed(_convert)(f) for f in glob(input_dir + '*.shp'))
+    Parallel(n_jobs=num_cores)(delayed(_convert)(f) for f in glob(os.path.join(input_dir, '*.shp')))
