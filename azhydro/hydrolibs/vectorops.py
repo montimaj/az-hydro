@@ -219,22 +219,13 @@ def add_attribute_well_reg(
         well_reg_gdf = well_reg_gdf[well_reg_gdf[shp_water_use_id] == water_use]
     if filter_attr:
         well_reg_gdf = well_reg_gdf[well_reg_gdf[filter_attr] != filter_attr_value]
-    well_id_selected = []
-    for well_id in gw_df[csv_well_id].unique():
-        selection_cond = (gw_df[csv_well_id] == well_id) & \
-                         (gw_df[csv_mov_id] == movement_type) & \
-                         (gw_df[csv_water_id] == water_type)
-        if water_use == 'IRRIGATION':
-            selection_cond = selection_cond & (gw_df[csv_right_type].str.startswith(right_type))
-        sub_gw_df = gw_df[selection_cond]
-        if not sub_gw_df.empty:
-            well_id_selected.append(well_id)
-            fill_value = list(sub_gw_df[fill_attr])
-            if len(fill_value) > 1:
-                fill_value = np.sum(fill_value)
-            else:
-                fill_value = fill_value[0]
-            well_reg_gdf.loc[well_reg_gdf[shp_well_id] == well_id, fill_attr] = fill_value
+    mask = (gw_df[csv_mov_id] == movement_type) & (gw_df[csv_water_id] == water_type)
+    if water_use == 'IRRIGATION':
+        mask = mask & gw_df[csv_right_type].str.startswith(right_type)
+    filtered_gw = gw_df.loc[mask]
+    agg = filtered_gw.groupby(csv_well_id)[fill_attr].sum()
+    well_id_selected = agg.index.tolist()
+    well_reg_gdf[fill_attr] = well_reg_gdf[shp_well_id].map(agg)
     if not use_only_ama_ina:
         well_reg_schema = fiona.open(input_well_reg_file).schema
         well_reg_schema['properties'][fill_attr] = 'float:24.20'
