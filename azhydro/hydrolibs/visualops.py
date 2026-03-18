@@ -1230,6 +1230,8 @@ def explore_az_data(
         # Exclude zero values before plotting
         col_df = col_df[col_df[col] > 0]
 
+        skip_era = col in static_cols or col == 'gw_pumping_mm'
+
         # ── 1 & 2. Time series (skip for static/time-invariant variables) ─
         if col not in static_cols:
             # ── 1. Time series (mean ± std per year), shaded by era ──────
@@ -1273,13 +1275,15 @@ def explore_az_data(
             _plt.savefig(os.path.join(output_dir, f'{safe}_timeseries_by_basin_type.png'))
             _plt.close()
 
-        if col not in static_cols:
+        if not skip_era:
             # ── 3. Boxplot by Era ────────────────────────────────────────
             fig, ax = _plt.subplots(figsize=figsize_box)
             era_df = col_df[col_df['Era'].isin(era_order)]
+            present_eras = [e for e in era_order if e in era_df['Era'].unique()]
+            present_palette = {e: ERA_COLORS[e] for e in present_eras}
             _sns.boxplot(
-                data=era_df, x='Era', y=col, hue='Era', order=era_order,
-                palette=era_palette, ax=ax, fliersize=2, legend=False,
+                data=era_df, x='Era', y=col, hue='Era', order=present_eras,
+                palette=present_palette, ax=ax, fliersize=2, legend=False,
             )
             ax.set_title(f'{label} — Distribution by Era')
             _plt.tight_layout()
@@ -1289,8 +1293,8 @@ def explore_az_data(
             # ── 4. Violin plot by Era ────────────────────────────────────
             fig, ax = _plt.subplots(figsize=figsize_box)
             _sns.violinplot(
-                data=era_df, x='Era', y=col, hue='Era', order=era_order,
-                palette=era_palette, ax=ax, inner='quartile', cut=0, legend=False,
+                data=era_df, x='Era', y=col, hue='Era', order=present_eras,
+                palette=present_palette, ax=ax, inner='quartile', cut=0, legend=False,
             )
             ax.set_title(f'{label} — Violin by Era')
             _plt.tight_layout()
@@ -1329,7 +1333,7 @@ def explore_az_data(
             _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_gw_basin.png'))
             _plt.close()
         else:
-            # Static variables: spatial distribution only (no era split)
+            # Static / single-era variables: spatial distribution only (no era split)
             # ── 3s. Boxplot by Basin Type ────────────────────────────────
             fig, ax = _plt.subplots(figsize=figsize_box)
             _sns.boxplot(
@@ -1899,16 +1903,19 @@ def create_basin_time_series(
     ax.set_ylabel('GW Withdrawal (acre-ft)', fontweight='bold')
     ax.set_title(f'Annual {label}GW Withdrawal by Basin (1896–2099)', fontweight='bold',
                  fontsize=14)
-    # Add a single dashed-line entry for 'Observed' in the legend
+    # Build legend: basin lines + era patches + optional observed
+    handles, labels = ax.get_legend_handles_labels()
+    era_handles = [
+        mpatches.Patch(color=ERA_COLORS[e], alpha=0.35,
+                       label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
+        for e in ERA_PERIODS
+    ]
+    handles.extend(era_handles)
     if actual_df is not None:
         from matplotlib.lines import Line2D
-        obs_handle = Line2D([], [], color='gray', linestyle='--', marker='o',
-                            markersize=3, label='Observed (ADWR Meter)')
-        handles, labels = ax.get_legend_handles_labels()
-        handles.append(obs_handle)
-        ax.legend(handles=handles, fontsize=8, ncol=2, loc='upper left', framealpha=0.9)
-    else:
-        ax.legend(fontsize=8, ncol=2, loc='upper left', framealpha=0.9)
+        handles.append(Line2D([], [], color='gray', linestyle='--', marker='o',
+                               markersize=3, label='Observed (ADWR Meter)'))
+    ax.legend(handles=handles, fontsize=8, ncol=2, loc='upper left', framealpha=0.9)
     ax.set_xlim(start_year - 1, end_year + 1)
     ax.grid(True, alpha=0.3, linestyle='--')
     _add_m3_twinx(ax)
@@ -2081,7 +2088,13 @@ def create_subbasin_time_series(
         for era, (s, e) in ERA_PERIODS.items():
             ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.07)
         ax.set_title(parent, fontweight='bold', fontsize=11)
-        ax.legend(fontsize=7, loc='upper left', framealpha=0.9)
+        sb_handles, _ = ax.get_legend_handles_labels()
+        sb_handles.extend([
+            mpatches.Patch(color=ERA_COLORS[e], alpha=0.35,
+                           label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
+            for e in ERA_PERIODS
+        ])
+        ax.legend(handles=sb_handles, fontsize=7, loc='upper left', framealpha=0.9)
         ax.set_xlim(start_year - 1, end_year + 1)
         ax.grid(True, alpha=0.3, linestyle='--')
         if idx >= (n_rows - 1) * n_cols:
@@ -2964,13 +2977,16 @@ def create_trend_maps(
     apply_journal_style()
     makedirs(output_dir)
 
-    # ── Default periods: full + 4 eras ──────────────────────────────
+    # ── Default periods: full + 3 eras (Forecast merged into Historical) ─
     if periods is None:
-        periods = {'Full (1896–2099)': (1896, 2099)}
-        periods.update({
-            f'{era} ({y1}–{y2})': (y1, y2)
-            for era, (y1, y2) in ERA_PERIODS.items()
-        })
+        hist_start = ERA_PERIODS['Historical'][0]
+        hist_end = ERA_PERIODS['Forecast'][1]
+        periods = {
+            'Full (1896–2099)': (1896, 2099),
+            f'Hindcast ({ERA_PERIODS["Hindcast"][0]}–{ERA_PERIODS["Hindcast"][1]})': ERA_PERIODS['Hindcast'],
+            f'Historical ({hist_start}–{hist_end})': (hist_start, hist_end),
+            f'Projection ({ERA_PERIODS["Projection"][0]}–{ERA_PERIODS["Projection"][1]})': ERA_PERIODS['Projection'],
+        }
 
     # ── Discover raster files and build {year: filepath} ────────────
     tif_files = sorted(f for f in os.listdir(raster_dir) if f.endswith('.tif'))
