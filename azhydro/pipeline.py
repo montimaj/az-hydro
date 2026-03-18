@@ -90,8 +90,9 @@ START_YEAR = 1896
 END_YEAR = 2099
 YEAR_LIST = list(range(1984, 2025))
 RANDOM_STATE = 42
-N_TRIALS = 5
+N_TRIALS = 50
 FOLD_COUNT = 5
+REPEATS = 3
 N_DASK_WORKERS = 10
 N_DASK_WORKERS_DATA_PREP = 40 # more workers for data prep since it involves many independent raster operations
 USE_OPTUNA = True
@@ -372,6 +373,8 @@ def _train_and_evaluate(
     model, cv_df = mlops.build_ml_model_optuna_dask(
         x_train, y_train, output_dir, model_name,
         random_state=RANDOM_STATE,
+        fold_count=FOLD_COUNT,
+        repeats=REPEATS,
         n_trials=N_TRIALS,
         n_dask_workers=N_DASK_WORKERS,
         use_dask=USE_DASK,
@@ -435,6 +438,8 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
         model_names=ml_models,
         random_state=RANDOM_STATE,
         use_optuna=USE_OPTUNA,
+        fold_count=FOLD_COUNT,
+        repeats=REPEATS,
         n_trials=N_TRIALS,
         n_dask_workers=N_DASK_WORKERS,
         use_dask=USE_DASK,
@@ -870,6 +875,8 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         x_train, y_train,
         os.path.join(prediction_dir, 'Model'),
         model_name, RANDOM_STATE,
+        fold_count=FOLD_COUNT,
+        repeats=REPEATS,
         n_trials=N_TRIALS,
         n_dask_workers=N_DASK_WORKERS,
         use_dask=USE_DASK,
@@ -2047,6 +2054,8 @@ def main() -> None:
                 start_year=START_YEAR,
                 end_year=END_YEAR,
                 year_list=YEAR_LIST,
+                fold_count=FOLD_COUNT,
+                repeats=REPEATS,
                 n_trials=N_TRIALS,
                 n_dask_workers=N_DASK_WORKERS,
                 use_dask=USE_DASK,

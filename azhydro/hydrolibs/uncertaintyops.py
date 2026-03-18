@@ -689,6 +689,8 @@ def compute_sigma_model(
         end_year: int,
         year_list: list[int],
         mosaic_res: int,
+        fold_count: int = 5,
+        repeats: int = 3,
         n_trials: int = 100,
         n_dask_workers: int = 10,
         use_dask: bool = True,
@@ -709,6 +711,8 @@ def compute_sigma_model(
         end_year (int): Last year of prediction period.
         year_list (list[int]): Full list of prediction years.
         mosaic_res (int): Raster resolution in metres.
+        fold_count (int): Number of folds for KFold. Default is 5.
+        repeats (int): Number of repeats for RepeatedKFold. Default is 3.
         n_trials (int): Number of Optuna trials per seed.
         n_dask_workers (int): Number of Dask workers.
         use_dask (bool): If True, use Dask for parallel tuning.
@@ -754,6 +758,8 @@ def compute_sigma_model(
             m, _ = mlops.build_ml_model_optuna_dask(
                 x_train, y_train, seed_dir,
                 model_name, seed,
+                fold_count=fold_count,
+                repeats=repeats,
                 n_trials=n_trials,
                 n_dask_workers=n_dask_workers,
                 use_dask=use_dask,
@@ -1902,6 +1908,8 @@ def run_uncertainty_quantification(
         start_year: int,
         end_year: int,
         year_list: list[int],
+        fold_count: int = 5,
+        repeats: int = 3,
         n_trials: int = 100,
         n_dask_workers: int = 10,
         use_dask: bool = True,
@@ -1937,6 +1945,8 @@ def run_uncertainty_quantification(
         start_year (int): First year of prediction period.
         end_year (int): Last year of prediction period.
         year_list (list[int]): Full list of prediction years.
+        fold_count (int): Number of folds for KFold. Default is 5.
+        repeats (int): Number of repeats for RepeatedKFold. Default is 3.
         n_trials (int): Number of Optuna trials per seed.
         n_dask_workers (int): Number of Dask workers.
         use_dask (bool): If True, use Dask for parallel tuning.
@@ -1972,6 +1982,7 @@ def run_uncertainty_quantification(
         x_train, y_train, feature_cols, az_df,
         drop_attrs, pred_data_dir, unc_dir,
         start_year, end_year, year_list, mosaic_res,
+        fold_count=fold_count, repeats=repeats,
         n_trials=n_trials, n_dask_workers=n_dask_workers,
         use_dask=use_dask,
     )

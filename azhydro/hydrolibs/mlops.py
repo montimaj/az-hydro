@@ -1019,108 +1019,95 @@ def get_optuna_params_for_model(
     """
     if model_name == 'XGB':
         return {
-            'eta': trial.suggest_float('eta', 0.01, 0.1),
-            'max_depth': trial.suggest_categorical('max_depth', [0, 16, 20]),
+            'eta': trial.suggest_float('eta', 0.01, 0.3, log=True),
+            'max_depth': trial.suggest_int('max_depth', 3, 10),
+            'n_estimators': trial.suggest_int('n_estimators', 300, 600, step=100),
             'subsample': trial.suggest_float('subsample', 0.6, 1.0),
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-            'colsample_bynode': trial.suggest_float('colsample_bynode', 0.6, 1.0),
-            'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.6, 1.0),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
-            'gamma': trial.suggest_float('gamma', 0.0, 1.0),
-            'min_child_weight': trial.suggest_int('min_child_weight', 10, 100, step=10),
-            'n_estimators': trial.suggest_int('n_estimators', 300, 600, step=100),
-            'grow_policy': trial.suggest_categorical('grow_policy', ['depthwise', 'lossguide'])
+            'reg_lambda': trial.suggest_float('reg_lambda', 1e-3, 10.0, log=True),
+            'min_child_weight': trial.suggest_int('min_child_weight', 1, 50),
         }
     elif model_name == 'XGBRF':
         return {
-            'eta': trial.suggest_float('eta', 0.01, 0.1),
-            'max_depth': trial.suggest_categorical('max_depth', [0, 16, 20, 32, 64]),
+            'eta': trial.suggest_float('eta', 0.01, 0.3, log=True),
+            'max_depth': trial.suggest_categorical('max_depth', [0, 10, 16]),
+            'num_parallel_tree': trial.suggest_int('num_parallel_tree', 300, 500, step=100),
             'subsample': trial.suggest_float('subsample', 0.6, 1.0),
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-            'colsample_bynode': trial.suggest_float('colsample_bynode', 0.6, 1.0),
-            'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.6, 1.0),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
-            'gamma': trial.suggest_float('gamma', 0.0, 1.0),
-            'min_child_weight': trial.suggest_int('min_child_weight', 10, 100, step=10),
-            'num_parallel_tree': trial.suggest_int('num_parallel_tree', 300, 600, step=100),
-            'grow_policy': trial.suggest_categorical('grow_policy', ['depthwise', 'lossguide'])
+            'reg_lambda': trial.suggest_float('reg_lambda', 1e-3, 10.0, log=True),
+            'min_child_weight': trial.suggest_int('min_child_weight', 1, 50),
         }
     elif model_name == 'LGBM':
         return {
-            'n_estimators': trial.suggest_int('n_estimators', 300, 600),
-            'max_depth': trial.suggest_categorical('max_depth', [-1, 16, 20, 32, 64]),
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1),
+            'n_estimators': trial.suggest_int('n_estimators', 300, 600, step=100),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+            'num_leaves': trial.suggest_categorical('num_leaves', [31, 63, 127]),
+            'max_depth': trial.suggest_categorical('max_depth', [-1, 10, 20]),
             'subsample': trial.suggest_float('subsample', 0.6, 1.0),
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-            'colsample_bynode': trial.suggest_float('colsample_bynode', 0.6, 1.0),
-            'path_smooth': trial.suggest_float('path_smooth', 0.1, 0.5),
-            'num_leaves': trial.suggest_categorical('num_leaves', [31, 32, 63, 127]),
             'min_child_samples': trial.suggest_int('min_child_samples', 10, 50, step=10)
         }
     elif model_name == 'RF':
         return {
-            'n_estimators': trial.suggest_int('n_estimators', 300, 600),
-            'max_features': trial.suggest_categorical('max_features', [None, 10, 8, 15]),
-            'max_depth': trial.suggest_categorical('max_depth', [None, 16, 20, 32, 64]),
-            'max_samples': trial.suggest_categorical('max_samples', [None, 0.8, 0.9, 1.0]),
-            'max_leaf_nodes': trial.suggest_categorical('max_leaf_nodes', [None, 31, 63, 128]),
-            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 5)
+            'n_estimators': trial.suggest_int('n_estimators', 300, 500, step=100),
+            'max_features': trial.suggest_categorical('max_features', [None, 8, 10]),
+            'max_depth': trial.suggest_categorical('max_depth', [None, 16, 20]),
+            'max_samples': trial.suggest_categorical('max_samples', [None, 0.8, 0.9]),
+            'max_leaf_nodes': trial.suggest_categorical('max_leaf_nodes', [None, 63, 128]),
+            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 3)
         }
     elif model_name == 'ETR':
         return {
-            'n_estimators': trial.suggest_int('n_estimators', 300, 600),
-            'max_features': trial.suggest_categorical('max_features', [None, 10, 8, 15]),
-            'max_depth': trial.suggest_categorical('max_depth', [None, 16, 20, 32, 64]),
-            'max_samples': trial.suggest_categorical('max_samples', [None, 0.8, 0.9, 1.0]),
-            'max_leaf_nodes': trial.suggest_categorical('max_leaf_nodes', [None, 31, 63, 128]),
-            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 5)
+            'n_estimators': trial.suggest_int('n_estimators', 300, 500, step=100),
+            'max_features': trial.suggest_categorical('max_features', [None, 8, 10]),
+            'max_depth': trial.suggest_categorical('max_depth', [None, 16, 20]),
+            'max_samples': trial.suggest_categorical('max_samples', [None, 0.8, 0.9]),
+            'max_leaf_nodes': trial.suggest_categorical('max_leaf_nodes', [None, 63, 128]),
+            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 3)
         }
     elif model_name == 'HGBR':
         return {
-            'max_iter': trial.suggest_int('max_iter', 300, 600),
-            'max_depth': trial.suggest_categorical('max_depth', [None, 16, 20, 32, 64]),
+            'max_iter': trial.suggest_int('max_iter', 300, 500, step=100),
+            'max_depth': trial.suggest_categorical('max_depth', [None, 16, 20]),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1),
             'max_leaf_nodes': trial.suggest_int('max_leaf_nodes', 31, 128),
-            'max_bins': trial.suggest_categorical('max_bins', [31, 63, 127, 255]),
+            'max_bins': trial.suggest_categorical('max_bins', [63, 127, 255]),
             'l2_regularization': trial.suggest_float('l2_regularization', 0.0, 1.0),
         }
     elif model_name == 'GBR':
         return {
-            'n_estimators': trial.suggest_int('n_estimators', 200, 500),
+            'n_estimators': trial.suggest_int('n_estimators', 200, 400, step=100),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
-            'max_depth': trial.suggest_int('max_depth', 3, 15),
-            'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
-            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
-            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'max_depth': trial.suggest_int('max_depth', 3, 10),
+            'min_samples_split': trial.suggest_int('min_samples_split', 2, 10),
+            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 5),
+            'subsample': trial.suggest_float('subsample', 0.7, 1.0),
             'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', None])
         }
     elif model_name == 'ADA':
         return {
-            'n_estimators': trial.suggest_int('n_estimators', 50, 300),
+            'n_estimators': trial.suggest_int('n_estimators', 50, 200, step=50),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 1.0, log=True),
-            'estimator__max_depth': trial.suggest_int('estimator__max_depth', 3, 15),
-            'estimator__min_samples_split': trial.suggest_int('estimator__min_samples_split', 2, 20),
-            'estimator__min_samples_leaf': trial.suggest_int('estimator__min_samples_leaf', 1, 10)
+            'estimator__max_depth': trial.suggest_int('estimator__max_depth', 3, 10),
+            'estimator__min_samples_split': trial.suggest_int('estimator__min_samples_split', 2, 10),
+            'estimator__min_samples_leaf': trial.suggest_int('estimator__min_samples_leaf', 1, 5)
         }
     elif model_name == 'BAG':
         return {
-            'n_estimators': trial.suggest_int('n_estimators', 50, 300),
-            'max_samples': trial.suggest_float('max_samples', 0.5, 1.0),
-            'max_features': trial.suggest_float('max_features', 0.5, 1.0),
-            'estimator__max_depth': trial.suggest_categorical('estimator__max_depth', [None, 10, 20, 30]),
-            'estimator__min_samples_split': trial.suggest_int('estimator__min_samples_split', 2, 20),
-            'estimator__min_samples_leaf': trial.suggest_int('estimator__min_samples_leaf', 1, 10)
+            'n_estimators': trial.suggest_int('n_estimators', 50, 200, step=50),
+            'max_samples': trial.suggest_float('max_samples', 0.6, 1.0),
+            'max_features': trial.suggest_float('max_features', 0.6, 1.0),
+            'estimator__max_depth': trial.suggest_categorical('estimator__max_depth', [None, 10, 20]),
+            'estimator__min_samples_split': trial.suggest_int('estimator__min_samples_split', 2, 10),
+            'estimator__min_samples_leaf': trial.suggest_int('estimator__min_samples_leaf', 1, 5)
         }
     elif model_name == 'CAT':
         return {
-            'iterations': trial.suggest_int('iterations', 200, 600),
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
-            'depth': trial.suggest_int('depth', 4, 12),
-            'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1, 10),
-            'border_count': trial.suggest_categorical('border_count', [32, 64, 128, 255]),
-            'bagging_temperature': trial.suggest_float('bagging_temperature', 0, 1)
+            'iterations': trial.suggest_int('iterations', 300, 600, step=100),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+            'depth': trial.suggest_int('depth', 4, 10),
+            'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1e-1, 10.0, log=True),
+            'border_count': trial.suggest_categorical('border_count', [128, 255]),
         }
     elif model_name == 'LR':
         # No hyperparameters — single trial is sufficient
@@ -1379,6 +1366,8 @@ def compare_all_models(
         model_names: list[str] = None,
         random_state: int = 42,
         use_optuna: bool = True,
+        fold_count: int = 5,
+        repeats: int = 3,
         n_trials: int = 50,
         n_dask_workers: int = 4,
         use_dask: bool = True,
@@ -1405,6 +1394,8 @@ def compare_all_models(
         model_names: List of model names to compare.
         random_state: Random state.
         use_optuna: Whether to use Optuna for tuning.
+        fold_count: Number of folds for KFold. Default is 5.
+        repeats: Number of repeats for RepeatedKFold. Default is 3.
         n_trials: Number of Optuna trials.
         n_dask_workers: Number of Dask workers for parallel Optuna trials.
         use_dask: Whether to use Dask parallelization.
@@ -1448,7 +1439,8 @@ def compare_all_models(
         if use_optuna:
             model, cv_metric_df = build_ml_model_optuna_dask(
                 x_train, y_train, model_subdir, model_name,
-                random_state=random_state, n_trials=n_trials,
+                random_state=random_state, fold_count=fold_count,
+                repeats=repeats, n_trials=n_trials,
                 n_dask_workers=n_dask_workers, use_dask=use_dask
             )
         else:
