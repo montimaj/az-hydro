@@ -183,6 +183,8 @@ def prepare_data(
         START_YEAR,
         END_YEAR,
         already_mosaicked=skip_gee,
+        fishnet_file=os.path.join(INPUT_DIR, 'GW_Data',
+                                  f'AZ_Polygons_{TILE_SIZE}m.geojson'),
     )
 
     # GW CSV → per-year shapefiles

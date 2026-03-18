@@ -387,6 +387,13 @@ def download_gee_tif(
                 tile_rio.close()
                 os.remove(local_file_name)
                 raise rio.errors.RasterioIOError
+            # Detect all-zero tiles (GEE returned valid TIFF with no data)
+            if np.all(tile_arr == 0):
+                if verbose:
+                    logger.warning('Downloaded file has all-zero data. Deleting %s', local_file_name)
+                tile_rio.close()
+                os.remove(local_file_name)
+                raise ValueError('All-zero tile data')
             tile_rio.close()
             clamp_and_rewrite_raster(
                 local_file_name,
@@ -620,10 +627,17 @@ def download_gee_tile(
                     tile_rio.close()
                     os.remove(local_file_name)
                     raise rio.errors.RasterioIOError
+                if np.all(tile_arr == 0):
+                    if verbose:
+                        logger.warning('Existing file has all-zero data. Deleting %s', local_file_name)
+                    tile_rio.close()
+                    os.remove(local_file_name)
+                    raise rio.errors.RasterioIOError
                 tile_rio.close()
                 continue
             except rio.errors.RasterioIOError:
-                os.remove(local_file_name)
+                if os.path.exists(local_file_name):
+                    os.remove(local_file_name)
                 if verbose:
                     logger.warning('Existing file %s is corrupted. Deleted and retrying download...', local_file_name)
         irrmapper_year = year if 1985 <= year <= 2025 else 1985 if year < 1985 else 2025
@@ -698,6 +712,8 @@ def download_gee_tile(
             crs=crs,
             verbose=verbose
         )
+        if not os.path.exists(local_file_name):
+            logger.warning('Tile %s was not created after all retries', local_file_name)
 
 
 def download_gee_data(
@@ -852,6 +868,7 @@ def mosaic_tiles(
         end_year: int = 2023,
         output_prefix: str = 'Predictor',
         already_mosaicked: bool = False,
+        fishnet_file: str | None = None,
 ) -> None:
     """
     Mosaic all tiles based on the start and end years.
@@ -863,6 +880,10 @@ def mosaic_tiles(
         end_year (int): End year in YYYY.
         output_prefix (str): Output prefix name to append to output files.
         already_mosaicked (bool): Set True to skip mosaicking.
+        fishnet_file (str | None): Path to the fishnet GeoJSON used to
+            determine the expected tile count.  When provided, a warning
+            is logged for any year whose tile count is lower than
+            expected.
 
     Returns:
         None.
@@ -870,6 +891,13 @@ def mosaic_tiles(
 
     def _mosaic_year(year):
         tile_list = glob(os.path.join(input_tile_dir, f'*{year}.tif'))
+        # Warn about missing tiles by comparing to the full set from the
+        # first year (all years should have the same tile count).
+        if expected_tile_count and len(tile_list) < expected_tile_count:
+            logger.warning(
+                'Year %d: only %d of %d tiles found — mosaic will have zero-filled gaps',
+                year, len(tile_list), expected_tile_count,
+            )
         merged_tif = os.path.join(output_dir, f'{output_prefix}_{year}.tif')
         if os.path.exists(merged_tif):
             os.remove(merged_tif)
@@ -895,6 +923,10 @@ def mosaic_tiles(
         gdal_merge_path = shutil.which('gdal_merge.py')
         if gdal_merge_path is None:
             raise FileNotFoundError('gdal_merge.py not found on PATH')
+        # Determine expected tile count from the fishnet
+        expected_tile_count = 0
+        if fishnet_file and os.path.exists(fishnet_file):
+            expected_tile_count = len(gpd.read_file(fishnet_file))
         joblib.Parallel(n_jobs=-1)(
             joblib.delayed(_mosaic_year)(year)
             for year in range(start_year, end_year + 1)
