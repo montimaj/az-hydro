@@ -1270,7 +1270,13 @@ def explore_az_data(
             ax.set_xlabel('Year')
             ax.set_ylabel(label)
             ax.set_title(f'{label} — Annual Mean by Basin Type')
-            ax.legend(loc='best', fontsize=9)
+            bt_handles, _ = ax.get_legend_handles_labels()
+            bt_handles.extend([
+                _mpatches.Patch(color=ERA_COLORS[e], alpha=0.35,
+                                label=f'{e} ({eda_periods[e][0]}–{eda_periods[e][1]})')
+                for e in era_order
+            ])
+            ax.legend(handles=bt_handles, loc='best', fontsize=9)
             _plt.tight_layout()
             _plt.savefig(os.path.join(output_dir, f'{safe}_timeseries_by_basin_type.png'))
             _plt.close()
