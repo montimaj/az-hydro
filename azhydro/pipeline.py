@@ -307,6 +307,13 @@ def create_az_data(data_band_names: list[str], load_files: bool = True) -> pd.Da
     Predictor, GW_Basin, GW_Subbasin, Streamflow,
     Canal_Weighted_Streamflow, Canal_Density, and Well_Density rasters,
     then maps ADWR sub-basin OBJECTIDs to names and runs EDA.
+
+    Args:
+        data_band_names (list[str]): Band/layer names for predictor rasters.
+        load_files (bool): If True, load from cached parquet files.
+
+    Returns:
+        pd.DataFrame: Combined predictor dataframe for the full study period.
     """
     logger.info('='*60)
     logger.info('Step 1: Creating AZ predictor data (1896-2099)...')
@@ -459,6 +466,12 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
     Evaluate each model on every temporal holdout (T1-T6).
 
     Returns per-holdout and averaged metrics across all holdouts.
+
+    Args:
+        az_df (pd.DataFrame): Full predictor dataframe with all years.
+
+    Returns:
+        dict: Per-model averaged metrics across all temporal holdouts.
     """
     logger.info('='*60)
     logger.info('Step 2b: LOO Temporal evaluation (T1-T6)')
@@ -623,6 +636,12 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
     the held-out sub-basin.
 
     Reports per-sub-basin and averaged metrics.
+
+    Args:
+        az_df (pd.DataFrame): Full predictor dataframe with all years.
+
+    Returns:
+        dict: Per-model averaged metrics across all spatial holdouts.
     """
     logger.info('='*60)
     logger.info('Step 2c: LOO Spatial evaluation (ADWR sub-basins)')
@@ -802,11 +821,9 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     Train XGBoost on the full 1984-2024 metered data (temporal split T1)
     and predict groundwater pumping rasters for every year from 1896 to 2099.
 
-    Returns
-    -------
-    tuple
-        (model, feature_cols, x_train, y_train) — the trained XGBoost model,
-        feature column names, and training data for uncertainty quantification.
+    Returns:
+        tuple: (model, feature_cols, x_train, y_train) — the trained XGBoost model,
+            feature column names, and training data for uncertainty quantification.
     """
     logger.info('='*60)
     logger.info('Step 3: XGBoost full-period prediction (1896-2099)')
@@ -1669,10 +1686,8 @@ def run_usgs_intercomparison() -> pd.DataFrame:
     (HUC12-scale) and USGS Reitz (county-scale raster) datasets across
     Arizona groundwater basins.
 
-    Returns
-    -------
-    pd.DataFrame
-        Summary metrics for every pairwise comparison × category.
+    Returns:
+        pd.DataFrame: Summary metrics for every pairwise comparison × category.
     """
     logger.info('='*60)
     logger.info('Step 4: USGS Intercomparison')
@@ -1708,10 +1723,8 @@ def run_cu_ie_usgs_intercomparison() -> pd.DataFrame:
     Compare ML-based Irrigation CU and IE predictions with USGS NHM
     HUC12-scale data across Arizona groundwater basins.
 
-    Returns
-    -------
-    pd.DataFrame
-        Summary metrics for CU and IE intercomparisons.
+    Returns:
+        pd.DataFrame: Summary metrics for CU and IE intercomparisons.
     """
     logger.info('=' * 60)
     logger.info('Step 4b: CU / IE Intercomparison')
@@ -1745,10 +1758,8 @@ def run_cap_srp_sw_validation() -> pd.DataFrame:
     Validate ML Total_SW predictions against observed CAP and SRP
     surface-water delivery records across Arizona groundwater basins.
 
-    Returns
-    -------
-    pd.DataFrame
-        Per-basin statistics (RMSD, MAD, Pct Diff, Pearson R).
+    Returns:
+        pd.DataFrame: Per-basin statistics (RMSD, MAD, Pct Diff, Pearson R).
     """
     logger.info('=' * 60)
     logger.info('Step 4c: CAP/SRP Total SW Validation')
@@ -1777,10 +1788,8 @@ def run_peff_usgs_intercomparison() -> pd.DataFrame:
     Compare irrigated effective precipitation from ML predictions
     (SCS-based and PCML-based) with USGS NHM PPTeff data.
 
-    Returns
-    -------
-    pd.DataFrame
-        Summary metrics for Peff intercomparisons.
+    Returns:
+        pd.DataFrame: Summary metrics for Peff intercomparisons.
     """
     logger.info('=' * 60)
     logger.info('Step 4d: Effective Precipitation Intercomparison')
@@ -1814,10 +1823,8 @@ def run_ps_intercomparison() -> pd.DataFrame:
         Non_Irrigation_GW vs PS GW
         Non_Irrigation_SW vs PS SW
 
-    Returns
-    -------
-    pd.DataFrame
-        Summary metrics for PS intercomparisons.
+    Returns:
+        pd.DataFrame: Summary metrics for PS intercomparisons.
     """
     logger.info('=' * 60)
     logger.info('Step 4e: Non-Irrigation vs USGS Public Supply Intercomparison')

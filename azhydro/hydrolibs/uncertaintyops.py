@@ -198,11 +198,18 @@ def _predict_total(model, pred_features, year_df, partops,
                    raster_shape, valid_mask):
     """Predict and partition, returning total pumping and category dict.
 
-    Returns
-    -------
-    tuple[np.ndarray, dict[str, np.ndarray]]
-        (total_1d, categories) where total = Irrigation + Non_Irrigation
-        and categories is the full dict from ``partition_predictions``.
+    Args:
+        model: Trained ML model with a ``predict`` method.
+        pred_features: Feature matrix for prediction.
+        year_df: Single-year DataFrame with partitioning columns.
+        partops: Module providing ``partition_predictions``.
+        raster_shape (tuple): (rows, cols) of the full raster grid.
+        valid_mask (np.ndarray): Boolean mask of valid pixels (ravelled).
+
+    Returns:
+        tuple[np.ndarray, dict[str, np.ndarray]]: (total_1d, categories) where
+            total = Irrigation + Non_Irrigation and categories is the full
+            dict from ``partition_predictions``.
     """
     raw = np.abs(model.predict(pred_features))
     cat = partops.partition_predictions(raw, year_df, raster_shape, valid_mask)

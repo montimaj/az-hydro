@@ -2560,29 +2560,21 @@ class OODDetector:
     is computed using the training covariance matrix (regularised for numerical
     stability).
 
-    Attributes
-    ----------
-    mean_ : np.ndarray
-        Training feature means (n_features,).
-    cov_inv_ : np.ndarray
-        Inverse of the regularised training covariance matrix.
-    threshold_ : float
-        Chi-squared threshold at the chosen significance level.
-    n_features_ : int
-        Number of features.
+    Attributes:
+        mean_ (np.ndarray): Training feature means (n_features,).
+        cov_inv_ (np.ndarray): Inverse of the regularised training covariance matrix.
+        threshold_ (float): Chi-squared threshold at the chosen significance level.
+        n_features_ (int): Number of features.
     """
 
     def __init__(self, alpha: float = 0.01, reg: float = 1e-6):
         """
-        Parameters
-        ----------
-        alpha : float
-            Significance level for the chi-squared threshold.  Pixels with
-            Mahalanobis distance exceeding the (1 - alpha) quantile of
-            chi-squared(n_features) are flagged as OOD.  Default 0.01.
-        reg : float
-            Tikhonov regularisation added to the covariance diagonal for
-            numerical stability.  Default 1e-6.
+        Args:
+            alpha (float): Significance level for the chi-squared threshold.
+                Pixels with Mahalanobis distance exceeding the (1 - alpha)
+                quantile of chi-squared(n_features) are flagged as OOD.
+            reg (float): Tikhonov regularisation added to the covariance
+                diagonal for numerical stability.
         """
         self.alpha = alpha
         self.reg = reg
@@ -2594,14 +2586,11 @@ class OODDetector:
     def fit(self, x_train: np.ndarray | pd.DataFrame) -> 'OODDetector':
         """Fit the detector on training features.
 
-        Parameters
-        ----------
-        x_train : array-like of shape (n_samples, n_features)
-            Training feature matrix.
+        Args:
+            x_train: Training feature matrix of shape (n_samples, n_features).
 
-        Returns
-        -------
-        self
+        Returns:
+            OODDetector: self.
         """
         from scipy.stats import chi2
 
@@ -2631,14 +2620,11 @@ class OODDetector:
     def mahalanobis(self, x: np.ndarray | pd.DataFrame) -> np.ndarray:
         """Compute Mahalanobis distances for new data.
 
-        Parameters
-        ----------
-        x : array-like of shape (n_samples, n_features)
+        Args:
+            x: Feature matrix of shape (n_samples, n_features).
 
-        Returns
-        -------
-        np.ndarray of shape (n_samples,)
-            Squared Mahalanobis distances.
+        Returns:
+            np.ndarray: Squared Mahalanobis distances of shape (n_samples,).
         """
         x = np.asarray(x, dtype=np.float64)
         diff = x - self.mean_
@@ -2649,10 +2635,11 @@ class OODDetector:
     def is_ood(self, x: np.ndarray | pd.DataFrame) -> np.ndarray:
         """Flag OOD samples.
 
-        Returns
-        -------
-        np.ndarray of bool, shape (n_samples,)
-            True for samples exceeding the chi-squared threshold.
+        Args:
+            x: Feature matrix of shape (n_samples, n_features).
+
+        Returns:
+            np.ndarray: Boolean array where True indicates OOD samples.
         """
         return self.mahalanobis(x) > self.threshold_
 
@@ -2663,15 +2650,12 @@ class OODDetector:
     ) -> dict:
         """Compute OOD statistics for a batch of prediction features.
 
-        Parameters
-        ----------
-        x : array-like of shape (n_samples, n_features)
-        year : int, optional
-            Year label for logging.
+        Args:
+            x: Feature matrix of shape (n_samples, n_features).
+            year (int | None): Year label for logging.
 
-        Returns
-        -------
-        dict with keys: 'n_total', 'n_ood', 'pct_ood', 'mean_d2', 'max_d2'.
+        Returns:
+            dict: Keys: 'n_total', 'n_ood', 'pct_ood', 'mean_d2', 'max_d2'.
         """
         d2 = self.mahalanobis(x)
         ood_mask = d2 > self.threshold_
