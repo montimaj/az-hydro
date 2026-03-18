@@ -1152,6 +1152,10 @@ def explore_az_data(
         gw_basin_col: str = 'GW_Basin',
         basin_type_col: str = 'GW_Basin_Type',
         skip_cols: tuple[str, ...] = ('easting_m', 'northing_m'),
+        static_cols: tuple[str, ...] = (
+            'soil_depth_mm', 'awc_mm', 'ksat_mean_micromps',
+            'canal_density', 'well_density',
+        ),
         figsize_ts: tuple[float, float] = (14, 5),
         figsize_box: tuple[float, float] = (14, 6),
 ) -> None:
@@ -1168,7 +1172,9 @@ def explore_az_data(
         year_col: Name of the year column.
         gw_basin_col: Name of the groundwater basin column.
         basin_type_col: Name of the basin type column (0=AMA, 1=INA, 2=Other).
-        skip_cols: Columns to skip in the visualizations.
+        skip_cols: Columns to skip entirely in the visualizations.
+        static_cols: Time-invariant columns for which time series plots are
+            skipped (boxplots and violin plots are still generated).
         figsize_ts: Figure size for time series plots.
         figsize_box: Figure size for box/violin plots.
     """
@@ -1202,7 +1208,15 @@ def explore_az_data(
     ama_ina_basins = get_ama_ina_basin_names()
     var_name_dict = get_variable_name_dict()
 
-    for col in numeric_cols:
+    def _plot_column(col):
+        """Generate all EDA plots for a single column."""
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as _plt
+        import matplotlib.patches as _mpatches
+        import seaborn as _sns
+        apply_journal_style()
+
         safe = col.replace('/', '_')
         label = var_name_dict.get(col, col)
 
@@ -1216,102 +1230,137 @@ def explore_az_data(
         # Exclude zero values before plotting
         col_df = col_df[col_df[col] > 0]
 
-        # ── 1. Time series (mean ± std per year), shaded by era ──────────
-        yearly = col_df.groupby(year_col)[col].agg(['mean', 'std']).reset_index()
-        yearly['Era'] = yearly[year_col].apply(_assign_era).replace({'Forecast': 'Historical'})
+        # ── 1 & 2. Time series (skip for static/time-invariant variables) ─
+        if col not in static_cols:
+            # ── 1. Time series (mean ± std per year), shaded by era ──────
+            yearly = col_df.groupby(year_col)[col].agg(['mean', 'std']).reset_index()
+            yearly['Era'] = yearly[year_col].apply(_assign_era).replace({'Forecast': 'Historical'})
 
-        fig, ax = plt.subplots(figsize=figsize_ts)
-        yearly = yearly.sort_values(year_col)
-        ax.plot(yearly[year_col], yearly['mean'], color='#2C3E50', lw=1.5)
-        ax.fill_between(
-            yearly[year_col],
-            yearly['mean'] - yearly['std'],
-            yearly['mean'] + yearly['std'],
-            color='#2C3E50', alpha=0.15,
-        )
-        # shade era backgrounds
-        for era, (s, e) in eda_periods.items():
-            ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
-        ax.set_xlabel('Year')
-        ax.set_ylabel(label)
-        ax.set_title(f'{label} — Annual Mean ± Std')
-        handles = [mpatches.Patch(color=ERA_COLORS[e], label=f'{e} ({eda_periods[e][0]}–{eda_periods[e][1]})')
-                   for e in era_order]
-        ax.legend(handles=handles, loc='best', fontsize=9)
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f'{safe}_timeseries.png'))
-        plt.close()
+            fig, ax = _plt.subplots(figsize=figsize_ts)
+            yearly = yearly.sort_values(year_col)
+            ax.plot(yearly[year_col], yearly['mean'], color='#2C3E50', lw=1.5)
+            ax.fill_between(
+                yearly[year_col],
+                yearly['mean'] - yearly['std'],
+                yearly['mean'] + yearly['std'],
+                color='#2C3E50', alpha=0.15,
+            )
+            # shade era backgrounds
+            for era, (s, e) in eda_periods.items():
+                ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
+            ax.set_xlabel('Year')
+            ax.set_ylabel(label)
+            ax.set_title(f'{label} — Annual Mean ± Std')
+            handles = [_mpatches.Patch(color=ERA_COLORS[e], label=f'{e} ({eda_periods[e][0]}–{eda_periods[e][1]})')
+                       for e in era_order]
+            ax.legend(handles=handles, loc='best', fontsize=9)
+            _plt.tight_layout()
+            _plt.savefig(os.path.join(output_dir, f'{safe}_timeseries.png'))
+            _plt.close()
 
-        # ── 2. Time series grouped by Basin Type ─────────────────────────
-        fig, ax = plt.subplots(figsize=figsize_ts)
-        for bt_label, bt_df in col_df.groupby('Basin_Type_Label'):
-            yt = bt_df.groupby(year_col)[col].mean().reset_index()
-            ax.plot(yt[year_col], yt[col], label=bt_label, lw=1.3)
-        for era, (s, e) in eda_periods.items():
-            ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.06)
-        ax.set_xlabel('Year')
-        ax.set_ylabel(label)
-        ax.set_title(f'{label} — Annual Mean by Basin Type')
-        ax.legend(loc='best', fontsize=9)
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f'{safe}_timeseries_by_basin_type.png'))
-        plt.close()
+            # ── 2. Time series grouped by Basin Type ─────────────────────
+            fig, ax = _plt.subplots(figsize=figsize_ts)
+            for bt_label, bt_df in col_df.groupby('Basin_Type_Label'):
+                yt = bt_df.groupby(year_col)[col].mean().reset_index()
+                ax.plot(yt[year_col], yt[col], label=bt_label, lw=1.3)
+            for era, (s, e) in eda_periods.items():
+                ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.06)
+            ax.set_xlabel('Year')
+            ax.set_ylabel(label)
+            ax.set_title(f'{label} — Annual Mean by Basin Type')
+            ax.legend(loc='best', fontsize=9)
+            _plt.tight_layout()
+            _plt.savefig(os.path.join(output_dir, f'{safe}_timeseries_by_basin_type.png'))
+            _plt.close()
 
-        # ── 3. Boxplot by Era ────────────────────────────────────────────
-        fig, ax = plt.subplots(figsize=figsize_box)
-        era_df = col_df[col_df['Era'].isin(era_order)]
-        sns.boxplot(
-            data=era_df, x='Era', y=col, order=era_order,
-            palette=era_palette, ax=ax, fliersize=2,
-        )
-        ax.set_title(f'{label} — Distribution by Era')
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_era.png'))
-        plt.close()
+        if col not in static_cols:
+            # ── 3. Boxplot by Era ────────────────────────────────────────
+            fig, ax = _plt.subplots(figsize=figsize_box)
+            era_df = col_df[col_df['Era'].isin(era_order)]
+            _sns.boxplot(
+                data=era_df, x='Era', y=col, hue='Era', order=era_order,
+                palette=era_palette, ax=ax, fliersize=2, legend=False,
+            )
+            ax.set_title(f'{label} — Distribution by Era')
+            _plt.tight_layout()
+            _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_era.png'))
+            _plt.close()
 
-        # ── 4. Violin plot by Era ────────────────────────────────────────
-        fig, ax = plt.subplots(figsize=figsize_box)
-        sns.violinplot(
-            data=era_df, x='Era', y=col, order=era_order,
-            palette=era_palette, ax=ax, inner='quartile', cut=0,
-        )
-        ax.set_title(f'{label} — Violin by Era')
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f'{safe}_violin_era.png'))
-        plt.close()
+            # ── 4. Violin plot by Era ────────────────────────────────────
+            fig, ax = _plt.subplots(figsize=figsize_box)
+            _sns.violinplot(
+                data=era_df, x='Era', y=col, hue='Era', order=era_order,
+                palette=era_palette, ax=ax, inner='quartile', cut=0, legend=False,
+            )
+            ax.set_title(f'{label} — Violin by Era')
+            _plt.tight_layout()
+            _plt.savefig(os.path.join(output_dir, f'{safe}_violin_era.png'))
+            _plt.close()
 
-        # ── 5. Boxplot by GW_Basin_Type ──────────────────────────────────
-        fig, ax = plt.subplots(figsize=figsize_box)
-        sns.boxplot(
-            data=col_df, x='Basin_Type_Label', y=col,
-            hue='Era', hue_order=era_order,
-            palette=ERA_COLORS, ax=ax, fliersize=2,
-        )
-        ax.set_title(f'{label} — by Basin Type & Era')
-        ax.set_xlabel('Basin Type')
-        ax.legend(loc='best', fontsize=9)
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_basin_type.png'))
-        plt.close()
+            # ── 5. Boxplot by GW_Basin_Type ──────────────────────────────
+            fig, ax = _plt.subplots(figsize=figsize_box)
+            _sns.boxplot(
+                data=col_df, x='Basin_Type_Label', y=col,
+                hue='Era', hue_order=era_order,
+                palette=ERA_COLORS, ax=ax, fliersize=2,
+            )
+            ax.set_title(f'{label} — by Basin Type & Era')
+            ax.set_xlabel('Basin Type')
+            ax.legend(loc='best', fontsize=9)
+            _plt.tight_layout()
+            _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_basin_type.png'))
+            _plt.close()
 
-        # ── 6. Boxplot by GW_Basin ───────────────────────────────────────
-        basin_df = col_df[col_df[gw_basin_col].isin(ama_ina_basins)]
-        basin_list = sorted(basin_df[gw_basin_col].unique())
-        fig, ax = plt.subplots(figsize=(16, 7))
-        sns.boxplot(
-            data=basin_df, x=gw_basin_col, y=col,
-            order=basin_list,
-            hue='Era', hue_order=era_order,
-            palette=ERA_COLORS, ax=ax, fliersize=1,
-        )
-        ax.set_title(f'{label} — by GW Basin (AMA/INA) & Era')
-        ax.set_xlabel('GW Basin')
-        ax.tick_params(axis='x', rotation=35)
-        ax.legend(loc='best', fontsize=8)
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_gw_basin.png'))
-        plt.close()
+            # ── 6. Boxplot by GW_Basin ───────────────────────────────────
+            basin_df = col_df[col_df[gw_basin_col].isin(ama_ina_basins)]
+            basin_list = sorted(basin_df[gw_basin_col].unique())
+            fig, ax = _plt.subplots(figsize=(16, 7))
+            _sns.boxplot(
+                data=basin_df, x=gw_basin_col, y=col,
+                order=basin_list,
+                hue='Era', hue_order=era_order,
+                palette=ERA_COLORS, ax=ax, fliersize=1,
+            )
+            ax.set_title(f'{label} — by GW Basin (AMA/INA) & Era')
+            ax.set_xlabel('GW Basin')
+            ax.tick_params(axis='x', rotation=35)
+            ax.legend(loc='best', fontsize=8)
+            _plt.tight_layout()
+            _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_gw_basin.png'))
+            _plt.close()
+        else:
+            # Static variables: spatial distribution only (no era split)
+            # ── 3s. Boxplot by Basin Type ────────────────────────────────
+            fig, ax = _plt.subplots(figsize=figsize_box)
+            _sns.boxplot(
+                data=col_df, x='Basin_Type_Label', y=col,
+                ax=ax, fliersize=2,
+            )
+            ax.set_title(f'{label} — by Basin Type')
+            ax.set_xlabel('Basin Type')
+            _plt.tight_layout()
+            _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_basin_type.png'))
+            _plt.close()
 
+            # ── 4s. Boxplot by GW_Basin ──────────────────────────────────
+            basin_df = col_df[col_df[gw_basin_col].isin(ama_ina_basins)]
+            basin_list = sorted(basin_df[gw_basin_col].unique())
+            fig, ax = _plt.subplots(figsize=(16, 7))
+            _sns.boxplot(
+                data=basin_df, x=gw_basin_col, y=col,
+                order=basin_list, ax=ax, fliersize=1,
+            )
+            ax.set_title(f'{label} — by GW Basin (AMA/INA)')
+            ax.set_xlabel('GW Basin')
+            ax.tick_params(axis='x', rotation=35)
+            _plt.tight_layout()
+            _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_gw_basin.png'))
+            _plt.close()
+
+    n_jobs = max(1, multiprocessing.cpu_count() - 2)
+    Parallel(n_jobs=n_jobs, backend='loky')(
+        delayed(_plot_column)(col) for col in numeric_cols
+    )
     logger.info(f'Exploratory plots saved to {output_dir}')
 
 
