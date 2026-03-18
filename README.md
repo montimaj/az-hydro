@@ -106,6 +106,24 @@ We would like to acknowledge funding from NASA (Grant numbers: 80NSSC21K0979 and
 
 <img src="docs/images/DRITaglineLogoTransparentBackground.png" height="100"/> &nbsp;  &nbsp; <img src="docs/images/CSU-Signature-C-357.png" height="130"/> &nbsp; <img src="docs/images/ADWR.png" height="120"/> &nbsp;  &nbsp; <img src="docs/images/nasa-logo-web-rgb.png" height="120"/>
 
+## AI Usage Disclosure
+
+Portions of this codebase were developed with the assistance of **Claude Code**
+(Anthropic, Claude Opus 4.6), an AI-powered coding assistant. The AI was used
+for:
+
+- **Code generation and refactoring** — implementing pipeline steps,
+  visualization functions, intercomparison workflows, uncertainty
+  quantification, and trend analysis routines.
+- **Code review and cleanup** — identifying dead code, fixing bugs, improving
+  code quality, and resolving linter warnings.
+- **Documentation** — drafting and updating this README, docstrings, and inline
+  comments.
+
+All AI-generated code was reviewed, tested, and validated by the authors. The
+scientific methodology, research design, data interpretation, and manuscript
+writing remain entirely the responsibility of the authors.
+
 ## References
 
 Hasan, M. F., Smith, R. G., Majumdar, S., Huntington, J. L., Alves Meira Neto, A., & Minor, B. A. (2025). Satellite data and physics-constrained machine learning for estimating effective precipitation in the Western United States and application for monitoring groundwater irrigation. _Agricultural Water Management_, _319_, 109821. https://doi.org/10.1016/j.agwat.2025.109821.
