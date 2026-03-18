@@ -1201,7 +1201,6 @@ def explore_az_data(
     eda_periods = {k: v for k, v in ERA_PERIODS.items() if k != 'Forecast'}
     eda_periods['Historical'] = (ERA_PERIODS['Historical'][0], ERA_PERIODS['Forecast'][1])
     era_order = list(eda_periods.keys())
-    era_palette = [ERA_COLORS[e] for e in era_order]
 
     logger.info(f'Generating exploratory plots for {len(numeric_cols)} columns …')
 
@@ -1279,6 +1278,74 @@ def explore_az_data(
             ax.legend(handles=bt_handles, loc='best', fontsize=9)
             _plt.tight_layout()
             _plt.savefig(os.path.join(output_dir, f'{safe}_timeseries_by_basin_type.png'))
+            _plt.close()
+
+        # ── Histogram + KDE (clipped to P1–P99) ──────────────────────────
+        clip_lower = col_df[col].quantile(0.01)
+        clip_upper = col_df[col].quantile(0.99)
+        clip_mask = col_df[col].between(clip_lower, clip_upper)
+        clip_vals = col_df.loc[clip_mask, col]
+
+        # H1. Overall histogram + KDE
+        fig, ax = _plt.subplots(figsize=figsize_box)
+        _sns.histplot(clip_vals, kde=True, ax=ax, color='#2C3E50', edgecolor='white', stat='count')
+        ax.set_xlabel(label)
+        ax.set_title(f'{label} — Histogram + KDE (P1–P99)')
+        _plt.tight_layout()
+        _plt.savefig(os.path.join(output_dir, f'{safe}_hist_kde.png'))
+        _plt.close()
+
+        clip_col_df = col_df[clip_mask]
+
+        if not skip_era:
+            # H2. Histogram + KDE by Era
+            era_df_h = clip_col_df[clip_col_df['Era'].isin(era_order)]
+            present_eras_h = [e for e in era_order if e in era_df_h['Era'].unique()]
+            present_palette_h = {e: ERA_COLORS[e] for e in present_eras_h}
+
+            fig, ax = _plt.subplots(figsize=figsize_box)
+            _sns.histplot(
+                data=era_df_h, x=col, hue='Era', hue_order=present_eras_h,
+                palette=present_palette_h, kde=True, stat='count',
+                edgecolor='white', alpha=0.35, ax=ax,
+            )
+            ax.set_xlabel(label)
+            ax.set_title(f'{label} — Histogram + KDE by Era (P1–P99)')
+            _plt.tight_layout()
+            _plt.savefig(os.path.join(output_dir, f'{safe}_kde_era.png'))
+            _plt.close()
+
+        # H3. Histogram + KDE by Basin Type
+        fig, ax = _plt.subplots(figsize=figsize_box)
+        _sns.histplot(
+            data=clip_col_df, x=col, hue='Basin_Type_Label',
+            kde=True, stat='count', edgecolor='white', alpha=0.35, ax=ax,
+        )
+        ax.set_xlabel(label)
+        ax.set_title(f'{label} — Histogram + KDE by Basin Type (P1–P99)')
+        _plt.tight_layout()
+        _plt.savefig(os.path.join(output_dir, f'{safe}_kde_basin_type.png'))
+        _plt.close()
+
+        # H4. Histogram + KDE by GW Basin (AMA/INA)
+        basin_df_kde = clip_col_df[clip_col_df[gw_basin_col].isin(ama_ina_basins)]
+        basin_list_kde = sorted(basin_df_kde[gw_basin_col].unique())
+        if basin_list_kde:
+            fig, ax = _plt.subplots(figsize=(16, 7))
+            _sns.histplot(
+                data=basin_df_kde, x=col, hue=gw_basin_col,
+                hue_order=basin_list_kde,
+                kde=True, stat='count', edgecolor='white', alpha=0.25, ax=ax,
+            )
+            ax.set_xlabel(label)
+            ax.set_title(f'{label} — Histogram + KDE by GW Basin (AMA/INA) (P1–P99)')
+            legend = ax.get_legend()
+            if legend:
+                legend.set_bbox_to_anchor((1.02, 1))
+                for text in legend.get_texts():
+                    text.set_fontsize(7)
+            _plt.tight_layout()
+            _plt.savefig(os.path.join(output_dir, f'{safe}_kde_gw_basin.png'))
             _plt.close()
 
         if not skip_era:

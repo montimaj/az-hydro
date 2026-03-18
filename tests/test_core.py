@@ -304,8 +304,8 @@ class TestNormalizedRMSE:
         y_pred = np.array([12.0, 18.0, 32.0])
         assert normalized_rmse(y, y_pred) > 0
 
-    def test_zero_mean_returns_nan(self):
-        y = np.array([-1.0, 0.0, 1.0])
+    def test_zero_std_returns_nan(self):
+        y = np.array([5.0, 5.0, 5.0])
         assert np.isnan(normalized_rmse(y, y + 0.1))
 
 
@@ -319,8 +319,8 @@ class TestNormalizedMAE:
         y_pred = np.array([6.0, 9.0, 14.0])
         assert normalized_mae(y, y_pred) > 0
 
-    def test_zero_mean_returns_nan(self):
-        y = np.array([-1.0, 0.0, 1.0])
+    def test_zero_std_returns_nan(self):
+        y = np.array([5.0, 5.0, 5.0])
         assert np.isnan(normalized_mae(y, y + 0.5))
 
 

@@ -90,7 +90,7 @@ START_YEAR = 1896
 END_YEAR = 2099
 YEAR_LIST = list(range(1984, 2025))
 RANDOM_STATE = 42
-N_TRIALS = 100
+N_TRIALS = 5
 FOLD_COUNT = 5
 N_DASK_WORKERS = 10
 N_DASK_WORKERS_DATA_PREP = 40 # more workers for data prep since it involves many independent raster operations
@@ -299,7 +299,11 @@ def prepare_data(
 # =============================================================================
 
 
-def create_az_data(data_band_names: list[str], load_files: bool = True) -> pd.DataFrame:
+def create_az_data(
+        data_band_names: list[str],
+        load_files: bool = True,
+        skip_eda: bool = False,
+) -> pd.DataFrame:
     """
     Build the AZ predictor dataframe for years START_YEAR to END_YEAR.
 
@@ -311,6 +315,7 @@ def create_az_data(data_band_names: list[str], load_files: bool = True) -> pd.Da
     Args:
         data_band_names (list[str]): Band/layer names for predictor rasters.
         load_files (bool): If True, load from cached parquet files.
+        skip_eda (bool): If True, skip EDA plot generation.
 
     Returns:
         pd.DataFrame: Combined predictor dataframe for the full study period.
@@ -335,7 +340,10 @@ def create_az_data(data_band_names: list[str], load_files: bool = True) -> pd.Da
     logger.debug(f'Columns: {list(az_df.columns)}')
 
     # EDA
-    vizops.explore_az_data(az_df, os.path.join(MODEL_DIR, 'EDA'))
+    if not skip_eda:
+        vizops.explore_az_data(az_df, os.path.join(MODEL_DIR, 'EDA'))
+    else:
+        logger.info('Skipping EDA plots (--skip-eda)')
     return az_df
 
 
@@ -1923,6 +1931,10 @@ def main() -> None:
         help='Enable verbose (DEBUG-level) logging.',
     )
     parser.add_argument(
+        '--skip-eda', action='store_true', default=False,
+        help='Skip EDA plot generation in Step 1.',
+    )
+    parser.add_argument(
         '--skip-prep', type=str, default='',
         help=(
             'Comma-separated Step 0 sub-steps to skip: '
@@ -1971,7 +1983,7 @@ def main() -> None:
     def get_az_df():
         nonlocal az_df
         if az_df is None:
-            az_df = create_az_data(data_band_names, load_files=load_files)
+            az_df = create_az_data(data_band_names, load_files=load_files, skip_eda=args.skip_eda)
         return az_df
 
     # Step 1

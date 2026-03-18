@@ -74,6 +74,7 @@ python pipeline.py --steps 0,1,2a         # run only steps 0, 1, and 2a
 python pipeline.py --steps 3              # prediction only
 python pipeline.py --steps 3,3b           # prediction + uncertainty quantification
 python pipeline.py --download --recreate  # force fresh GEE download and file recreation
+python pipeline.py --skip-eda            # skip EDA plot generation
 ```
 
 Step 0 supports fine-grained sub-step control via `--skip-prep`:
@@ -124,6 +125,7 @@ python pipeline.py --skip-prep gee,vectors,reproject        # skip multiple sub-
 | `--download` | — | Force GEE tile download. |
 | `--load-files` | `True` | Skip recreating intermediate files that already exist. |
 | `--recreate` | — | Force recreation of intermediate files. |
+| `--skip-eda` | `False` | Skip EDA plot generation in Step 1. |
 | `--skip-prep` | — | Comma-separated Step 0 sub-steps to skip. |
 | `-v`, `--verbose` | `False` | Enable verbose (DEBUG-level) logging. |
 
@@ -359,7 +361,12 @@ Ridge, Lasso) and ensemble tree models (XGBoost, LightGBM, Random Forest,
 Extra Trees, Histogram Gradient Boosting, CatBoost, Gradient Boosting,
 AdaBoost) — using Optuna + Dask hyperparameter optimisation (100 TPE trials,
 5-fold CV; 1 trial for parameter-free baselines) and reports R², normalised
-RMSE (%), normalised MAE (%), and normalised MBE (%).  The linear baselines
+RMSE (% of σ), normalised MAE (% of σ), and normalised MBE (%).  NRMSE and
+NMAE are normalized by the standard deviation of observed values rather than
+the mean, which is more appropriate for the right-skewed pumping distribution
+(where mean-normalisation underestimates relative error).  NMBE remains
+mean-normalised since bias direction relative to the mean is the meaningful
+quantity.  The linear baselines
 provide a reference for quantifying the value added by nonlinear models.
 
 #### Step 2a — Random 80/20 split (`evaluate_random()`)
@@ -1230,7 +1237,8 @@ Key functions:
   bias correction.
 - **`perform_bias_correction()`** — Applies basin-level or global bias
   correction using linear scaling.
-- **`calc_train_test_metrics()`** — Computes R², normalised RMSE, MAE, MBE.
+- **`calc_train_test_metrics()`** — Computes R², normalised RMSE (% of σ),
+  normalised MAE (% of σ), and normalised MBE (% of mean).
 - **`compute_perm_imp()`**, **`compute_ale_plots()`**,
   **`compute_shap_plots()`** — Model interpretability diagnostics.
 - **`generate_model_visualizations()`** — Scatter, residual, and time series

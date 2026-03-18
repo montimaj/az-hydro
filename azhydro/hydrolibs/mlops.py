@@ -60,6 +60,7 @@ from catboost import CatBoostRegressor
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=optuna.exceptions.ExperimentalWarning)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
@@ -294,20 +295,19 @@ def normalized_rmse(
         y_pred: np.array
 ) -> float:
     """
-    Normalized RMSE using mean.
+    Normalized RMSE using standard deviation.
 
     Args:
         y (np.array): Actual values.
         y_pred (np.array): Predicted values.
 
     Returns:
-        float: Normalized RMSE using mean.
+        float: Normalized RMSE using standard deviation.
     """
-
-    mean_y = np.mean(y)
-    if mean_y == 0:
+    std_y = np.std(y)
+    if std_y == 0:
         return np.nan
-    nrmse = root_mean_squared_error(y, y_pred) * 100 / mean_y
+    nrmse = root_mean_squared_error(y, y_pred) * 100 / std_y
     return nrmse
 
 
@@ -316,19 +316,19 @@ def normalized_mae(
         y_pred: np.array
 ) -> float:
     """
-    Normalized MAE using mean.
+    Normalized MAE using standard deviation.
 
     Args:
         y (np.array): Actual values.
         y_pred (np.array): Predicted values.
 
     Returns:
-        float: Normalized MAE using standard mean.
+        float: Normalized MAE using standard deviation.
     """
-    mean_y = np.mean(y)
-    if mean_y == 0:
+    std_y = np.std(y)
+    if std_y == 0:
         return np.nan
-    nmae = mean_absolute_error(y, y_pred) * 100 / mean_y
+    nmae = mean_absolute_error(y, y_pred) * 100 / std_y
     return nmae
 
 
@@ -344,7 +344,7 @@ def normalized_mbe(
         y_pred (np.array): Predicted values.
 
     Returns:
-        float: Normalized MAE using standard mean.
+        float: Normalized MBE using mean.
     """
     mean_y = np.mean(y)
     if mean_y == 0:
@@ -955,29 +955,34 @@ def build_ml_model_optuna(
             cv = cv.split(x_train, stratify_labels)
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         optuna_storage = os.path.join(model_dir, f'optuna_study_{model_name}.db')
-        if os.path.isfile(optuna_storage):
-            study = optuna.load_study(
-                study_name=f'Optuna_{model_name}',
-                storage=f'sqlite:///{optuna_storage}'
-            )
-        else:
-            study = optuna.create_study(
-                direction='minimize',
-                storage=f'sqlite:///{optuna_storage}',
-                study_name=f'Optuna_{model_name}',
-                load_if_exists=True,
-                sampler=optuna.samplers.TPESampler(seed=random_state)
-            )
-            study.set_metric_names(['NRMSE_with_Overfitting_Penalty'])
+        study = optuna.create_study(
+            direction='minimize',
+            storage=f'sqlite:///{optuna_storage}',
+            study_name=f'Optuna_{model_name}',
+            load_if_exists=True,
+            sampler=optuna.samplers.TPESampler(seed=random_state)
+        )
+        study.set_metric_names(['NRMSE_with_Overfitting_Penalty'])
+
+        completed = len([t for t in study.trials
+                         if t.state == optuna.trial.TrialState.COMPLETE])
+        remaining = max(0, n_trials - completed)
+
+        if remaining > 0:
+            logger.info(f'Running {remaining} remaining trials '
+                        f'(target={n_trials}, completed={completed})')
             study.optimize(
                 lambda trial: objective_with_cv(
                     trial, x_train, y_train,
                     model_name, cv, scoring_metrics,
                     alpha, random_state
                 ),
-                n_trials=n_trials,
+                n_trials=remaining,
                 show_progress_bar=True
             )
+        else:
+            logger.info(f'Study already has {completed} completed trials '
+                        f'(target={n_trials}) — skipping optimization')
         best_params = study.best_params
         logger.info(f'Best params: {best_params}')
         model_dict, _ = get_model_param_dict(random_state)
@@ -1202,52 +1207,52 @@ def build_ml_model_optuna_dask(
             dask_client = Client(dask_cluster)
             logger.info(f'Dask cluster started with {n_dask_workers} workers')
 
-        # Create or load study
-        if os.path.isfile(optuna_storage):
-            study = optuna.load_study(
-                study_name=f'Optuna_{model_name}',
-                storage=f'sqlite:///{optuna_storage}'
-            )
-            logger.info(f'Loaded existing study with {len(study.trials)} trials')
-        else:
-            # Create sampler with pruning support
-            sampler = optuna.samplers.TPESampler(
-                seed=random_state,
-                multivariate=True,
-                group=True
-            )
+        # Create or load study (load_if_exists preserves completed trials)
+        sampler = optuna.samplers.TPESampler(
+            seed=random_state,
+            multivariate=True,
+            group=True
+        )
+        pruner = optuna.pruners.MedianPruner(
+            n_startup_trials=10,
+            n_warmup_steps=5
+        ) if pruning else optuna.pruners.NopPruner()
 
-            # Create pruner if enabled
-            pruner = optuna.pruners.MedianPruner(
-                n_startup_trials=10,
-                n_warmup_steps=5
-            ) if pruning else optuna.pruners.NopPruner()
+        study = optuna.create_study(
+            direction='minimize',
+            storage=f'sqlite:///{optuna_storage}',
+            study_name=f'Optuna_{model_name}',
+            load_if_exists=True,
+            sampler=sampler,
+            pruner=pruner
+        )
+        study.set_metric_names(['NRMSE_with_Overfitting_Penalty'])
 
-            study = optuna.create_study(
-                direction='minimize',
-                storage=f'sqlite:///{optuna_storage}',
-                study_name=f'Optuna_{model_name}',
-                load_if_exists=True,
-                sampler=sampler,
-                pruner=pruner
-            )
-            study.set_metric_names(['NRMSE_with_Overfitting_Penalty'])
+        completed = len([t for t in study.trials
+                         if t.state == optuna.trial.TrialState.COMPLETE])
+        logger.info(f'Study has {completed} completed trials')
 
-            # For parameter-free models (LR), a single trial suffices
-            effective_n_trials = 1 if model_name == 'LR' else n_trials
-            # Run optimization — sequential trials since cross_validate already
-            # parallelises across CV folds and saturates all cores
+        # For parameter-free models (LR), a single trial suffices
+        effective_n_trials = 1 if model_name == 'LR' else n_trials
+        remaining = max(0, effective_n_trials - completed)
+
+        if remaining > 0:
+            logger.info(f'Running {remaining} remaining trials '
+                        f'(target={effective_n_trials}, completed={completed})')
             study.optimize(
                 lambda trial: objective_with_cv_enhanced(
                     trial, x_train, y_train,
                     model_name, cv, scoring_metrics,
                     alpha, random_state, pruning
                 ),
-                n_trials=effective_n_trials,
+                n_trials=remaining,
                 n_jobs=1,
                 show_progress_bar=True,
                 gc_after_trial=True
             )
+        else:
+            logger.info(f'Study already has {completed} completed trials '
+                        f'(target={effective_n_trials}) — skipping optimization')
 
         # Cleanup Dask
         if dask_client:
