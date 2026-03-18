@@ -135,22 +135,15 @@ def prepare_data(
     Download GEE data, preprocess GW CSVs, reproject vectors, and create
     all intermediate rasters needed by the ML pipeline.
 
-    Parameters
-    ----------
-    skip_download : bool
-        If *True*, skip the GEE download (use existing tiles).
-    load_files : bool
-        If *True*, skip recreating files that already exist on disk.
-    verbose : bool
-        If *True*, enable verbose output for GEE downloads.
-    skip_prep : set[str] or None
-        Sub-step names to skip: ``gee``, ``gw-csv``, ``vectors``,
-        ``gw-rasters``, ``streamflow``, ``basin-rasters``, ``reproject``.
+    Args:
+        skip_download (bool): If *True*, skip the GEE download (use existing tiles).
+        load_files (bool): If *True*, skip recreating files that already exist on disk.
+        verbose (bool): If *True*, enable verbose output for GEE downloads.
+        skip_prep (set[str] or None): Sub-step names to skip: ``gee``, ``gw-csv``, ``vectors``,
+            ``gw-rasters``, ``streamflow``, ``basin-rasters``, ``reproject``.
 
-    Returns
-    -------
-    list[str]
-        GEE data band names (needed by ``create_az_data``).
+    Returns:
+        list[str]: GEE data band names (needed by ``create_az_data``).
     """
     if skip_prep is None:
         skip_prep = set()
@@ -380,7 +373,15 @@ def _train_and_evaluate(
 
 # ---- 2a. Random 80/20 evaluation ------------------------------------------
 def evaluate_random(az_df: pd.DataFrame) -> dict:
-    """Random 80/20 split — single run with compare_all_models."""
+    """Random 80/20 split — single run with compare_all_models.
+
+    Args:
+        az_df (pd.DataFrame): Arizona training DataFrame.
+
+    Returns:
+        dict: Evaluation results containing comparison DataFrame and
+            best model metadata.
+    """
     logger.info('='*60)
     logger.info('Step 2a: Random 80/20 evaluation')
     logger.info('='*60)
@@ -1458,6 +1459,9 @@ def create_all_raster_maps() -> None:
     Iterates over all raster output directories (depth, volume
     partitions, CU, IE, OOD, and uncertainty) and produces 2×2
     era-mean panel figures with basin boundaries and AMA/INA labels.
+
+    Returns:
+        None.
     """
     logger.info('=' * 60)
     logger.info('Step 3g: Creating raster maps for all output categories')
@@ -1878,6 +1882,9 @@ def main() -> None:
         python pipeline.py --steps 0,1,2a
         python pipeline.py --steps 3   # prediction only
         python pipeline.py              # runs all steps
+
+    Returns:
+        None.
     """
     parser = argparse.ArgumentParser(
         description='ML Pipeline for Arizona Groundwater Pumping Prediction.',

@@ -135,37 +135,26 @@ def create_well_package(
     Only the **mm** rasters are read; ft, m³, and acre-ft values are
     computed arithmetically, reducing I/O by 75 %.
 
-    Parameters
-    ----------
-    well_registry_file : str
-        Path to the (reprojected) ADWR Well Registry shapefile.
-    raster_dirs : dict
-        ``{'mm': dir, 'ft': dir, 'm3': dir, 'AF': dir}`` for total
-        pumping rasters.
-    cat_raster_dirs : dict
-        ``{category: {'mm': dir, ...}, ...}`` for each of the 8
-        partitioned categories.
-    output_dir : str
-        Directory for the output GeoPackage.
-    ref_raster_file : str
-        Path to a reference raster used to map well coordinates to pixel
-        indices (must share the same grid as the withdrawal rasters).
-    pixel_area_m2 : float
-        Area of one raster pixel in m².  Default 2000² = 4 000 000.
-    start_year, end_year : int
-        Year range to process.
-    water_use : str or None
-        If set, filter wells by ``WATER_USE`` attribute before sampling.
-    gw_vector_dir : str or None
-        Directory containing per-year GW shapefiles (``GW_YYYY.shp``)
-        with ``AF Pumped`` column.  Used to build capacity-proportional
-        weights.  If *None*, falls back to ``PUMPRATE`` and then
-        equal-share.
+    Args:
+        well_registry_file (str): Path to the (reprojected) ADWR Well Registry shapefile.
+        raster_dirs (dict): ``{'mm': dir, 'ft': dir, 'm3': dir, 'AF': dir}`` for total
+            pumping rasters.
+        cat_raster_dirs (dict): ``{category: {'mm': dir, ...}, ...}`` for each of the 8
+            partitioned categories.
+        output_dir (str): Directory for the output GeoPackage.
+        ref_raster_file (str): Path to a reference raster used to map well coordinates to pixel
+            indices (must share the same grid as the withdrawal rasters).
+        pixel_area_m2 (float): Area of one raster pixel in m².  Default 2000² = 4 000 000.
+        start_year (int): Start of the year range to process.
+        end_year (int): End of the year range to process.
+        water_use (str or None): If set, filter wells by ``WATER_USE`` attribute before sampling.
+        gw_vector_dir (str or None): Directory containing per-year GW shapefiles (``GW_YYYY.shp``)
+            with ``AF Pumped`` column.  Used to build capacity-proportional
+            weights.  If *None*, falls back to ``PUMPRATE`` and then
+            equal-share.
 
-    Returns
-    -------
-    str
-        Path to the written GeoPackage file.
+    Returns:
+        str: Path to the written GeoPackage file.
     """
     makedirs(output_dir)
     out_gpkg = os.path.join(output_dir, 'Well_Package.gpkg')

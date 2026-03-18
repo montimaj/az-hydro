@@ -107,7 +107,11 @@ def get_ama_ina_basin_names() -> list[str]:
 
 
 def apply_journal_style():
-    """Apply journal-quality matplotlib settings."""
+    """Apply journal-quality matplotlib settings.
+
+    Returns:
+        None.
+    """
     plt.rcParams.update(JOURNAL_SETTINGS)
     sns.set_style("whitegrid")
     sns.set_context("paper", font_scale=1.2)
@@ -1027,7 +1031,26 @@ def make_time_series_plots(
         x_scaler: Any = None,
         y_scaler: Any = None
 ) -> None:
-    """Legacy wrapper for backward compatibility."""
+    """Legacy wrapper for backward compatibility.
+
+    Args:
+        input_df (pd.DataFrame): Input DataFrame with features and target.
+        model: Trained ML model.
+        features (list[str]): Feature column names.
+        output_dir (str): Output directory for plots.
+        year_col (str): Column name for year.
+        gw_basin_col (str): Column name for GW basin.
+        test_year_limits (tuple): Tuple of (start, end) year ranges for test set.
+        pred_attr (str): Target column name.
+        split_strategy (int): Splitting strategy identifier.
+        test_gw_basins (tuple[str, ...]): GW basin names for spatial holdout.
+        raster_res (float): Raster resolution in metres.
+        x_scaler: Feature scaler (or None).
+        y_scaler: Target scaler (or None).
+
+    Returns:
+        None.
+    """
     logger.info('Creating time series plots...')
     makedirs(output_dir)
 
@@ -1064,7 +1087,10 @@ def make_time_series_plots(
 
 def get_variable_name_dict() -> dict[str, str]:
     """
-    Returns a dictionary mapping variable names to more descriptive labels for plotting.
+    Return a dictionary mapping variable names to descriptive labels for plotting.
+
+    Returns:
+        dict[str, str]: Mapping of variable names to display labels.
     """
 
     var_name_dict = {
@@ -1298,7 +1324,18 @@ def plot_loo_heatmap(
         output_dir: str,
         title: str = 'LOO Heatmap',
 ) -> None:
-    """Heatmap of Test R² (fold × model)."""
+    """Heatmap of Test R² (fold × model).
+
+    Args:
+        metrics_df (pd.DataFrame): DataFrame with columns Model, Test_R2,
+            and one row per fold × model.
+        fold_col (str): Column name identifying folds (e.g. 'Test_Year', 'Basin').
+        output_dir (str): Output directory for the plot.
+        title (str): Figure title.
+
+    Returns:
+        None.
+    """
     apply_journal_style()
     pivot = metrics_df.pivot(index=fold_col, columns='Model', values='Test_R2')
     fig, ax = plt.subplots(figsize=(max(8, len(pivot.columns) * 1.2),
@@ -1319,7 +1356,17 @@ def plot_loo_bar(
         fold_col: str,
         output_dir: str,
 ) -> None:
-    """Grouped bar chart of averaged Test RMSE and R² per model."""
+    """Grouped bar chart of averaged Test RMSE and R² per model.
+
+    Args:
+        metrics_df (pd.DataFrame): DataFrame with columns Model, Test_R2,
+            and Test_RMSE.
+        fold_col (str): Column name identifying folds (used in titles).
+        output_dir (str): Output directory for the plot.
+
+    Returns:
+        None.
+    """
     apply_journal_style()
     avg = metrics_df.groupby('Model').agg(
         R2_mean=('Test_R2', 'mean'),
@@ -1508,7 +1555,22 @@ def create_full_period_time_series(
         title_prefix: str = '',
         sigma_data: dict | None = None,
 ) -> None:
-    """Time series of predicted AMA/INA pumping with era shading."""
+    """Time series of predicted AMA/INA pumping with era shading.
+
+    Args:
+        yearly_predictions (dict): {year: {'Volume_AF': ..., 'Mean_Depth_mm': ...}}.
+        output_dir (str): Output directory for plots.
+        start_year (int): First year on the x-axis.
+        end_year (int): Last year on the x-axis.
+        actual_data (dict or None): Observed meter data in same format as
+            yearly_predictions.
+        title_prefix (str): Prefix for figure title.
+        sigma_data (dict or None): Per-year uncertainty
+            {year: {'Mean_Depth_mm': σ, 'Volume_AF': σ}}.
+
+    Returns:
+        None.
+    """
     apply_journal_style()
     makedirs(output_dir)
     label = f'{title_prefix} ' if title_prefix else ''
@@ -1615,7 +1677,16 @@ def create_era_summary_maps(
         output_dir: str,
         title_prefix: str = '',
 ) -> None:
-    """Bar chart of mean annual pumping per era."""
+    """Bar chart of mean annual pumping per era.
+
+    Args:
+        yearly_predictions (dict): {year: {'Volume_AF': ...}}.
+        output_dir (str): Output directory for plots.
+        title_prefix (str): Prefix for figure title.
+
+    Returns:
+        None.
+    """
     apply_journal_style()
     makedirs(output_dir)
 
@@ -1654,7 +1725,17 @@ def build_annual_df(
         yearly_dict: dict[int, dict[str, dict]],
         name_col: str,
 ) -> pd.DataFrame:
-    """Pivot *yearly_dict* {year: {name: metrics_dict}} → long-form DataFrame."""
+    """Pivot *yearly_dict* {year: {name: metrics_dict}} → long-form DataFrame.
+
+    Args:
+        yearly_dict (dict[int, dict[str, dict]]): Nested dict keyed by year
+            then zone name, with metric dicts as values.
+        name_col (str): Column name for the zone identifier (e.g. 'Basin').
+
+    Returns:
+        pd.DataFrame: Long-form DataFrame with Year, *name_col*, Era, and
+            all metric columns.
+    """
     rows = []
     for year, totals in sorted(yearly_dict.items()):
         for name, metrics in totals.items():
@@ -1678,7 +1759,19 @@ def era_shaded_ts(
         color: str = '#2C3E50',
         label: str | None = None,
 ) -> None:
-    """Plot a line with ±1 σ shading and era background colours."""
+    """Plot a line with ±1 σ shading and era background colours.
+
+    Args:
+        ax (plt.Axes): Matplotlib axes to plot on.
+        years (np.ndarray): Array of years.
+        mean_vals (np.ndarray): Mean values per year.
+        std_vals (np.ndarray or None): Standard deviation per year (or None).
+        color (str): Line and shading colour.
+        label (str or None): Legend label.
+
+    Returns:
+        None.
+    """
     for era, (s, e) in ERA_PERIODS.items():
         ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.08)
     ax.plot(years, mean_vals, color=color, linewidth=1.4, marker='.', markersize=3,
@@ -1697,7 +1790,20 @@ def create_basin_time_series(
         actual_basin_yearly: dict[int, dict[str, dict]] | None = None,
         sigma_basin_yearly: dict[int, dict[str, dict]] | None = None,
 ) -> None:
-    """Per-basin annual GW withdrawal time series with era shading + uncertainty."""
+    """Per-basin annual GW withdrawal time series with era shading + uncertainty.
+
+    Args:
+        basin_yearly (dict[int, dict[str, dict]]): {year: {basin: metrics}}.
+        output_dir (str): Output directory for plots.
+        start_year (int): First year on the x-axis.
+        end_year (int): Last year on the x-axis.
+        title_prefix (str): Prefix for figure titles.
+        actual_basin_yearly (dict or None): Observed meter data in same format.
+        sigma_basin_yearly (dict or None): Per-basin uncertainty in same format.
+
+    Returns:
+        None.
+    """
     apply_journal_style()
     label = f'{title_prefix} ' if title_prefix else ''
     ts_dir = os.path.join(output_dir, 'Basin_Time_Series')
@@ -1849,7 +1955,22 @@ def create_subbasin_time_series(
         actual_subbasin_yearly: dict[int, dict[str, dict]] | None = None,
         sigma_subbasin_yearly: dict[int, dict[str, dict]] | None = None,
 ) -> None:
-    """Per-sub-basin annual GW withdrawal time series with era shading + uncertainty."""
+    """Per-sub-basin annual GW withdrawal time series with era shading + uncertainty.
+
+    Args:
+        subbasin_yearly (dict[int, dict[str, dict]]): {year: {subbasin: metrics}}.
+        output_dir (str): Output directory for plots.
+        subbasin_shp (str): Path to ADWR sub-basin shapefile.
+        ama_code_map (dict[str, str]): Mapping of AMA/INA codes to names.
+        start_year (int): First year on the x-axis.
+        end_year (int): Last year on the x-axis.
+        title_prefix (str): Prefix for figure titles.
+        actual_subbasin_yearly (dict or None): Observed meter data in same format.
+        sigma_subbasin_yearly (dict or None): Per-sub-basin uncertainty in same format.
+
+    Returns:
+        None.
+    """
     apply_journal_style()
     label = f'{title_prefix} ' if title_prefix else ''
     ts_dir = os.path.join(output_dir, 'Subbasin_Time_Series')
@@ -2036,22 +2157,21 @@ def create_graphical_abstract(
       - **Right**: Time series of total annual AMA/INA pumping (acre-ft)
         with era shading and an inset era bar chart.
 
-    Parameters
-    ----------
-    raster_dir : str
-        Directory containing ``Predicted_GW_<year>.tif`` depth rasters (mm).
-    basin_shp : str
-        Path to GW basin boundary shapefile.
-    output_dir : str
-        Where to save the figure.
-    start_year, end_year : int
-        Year range for the raster stack.
-    ref_raster : str or None
-        A reference raster for CRS/extent.  If *None*, the first raster in
-        *raster_dir* is used.
-    yearly_predictions : dict or None
-        ``{year: {'Volume_AF': ..., 'Mean_Depth_mm': ...}}`` for the
-        time-series panel.  If *None*, only the spatial panel is produced.
+    Args:
+        raster_dir (str): Directory containing ``Predicted_GW_<year>.tif``
+            depth rasters (mm).
+        basin_shp (str): Path to GW basin boundary shapefile.
+        output_dir (str): Where to save the figure.
+        start_year (int): First year of the raster stack.
+        end_year (int): Last year of the raster stack.
+        ref_raster (str or None): A reference raster for CRS/extent.  If
+            None, the first raster in *raster_dir* is used.
+        yearly_predictions (dict or None):
+            ``{year: {'Volume_AF': ..., 'Mean_Depth_mm': ...}}`` for the
+            time-series panel.  If None, only the spatial panel is produced.
+
+    Returns:
+        None.
     """
     import rasterio as rio
 
@@ -2250,22 +2370,15 @@ def _compute_era_means(
 ) -> dict[str, np.ma.MaskedArray]:
     """Load all .tif files in *raster_dir*, group by era, return era means.
 
-    Parameters
-    ----------
-    raster_dir : str
-        Directory containing ``*.tif`` rasters.
-    raster_shape : tuple
-        (rows, cols) expected raster shape.
-    band : int
-        Band number to read (1-based).  Default 1.
-    mask_nan_only : bool
-        If *True*, only mask NaN pixels (keep zeros visible).  Useful for
-        ratio bands like CV where zero is a valid value.
+    Args:
+        raster_dir (str): Directory containing ``*.tif`` rasters.
+        raster_shape (tuple): (rows, cols) expected raster shape.
+        band (int): Band number to read (1-based).  Default 1.
+        mask_nan_only (bool): If True, only mask NaN pixels (keep zeros
+            visible).  Useful for ratio bands like CV where zero is valid.
 
-    Returns
-    -------
-    dict
-        ``{era_name: masked_array}`` where masked pixels are zero/NaN.
+    Returns:
+        dict: ``{era_name: masked_array}`` where masked pixels are zero/NaN.
     """
     import rasterio as rio
 
@@ -2336,31 +2449,25 @@ def create_era_raster_maps(
     and AMA/INA labels overlaid.  Designed for Scientific Data
     publication quality.
 
-    Parameters
-    ----------
-    raster_dir : str
-        Directory containing ``*.tif`` rasters with years in filenames.
-    basin_shp : str
-        Path to GW basin boundary shapefile.
-    output_dir : str
-        Where to save the figure.
-    title : str
-        Figure super-title (category name).
-    unit_label : str
-        Colorbar label (e.g. 'Depth (mm)', 'Efficiency', 'OOD Flag').
-    cmap : str
-        Matplotlib colormap name.
-    out_filename : str or None
-        Output PNG filename.  Defaults to ``Era_Maps_{title_slug}.png``.
-    vmin, vmax : float or None
-        Explicit colorbar limits.  If *None*, derived from data.
-    symmetric : bool
-        If *True*, centre colorbar on zero (for difference maps).
-    band : int
-        Band number to read from each raster (1-based).  Default 1.
-    mask_nan_only : bool
-        If *True*, only mask NaN pixels (keep zeros visible).  Useful
-        for ratio quantities like CV where zero is meaningful.
+    Args:
+        raster_dir (str): Directory containing ``*.tif`` rasters with years
+            in filenames.
+        basin_shp (str): Path to GW basin boundary shapefile.
+        output_dir (str): Where to save the figure.
+        title (str): Figure super-title (category name).
+        unit_label (str): Colorbar label (e.g. 'Depth (mm)').
+        cmap (str): Matplotlib colormap name.
+        out_filename (str or None): Output PNG filename.  Defaults to
+            ``Era_Maps_{title_slug}.png``.
+        vmin (float or None): Explicit colorbar minimum.
+        vmax (float or None): Explicit colorbar maximum.
+        symmetric (bool): If True, centre colorbar on zero.
+        band (int): Band number to read from each raster (1-based).
+        mask_nan_only (bool): If True, only mask NaN pixels (keep zeros
+            visible).
+
+    Returns:
+        None.
     """
     import rasterio as rio
 
@@ -2481,28 +2588,23 @@ def create_actual_vs_predicted_maps(
     Actual no-data regions (unmetered areas outside AMA/INA) are shown in gray.
     Groundwater basin boundaries and AMA/INA labels are overlaid on all panels.
 
-    Parameters
-    ----------
-    actual_dir : str
-        Directory containing actual meter-based rasters (``GW_<year>.tif``).
-    predicted_dir : str
-        Directory containing predicted rasters (``*_<year>_*.tif``).
-    basin_shp : str
-        Path to GW basin boundary shapefile.
-    output_dir : str
-        Where to save the figure.
-    title : str
-        Figure super-title.
-    unit_label : str
-        Colorbar label.
-    cmap : str
-        Colormap for actual and predicted panels.
-    diff_cmap : str
-        Diverging colormap for the difference panel.
-    start_year, end_year : int
-        Year range for the comparison (metered period).
-    out_filename : str
-        Output PNG filename.
+    Args:
+        actual_dir (str): Directory containing actual meter-based rasters
+            (``GW_<year>.tif``).
+        predicted_dir (str): Directory containing predicted rasters
+            (``*_<year>_*.tif``).
+        basin_shp (str): Path to GW basin boundary shapefile.
+        output_dir (str): Where to save the figure.
+        title (str): Figure super-title.
+        unit_label (str): Colorbar label.
+        cmap (str): Colormap for actual and predicted panels.
+        diff_cmap (str): Diverging colormap for the difference panel.
+        start_year (int): First year of the comparison period.
+        end_year (int): Last year of the comparison period.
+        out_filename (str): Output PNG filename.
+
+    Returns:
+        None.
     """
     import rasterio as rio
 
@@ -2788,31 +2890,25 @@ def create_trend_maps(
     Per-basin and (optionally) per-sub-basin trend statistics CSVs are
     also written alongside the maps.
 
-    Parameters
-    ----------
-    raster_dir : str
-        Directory containing ``*.tif`` rasters with years in filenames.
-    basin_shp : str
-        Path to GW basin boundary shapefile.
-    output_dir : str
-        Where to save figures.
-    title : str
-        Category name for the figure title.
-    unit_label : str
-        Depth/volume unit (e.g. 'mm', 'AF').
-    periods : dict or None
-        ``{period_name: (start, end)}`` year ranges to analyse.
-        Defaults to the four standard eras plus the full period.
-    alpha : float
-        Significance level for Mann-Kendall (default 0.05).
-    band : int
-        Band number to read from each raster (1-based).
-    subbasin_shp : str or None
-        Path to sub-basin shapefile for sub-basin statistics.
-    basin_col : str
-        Column in basin shapefile identifying basins.
-    subbasin_col : str
-        Column in sub-basin shapefile identifying sub-basins.
+    Args:
+        raster_dir (str): Directory containing ``*.tif`` rasters with years
+            in filenames.
+        basin_shp (str): Path to GW basin boundary shapefile.
+        output_dir (str): Where to save figures.
+        title (str): Category name for the figure title.
+        unit_label (str): Depth/volume unit (e.g. 'mm', 'AF').
+        periods (dict or None): ``{period_name: (start, end)}`` year ranges
+            to analyse.  Defaults to the four standard eras plus full period.
+        alpha (float): Significance level for Mann-Kendall (default 0.05).
+        band (int): Band number to read from each raster (1-based).
+        subbasin_shp (str or None): Path to sub-basin shapefile for
+            sub-basin statistics.
+        basin_col (str): Column in basin shapefile identifying basins.
+        subbasin_col (str): Column in sub-basin shapefile identifying
+            sub-basins.
+
+    Returns:
+        None.
     """
     import rasterio as rio
 
@@ -3039,32 +3135,28 @@ def plot_intercomp_time_series(
 ) -> None:
     """Generic per-basin intercomparison time series.
 
-    Parameters
-    ----------
-    all_sources : dict
-        ``{source_name: {cat_key: {'mean': ..., 'yearly': {year: {basin: val}}}}}``
-        For a 2-source comparison (e.g. ML vs PS) pass two entries.
-        For a 3-source comparison (e.g. ML vs NHM vs Reitz) pass three.
-        Values are in AF for ``mode='volume'`` or dimensionless for ``mode='ratio'``.
-    categories : list[str]
-        Category keys to iterate over (e.g. ``['GW', 'SW']``).
-    basin_names : list[str]
-        Basin identifiers.
-    basin_areas_m2 : dict[str, float]
-        Basin areas for depth conversion.
-    output_dir : str
-        Directory for saved plots.
-    colors, markers : dict
-        Per-source colours and markers.
-    labels : dict or None
-        Display labels per source.  Defaults to source keys.
-    title_prefix : str
-        Prepended to plot titles.
-    file_prefix : str
-        Prepended to filenames.
-    mode : str
-        ``'volume'`` → 2-row (depth mm/ft + volume m³/AF).
-        ``'ratio'`` → 1-row (dimensionless).
+    Args:
+        all_sources (dict): ``{source_name: {cat_key: {'mean': ...,
+            'yearly': {year: {basin: val}}}}}``  Values are in AF for
+            ``mode='volume'`` or dimensionless for ``mode='ratio'``.
+        categories (list[str]): Category keys to iterate over.
+        basin_names (list[str]): Basin identifiers.
+        basin_areas_m2 (dict[str, float]): Basin areas for depth conversion.
+        output_dir (str): Directory for saved plots.
+        colors (dict[str, str]): Per-source colours.
+        markers (dict[str, str]): Per-source markers.
+        labels (dict or None): Display labels per source.
+        title_prefix (str): Prepended to plot titles.
+        file_prefix (str): Prepended to filenames.
+        mode (str): ``'volume'`` → 2-row (depth + volume).
+            ``'ratio'`` → 1-row (dimensionless).
+        af_to_m3 (float): Conversion factor AF to m³.
+        m_to_mm (float): Conversion factor metres to mm.
+        mm_to_ft (float): Conversion factor mm to ft.
+        m3_to_af (float): Conversion factor m³ to AF.
+
+    Returns:
+        None.
     """
     makedirs(output_dir)
     if labels is None:
@@ -3191,24 +3283,21 @@ def plot_intercomp_scatter(
 ) -> None:
     """Generic intercomparison scatter plots with 1:1 line and linear fit.
 
-    Parameters
-    ----------
-    pairs : list of (label_a, label_b, mean_a, mean_b)
-        Each tuple is one subplot column.  ``mean_a``/``mean_b`` are
-        ``{basin: value}`` dicts.  Values in AF for ``mode='volume'``
-        or dimensionless for ``mode='ratio'``.
-    basin_names : list[str]
-        Basin identifiers.
-    basin_areas_m2 : dict[str, float]
-        Basin areas for mm conversion.
-    output_dir : str
-        Directory for saved plots.
-    title : str
-        Figure suptitle.
-    filename : str
-        Output filename.
-    mode : str
-        ``'volume'`` → 2 rows (AF, mm).  ``'ratio'`` → 1 row.
+    Args:
+        pairs (list): List of (label_a, label_b, mean_a, mean_b) tuples.
+            ``mean_a``/``mean_b`` are ``{basin: value}`` dicts.
+        basin_names (list[str]): Basin identifiers.
+        basin_areas_m2 (dict[str, float]): Basin areas for mm conversion.
+        output_dir (str): Directory for saved plots.
+        title (str): Figure suptitle.
+        filename (str): Output filename.
+        mode (str): ``'volume'`` → 2 rows (AF, mm).
+            ``'ratio'`` → 1 row.
+        af_to_m3 (float): Conversion factor AF to m³.
+        m_to_mm (float): Conversion factor metres to mm.
+
+    Returns:
+        None.
     """
     makedirs(output_dir)
     n_pairs = len(pairs)
@@ -3295,24 +3384,21 @@ def plot_intercomp_taylor(
 ) -> None:
     """Generic Taylor diagram for intercomparison datasets.
 
-    Parameters
-    ----------
-    all_sources : dict
-        ``{source_name: {cat_key: {'yearly': {year: {basin: val}}}}}``
-    pairs : list of (src_a, src_b)
-        Dataset pairs.  Second element is the reference.
-    categories : list[str]
-        Category keys to iterate over.
-    basin_names : list[str]
-        Basin identifiers.
-    output_dir : str
-        Directory for saved plots.
-    pair_colors : dict or None
-        ``{'src_a vs src_b': '#color'}``.  Auto-generated if None.
-    title_prefix : str
-        Prepended to diagram titles.
-    file_prefix : str
-        Prepended to filenames.
+    Args:
+        all_sources (dict): ``{source_name: {cat_key: {'yearly':
+            {year: {basin: val}}}}}``.
+        pairs (list): List of (src_a, src_b) tuples.  Second element is
+            the reference.
+        categories (list[str]): Category keys to iterate over.
+        basin_names (list[str]): Basin identifiers.
+        output_dir (str): Directory for saved plots.
+        pair_colors (dict or None): ``{'src_a vs src_b': '#color'}``.
+            Auto-generated if None.
+        title_prefix (str): Prepended to diagram titles.
+        file_prefix (str): Prepended to filenames.
+
+    Returns:
+        None.
     """
     makedirs(output_dir)
     default_palette = ['#2C3E50', '#E67E22', '#27AE60', '#E74C3C', '#8E44AD']
@@ -3409,12 +3495,13 @@ def plot_temporal_heatmap(
 ) -> None:
     """Heatmap of per-basin Pearson r and NSE, one panel per category.
 
-    Parameters
-    ----------
-    temporal_basin_df : pd.DataFrame
-        Must contain columns: Category, Pair, Basin, Pearson_r, NSE.
-    output_dir : str
-        Directory for saved plots.
+    Args:
+        temporal_basin_df (pd.DataFrame): Must contain columns: Category,
+            Pair, Basin, Pearson_r, NSE.
+        output_dir (str): Directory for saved plots.
+
+    Returns:
+        None.
     """
     import matplotlib.colors as mcolors
     makedirs(output_dir)
@@ -3469,12 +3556,13 @@ def plot_temporal_box_violin(
 ) -> None:
     """Box + overlaid violin plots of per-basin r/NSE distributions.
 
-    Parameters
-    ----------
-    temporal_basin_df : pd.DataFrame
-        Must contain columns: Category, Pair, Basin, Pearson_r, NSE.
-    output_dir : str
-        Directory for saved plots.
+    Args:
+        temporal_basin_df (pd.DataFrame): Must contain columns: Category,
+            Pair, Basin, Pearson_r, NSE.
+        output_dir (str): Directory for saved plots.
+
+    Returns:
+        None.
     """
     makedirs(output_dir)
 
@@ -3526,14 +3614,15 @@ def plot_temporal_r_vs_nse(
 ) -> None:
     """Paired scatter of per-basin Pearson r vs NSE for each dataset pair.
 
-    Parameters
-    ----------
-    temporal_basin_df : pd.DataFrame
-        Must contain columns: Category, Pair, Basin, Pearson_r, NSE.
-    output_dir : str
-        Directory for saved plots.
-    pair_colors : dict or None
-        ``{'pair_label': '#color'}``.  Falls back to grey if missing.
+    Args:
+        temporal_basin_df (pd.DataFrame): Must contain columns: Category,
+            Pair, Basin, Pearson_r, NSE.
+        output_dir (str): Directory for saved plots.
+        pair_colors (dict or None): ``{'pair_label': '#color'}``.  Falls
+            back to grey if missing.
+
+    Returns:
+        None.
     """
     makedirs(output_dir)
     if pair_colors is None:

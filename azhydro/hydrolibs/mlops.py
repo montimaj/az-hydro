@@ -2014,8 +2014,8 @@ def calc_train_test_metrics(
         precision (int): Floating point precision to use.
         n_features (int or None): Number of model features for adjusted R². Falls back to column count if None.
 
-    Returns
-        None
+    Returns:
+        None.
     """
     if use_ama_ina:
         ama_ina_basins = get_ama_ina_basin_names()

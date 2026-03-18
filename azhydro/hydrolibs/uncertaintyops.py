@@ -215,13 +215,14 @@ def _compute_category_sigmas(
 ) -> dict[str, np.ndarray]:
     """Compute per-category σ from ensemble member category dicts.
 
-    Parameters
-    ----------
-    member_cats : list of dicts
-        Each dict maps category name → 1-D prediction array.
-    mode : {'std', 'half_range'}
-        'std' — ``np.nanstd`` with ``ddof=1`` (3+ members).
-        'half_range' — ``|a − b| / 2`` (2 counterfactual members).
+    Args:
+        member_cats (list[dict[str, np.ndarray]]): Each dict maps category name to
+            1-D prediction array.
+        mode (str): 'std' — ``np.nanstd`` with ``ddof=1`` (3+ members).
+            'half_range' — ``|a - b| / 2`` (2 counterfactual members).
+
+    Returns:
+        dict[str, np.ndarray]: Per-category sigma arrays.
     """
     cat_sigmas: dict[str, np.ndarray] = {}
     for cat_name in member_cats[0]:
@@ -324,20 +325,16 @@ def _aggregate_member_volumes(
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
     """Aggregate per-member pixel predictions to basin/sub-basin volumes.
 
-    Parameters
-    ----------
-    member_preds : list of 1-D arrays
-        Each array has length = number of valid pixels (same as year_df rows).
-    year_df : DataFrame
-        Must contain ``GW_Basin`` and ``GW_Subbasin`` string columns.
-    mm_to_m3 : float
-        Conversion factor: pixel depth (mm) → volume (m³).
+    Args:
+        member_preds (list[np.ndarray]): Each array has length = number of valid pixels
+            (same as year_df rows).
+        year_df (pd.DataFrame): Must contain ``GW_Basin`` and ``GW_Subbasin`` string columns.
+        mm_to_m3 (float): Conversion factor: pixel depth (mm) to volume (m³).
 
-    Returns
-    -------
-    (basin_vols, subbasin_vols)
-        Each is ``{region_name: np.ndarray of shape (n_members,)}``
-        giving the total volume (AF) per member for that region.
+    Returns:
+        tuple[dict[str, np.ndarray], dict[str, np.ndarray]]: (basin_vols, subbasin_vols) —
+            each is ``{region_name: np.ndarray of shape (n_members,)}``
+            giving the total volume (AF) per member for that region.
     """
     basins = year_df['GW_Basin'].values
     subbasins = year_df['GW_Subbasin'].values
@@ -462,12 +459,27 @@ def compute_sigma_maca(
     Compute σ_MACA: per-pixel std of predictions across 5 representative
     GCMs for future years (2026-2099).
 
-    Returns
-    -------
-    tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]], dict[str, str]]
-        (sigma_maca, cat_sigma_maca, gcm_mosaic_dirs) — per-year total σ
-        arrays, per-category per-year σ arrays, and the per-GCM mosaic
-        directory paths (reused by σ_CU).
+    Args:
+        model: Trained ML model for prediction.
+        feature_cols (list[str]): Feature column names.
+        az_df (pd.DataFrame): Arizona training DataFrame.
+        drop_attrs (tuple[str, ...]): Columns to drop before prediction.
+        pred_data_dir (str): Directory containing predictor rasters.
+        output_dir (str): Base output directory for uncertainty products.
+        input_dir (str): Base input directory for GEE downloads.
+        vector_dir (str): Directory containing vector shapefiles.
+        mosaic_res (int): Raster resolution in metres.
+        gcloud_project (str): Google Cloud project ID.
+        gcloud_bucket (str): Google Cloud Storage bucket name.
+        tile_size (int): GEE export tile size.
+        end_year (int): Last year of prediction period.
+        year_list (list[int]): Full list of prediction years.
+        skip_download (bool): If True, skip GEE download step.
+
+    Returns:
+        tuple: (sigma_maca, cat_sigma_maca, gcm_mosaic_dirs) — per-year
+            total σ arrays, per-category per-year σ arrays, and per-GCM
+            mosaic directory paths (reused by σ_CU).
     """
     import hydrolibs.dataops as dataops
     import hydrolibs.partitionops as partops
@@ -678,11 +690,25 @@ def compute_sigma_model(
     Compute σ_model: per-pixel std of predictions across a 10-seed
     XGBoost ensemble.
 
-    Returns
-    -------
-    tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]
-        (sigma_model, cat_sigma_model) — per-year total σ and
-        per-category per-year σ arrays.
+    Args:
+        x_train (pd.DataFrame): Training feature matrix.
+        y_train (np.ndarray): Training target array.
+        feature_cols (list[str]): Feature column names.
+        az_df (pd.DataFrame): Arizona training DataFrame.
+        drop_attrs (tuple[str, ...]): Columns to drop before prediction.
+        pred_data_dir (str): Directory containing predictor rasters.
+        output_dir (str): Base output directory for uncertainty products.
+        start_year (int): First year of prediction period.
+        end_year (int): Last year of prediction period.
+        year_list (list[int]): Full list of prediction years.
+        mosaic_res (int): Raster resolution in metres.
+        n_trials (int): Number of Optuna trials per seed.
+        n_dask_workers (int): Number of Dask workers.
+        use_dask (bool): If True, use Dask for parallel tuning.
+
+    Returns:
+        tuple: (sigma_model, cat_sigma_model) — per-year total σ and
+            per-category per-year σ arrays.
     """
     import hydrolibs.mlops as mlops
     import hydrolibs.partitionops as partops
@@ -807,11 +833,21 @@ def compute_sigma_irr(
     For years outside 1985-2025, only the regression estimate exists, so
     σ_irr is estimated via perturbation (irr ± RMSE), taking the half-range.
 
-    Returns
-    -------
-    tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]
-        (sigma_irr, cat_sigma_irr) — per-year total σ and
-        per-category per-year σ arrays.
+    Args:
+        model: Trained ML model for prediction.
+        feature_cols (list[str]): Feature column names.
+        az_df (pd.DataFrame): Arizona training DataFrame.
+        drop_attrs (tuple[str, ...]): Columns to drop before prediction.
+        pred_data_dir (str): Directory containing predictor rasters.
+        output_dir (str): Base output directory for uncertainty products.
+        start_year (int): First year of prediction period.
+        end_year (int): Last year of prediction period.
+        year_list (list[int]): Full list of prediction years.
+        mosaic_res (int): Raster resolution in metres.
+
+    Returns:
+        tuple: (sigma_irr, cat_sigma_irr) — per-year total σ and
+            per-category per-year σ arrays.
     """
     from sklearn.linear_model import LinearRegression
 
@@ -980,11 +1016,26 @@ def compute_sigma_lulc(
     irr_fraction chain is re-derived, so this component subsumes σ_irr
     for future years.
 
-    Returns
-    -------
-    tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]
-        (sigma_lulc, cat_sigma_lulc) — per-year total σ and
-        per-category per-year σ arrays.
+    Args:
+        model: Trained ML model for prediction.
+        feature_cols (list[str]): Feature column names.
+        az_df (pd.DataFrame): Arizona training DataFrame.
+        drop_attrs (tuple[str, ...]): Columns to drop before prediction.
+        pred_data_dir (str): Directory containing predictor rasters.
+        output_dir (str): Base output directory for uncertainty products.
+        input_dir (str): Base input directory for GEE downloads.
+        vector_dir (str): Directory containing vector shapefiles.
+        mosaic_res (int): Raster resolution in metres.
+        gcloud_project (str): Google Cloud project ID.
+        gcloud_bucket (str): Google Cloud Storage bucket name.
+        tile_size (int): GEE export tile size.
+        end_year (int): Last year of prediction period.
+        year_list (list[int]): Full list of prediction years.
+        skip_download (bool): If True, skip GEE download step.
+
+    Returns:
+        tuple: (sigma_lulc, cat_sigma_lulc) — per-year total σ and
+            per-category per-year σ arrays.
     """
     from sklearn.linear_model import LinearRegression
 
@@ -1151,11 +1202,21 @@ def compute_sigma_gw(
     snapshots is used, capturing temporal variability in irrigation source
     allocation.
 
-    Returns
-    -------
-    tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]
-        (sigma_gw, cat_sigma_gw) — per-year total σ and
-        per-category per-year σ arrays.
+    Args:
+        model: Trained ML model for prediction.
+        feature_cols (list[str]): Feature column names.
+        az_df (pd.DataFrame): Arizona training DataFrame.
+        drop_attrs (tuple[str, ...]): Columns to drop before prediction.
+        pred_data_dir (str): Directory containing predictor rasters.
+        output_dir (str): Base output directory for uncertainty products.
+        start_year (int): First year of prediction period.
+        end_year (int): Last year of prediction period.
+        year_list (list[int]): Full list of prediction years.
+        mosaic_res (int): Raster resolution in metres.
+
+    Returns:
+        tuple: (sigma_gw, cat_sigma_gw) — per-year total σ and
+            per-category per-year σ arrays.
     """
     import hydrolibs.partitionops as partops
     from hydrolibs.rasterops import read_raster_as_arr, write_raster
@@ -1281,6 +1342,22 @@ def run_gw_fraction_sensitivity(
     Writes ``GW_Fraction_Sensitivity.csv`` with columns:
         Year, Category, Baseline_AF, Plus_AF, Minus_AF,
         Delta_Plus_AF, Delta_Minus_AF, Pct_Change_Plus, Pct_Change_Minus
+
+    Args:
+        model: Trained ML model for prediction.
+        feature_cols (list[str]): Feature column names.
+        az_df (pd.DataFrame): Arizona training DataFrame.
+        drop_attrs (tuple[str, ...]): Columns to drop before prediction.
+        pred_data_dir (str): Directory containing predictor rasters.
+        output_dir (str): Base output directory for uncertainty products.
+        start_year (int): First year of prediction period.
+        end_year (int): Last year of prediction period.
+        year_list (list[int]): Full list of prediction years.
+        mosaic_res (int): Raster resolution in metres.
+        delta (float): GW fraction perturbation magnitude (default 0.2).
+
+    Returns:
+        None.
     """
     import hydrolibs.partitionops as partops
     from hydrolibs.sysops import makedirs
@@ -1398,24 +1475,21 @@ def compute_sigma_total(
 
     A temporal mean-CV raster across all years is also written.
 
-    Parameters
-    ----------
-    sigma_components : dict[str, dict[int, np.ndarray]]
-        Mapping of component name → {year → 1-D std array}.
-        E.g. {'MACA': {...}, 'Model': {...}, 'Irr': {...}, 'GW': {...}}
-    prediction_raster_dir : str
-        Directory containing total-pumping prediction rasters named
-        ``Predicted_GW_{year}_mm.tif``.  Required for CV computation.
-    cat_sigma_components : dict or None
-        Mapping of component name → {category → {year → 1-D std array}}.
-        When provided, per-category σ_total is computed via quadrature
-        and written as ``Sigma_Total_{cat}_mm_{year}.tif``.
+    Args:
+        sigma_components (dict[str, dict[int, np.ndarray]]): Mapping of component name to
+            {year: 1-D std array}.
+            E.g. {'MACA': {...}, 'Model': {...}, 'Irr': {...}, 'GW': {...}}
+        prediction_raster_dir (str): Directory containing total-pumping prediction rasters named
+            ``Predicted_GW_{year}_mm.tif``.  Required for CV computation.
+        cat_sigma_components (dict or None): Mapping of component name to
+            {category: {year: 1-D std array}}.
+            When provided, per-category sigma_total is computed via quadrature
+            and written as ``Sigma_Total_{cat}_mm_{year}.tif``.
 
-    Returns
-    -------
-    tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]
-        (sigma_total, cat_sigma_total) — per-year total σ arrays and
-        per-category per-year σ_total arrays.
+    Returns:
+        tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]: (sigma_total,
+            cat_sigma_total) — per-year total sigma arrays and per-category per-year
+            sigma_total arrays.
     """
     from hydrolibs.rasterops import read_raster_as_arr, write_raster
     from hydrolibs.sysops import makedirs
@@ -1709,6 +1783,18 @@ def compute_sigma_cu(
 
     Writes σ rasters for Irrigation_CU, Irrigation_GW_CU, and
     Irrigation_SW_CU for future years (2026-2099).
+
+    Args:
+        gcm_mosaic_dirs (dict[str, str]): Per-GCM mosaic directory paths
+            from ``compute_sigma_maca``.
+        pred_data_dir (str): Directory containing ensemble predictor rasters.
+        output_dir (str): Base output directory for uncertainty products.
+        end_year (int): Last year of prediction period.
+        year_list (list[int]): Full list of prediction years.
+        mosaic_res (int): Raster resolution in metres.
+
+    Returns:
+        None.
     """
     from hydrolibs.sysops import makedirs
 
@@ -1824,6 +1910,36 @@ def run_uncertainty_quantification(
     σ_LULC (future only), σ_gw, and combines them into σ_total via
     quadrature.  Writes per-component and total uncertainty rasters,
     summary CSVs, and time-series plots.
+
+    Args:
+        model: Trained ML model for prediction.
+        feature_cols (list[str]): Feature column names.
+        x_train (pd.DataFrame): Training feature matrix.
+        y_train (np.ndarray): Training target array.
+        az_df (pd.DataFrame): Arizona training DataFrame.
+        drop_attrs (tuple[str, ...]): Columns to drop before prediction.
+        pred_data_dir (str): Directory containing predictor rasters.
+        model_dir (str): Base model output directory.
+        input_dir (str): Base input directory for GEE downloads.
+        output_dir (str): Base output directory.
+        vector_dir (str): Directory containing vector shapefiles.
+        mosaic_res (int): Raster resolution in metres.
+        gcloud_project (str): Google Cloud project ID.
+        gcloud_bucket (str): Google Cloud Storage bucket name.
+        tile_size (int): GEE export tile size.
+        start_year (int): First year of prediction period.
+        end_year (int): Last year of prediction period.
+        year_list (list[int]): Full list of prediction years.
+        n_trials (int): Number of Optuna trials per seed.
+        n_dask_workers (int): Number of Dask workers.
+        use_dask (bool): If True, use Dask for parallel tuning.
+        skip_download (bool): If True, skip GEE download step.
+        subbasin_shp (str): Path to ADWR sub-basin shapefile.
+        ama_code_map (dict or None): AMA/INA code mapping.
+        basin_shp (str): Path to GW basin shapefile.
+
+    Returns:
+        None.
     """
     import hydrolibs.visualops as vizops
     from hydrolibs.sysops import makedirs
@@ -2006,6 +2122,16 @@ def augment_prediction_rasters(
 
     σ_total rasters are stored in mm; they are scaled to the target unit
     before writing.
+
+    Args:
+        sigma_total_raster_dir (str): Directory containing Sigma_Total rasters.
+        prediction_base_dir (str): Base directory for prediction rasters.
+        start_year (int): First year of prediction period.
+        end_year (int): Last year of prediction period.
+        mosaic_res (int or float): Raster resolution in metres.
+
+    Returns:
+        None.
     """
     from hydrolibs.rasterops import read_raster_as_arr
 
@@ -2102,6 +2228,16 @@ def augment_category_rasters(
     quadrature over per-category ensemble spreads, so each category's
     uncertainty is derived directly from the ensemble — not approximated
     by linear scaling of the total σ.
+
+    Args:
+        prediction_dir (str): Base directory for per-category prediction rasters.
+        sigma_total_raster_dir (str): Directory containing per-category σ_total rasters.
+        start_year (int): First year of prediction period.
+        end_year (int): Last year of prediction period.
+        mosaic_res (int or float): Raster resolution in metres.
+
+    Returns:
+        None.
     """
     import hydrolibs.partitionops as partops
     from hydrolibs.rasterops import read_raster_as_arr
@@ -2178,6 +2314,16 @@ def augment_cu_rasters(
 
     For future years (≥ 2026), σ_CU is the inter-GCM spread in
     max(ET_irr − Peff_irr, 0).  For historical years, σ_CU = 0.
+
+    Args:
+        sigma_cu_raster_dir (str): Directory containing σ_CU rasters.
+        prediction_dir (str): Base directory for CU prediction rasters.
+        start_year (int): First year of prediction period.
+        end_year (int): Last year of prediction period.
+        mosaic_res (int or float): Raster resolution in metres.
+
+    Returns:
+        None.
     """
     logger.info('Augmenting CU rasters with uncertainty bands...')
 
@@ -2250,6 +2396,14 @@ def augment_ie_rasters(
 
     CU and withdrawal rasters must already be augmented (6-band) so
     that band 3 = CV is available.
+
+    Args:
+        prediction_dir (str): Base directory for IE/CU/withdrawal rasters.
+        start_year (int): First year of prediction period.
+        end_year (int): Last year of prediction period.
+
+    Returns:
+        None.
     """
     logger.info('Augmenting IE rasters with uncertainty bands...')
 

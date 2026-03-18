@@ -85,23 +85,15 @@ def _raster_basin_volumes(
     """Sum raster depth values within each basin polygon and return
     volumes in acre-feet.
 
-    Parameters
-    ----------
-    raster_path : str
-        Path to a single-band depth raster (mm or m).
-    basin_gdf : gpd.GeoDataFrame
-        Basin polygons in the same CRS as *raster_path*.
-    basin_col : str
-        Column in *basin_gdf* identifying basins.
-    pixel_area_m2 : float
-        Pixel area in square metres.
-    depth_unit : str
-        ``'mm'`` or ``'m'`` — unit of pixel values.
+    Args:
+        raster_path (str): Path to a single-band depth raster (mm or m).
+        basin_gdf (gpd.GeoDataFrame): Basin polygons in the same CRS as *raster_path*.
+        basin_col (str): Column in *basin_gdf* identifying basins.
+        pixel_area_m2 (float): Pixel area in square metres.
+        depth_unit (str): ``'mm'`` or ``'m'`` — unit of pixel values.
 
-    Returns
-    -------
-    dict[str, float]
-        ``{basin_name: volume_AF}``.
+    Returns:
+        dict[str, float]: ``{basin_name: volume_AF}``.
     """
     depth_to_m = 1.0 / M_TO_MM if depth_unit == 'mm' else 1.0
     volumes = {}
@@ -138,10 +130,8 @@ def _raster_basin_means(
     within each basin polygon.  Used for dimensionless ratio rasters
     (e.g. irrigation efficiency).
 
-    Returns
-    -------
-    dict[str, float]
-        ``{basin_name: mean_value}``.
+    Returns:
+        dict[str, float]: ``{basin_name: mean_value}``.
     """
     means = {}
     with rio.open(raster_path) as src:
@@ -200,34 +190,22 @@ def load_nhm_basin_volumes(
     If *predictor_dir* is not provided, the full HUC12 area is used with
     a warning.
 
-    Parameters
-    ----------
-    nhm_dir : str
-        Directory containing the NHM CSV files.
-    huc12_geojson : str
-        Path to ``AZ_HUC12.geojson``.
-    basin_gdf : gpd.GeoDataFrame
-        Basin polygons (target CRS = reference raster CRS).
-    basin_col : str
-        Column in *basin_gdf* naming basins.
-    ref_raster : str
-        Reference raster for grid/CRS information.
-    year_range : tuple[int, int]
-        ``(start_year, end_year)`` inclusive.
-    output_dir : str
-        Directory for intermediate rasters.
-    predictor_dir : str or None
-        Directory with ``Predictor_YYYY.tif`` multi-band rasters containing
-        ``annual_irr_fraction`` (band *irr_fraction_band*).  When provided,
-        the mean irrigated fraction per HUC12 is used to scale the area.
-    irr_fraction_band : int
-        1-indexed band number for ``annual_irr_fraction`` in the predictor
-        rasters (default 14).
+    Args:
+        nhm_dir (str): Directory containing the NHM CSV files.
+        huc12_geojson (str): Path to ``AZ_HUC12.geojson``.
+        basin_gdf (gpd.GeoDataFrame): Basin polygons (target CRS = reference raster CRS).
+        basin_col (str): Column in *basin_gdf* naming basins.
+        ref_raster (str): Reference raster for grid/CRS information.
+        year_range (tuple[int, int]): ``(start_year, end_year)`` inclusive.
+        output_dir (str): Directory for intermediate rasters.
+        predictor_dir (str or None): Directory with ``Predictor_YYYY.tif`` multi-band rasters containing
+            ``annual_irr_fraction`` (band *irr_fraction_band*).  When provided,
+            the mean irrigated fraction per HUC12 is used to scale the area.
+        irr_fraction_band (int): 1-indexed band number for ``annual_irr_fraction`` in the predictor
+            rasters (default 14).
 
-    Returns
-    -------
-    dict[str, dict[str, float]]
-        ``{'GW': {basin: AF}, 'SW': {basin: AF}}``.
+    Returns:
+        dict[str, dict[str, float]]: ``{'GW': {basin: AF}, 'SW': {basin: AF}}``.
     """
     makedirs(output_dir)
     start_yr, end_yr = year_range
@@ -468,26 +446,17 @@ def load_reitz_basin_volumes(
 
     The Reitz rasters are in **metres/year** at ~800 m geographic resolution.
 
-    Parameters
-    ----------
-    reitz_base_dir : str
-        Parent directory containing ``Irrigation_groundwater_1980-2018/``
-        and ``Irrigation_surfacewater_1980-2018/``.
-    ref_raster : str
-        Reference ML prediction raster for CRS/grid alignment.
-    basin_gdf : gpd.GeoDataFrame
-        Basin polygons.
-    basin_col : str
-        Basin name column.
-    year_range : tuple[int, int]
-        ``(start_year, end_year)`` inclusive.
-    output_dir : str
-        Directory for reprojected/intermediate rasters.
+    Args:
+        reitz_base_dir (str): Parent directory containing ``Irrigation_groundwater_1980-2018/``
+            and ``Irrigation_surfacewater_1980-2018/``.
+        ref_raster (str): Reference ML prediction raster for CRS/grid alignment.
+        basin_gdf (gpd.GeoDataFrame): Basin polygons.
+        basin_col (str): Basin name column.
+        year_range (tuple[int, int]): ``(start_year, end_year)`` inclusive.
+        output_dir (str): Directory for reprojected/intermediate rasters.
 
-    Returns
-    -------
-    dict[str, dict[str, float]]
-        ``{'GW': {basin: AF}, 'SW': {basin: AF}}``.
+    Returns:
+        dict[str, dict[str, float]]: ``{'GW': {basin: AF}, 'SW': {basin: AF}}``.
     """
     makedirs(output_dir)
     start_yr, end_yr = year_range
@@ -590,25 +559,16 @@ def load_ml_basin_volumes(
     because the total predictions include non-irrigation pumping; a warning
     is emitted.
 
-    Parameters
-    ----------
-    pred_raster_dir : str
-        Directory with ``pred_YYYY.tif`` total pumping rasters (mm).
-    basin_gdf : gpd.GeoDataFrame
-        Basin polygons.
-    basin_col : str
-        Basin name column.
-    year_range : tuple[int, int]
-        ``(start_year, end_year)`` inclusive.
-    irr_gw_dir : str or None
-        Directory with ``Irrigation_GW_YYYY_mm.tif`` rasters.
-    irr_sw_dir : str or None
-        Directory with ``Irrigation_SW_YYYY_mm.tif`` rasters.
+    Args:
+        pred_raster_dir (str): Directory with ``pred_YYYY.tif`` total pumping rasters (mm).
+        basin_gdf (gpd.GeoDataFrame): Basin polygons.
+        basin_col (str): Basin name column.
+        year_range (tuple[int, int]): ``(start_year, end_year)`` inclusive.
+        irr_gw_dir (str or None): Directory with ``Irrigation_GW_YYYY_mm.tif`` rasters.
+        irr_sw_dir (str or None): Directory with ``Irrigation_SW_YYYY_mm.tif`` rasters.
 
-    Returns
-    -------
-    dict[str, dict[str, float]]
-        ``{'GW': {basin: AF}, 'SW': {basin: AF}}``.
+    Returns:
+        dict[str, dict[str, float]]: ``{'GW': {basin: AF}, 'SW': {basin: AF}}``.
     """
     start_yr, end_yr = year_range
 
@@ -799,20 +759,14 @@ def _compute_temporal_metrics(
     Efficiency (NSE).  Returns basin-mean, basin-median, and per-basin
     values.
 
-    Parameters
-    ----------
-    basin_names : list[str]
-        Basin identifiers.
-    yearly_a, yearly_b : dict[int, dict[str, float]]
-        ``{year: {basin: volume_AF}}`` for each dataset.
-    label_a, label_b : str
-        Dataset labels.
+    Args:
+        basin_names (list[str]): Basin identifiers.
+        yearly_a, yearly_b (dict[int, dict[str, float]]): ``{year: {basin: volume_AF}}`` for each dataset.
+        label_a, label_b (str): Dataset labels.
 
-    Returns
-    -------
-    dict
-        Summary with Pearson_r_mean, Pearson_r_median, NSE_mean, NSE_median,
-        n_basins_with_data, and per_basin detail list.
+    Returns:
+        dict: Summary with Pearson_r_mean, Pearson_r_median, NSE_mean, NSE_median,
+            n_basins_with_data, and per_basin detail list.
     """
     common_years = sorted(set(yearly_a.keys()) & set(yearly_b.keys()))
     if not common_years:
@@ -893,15 +847,14 @@ def _plot_spatial_diff_maps(
         ML − NHM, ML − Reitz, NHM − Reitz
     using a diverging colour map centred on zero.
 
-    Parameters
-    ----------
-    mean_raster_paths : dict
-        ``{source: {cat: path}}`` where source ∈ {ML, NHM, Reitz} and
-        cat ∈ {GW, SW}.  Paths to mean-annual depth rasters (mm).
-    ref_raster : str
-        Reference raster for extent / CRS.
-    output_dir : str
-        Directory for saved plots.
+    Args:
+        mean_raster_paths (dict): ``{source: {cat: path}}`` where source ∈ {ML, NHM, Reitz} and
+            cat ∈ {GW, SW}.  Paths to mean-annual depth rasters (mm).
+        ref_raster (str): Reference raster for extent / CRS.
+        output_dir (str): Directory for saved plots.
+
+    Returns:
+        None
     """
     makedirs(output_dir)
 
@@ -986,37 +939,23 @@ def _load_nhm_annual_csv_to_basins(
     annual value is rasterised and aggregated to basin area-weighted means.
     Returns ``{'mean': {basin: ratio}, 'yearly': {year: {basin: ratio}}}``.
 
-    Parameters
-    ----------
-    csv_path : str
-        Path to the NHM annual CSV (Year, <HUC12_code>, …).
-    huc12_geojson : str
-        Path to ``AZ_HUC12.geojson``.
-    basin_gdf : gpd.GeoDataFrame
-        Basin polygons (target CRS = reference raster CRS).
-    basin_col : str
-        Column in *basin_gdf* naming each basin.
-    ref_raster : str
-        Reference raster for grid/CRS information.
-    year_range : tuple[int, int]
-        ``(start_year, end_year)`` inclusive.
-    output_dir : str
-        Directory for intermediate rasters.
-    mode : str
-        ``'volume'`` for CU (Mgal → AF) or ``'ratio'`` for IE.
-    predictor_dir : str or None
-        Directory with ``Predictor_YYYY.tif`` rasters for irrigated-area
-        scaling (used only when ``mode='volume'``).
-    irr_fraction_band : int
-        Band number in predictor rasters for irrigated fraction
-        (used only when ``mode='volume'``).
-    raster_label : str
-        Label used in intermediate raster filenames (default ``'CU'``).
+    Args:
+        csv_path (str): Path to the NHM annual CSV (Year, <HUC12_code>, ...).
+        huc12_geojson (str): Path to ``AZ_HUC12.geojson``.
+        basin_gdf (gpd.GeoDataFrame): Basin polygons (target CRS = reference raster CRS).
+        basin_col (str): Column in *basin_gdf* naming each basin.
+        ref_raster (str): Reference raster for grid/CRS information.
+        year_range (tuple[int, int]): ``(start_year, end_year)`` inclusive.
+        output_dir (str): Directory for intermediate rasters.
+        mode (str): ``'volume'`` for CU (Mgal -> AF) or ``'ratio'`` for IE.
+        predictor_dir (str or None): Directory with ``Predictor_YYYY.tif`` rasters for irrigated-area
+            scaling (used only when ``mode='volume'``).
+        irr_fraction_band (int): Band number in predictor rasters for irrigated fraction
+            (used only when ``mode='volume'``).
+        raster_label (str): Label used in intermediate raster filenames (default ``'CU'``).
 
-    Returns
-    -------
-    dict
-        See description above.
+    Returns:
+        dict: See description above.
     """
     makedirs(output_dir)
     start_yr, end_yr = year_range
@@ -1302,21 +1241,17 @@ def _load_ml_rasters_to_basins(
     For ``mode='ratio'`` (IE): compute mean-annual ratio then basin
     area-weighted means.  Returns ``{'mean': {basin: ratio}, 'yearly': …}``.
 
-    Parameters
-    ----------
-    raster_dir : str
-        Directory containing annual rasters.
-    basin_gdf : gpd.GeoDataFrame
-        Basin polygons.
-    basin_col : str
-        Basin name column.
-    year_range : tuple[int, int]
-        ``(start_year, end_year)`` inclusive.
-    file_pattern : str
-        Python format string with ``{year}`` placeholder,
-        e.g. ``'Irrigation_CU_{year}_mm.tif'``.
-    mode : str
-        ``'volume'`` for depth rasters or ``'ratio'`` for dimensionless.
+    Args:
+        raster_dir (str): Directory containing annual rasters.
+        basin_gdf (gpd.GeoDataFrame): Basin polygons.
+        basin_col (str): Basin name column.
+        year_range (tuple[int, int]): ``(start_year, end_year)`` inclusive.
+        file_pattern (str): Python format string with ``{year}`` placeholder,
+            e.g. ``'Irrigation_CU_{year}_mm.tif'``.
+        mode (str): ``'volume'`` for depth rasters or ``'ratio'`` for dimensionless.
+
+    Returns:
+        dict: Basin aggregates with ``'mean'`` and ``'yearly'`` keys.
     """
     start_yr, end_yr = year_range
     ref_raster = None
@@ -1483,37 +1418,23 @@ def run_intercomparison(
     datasets (ML: 2002-2020, NHM: 2000-2020, Reitz: 1980-2018).  Years
     without data for a given USGS dataset will appear as blank/zero.
 
-    Parameters
-    ----------
-    ml_pred_dir : str
-        Directory with ``pred_YYYY.tif`` (or use *irr_gw_dir*/*irr_sw_dir*).
-    nhm_dir : str
-        Directory containing the NHM CSV files.
-    reitz_base_dir : str
-        Parent directory with Reitz sub-folders.
-    huc12_geojson : str
-        Path to ``AZ_HUC12.geojson``.
-    basin_shp : str
-        Shapefile or GeoJSON for Arizona groundwater basins.
-    basin_col : str
-        Column in *basin_shp* identifying each basin.
-    output_dir : str
-        Root output directory for all results.
-    ref_raster : str or None
-        Reference raster for CRS/grid.  Defaults to the first ML prediction.
-    irr_gw_dir, irr_sw_dir : str or None
-        Optional category-specific ML raster directories.
-    predictor_dir : str or None
-        Directory with ``Predictor_YYYY.tif`` rasters containing
-        ``annual_irr_fraction``.  Passed to :func:`load_nhm_basin_volumes`
-        so NHM volumes are converted to depth using irrigated area.
-    ml_year_range, nhm_year_range, reitz_year_range : tuple[int, int]
-        Per-dataset year ranges (inclusive).
+    Args:
+        ml_pred_dir (str): Directory with ``pred_YYYY.tif`` (or use *irr_gw_dir*/*irr_sw_dir*).
+        nhm_dir (str): Directory containing the NHM CSV files.
+        reitz_base_dir (str): Parent directory with Reitz sub-folders.
+        huc12_geojson (str): Path to ``AZ_HUC12.geojson``.
+        basin_shp (str): Shapefile or GeoJSON for Arizona groundwater basins.
+        basin_col (str): Column in *basin_shp* identifying each basin.
+        output_dir (str): Root output directory for all results.
+        ref_raster (str or None): Reference raster for CRS/grid.  Defaults to the first ML prediction.
+        irr_gw_dir, irr_sw_dir (str or None): Optional category-specific ML raster directories.
+        predictor_dir (str or None): Directory with ``Predictor_YYYY.tif`` rasters containing
+            ``annual_irr_fraction``.  Passed to :func:`load_nhm_basin_volumes`
+            so NHM volumes are converted to depth using irrigated area.
+        ml_year_range, nhm_year_range, reitz_year_range (tuple[int, int]): Per-dataset year ranges (inclusive).
 
-    Returns
-    -------
-    pd.DataFrame
-        Summary metrics table for every pairwise comparison × category.
+    Returns:
+        pd.DataFrame: Summary metrics table for every pairwise comparison x category.
     """
     makedirs(output_dir)
     logger.info('='*60)
@@ -1836,38 +1757,24 @@ def run_cu_ie_intercomparison(
     (metrics in AF, m³, mm).  IE comparison uses dimensionless ratios
     (area-weighted basin means).
 
-    Parameters
-    ----------
-    irr_cu_dir : str
-        Directory with ``Irrigation_CU_{year}_mm.tif`` rasters.
-    irr_ie_dir : str
-        Directory with ``Irrigation_Efficiency_{year}.tif`` rasters.
-    nhm_cu_csv : str
-        Path to NHM CU CSV
-        (``Irr_CU_HUC12_Tot_annual_2000_2020.csv``).
-    nhm_ie_csv : str
-        Path to NHM IE CSV
-        (``IR_HUC12_Eff_annual_2000_2020.csv``).
-    huc12_geojson : str
-        Path to ``AZ_HUC12.geojson``.
-    basin_shp : str
-        Shapefile or GeoJSON for Arizona groundwater basins.
-    basin_col : str
-        Column in *basin_shp* identifying each basin.
-    output_dir : str
-        Root output directory for all CU/IE results.
-    ref_raster : str or None
-        Reference raster for CRS/grid.  Defaults to the first ML CU raster.
-    predictor_dir : str or None
-        Directory with ``Predictor_YYYY.tif`` rasters for irrigated-area
-        scaling in NHM CU conversion.
-    ml_year_range, nhm_year_range : tuple[int, int]
-        Per-dataset year ranges (inclusive).
+    Args:
+        irr_cu_dir (str): Directory with ``Irrigation_CU_{year}_mm.tif`` rasters.
+        irr_ie_dir (str): Directory with ``Irrigation_Efficiency_{year}.tif`` rasters.
+        nhm_cu_csv (str): Path to NHM CU CSV
+            (``Irr_CU_HUC12_Tot_annual_2000_2020.csv``).
+        nhm_ie_csv (str): Path to NHM IE CSV
+            (``IR_HUC12_Eff_annual_2000_2020.csv``).
+        huc12_geojson (str): Path to ``AZ_HUC12.geojson``.
+        basin_shp (str): Shapefile or GeoJSON for Arizona groundwater basins.
+        basin_col (str): Column in *basin_shp* identifying each basin.
+        output_dir (str): Root output directory for all CU/IE results.
+        ref_raster (str or None): Reference raster for CRS/grid.  Defaults to the first ML CU raster.
+        predictor_dir (str or None): Directory with ``Predictor_YYYY.tif`` rasters for irrigated-area
+            scaling in NHM CU conversion.
+        ml_year_range, nhm_year_range (tuple[int, int]): Per-dataset year ranges (inclusive).
 
-    Returns
-    -------
-    pd.DataFrame
-        Summary metrics table.
+    Returns:
+        pd.DataFrame: Summary metrics table.
     """
     makedirs(output_dir)
     logger.info('=' * 60)
@@ -2218,40 +2125,24 @@ def run_peff_intercomparison(
     All three datasets are scaled by ``annual_irr_fraction`` so that
     volumes represent only the irrigated-area contribution.
 
-    Parameters
-    ----------
-    predictor_dir : str
-        Directory with ``Predictor_YYYY.tif`` multi-band rasters.
-    nhm_peff_csv : str
-        Path to NHM PPTeff CSV
-        (``PPTeff_HUC12_Tot_annual_2000_2020.csv``).
-    huc12_geojson : str
-        Path to ``AZ_HUC12.geojson``.
-    basin_shp : str
-        Shapefile or GeoJSON for Arizona groundwater basins.
-    basin_col : str
-        Column in *basin_shp* identifying each basin.
-    output_dir : str
-        Root output directory.
-    ref_raster : str or None
-        Reference raster for CRS/grid.  Defaults to the first predictor.
-    peff_band : int
-        Band index for ``annual_peff_mm`` (default 4).
-    peff_pcml_band : int
-        Band index for ``annual_peff_pcml_mm`` (default 5).
-    irr_fraction_band : int
-        Band index for ``annual_irr_fraction`` (default 14).
-    ml_year_range : tuple[int, int]
-        Year range for ML Peff (default 2000-2024).
-    ml_pcml_year_range : tuple[int, int]
-        Year range for ML Peff PCML (default 2000-2023).
-    nhm_year_range : tuple[int, int]
-        Year range for NHM PPTeff (default 2000-2020).
+    Args:
+        predictor_dir (str): Directory with ``Predictor_YYYY.tif`` multi-band rasters.
+        nhm_peff_csv (str): Path to NHM PPTeff CSV
+            (``PPTeff_HUC12_Tot_annual_2000_2020.csv``).
+        huc12_geojson (str): Path to ``AZ_HUC12.geojson``.
+        basin_shp (str): Shapefile or GeoJSON for Arizona groundwater basins.
+        basin_col (str): Column in *basin_shp* identifying each basin.
+        output_dir (str): Root output directory.
+        ref_raster (str or None): Reference raster for CRS/grid.  Defaults to the first predictor.
+        peff_band (int): Band index for ``annual_peff_mm`` (default 4).
+        peff_pcml_band (int): Band index for ``annual_peff_pcml_mm`` (default 5).
+        irr_fraction_band (int): Band index for ``annual_irr_fraction`` (default 14).
+        ml_year_range (tuple[int, int]): Year range for ML Peff (default 2000-2024).
+        ml_pcml_year_range (tuple[int, int]): Year range for ML Peff PCML (default 2000-2023).
+        nhm_year_range (tuple[int, int]): Year range for NHM PPTeff (default 2000-2020).
 
-    Returns
-    -------
-    pd.DataFrame
-        Summary metrics table.
+    Returns:
+        pd.DataFrame: Summary metrics table.
     """
     makedirs(output_dir)
     logger.info('=' * 60)
@@ -2467,20 +2358,14 @@ def _load_cap_srp_annual_sw(
     For Phoenix AMA the two sources are summed.  Both datasets use
     calendar-year columns (CAP ``Year``; SRP ``Water Move Year``).
 
-    Parameters
-    ----------
-    cap_xlsx : str
-        Path to CAP delivery Excel file.
-    srp_xlsx : str
-        Path to SRP delivery Excel file.
-    include_spill_water : bool
-        If True, include SRP ``SPILL WATER`` records in addition to
-        ``SURFACE WATER``.  Default False (baseline).
+    Args:
+        cap_xlsx (str): Path to CAP delivery Excel file.
+        srp_xlsx (str): Path to SRP delivery Excel file.
+        include_spill_water (bool): If True, include SRP ``SPILL WATER`` records in addition to
+            ``SURFACE WATER``.  Default False (baseline).
 
-    Returns
-    -------
-    dict[str, dict[int, float]]
-        ``{basin_name: {year: delivery_AF}}``.
+    Returns:
+        dict[str, dict[int, float]]: ``{basin_name: {year: delivery_AF}}``.
     """
     # ── CAP ──────────────────────────────────────────────────────────────
     cap_df = pd.read_excel(cap_xlsx)
@@ -2559,10 +2444,8 @@ def _load_ml_total_sw_basin_volumes(
     """Aggregate ML ``Total_SW_YYYY_mm.tif`` rasters to annual basin
     volumes (AF).
 
-    Returns
-    -------
-    dict[str, dict[int, float]]
-        ``{basin_name: {year: volume_AF}}``.
+    Returns:
+        dict[str, dict[int, float]]: ``{basin_name: {year: volume_AF}}``.
     """
     start_yr, end_yr = year_range
     ref_raster = None
@@ -2712,27 +2595,17 @@ def run_cap_srp_validation(
     Produces per-basin time series plots, a statistics CSV, and a time
     series CSV.
 
-    Parameters
-    ----------
-    cap_xlsx : str
-        Path to the CAP delivery Excel file.
-    srp_xlsx : str
-        Path to the SRP delivery Excel file.
-    total_sw_dir : str
-        Directory with ``Total_SW_YYYY_mm.tif`` rasters.
-    basin_shp : str
-        Shapefile or GeoJSON for Arizona groundwater basins.
-    basin_col : str
-        Column in *basin_shp* identifying each basin.
-    output_dir : str
-        Root output directory for validation results.
-    year_range : tuple[int, int]
-        ``(start_year, end_year)`` inclusive for ML rasters.
+    Args:
+        cap_xlsx (str): Path to the CAP delivery Excel file.
+        srp_xlsx (str): Path to the SRP delivery Excel file.
+        total_sw_dir (str): Directory with ``Total_SW_YYYY_mm.tif`` rasters.
+        basin_shp (str): Shapefile or GeoJSON for Arizona groundwater basins.
+        basin_col (str): Column in *basin_shp* identifying each basin.
+        output_dir (str): Root output directory for validation results.
+        year_range (tuple[int, int]): ``(start_year, end_year)`` inclusive for ML rasters.
 
-    Returns
-    -------
-    pd.DataFrame
-        Per-basin statistics (RMSD, MAD, Pct Diff, Pearson R).
+    Returns:
+        pd.DataFrame: Per-basin statistics (RMSD, MAD, Pct Diff, Pearson R).
     """
     makedirs(output_dir)
     logger.info('=' * 60)
@@ -3031,31 +2904,19 @@ def run_ps_intercomparison(
         * Non_Irrigation_GW vs PS GW
         * Non_Irrigation_SW vs PS SW
 
-    Parameters
-    ----------
-    nonirr_dir : str
-        Directory with ``Non_Irrigation_YYYY_mm.tif`` rasters.
-    nonirr_gw_dir : str
-        Directory with ``Non_Irrigation_GW_YYYY_mm.tif`` rasters.
-    nonirr_sw_dir : str
-        Directory with ``Non_Irrigation_SW_YYYY_mm.tif`` rasters.
-    ps_data_dir : str
-        Directory with PS HUC12 CSVs (Tot, GW, SW).
-    huc12_geojson : str
-        Path to ``AZ_HUC12.geojson``.
-    basin_shp : str
-        Basin boundary shapefile.
-    basin_col : str
-        Column in *basin_shp* naming each basin.
-    output_dir : str
-        Root output directory.
-    year_range : tuple[int, int]
-        Year range (default 2000-2020 to match PS data availability).
+    Args:
+        nonirr_dir (str): Directory with ``Non_Irrigation_YYYY_mm.tif`` rasters.
+        nonirr_gw_dir (str): Directory with ``Non_Irrigation_GW_YYYY_mm.tif`` rasters.
+        nonirr_sw_dir (str): Directory with ``Non_Irrigation_SW_YYYY_mm.tif`` rasters.
+        ps_data_dir (str): Directory with PS HUC12 CSVs (Tot, GW, SW).
+        huc12_geojson (str): Path to ``AZ_HUC12.geojson``.
+        basin_shp (str): Basin boundary shapefile.
+        basin_col (str): Column in *basin_shp* naming each basin.
+        output_dir (str): Root output directory.
+        year_range (tuple[int, int]): Year range (default 2000-2020 to match PS data availability).
 
-    Returns
-    -------
-    pd.DataFrame
-        Summary metrics table.
+    Returns:
+        pd.DataFrame: Summary metrics table.
     """
     makedirs(output_dir)
     logger.info('=' * 60)

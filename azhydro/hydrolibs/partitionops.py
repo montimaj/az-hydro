@@ -45,6 +45,17 @@ def focal_fill_irr_fraction(
 
     If the focal neighbourhood also has no substantial irrigated pixels,
     the value stays unchanged (genuinely non-irrigation well).
+
+    Args:
+        irr_frac (np.ndarray): 1-D irrigation fraction for valid pixels.
+        well_dens (np.ndarray): 1-D well density for valid pixels.
+        raster_shape (tuple): (rows, cols) of the full raster grid.
+        valid_mask (np.ndarray): Boolean mask of valid pixels (ravelled).
+        kernel_size (int): Focal neighbourhood size (default 5).
+        min_irr_frac (float): Minimum irrigation fraction threshold.
+
+    Returns:
+        np.ndarray: Gap-filled irrigation fraction array.
     """
     filled = irr_frac.copy()
     needs_fill = (well_dens > 0) & ~np.isnan(well_dens) & (irr_frac < min_irr_frac)
@@ -95,6 +106,15 @@ def compute_sw_fraction(
     maximum within a *kernel_size* × *kernel_size* neighbourhood,
     clipped to [0, 1].  Pixels with zero canal density get sw_frac = 0
     (100 % groundwater).
+
+    Args:
+        canal_dens (np.ndarray): 1-D canal density for valid pixels.
+        raster_shape (tuple): (rows, cols) of the full raster grid.
+        valid_mask (np.ndarray): Boolean mask of valid pixels (ravelled).
+        kernel_size (int): Focal neighbourhood size (default 5).
+
+    Returns:
+        np.ndarray: Surface-water fraction array, clipped to [0, 1].
     """
     grid = np.full(valid_mask.shape[0], 0.0, dtype=np.float64)
     grid[valid_mask] = canal_dens
@@ -116,24 +136,17 @@ def partition_predictions(
     """
     Partition total pumping predictions into 8 withdrawal categories.
 
-    Parameters
-    ----------
-    predictions : 1-D array
-        Total pumping predictions (mm) for valid pixels.
-    year_df : pd.DataFrame
-        Feature DataFrame for a single year (must contain columns
-        ``well_density``, ``annual_irr_fraction``,
-        ``annual_gw_fraction``, ``canal_density`` when available).
-    raster_shape : tuple
-        (rows, cols) of the full raster grid.
-    valid_mask : 1-D bool array
-        Mask of valid (in-AZ) pixels in the flattened raster.
+    Args:
+        predictions (np.ndarray): Total pumping predictions (mm) for valid pixels (1-D array).
+        year_df (pd.DataFrame): Feature DataFrame for a single year (must contain columns
+            ``well_density``, ``annual_irr_fraction``,
+            ``annual_gw_fraction``, ``canal_density`` when available).
+        raster_shape (tuple): (rows, cols) of the full raster grid.
+        valid_mask (np.ndarray): Mask of valid (in-AZ) pixels in the flattened raster (1-D bool array).
 
-    Returns
-    -------
-    dict[str, np.ndarray]
-        Mapping of category name → 1-D prediction array (same length
-        as *predictions*).
+    Returns:
+        dict[str, np.ndarray]: Mapping of category name to 1-D prediction array (same length
+            as *predictions*).
     """
     # ---- Well density masking ----
     well_dens = year_df['well_density'].values if 'well_density' in year_df.columns else None
