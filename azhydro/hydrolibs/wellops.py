@@ -207,6 +207,15 @@ def create_well_package(
     n_wells = len(wells)
 
     # ---- Pixel keys for grouping ----
+    # Encode (row, col) as a single int: row * 1M + col.
+    # This requires the grid to have fewer than 1M columns to avoid collisions.
+    n_cols = raster_mask.shape[1] if raster_mask is not None else int(pixel_rc[:, 1].max()) + 1
+    if n_cols >= 1_000_000:
+        raise ValueError(
+            f'Raster has {n_cols} columns (≥ 1M). Pixel key encoding '
+            f'(row * 1_000_000 + col) would produce collisions. '
+            f'Increase the multiplier or switch to tuple keys.'
+        )
     pixel_keys = pixel_rc[:, 0] * 1_000_000 + pixel_rc[:, 1]
 
     # ---- Capacity-proportional weights ----

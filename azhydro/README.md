@@ -19,7 +19,7 @@ Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Wh
 
 ### 1. Download and install Anaconda/Miniconda
 Either [Anaconda](https://www.anaconda.com/products/individual) or [miniconda](https://docs.conda.io/en/latest/miniconda.html) is required for installing the Python 3 packages. 
-It is recommended to install the latest version of Anaconda or miniconda (Python >= 3.10). If Anaconda or miniconda is already installed, skip this step. 
+It is recommended to install the latest version of Anaconda or miniconda (Python >= 3.11). If Anaconda or miniconda is already installed, skip this step. 
 
 **For Windows users:** Once installed, open the Anaconda terminal (called Ananconda Prompt), and run ```conda init powershell``` to add ```conda``` to Windows PowerShell path.
 
@@ -96,10 +96,12 @@ python pipeline.py --skip-prep gee,vectors,reproject        # skip multiple sub-
 | `2c` | Evaluate LOO spatial holdout |
 | `3`  | Full-period XGBoost prediction (1896–2099) |
 | `3b` | Hybrid uncertainty quantification |
+| `3g` | Raster maps, actual vs predicted, and trend analysis for all output categories |
 | `4`  | USGS intercomparison |
 | `4b` | CU / IE intercomparison |
 | `4c` | CAP/SRP surface-water validation |
 | `4d` | Effective precipitation intercomparison |
+| `4e` | Non-irrigation vs USGS Public Supply intercomparison |
 
 #### Step 0 sub-steps
 
@@ -261,11 +263,12 @@ intercomparison with independent USGS datasets.  It is divided into five
 numbered steps plus a cross-strategy summary:
 
 ```
-Step 0  ─  Data Preparation
-Step 1  ─  Create AZ Predictor DataFrame
-Step 2  ─  Model Evaluation (3 strategies: Random, Temporal LOO, Spatial LOO)
-Step 3  ─  Full-Period XGBoost Prediction (1896–2099)
-Step 4  ─  USGS Intercomparison (Withdrawals, CU, IE, Peff)
+Step 0   ─  Data Preparation
+Step 1   ─  Create AZ Predictor DataFrame
+Step 2   ─  Model Evaluation (3 strategies: Random, Temporal LOO, Spatial LOO)
+Step 3   ─  Full-Period XGBoost Prediction (1896–2099)
+Step 3g  ─  Raster Maps & Trend Analysis for All Output Categories
+Step 4   ─  USGS Intercomparison (Withdrawals, CU, IE, Peff)
 ```
 
 ### Configuration constants
@@ -351,11 +354,13 @@ steps.
 ### Step 2 — Model evaluation
 
 Three complementary strategies assess model performance.  Each strategy
-trains all available ensemble tree models (XGBoost, LightGBM, Random Forest,
+trains all available models — baseline linear regressors (Linear Regression,
+Ridge, Lasso) and ensemble tree models (XGBoost, LightGBM, Random Forest,
 Extra Trees, Histogram Gradient Boosting, CatBoost, Gradient Boosting,
-AdaBoost) using Optuna + Dask hyperparameter optimisation (100 TPE trials,
-5-fold CV) and reports R², normalised RMSE (%), normalised MAE (%),
-and normalised MBE (%).
+AdaBoost) — using Optuna + Dask hyperparameter optimisation (100 TPE trials,
+5-fold CV; 1 trial for parameter-free baselines) and reports R², normalised
+RMSE (%), normalised MAE (%), and normalised MBE (%).  The linear baselines
+provide a reference for quantifying the value added by nonlinear models.
 
 #### Step 2a — Random 80/20 split (`evaluate_random()`)
 
@@ -398,9 +403,17 @@ are included.  Bias correction is applied at level 1 (global).
 #### Cross-strategy summary
 
 After all three strategies complete,
-`vizops.create_cross_strategy_summary()` produces comparison plots and
-tables across Random, Temporal LOO, and Spatial LOO results, saved to
-`{MODEL_DIR}Model_Evaluation/`.
+`vizops.create_cross_strategy_summary()` produces:
+
+- **`Cross_Strategy_Summary.csv`** — all models × all strategies with R²,
+  RMSE, MAE, MBE, and Overfit R² columns.
+- **`Cross_Strategy_Summary.tex`** — LaTeX table (`\begin{table}`) ready
+  for direct inclusion in journal manuscripts (booktabs formatting with
+  multi-column strategy headers).
+- **`Cross_Strategy_Comparison.png`** — grouped bar chart of R², RMSE, MAE,
+  and Overfit R² across strategies.
+
+Saved to `{MODEL_DIR}Model_Evaluation/`.
 
 ### Step 3 — Full-period prediction (`predict_full_period()`)
 
@@ -427,35 +440,81 @@ from the training window, the less constrained the prediction.
 
 #### 3a. Model training & interpretability
 
-After training, three interpretability diagnostics are generated and saved
-to `{prediction_dir}Model_Interpretability/`:
+After training, three interpretability diagnostics are generated on the
+training data and saved to `{prediction_dir}Model_Interpretability/`:
 
 - **Permutation importance** (`mlops.compute_perm_imp()`)
 - **Accumulated Local Effects (ALE) plots** (`mlops.compute_ale_plots()`)
 - **SHAP plots** (`mlops.compute_shap_plots()`)
 
+After the full-period prediction loop completes, the same three diagnostics
+are re-computed separately for each temporal era:
+
+| Era | Years | Purpose |
+|---|---|---|
+| Hindcast | 1896–1983 | Pre-training extrapolation |
+| Training | 1984–2024 | In-distribution reference |
+| Projection | 2025–2099 | Future extrapolation |
+
+Up to 2 000 pixels are subsampled per year (capped at 10 000 per era) and
+passed through SHAP, ALE, and permutation importance analysis.  Comparing
+the resulting feature-contribution profiles across eras reveals whether the
+model relies on the same physical relationships in extrapolation as during
+training.  Stable feature rankings and ALE shapes across eras support the
+stationarity assumption; divergent patterns flag features whose
+out-of-distribution behaviour may reduce prediction reliability.  Outputs
+are saved to `{prediction_dir}Model_Interpretability/{Era}/`.
+
 #### 3b. Annual raster prediction loop (1896–2099)
+
+Before the loop begins, an **out-of-distribution (OOD) detector**
+(`mlops.OODDetector`) is fitted on the training feature matrix.  The
+detector computes the Mahalanobis distance of each prediction-time pixel
+from the training distribution using a regularised covariance matrix.
+Pixels exceeding the χ²(n\_features) threshold at α = 0.01 are flagged as
+OOD — i.e., their feature vector lies outside the region spanned by the
+1984–2024 training data.
+
+A **prediction exceedance check** complements the OOD detector from the
+opposite direction.  While OOD flags feature-space extrapolation, the
+exceedance check flags *output-space* implausibility: per-pixel predictions
+exceeding the training-era maximum (or 99th percentile) pumping depth
+indicate physically implausible rates, since modern pump infrastructure
+operates near hydraulic efficiency limits (~75–85 %) and volumetric capacity
+is unlikely to change substantially over the projection horizon.  Per-year
+exceedance statistics are accumulated and written to
+`Prediction_Exceedance_Summary.csv` with era-level summaries.
 
 For each year the pipeline:
 
 1. **Predicts** total pumping (mm) across all valid pixels.
-2. **Partitions** predictions into eight withdrawal categories via
+2. **Checks prediction exceedance** against the training-era per-pixel
+   maximum and P99 pumping depth.  Pixels exceeding these thresholds are
+   counted per year.
+3. **Flags out-of-distribution pixels** via the OOD detector.  Per-year
+   binary flag rasters (`OOD_Flag_{year}.tif`, 1 = OOD, 0 = in-distribution)
+   are written to `OOD_Rasters/`.  Per-year statistics (n\_ood, pct\_ood,
+   mean/max Mahalanobis d²) are accumulated and written to
+   `OOD_Rasters/OOD_Summary.csv` after the loop.  Era-level OOD rates
+   (hindcast 1896–1983, training 1984–2024, projection 2025–2099) are
+   logged with warnings when the mean OOD rate exceeds 10 %.
+4. **Partitions** predictions into eight withdrawal categories via
    `partitionops.partition_predictions()`:
    Irrigation, Non-Irrigation, Irrigation\_GW, Irrigation\_SW,
    Non\_Irrigation\_GW, Non\_Irrigation\_SW, Total\_GW, Total\_SW.
-3. **Computes consumptive use (CU):**
+5. **Computes consumptive use (CU):**
    ```
    CU = max(Irrigation_ET − Effective_Precip, 0)
    ```
    Split into Irrigation\_CU, Irrigation\_GW\_CU, Irrigation\_SW\_CU using
    the GW fraction.
-4. **Computes irrigation efficiency (IE):**
+6. **Computes irrigation efficiency (IE):**
    ```
    IE = CU / Withdrawal
    ```
    Producing Irrigation\_Efficiency, Irrigation\_GW\_Efficiency,
    Irrigation\_SW\_Efficiency.
-5. **Writes rasters** in four units for depth/volume products and as
+7. **Writes rasters** in four units for depth/volume products and as
    dimensionless ratios for IE:
 
 | Product | Units written | File naming |
@@ -464,8 +523,9 @@ For each year the pipeline:
 | 8 withdrawal categories | mm, ft, m³, AF | `{Category}_{year}_{unit}.tif` |
 | 3 CU categories | mm, ft, m³, AF | `{CU_Category}_{year}_{unit}.tif` |
 | 3 IE categories | dimensionless | `{IE_Category}_{year}.tif` |
+| OOD flags | binary (0/1) | `OOD_Flag_{year}.tif` |
 
-6. **Accumulates statistics** for AZ-wide, per-basin, and per-sub-basin
+8. **Accumulates statistics** for AZ-wide, per-basin, and per-sub-basin
    totals (volume in m³ and AF, mean depth in mm) for every category.
 
 Unit conversions:
@@ -493,6 +553,18 @@ Four temporal eras are distinguished in the plots:
 | Historical | 1984–2024 | Metered period; predictions vs. actuals. |
 | Forecast | 2025 | Transition year. |
 | Projected | 2026–2099 | Future projections. |
+
+#### 3f. Graphical abstract / Figure 1
+
+`vizops.create_graphical_abstract()` produces a two-panel publication figure:
+
+- **Panel (a)**: Spatial map of mean-annual predicted pumping depth (mm)
+  across all 204 years (1896–2099), with GW basin boundaries and AMA/INA
+  labels overlaid on a YlOrRd colour ramp.
+- **Panel (b)**: Time series of total annual AMA/INA pumping (acre-ft) with
+  era shading and an inset bar chart of era-averaged volumes.
+
+Saved as `{prediction_dir}Graphical_Abstract_Fig1.png` (600 dpi).
 
 #### 3d. Hybrid uncertainty quantification (`uncertaintyops.run_uncertainty_quantification()`)
 
@@ -904,6 +976,67 @@ efficiency values directly (mean ± 1.96 σ) rather than volume conversions.
 All plots are written to the `Visualizations/` directory, overwriting any
 earlier plots from Step 3c that lacked uncertainty bounds.
 
+#### 3g. Raster maps for all output categories (`create_all_raster_maps()`)
+
+Generates publication-quality spatial maps for **every** raster output
+product in the pipeline.  Three types of maps are produced:
+
+**Era-mean maps** (`vizops.create_era_raster_maps()`) — A 2×2 panel figure
+for each raster category showing the temporal mean within each of the four
+eras (Hindcast, Historical, Forecast, Projection).  Groundwater basin
+boundaries (thin gray) and AMA/INA basins (bold dark + labels) are overlaid
+on every panel.  No-data pixels appear as gray background.
+
+| Category group | Colormap | Count |
+|---|---|---|
+| Total predicted GW + 8 partition categories + 3 CU | `YlOrRd` | 12 figures |
+| 3 Irrigation Efficiency categories | `YlGn` | 3 figures |
+| OOD flags (mean fraction) | `RdYlGn_r` | 1 figure |
+| 6 sigma components — band 1 (σ in mm) | `Purples` | 6 figures |
+| 6 sigma components — band 2 (CV) | `inferno` | 6 figures |
+| Augmented prediction CV (band 3) and SNR (band 4) | `inferno` / `viridis` | 2 figures |
+
+**Actual vs predicted comparison** (`vizops.create_actual_vs_predicted_maps()`)
+— A 1×3 panel figure comparing the metered (1984–2024) mean with the
+predicted mean over the same period:
+
+- Panel (a): **Actual** (meter-based GW raster mean).  Unmetered areas
+  outside AMA/INA appear as gray no-data.
+- Panel (b): **Predicted** (ML raster mean).
+- Panel (c): **Difference** (Predicted − Actual) with a diverging `RdBu_r`
+  colormap centred on zero.
+
+**Trend analysis** (`vizops.create_trend_maps()`) — Pixel-wise
+Mann-Kendall trend test (via `scipy.stats.kendalltau`) and Sen's slope
+(via `scipy.stats.theilslopes`) for each period (full 1896–2099 and
+per-era).  Each figure shows:
+
+- Sen's slope (unit/year) with a diverging `RdBu_r` colormap (blue =
+  decreasing, red = increasing).
+- Gray stippling on pixels where the Mann-Kendall test is **not
+  significant** (p ≥ 0.05), so statistically significant trends appear
+  clean.
+- Inset text showing the percentage of domain pixels with significant
+  increasing (↑), decreasing (↓), and non-significant trends.
+- Basin boundaries and AMA/INA labels overlaid.
+
+Trend maps are generated for: total predicted GW, 8 partition categories,
+3 CU categories, and 3 IE categories — each with up to 5 periods (full +
+4 eras), yielding ~60–75 trend figures.
+
+**Zonal trend statistics** — For each category × period, per-basin and
+per-sub-basin CSV files are written alongside the trend maps.  Each CSV
+contains one row per zone with columns: `Category`, `Period`, `Region`,
+`N_Pixels`, `Median_Slope`, `Mean_Slope`, `Mean_Slope_Sig`,
+`Pct_Sig_Increase`, `Pct_Sig_Decrease`, `Pct_Not_Sig`, `P10_Slope`,
+`P90_Slope`, `Median_P_Value`.  Basin zones are rasterized from the
+groundwater basin shapefile; sub-basin zones from the ADWR sub-basin
+shapefile.
+
+All outputs are saved to `{prediction_dir}Raster_Maps/` (era maps and
+actual vs predicted) and `{prediction_dir}Raster_Maps/Trend_Analysis/`
+(trend maps and zonal statistics CSVs).
+
 #### 3e. Well package
 
 `wellops.create_well_package()` disaggregates pixel-level withdrawal
@@ -932,10 +1065,19 @@ comparison.  The intercomparison produces:
 
 - Pairwise metrics (RMSD, MAD, Percent Difference) for ML vs NHM, ML vs
   Reitz, NHM vs Reitz in both GW and SW categories.
+- Temporal agreement metrics (per-basin Pearson r and NSE) quantifying
+  interannual variability agreement across overlapping years.
 - Per-basin comparison tables (mm, ft, m³, AF).
 - Time series CSVs and per-basin time series plots.
 - Pairwise scatter plots with 1:1 lines and linear fits.
 - Spatial difference maps (diverging colourmap centred on zero).
+- Temporal agreement visualizations (`Temporal_Agreement/`):
+  - **Heatmaps** — Basin × pair grids coloured by Pearson r and NSE.
+  - **Box/violin plots** — Distribution of per-basin r/NSE across pairs.
+  - **Taylor diagrams** — Correlation vs normalised std dev in polar
+    coordinates, with centred RMSD contours.
+  - **r vs NSE scatter** — Paired scatter with quadrant annotations
+    identifying basins with good/mixed/poor agreement.
 
 All outputs are written to `{prediction_dir}Intercomparison/`.
 
@@ -1020,6 +1162,37 @@ The intercomparison produces:
 
 All outputs are written to `{prediction_dir}Peff_Intercomparison/`.
 
+#### Step 4e — Non-irrigation vs USGS Public Supply (`run_ps_intercomparison()`)
+
+Compares ML non-irrigation withdrawal predictions with USGS Public Supply
+(PS) reanalysis data (Alzraiee et al. 2024, *Water Resources Research*;
+DOI: 10.5066/P9FUL880).  The PS dataset provides monthly public supply
+GW and SW withdrawals by HUC12 for the CONUS (2000–2020).
+
+Public supply is a **subset** of total non-irrigation water use (it
+excludes industrial, mining, thermoelectric, and livestock self-supply).
+Therefore ML Non_Irrigation predictions should be ≥ PS estimates in most
+basins.  The PS / ML ratio quantifies the fraction of non-irrigation use
+attributable to public supply — an independently derived quantity.
+
+Three categories are compared at the basin level:
+
+| ML category | PS category | Expected relationship |
+|---|---|---|
+| Non_Irrigation | PS Total | ML ≥ PS |
+| Non_Irrigation_GW | PS GW | ML ≥ PS (validates GW partition) |
+| Non_Irrigation_SW | PS SW | ML ≥ PS (validates SW partition) |
+
+**Outputs:**
+- Metrics CSV with RMSD, MAD, and percent difference per category.
+- Per-basin comparison table with ML and PS volumes (AF, mm) and the
+  PS-as-fraction-of-ML percentage.
+- Temporal agreement metrics (Pearson r, NSE) per basin.
+- Time series plots and CSVs per basin and category.
+- Temporal agreement visualisation (heatmap, box/violin, r-vs-NSE).
+
+All outputs are written to `{prediction_dir}PS_Intercomparison/`.
+
 ---
 
 ## Library modules (`hydrolibs/`)
@@ -1042,11 +1215,13 @@ Key functions:
 
 ### `mlops.py` — Machine learning operations
 
-Builds, tunes, evaluates, and interprets ensemble tree models.
+Builds, tunes, evaluates, and interprets ML models including baseline linear
+regressors (LR, Ridge, Lasso) and ensemble tree models.
 
 Key functions:
-- **`get_model_param_dict()`** — Returns the hyperparameter search spaces
-  for XGB, LGBM, RF, ETR, HGBR, CatBoost, GBR, and AdaBoost.
+- **`get_model_param_dict()`** — Returns model objects and hyperparameter
+  search spaces for LR, Ridge, Lasso, XGB, LGBM, RF, ETR, HGBR, CatBoost,
+  GBR, and AdaBoost.
 - **`build_ml_model_optuna_dask()`** — Trains a single model with Optuna
   TPE-based hyperparameter search parallelised across Dask workers.
 - **`compare_all_models()`** — Trains all models on a common split and
@@ -1060,6 +1235,11 @@ Key functions:
   **`compute_shap_plots()`** — Model interpretability diagnostics.
 - **`generate_model_visualizations()`** — Scatter, residual, and time series
   plots per model.
+- **`OODDetector`** — Mahalanobis distance-based out-of-distribution
+  detector.  Fitted on training features, it flags prediction-time pixels
+  whose feature vectors exceed the χ²(n\_features) threshold at α = 0.01.
+  Used in `predict_full_period()` to write per-year OOD flag rasters and
+  a summary CSV with era-level OOD rate diagnostics.
 
 ### `visualops.py` — Visualisation
 
@@ -1077,7 +1257,19 @@ Key functions:
 - **`plot_loo_heatmap()`** / **`plot_loo_bar()`** — Heatmaps and bar plots
   for leave-one-out evaluation results.
 - **`create_cross_strategy_summary()`** — Side-by-side comparison of Random,
-  Temporal LOO, and Spatial LOO results.
+  Temporal LOO, and Spatial LOO results with R², RMSE, MAE, MBE, and
+  Overfit R².  Produces CSV, LaTeX (`booktabs`), and grouped bar chart.
+- **`create_graphical_abstract()`** — Two-panel Figure 1: (a) mean-annual
+  pumping depth map with GW basin boundaries, (b) annual pumping time series
+  with era shading and inset bar chart.
+- **`create_era_raster_maps()`** — 2×2 panel era-mean spatial maps with
+  basin/AMA/INA overlays and shared colorbar.  Supports multi-band rasters
+  (e.g., band 2 for CV in sigma rasters).
+- **`create_actual_vs_predicted_maps()`** — 3-panel actual vs predicted
+  comparison with gray no-data for unmetered areas and diverging difference
+  colormap.
+- **`create_trend_maps()`** — Pixel-wise Mann-Kendall + Sen's slope trend
+  maps per period with significance stippling and summary statistics inset.
 
 **Basin block bootstrap CI:** For AZ-wide time series sums,
 `aggregate_yearly_data()` uses a basin-level block bootstrap that resamples
@@ -1284,7 +1476,10 @@ Basin-scale comparison of ML predictions with independent USGS datasets.
 **Withdrawal intercomparison** (`run_intercomparison()`):
 - Loads ML, NHM ([Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM); [Martin et al., 2023](https://doi.org/10.5066/P9YWR0OJ)), and Reitz ([Reitz et al., 2023](https://doi.org/10.5066/P9EZ3VAS)) data; aggregates to basin volumes (AF).
 - Computes pairwise RMSD, MAD, Percent Difference.
-- Produces per-basin time series, scatter plots, and spatial difference maps.
+- Computes interannual temporal agreement (per-basin Pearson r and NSE).
+- Produces per-basin time series, scatter plots, spatial difference maps,
+  and temporal agreement visualizations (heatmaps, box/violin plots,
+  Taylor diagrams, r-vs-NSE scatter).
 
 **CU / IE intercomparison** (`run_cu_ie_intercomparison()`):
 - Compares ML CU (mm) and IE (ratio) with NHM HUC12 annual data ([Martin et al., 2025](https://doi.org/10.1016/j.jhydrol.2025.133909); [Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM)).
@@ -1303,6 +1498,15 @@ Basin-scale comparison of ML predictions with independent USGS datasets.
 - All three scaled by `irr_fraction` to represent irrigated-area Peff.
 - NHM PPTeff: Mgal/d → m³/yr → depth (mm) → basin volumes (AF).
 - Produces metrics, per-basin tables, time series, and scatter plots.
+
+**Public Supply intercomparison** (`run_ps_intercomparison()`):
+- Compares ML Non_Irrigation, Non_Irrigation_GW, and Non_Irrigation_SW
+  predictions with USGS Public Supply reanalysis data
+  ([Alzraiee et al., 2024](https://doi.org/10.1029/2023WR036632);
+  data: [Luukkonen et al., 2023](https://doi.org/10.5066/P9FUL880)).
+- PS monthly HUC12 data (Mgal/d, 2000–2020) → annual basin volumes (AF).
+- Reports PS/ML ratio per basin (expected ≤ 100% since PS ⊂ non-irrigation).
+- Produces metrics, per-basin tables, temporal agreement, and time series.
 
 ### `rasterops.py` — Raster I/O utilities
 
@@ -1359,10 +1563,16 @@ Data/Outputs/
     ├── Model_Evaluation/
     │   ├── Random/                          # Step 2a results
     │   ├── Temporal_LOO/                    # Step 2b results (T1–T6)
-    │   └── Spatial_LOO/                     # Step 2c results (per sub-basin)
+    │   ├── Spatial_LOO/                     # Step 2c results (per sub-basin)
+    │   ├── Cross_Strategy_Summary.csv       # All models × all strategies
+    │   ├── Cross_Strategy_Summary.tex       # LaTeX table for manuscripts
+    │   └── Cross_Strategy_Comparison.png    # Grouped bar chart
     │
     └── Full_Prediction_XGB/
         ├── Model_Interpretability/          # SHAP, ALE, permutation importance
+        │   ├── Hindcast/                    #   Era-specific plots (1896-1983)
+        │   ├── Training/                    #   Era-specific plots (1984-2024)
+        │   └── Projection/                  #   Era-specific plots (2025-2099)
         ├── Predicted_Rasters/               # Total pumping (4 units, 6-band)
         │   ├── Depth_mm/
         │   ├── Depth_ft/
@@ -1371,6 +1581,9 @@ Data/Outputs/
         ├── {Category}_Rasters/              # 8 withdrawal categories (4 units, 6-band)
         ├── Irrigation_CU_Rasters/           # CU (4 units, 6-band)
         ├── Irrigation_Efficiency_Rasters/   # IE (dimensionless, 6-band)
+        ├── OOD_Rasters/                     # Out-of-distribution detection
+        │   ├── OOD_Flag_{year}.tif          #   Binary flag (1=OOD, 0=in-distribution)
+        │   └── OOD_Summary.csv              #   Per-year OOD statistics
         ├── Uncertainty/                     # Hybrid uncertainty quantification
         │   ├── Sigma_MACA/                  #   Inter-GCM climate spread
         │   ├── Sigma_Model/                 #   Seed ensemble spread
@@ -1380,12 +1593,23 @@ Data/Outputs/
         │   ├── Sigma_Total/                 #   Quadrature combination (σ, CV, per-category σ)
         │   ├── Sigma_CU/                    #   CU inter-GCM spread
         │   └── Plots/                       #   Time-series plots
+        ├── Graphical_Abstract_Fig1.png         # Publication Figure 1 (map + time series)
+        ├── Prediction_Exceedance_Summary.csv   # Per-year exceedance stats
+        ├── Raster_Maps/                     # Step 3g — spatial maps for all products
+        │   ├── Era_Maps_*.png               #   2×2 era-mean panels per category
+        │   ├── Actual_vs_Predicted.png      #   Actual vs predicted (1984–2024)
+        │   └── Trend_Analysis/              #   Mann-Kendall + Sen's slope maps
+        │       ├── Trend_*.png              #   Per-category, per-period trend maps
+        │       ├── Basin_Trend_*.csv        #   Per-basin zonal trend statistics
+        │       └── Subbasin_Trend_*.csv     #   Per-sub-basin zonal trend statistics
         ├── Visualizations/                  # Time series & era summary maps
         ├── Well_Package/                    # Per-well GeoPackage
         ├── Intercomparison/                 # Step 4a — withdrawal comparison
+        │   └── Temporal_Agreement/          #   Heatmaps, box/violin, Taylor, r-vs-NSE
         ├── CU_IE_Intercomparison/           # Step 4b — CU/IE comparison
         ├── CAP_SRP_Validation/              # Step 4c — CAP/SRP SW validation
-        └── Peff_Intercomparison/            # Step 4d — Peff comparison
+        ├── Peff_Intercomparison/            # Step 4d — Peff comparison
+        └── PS_Intercomparison/              # Step 4e — Non-irrigation vs USGS PS
 ```
 
 ### Data References
@@ -1393,6 +1617,8 @@ Data/Outputs/
 Abatzoglou, J. T. (2013). Development of gridded surface meteorological data for ecological applications and modelling. _International Journal of Climatology_, _33_(1), 121–131. https://doi.org/10.1002/joc.3413.
 
 Abatzoglou, J. T., & Brown, T. J. (2012). A comparison of statistical downscaling methods suited for wildfire applications. _International Journal of Climatology_, _32_(5), 772–780. https://doi.org/10.1002/joc.2312.
+
+Alzraiee, A., Niswonger, R., Luukkonen, C., Larsen, J., Martin, D., Herbert, D., Buchwald, C., Dieter, C., Miller, L., Stewart, J., Houston, N., Paulinski, S., & Valseth, K. (2024). Next Generation Public Supply Water Withdrawal Estimation for the Conterminous United States Using Machine Learning and Operational Frameworks. _Water Resources Research_, _60_(7). https://doi.org/10.1029/2023WR036632
 
 Daly, C., Halbleib, M., Smith, J. I., Gibson, W. P., Doggett, M. K., Taylor, G. H., Curtis, J., & Pasteris, P. P. (2008). Physiographically sensitive mapping of climatological temperature and precipitation across the conterminous United States. _International Journal of Climatology_, _28_(15), 2031–2064. https://doi.org/10.1002/joc.1688.
 
@@ -1413,6 +1639,8 @@ Hung, F., Chiarelli, D. D., Famiglietti, J. S., & Müller, M. F. (2025). Downsca
 Ketchum, D., Hoylman, Z. H., Huntington, J., Brinkerhoff, D., & Jencso, K. G. (2023). Irrigation intensification impacts sustainability of streamflow in the Western United States. _Communications Earth & Environment_, _4_(1), 479. https://doi.org/10.1038/s43247-023-01152-2.
 
 Ketchum, D., Jencso, K., Maneta, M. P., Melton, F., Jones, M. O., & Huntington, J. (2020). IrrMapper: A Machine Learning Approach for High Resolution Mapping of Irrigated Agriculture Across the Western U.S. _Remote Sensing_, _12_(14), 2328. https://doi.org/10.3390/rs12142328.
+
+Luukkonen, C.L., Alzraiee, A.H., Larsen, J.D., Martin, D.J., Herbert, D.M., Buchwald, C.A., Houston, N.A., Valseth, K.J., Paulinski, S., Miller, L.D., Niswonger, R.G., Stewart, J.S., & Dieter, C.A. (2023). Public supply water use reanalysis for the 2000-2020 period by HUC12, month, and year for the conterminous United States. _U.S. Geological Survey data release_. https://doi.org/10.5066/P9FUL880
 
 Majumdar, S., ReVelle, P., Pearson, C., Nozari, S., Minor, B. A., Hasan, M. F., Huntington, J. L., & Smith, R. G. (2026). pyCropWat: A Python Package for Computing Effective Precipitation Using Google Earth Engine Climate Data (v1.2.1). _Zenodo_. https://doi.org/10.5281/zenodo.18706481.
 

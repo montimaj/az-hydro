@@ -425,6 +425,7 @@ def reproject_raster_gdal(
             )
     except Exception as e:
         logger.error(f'Error occurred while resampling {input_raster_file}', exc_info=e)
+        raise
 
 
 def crop_rasters(

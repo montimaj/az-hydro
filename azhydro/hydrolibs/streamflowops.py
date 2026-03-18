@@ -83,8 +83,9 @@ def _find_nearest_usbr_site(site_id, usbr_sites):
                 best_dist = dist
                 best_sid = ref_sid
         return best_sid
-    except Exception:
-        logger.debug('Could not find nearest USBR site, defaulting to %s', usbr_sites[0])
+    except (ValueError, KeyError, IndexError) as e:
+        logger.warning('Could not find nearest USBR site for %s: %s. Defaulting to %s',
+                        site_id, e, usbr_sites[0])
         return usbr_sites[0]
 
 
@@ -186,11 +187,24 @@ def download_streamflow(
         # Reindex and gap-fill with monthly climatology
         full_range = pd.date_range(start='1896-01-01', end='2099-12-01', freq='MS')
         monthly = monthly.reindex(full_range)
+        n_total = len(monthly)
+        n_observed = int(monthly['discharge_cfs'].notna().sum())
+        n_gaps = n_total - n_observed
         month_clim = monthly.groupby(monthly.index.month)['discharge_cfs'].transform('mean')
         monthly['discharge_cfs'] = monthly['discharge_cfs'].fillna(month_clim)
         monthly.index.name = 'date'
         monthly['site_id'] = site_id
         monthly['site_name'] = site_name
+
+        if verbose and n_gaps > 0:
+            pct_filled = n_gaps / n_total * 100
+            logger.info(
+                f'  Site {site_id}: gap-filled {n_gaps}/{n_total} months '
+                f'({pct_filled:.1f}%) with monthly climatology')
+            if pct_filled > 50:
+                logger.warning(
+                    f'  Site {site_id}: > 50% of record is climatology-filled — '
+                    f'interannual variability is suppressed for gap-filled months')
 
         site_file = os.path.join(output_dir, f'streamflow_{site_id}.csv')
         monthly.to_csv(site_file, date_format='%Y-%m-%d')
@@ -269,9 +283,39 @@ def download_streamflow(
                         synthetic_usbr = past_synthetic
 
                 if verbose:
-                    logger.info(f'Computed monthly ratios from {overlap_start.strftime("%Y-%m")} '
-                                f'to {overlap_end.strftime("%Y-%m")} '
-                                f'({len(ratio_df)} overlapping months)')
+                    overlap_years = (overlap_end - overlap_start).days / 365.25
+                    ratio_vals = monthly_ratios.values
+                    ratio_mean = float(np.nanmean(ratio_vals))
+                    ratio_std = float(np.nanstd(ratio_vals))
+                    ratio_cv = ratio_std / ratio_mean if ratio_mean > 0 else float('inf')
+                    months_with_data = int((monthly_ratios > 0).sum())
+                    logger.info(
+                        f'Computed monthly ratios from {overlap_start.strftime("%Y-%m")} '
+                        f'to {overlap_end.strftime("%Y-%m")} '
+                        f'({len(ratio_df)} overlapping months, {overlap_years:.1f} years)')
+                    logger.info(
+                        f'  Ratio stats for site {site_id}: mean={ratio_mean:.3f}, '
+                        f'std={ratio_std:.3f}, CV={ratio_cv:.3f}, '
+                        f'months with data={months_with_data}/12')
+                    # Warn about extrapolation distance
+                    if not future_usbr.empty:
+                        future_span = future_usbr.index.max().year - usgs_end.year
+                        logger.warning(
+                            f'  Site {site_id}: extrapolating ratios {future_span} years '
+                            f'into the future (to {future_usbr.index.max().year}) '
+                            f'from {overlap_years:.1f}-year overlap — '
+                            f'assumes stationary flow partitioning')
+                    if not past_usbr.empty:
+                        past_span = pre_usgs_start.year - past_usbr.index.min().year
+                        logger.warning(
+                            f'  Site {site_id}: extrapolating ratios {past_span} years '
+                            f'into the past (to {past_usbr.index.min().year}) '
+                            f'from {overlap_years:.1f}-year overlap — '
+                            f'pre-dam/canal infrastructure conditions likely differ')
+                    if overlap_years < 10:
+                        logger.warning(
+                            f'  Site {site_id}: overlap period ({overlap_years:.1f} years) '
+                            f'is < 10 years — ratios may not capture decadal variability')
 
         # Merge USGS with synthetic projections
         if synthetic_usbr is not None:
@@ -283,11 +327,24 @@ def download_streamflow(
         # Reindex and gap-fill with monthly climatology
         full_range = pd.date_range(start='1896-01-01', end='2099-12-01', freq='MS')
         monthly = monthly.reindex(full_range)
+        n_total = len(monthly)
+        n_observed = int(monthly['discharge_cfs'].notna().sum())
+        n_gaps = n_total - n_observed
         month_clim = monthly.groupby(monthly.index.month)['discharge_cfs'].transform('mean')
         monthly['discharge_cfs'] = monthly['discharge_cfs'].fillna(month_clim)
         monthly.index.name = 'date'
         monthly['site_id'] = site_id
         monthly['site_name'] = site_name
+
+        if verbose and n_gaps > 0:
+            pct_filled = n_gaps / n_total * 100
+            logger.info(
+                f'  Site {site_id}: gap-filled {n_gaps}/{n_total} months '
+                f'({pct_filled:.1f}%) with monthly climatology')
+            if pct_filled > 50:
+                logger.warning(
+                    f'  Site {site_id}: > 50% of record is climatology-filled — '
+                    f'interannual variability is suppressed for gap-filled months')
 
         site_file = os.path.join(output_dir, f'streamflow_{site_id}.csv')
         monthly.to_csv(site_file, date_format='%Y-%m-%d')
@@ -671,6 +728,21 @@ def create_canal_density_raster(
     )
 
     # Copy for each year
+    # NOTE: Canal density is static — a single raster from current GRAIN data is
+    # replicated for all years (1896–2099).  Arizona's canal infrastructure evolved
+    # significantly over this period (early canals 1860s–1920s, SRP expansion
+    # 1900s–1950s, CAP completion ~1993).  This assumption affects both
+    # canal-weighted streamflow redistribution and the non-irrigation SW fraction
+    # proxy in partitionops.  If historical canal construction dates become
+    # available in GRAIN or NHD metadata, time-varying rasters can be created.
+    logger.warning(
+        'Canal density is static for all years (%d-%d): modern GRAIN canal '
+        'network is applied uniformly across the full period. Canal '
+        'infrastructure changed substantially over this timespan '
+        '(pre-SRP, SRP expansion, CAP completion ~1993). This affects '
+        'canal-weighted streamflow and non-irrigation SW fraction proxy.',
+        start_year, end_year,
+    )
     for year in range(start_year + 1, end_year + 1):
         out_file = os.path.join(output_dir, f'Canal_Density_{year}.tif')
         copy_file(base_raster, out_file, verbose=False)

@@ -12,7 +12,6 @@ import warnings
 
 import fiona
 import geopandas as gpd
-import numpy as np
 import pandas as pd
 import rasterio as rio
 from osgeo import gdal
@@ -65,10 +64,10 @@ def reproject_vector(
     input_vector_file = gpd.read_file(input_vector_file)
     if crs_from_file:
         if raster:
-            ref_file = rio.open(ref_file)
+            with rio.open(ref_file) as ref_src:
+                crs = ref_src.crs
         else:
-            ref_file = gpd.read_file(ref_file)
-        crs = ref_file.crs
+            crs = gpd.read_file(ref_file).crs
     output_vector_file = input_vector_file.to_crs(crs)
     drop_cols = [c for c in output_vector_file.columns
                  if c.startswith('Shape__') or c.startswith('Shape_')]

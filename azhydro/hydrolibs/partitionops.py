@@ -67,7 +67,13 @@ def focal_fill_irr_fraction(
     with np.errstate(invalid='ignore', divide='ignore'):
         focal_mean = np.where(cnt_grid > 0, sum_grid / cnt_grid, 0)
 
-    focal_flat = focal_mean.ravel()[valid_mask]
+    focal_raveled = focal_mean.ravel()
+    if focal_raveled.shape[0] != valid_mask.shape[0]:
+        raise ValueError(
+            f'focal_mean ravel size ({focal_raveled.shape[0]}) != '
+            f'valid_mask size ({valid_mask.shape[0]})'
+        )
+    focal_flat = focal_raveled[valid_mask]
     # Only overwrite when the focal neighbourhood has substantial irrigation;
     # otherwise preserve the original small value.
     fill_mask = needs_fill & (focal_flat > 0)

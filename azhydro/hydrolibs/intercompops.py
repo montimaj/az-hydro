@@ -21,10 +21,15 @@ Metrics reported:
     * Mean Absolute Difference (MAD)
     * Percent Difference (%)
 
+Also compares non-irrigation predictions with:
+    4. **USGS Public Supply Reanalysis** — HUC12-scale monthly PS GW/SW
+       withdrawals (2000-2020), from Alzraiee et al. (2024, WRR).
+
 References
 ----------
 NHM metadata: IR_metadata.xml — withdrawals in million gallons per day.
 Reitz metadata: HistoricalET_metadata.xml — irrigation in metres/year.
+PS metadata: PS_WU_reanalysis_v2.xml — public supply in Mgal/d.
 """
 
 # Author: Dr. Sayantan Majumdar
@@ -41,10 +46,18 @@ import rasterio as rio
 from rasterio.features import rasterize
 from rasterio.mask import mask as rio_mask
 from rasterio.warp import Resampling, reproject
-from shapely.geometry import mapping
+from shapely.geometry import box, mapping
 
 from hydrolibs.rasterops import read_raster_as_arr
 from hydrolibs.sysops import makedirs
+from hydrolibs.visualops import (
+    plot_intercomp_scatter,
+    plot_intercomp_taylor,
+    plot_intercomp_time_series,
+    plot_temporal_box_violin,
+    plot_temporal_heatmap,
+    plot_temporal_r_vs_nse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +112,7 @@ def _raster_basin_volumes(
             geom = [mapping(row.geometry)]
             try:
                 if not row.geometry.intersects(
-                    __import__('shapely.geometry', fromlist=['box']).box(*raster_bounds)
+                    box(*raster_bounds)
                 ):
                     logger.warning('Basin %s does not intersect raster extent, setting volume to 0', basin_name)
                     volumes[basin_name] = 0.0
@@ -138,7 +151,7 @@ def _raster_basin_means(
             geom = [mapping(row.geometry)]
             try:
                 if not row.geometry.intersects(
-                    __import__('shapely.geometry', fromlist=['box']).box(*raster_bounds)
+                    box(*raster_bounds)
                 ):
                     logger.warning('Basin %s does not intersect raster extent, setting mean to NaN', basin_name)
                     means[basin_name] = np.nan
@@ -309,26 +322,22 @@ def load_nhm_basin_volumes(
                 pred_file = os.path.join(predictor_dir, f'Predictor_{yr}.tif')
                 if not os.path.isfile(pred_file):
                     continue
+                # Open raster once per year; reuse handle for all HUC12 clips
                 with rio.open(pred_file) as src:
-                    irr_arr = src.read(irr_fraction_band).astype(np.float64)
-                    irr_arr[np.isnan(irr_arr)] = 0.0
-                    irr_arr = np.clip(irr_arr, 0, 1)
-                # Zonal mean per HUC12
-                for idx, row in huc_reproj.iterrows():
-                    geom = [mapping(row.geometry)]
-                    try:
-                        with rio.open(pred_file) as src:
+                    for idx, row in huc_reproj.iterrows():
+                        geom = [mapping(row.geometry)]
+                        try:
                             clipped, _ = rio_mask(src, geom, crop=True,
                                                   all_touched=True,
                                                   indexes=[irr_fraction_band],
                                                   nodata=np.nan)
-                        vals = clipped[0].astype(np.float64)
-                        vals = vals[~np.isnan(vals)]
-                        vals = np.clip(vals, 0, 1)
-                        if vals.size > 0:
-                            irr_counts[huc_reproj.index.get_loc(idx)] += np.mean(vals)
-                    except Exception:
-                        logger.debug('Irr fraction clipping failed for HUC at index %s', idx)
+                            vals = clipped[0].astype(np.float64)
+                            vals = vals[~np.isnan(vals)]
+                            vals = np.clip(vals, 0, 1)
+                            if vals.size > 0:
+                                irr_counts[huc_reproj.index.get_loc(idx)] += np.mean(vals)
+                        except (ValueError, rio.errors.WindowError):
+                            logger.debug('Irr fraction clipping failed for HUC at index %s', idx)
                 irr_n_years += 1
 
             if irr_n_years > 0:
@@ -767,224 +776,107 @@ def _compute_metrics(
         result['RMSD_mm'] = round(float(np.sqrt(np.mean(diff_mm ** 2))), 4)
         result['MAD_mm'] = round(float(np.mean(np.abs(diff_mm))), 4)
 
+        vals_a_ft = vals_a_mm * MM_TO_FT
+        vals_b_ft = vals_b_mm * MM_TO_FT
+        diff_ft = vals_a_ft - vals_b_ft
+        result['RMSD_ft'] = round(float(np.sqrt(np.mean(diff_ft ** 2))), 6)
+        result['MAD_ft'] = round(float(np.mean(np.abs(diff_ft))), 6)
+
     return result
 
 
+def _compute_temporal_metrics(
+    basin_names: list[str],
+    yearly_a: dict[int, dict[str, float]],
+    yearly_b: dict[int, dict[str, float]],
+    label_a: str,
+    label_b: str,
+) -> dict:
+    """Compute interannual agreement metrics between two datasets.
+
+    For each basin, extracts the overlapping yearly time series from both
+    datasets and computes Pearson correlation (r) and Nash-Sutcliffe
+    Efficiency (NSE).  Returns basin-mean, basin-median, and per-basin
+    values.
+
+    Parameters
+    ----------
+    basin_names : list[str]
+        Basin identifiers.
+    yearly_a, yearly_b : dict[int, dict[str, float]]
+        ``{year: {basin: volume_AF}}`` for each dataset.
+    label_a, label_b : str
+        Dataset labels.
+
+    Returns
+    -------
+    dict
+        Summary with Pearson_r_mean, Pearson_r_median, NSE_mean, NSE_median,
+        n_basins_with_data, and per_basin detail list.
+    """
+    common_years = sorted(set(yearly_a.keys()) & set(yearly_b.keys()))
+    if not common_years:
+        return {
+            'Pair': f'{label_a} vs {label_b}',
+            'Pearson_r_mean': np.nan,
+            'Pearson_r_median': np.nan,
+            'NSE_mean': np.nan,
+            'NSE_median': np.nan,
+            'n_common_years': 0,
+            'n_basins_with_data': 0,
+        }
+
+    pearson_rs = []
+    nses = []
+    per_basin = []
+    for basin in basin_names:
+        ts_a = np.array([yearly_a[yr].get(basin, 0.0) for yr in common_years])
+        ts_b = np.array([yearly_b[yr].get(basin, 0.0) for yr in common_years])
+        # Skip basins where either series is all-zero or has non-finite values
+        if np.all(ts_a == 0) or np.all(ts_b == 0):
+            continue
+        if not (np.all(np.isfinite(ts_a)) and np.all(np.isfinite(ts_b))):
+            continue
+        if len(ts_a) < 2:
+            continue
+        # Pearson r
+        if np.std(ts_a) > 0 and np.std(ts_b) > 0:
+            r = float(np.corrcoef(ts_a, ts_b)[0, 1])
+        else:
+            r = np.nan
+        # NSE: 1 - SS_res / SS_tot  (treating ts_b as "observed")
+        ss_res = float(np.sum((ts_b - ts_a) ** 2))
+        ss_tot = float(np.sum((ts_b - np.mean(ts_b)) ** 2))
+        nse = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+        pearson_rs.append(r)
+        nses.append(nse)
+        per_basin.append({
+            'Basin': basin, 'Pearson_r': round(r, 4),
+            'NSE': round(nse, 4),
+        })
+
+    valid_rs = [v for v in pearson_rs if np.isfinite(v)]
+    valid_nses = [v for v in nses if np.isfinite(v)]
+    return {
+        'Pair': f'{label_a} vs {label_b}',
+        'Pearson_r_mean': round(float(np.mean(valid_rs)), 4) if valid_rs else np.nan,
+        'Pearson_r_median': round(float(np.median(valid_rs)), 4) if valid_rs else np.nan,
+        'NSE_mean': round(float(np.mean(valid_nses)), 4) if valid_nses else np.nan,
+        'NSE_median': round(float(np.median(valid_nses)), 4) if valid_nses else np.nan,
+        'n_common_years': len(common_years),
+        'n_basins_with_data': len(per_basin),
+        'per_basin': per_basin,
+    }
+
+
 # ═════════════════════════════════════════════════════════════════════════════
+# 4c. Temporal agreement visualizations
+
+
 # 5. Time series plotting
-# ═════════════════════════════════════════════════════════════════════════════
-_TS_COLORS = {'ML': '#2C3E50', 'NHM': '#27AE60', 'Reitz': '#E67E22'}
-_TS_MARKERS = {'ML': 'o', 'NHM': 's', 'Reitz': '^'}
 
 
-def _plot_basin_time_series(
-    all_sources: dict,
-    basin_names: list[str],
-    basin_areas_m2: dict[str, float],
-    output_dir: str,
-) -> None:
-    """Create per-basin time series plots with all three datasets.
-
-    Each basin gets one figure with two columns (Irrigation GW, Irrigation SW)
-    and two rows:
-        Row 0: Depth — mm (left axis) / ft (right twin axis)
-        Row 1: Volume — m³ (left axis) / AF (right twin axis)
-    An additional 'AZ Total' figure sums across all basins.
-
-    Parameters
-    ----------
-    all_sources : dict
-        ``{'ML': ml_vols, 'NHM': nhm_vols, 'Reitz': reitz_vols}`` where
-        each ``*_vols`` has ``{cat: {'mean': ..., 'yearly': ...}}``.
-    basin_names : list[str]
-        Sorted list of basin names.
-    basin_areas_m2 : dict[str, float]
-        Basin areas for depth conversion.
-    output_dir : str
-        Directory for saved plots.
-    """
-    makedirs(output_dir)
-    af_to_m3 = 1.0 / M3_TO_AF
-
-    targets = list(basin_names) + ['AZ_Total']
-
-    for basin in targets:
-        fig, axes = plt.subplots(2, 2, figsize=(14, 9), constrained_layout=True)
-        title = basin.replace('_', ' ')
-        fig.suptitle(title, fontsize=14, fontweight='bold')
-
-        for col_i, cat in enumerate(('GW', 'SW')):
-            # ─── Row 0: Depth (mm / ft) ───
-            ax_mm = axes[0, col_i]
-            ax_ft = ax_mm.twinx()
-            ax_mm.set_title(f'Irrigation {cat}')
-            ax_mm.set_ylabel('Depth (mm)')
-            ax_ft.set_ylabel('Depth (ft)')
-
-            # ─── Row 1: Volume (m³ / AF) ───
-            ax_m3 = axes[1, col_i]
-            ax_af = ax_m3.twinx()
-            ax_m3.set_ylabel('Volume (m³)')
-            ax_af.set_ylabel('Volume (AF)')
-            ax_m3.set_xlabel('Year')
-
-            for source in ('ML', 'NHM', 'Reitz'):
-                yearly = all_sources[source][cat].get('yearly', {})
-                years = sorted(yearly.keys())
-                if not years:
-                    continue
-
-                if basin == 'AZ_Total':
-                    af_vals = np.array([
-                        sum(yearly[yr].values()) for yr in years
-                    ])
-                    total_area = sum(basin_areas_m2.values())
-                else:
-                    af_vals = np.array([
-                        yearly[yr].get(basin, 0.0) for yr in years
-                    ])
-                    total_area = basin_areas_m2.get(basin, 1.0)
-
-                m3_vals = af_vals * af_to_m3
-                mm_vals = m3_vals / total_area * M_TO_MM
-                ft_vals = mm_vals * MM_TO_FT
-
-                # Depth row — plot on mm axis (ft axis is linked)
-                ax_mm.plot(
-                    years, mm_vals,
-                    label=source,
-                    color=_TS_COLORS[source],
-                    marker=_TS_MARKERS[source],
-                    markersize=3, linewidth=1.2,
-                )
-                ax_ft.plot(
-                    years, ft_vals,
-                    color=_TS_COLORS[source],
-                    linestyle='none',  # hidden; twinx shares scale
-                )
-
-                # Volume row — plot on m³ axis (AF axis is linked)
-                ax_m3.plot(
-                    years, m3_vals,
-                    label=source,
-                    color=_TS_COLORS[source],
-                    marker=_TS_MARKERS[source],
-                    markersize=3, linewidth=1.2,
-                )
-                ax_af.plot(
-                    years, af_vals,
-                    color=_TS_COLORS[source],
-                    linestyle='none',
-                )
-
-            # Sync twin axis limits
-            mm_lo, mm_hi = ax_mm.get_ylim()
-            ax_ft.set_ylim(mm_lo * MM_TO_FT, mm_hi * MM_TO_FT)
-            m3_lo, m3_hi = ax_m3.get_ylim()
-            ax_af.set_ylim(m3_lo * M3_TO_AF, m3_hi * M3_TO_AF)
-
-            ax_mm.legend(fontsize=9)
-            ax_m3.legend(fontsize=9)
-            for ax in (ax_mm, ax_m3):
-                ax.grid(True, alpha=0.3, linestyle='--')
-
-        clean_name = basin.replace(' ', '_').replace('/', '_')
-        out_path = os.path.join(output_dir, f'TS_{clean_name}.png')
-        fig.savefig(out_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
-
-    logger.info(f'Time series plots saved to {output_dir}')
-
-
-# ═════════════════════════════════════════════════════════════════════════════
 # 6. Scatter plots — per-basin volumes (pairwise)
-# ═════════════════════════════════════════════════════════════════════════════
-def _plot_scatter(
-    all_sources: dict,
-    basin_names: list[str],
-    basin_areas_m2: dict[str, float],
-    output_dir: str,
-) -> None:
-    """Create pairwise scatter plots of mean-annual per-basin volumes.
-
-    One figure per GW/SW category with three subplots:
-        ML vs NHM, ML vs Reitz, NHM vs Reitz.
-    Each subplot shows two rows (AF top, mm bottom) with a 1:1 line and
-    linear fit.
-
-    Parameters
-    ----------
-    all_sources : dict
-        ``{'ML': ml_vols, 'NHM': nhm_vols, 'Reitz': reitz_vols}``.
-    basin_names : list[str]
-        Sorted basin names.
-    basin_areas_m2 : dict[str, float]
-        Basin areas for depth conversion.
-    output_dir : str
-        Directory for saved plots.
-    """
-    makedirs(output_dir)
-    af_to_m3 = 1.0 / M3_TO_AF
-
-    pairs = [('ML', 'NHM'), ('ML', 'Reitz'), ('NHM', 'Reitz')]
-
-    for cat in ('GW', 'SW'):
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10), constrained_layout=True)
-        fig.suptitle(f'Irrigation {cat} — Per-Basin Scatter Comparison',
-                     fontsize=14, fontweight='bold')
-
-        for col_i, (src_a, src_b) in enumerate(pairs):
-            mean_a = all_sources[src_a][cat]['mean']
-            mean_b = all_sources[src_b][cat]['mean']
-
-            af_a = np.array([mean_a.get(b, 0.0) for b in basin_names])
-            af_b = np.array([mean_b.get(b, 0.0) for b in basin_names])
-            areas = np.array([basin_areas_m2.get(b, 1.0) for b in basin_names])
-            mm_a = af_a * af_to_m3 / areas * M_TO_MM
-            mm_b = af_b * af_to_m3 / areas * M_TO_MM
-
-            for row_i, (vals_x, vals_y, unit) in enumerate([
-                (af_a, af_b, 'AF'),
-                (mm_a, mm_b, 'mm'),
-            ]):
-                ax = axes[row_i, col_i]
-
-                ax.scatter(vals_x, vals_y, s=30, alpha=0.7,
-                           edgecolors='white', linewidths=0.5)
-
-                # 1:1 line
-                lo = min(vals_x.min(), vals_y.min(), 0)
-                hi = max(vals_x.max(), vals_y.max()) * 1.05
-                ax.plot([lo, hi], [lo, hi], 'k--', lw=1, label='1:1')
-
-                # Linear fit
-                if len(vals_x) > 1 and np.std(vals_x) > 0:
-                    z = np.polyfit(vals_x, vals_y, 1)
-                    x_fit = np.linspace(lo, hi, 100)
-                    ax.plot(x_fit, np.polyval(z, x_fit), 'r-', lw=1.2,
-                            label=f'y={z[0]:.2f}x+{z[1]:.1f}')
-
-                    ss_res = np.sum((vals_y - np.polyval(z, vals_x)) ** 2)
-                    ss_tot = np.sum((vals_y - np.mean(vals_y)) ** 2)
-                    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-                    ax.set_title(f'{src_a} vs {src_b}  (R²={r2:.3f})',
-                                 fontsize=11, fontweight='bold')
-                else:
-                    ax.set_title(f'{src_a} vs {src_b}', fontsize=11)
-
-                ax.set_xlabel(f'{src_a} ({unit})')
-                ax.set_ylabel(f'{src_b} ({unit})')
-                ax.legend(fontsize=8, loc='upper left')
-                ax.grid(True, alpha=0.3, linestyle='--')
-                ax.set_aspect('equal', adjustable='box')
-                ax.set_xlim(lo, hi)
-                ax.set_ylim(lo, hi)
-
-        out_path = os.path.join(output_dir, f'Scatter_{cat}.png')
-        fig.savefig(out_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
-
-    logger.info(f'Scatter plots saved to {output_dir}')
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1226,21 +1118,22 @@ def _nhm_cu_volume_path(
             pred_file = os.path.join(predictor_dir, f'Predictor_{yr}.tif')
             if not os.path.isfile(pred_file):
                 continue
-            for idx, row in huc_merged.iterrows():
-                geom = [mapping(row.geometry)]
-                try:
-                    with rio.open(pred_file) as src:
+            # Open raster once per year; reuse handle for all HUC12 clips
+            with rio.open(pred_file) as src:
+                for idx, row in huc_merged.iterrows():
+                    geom = [mapping(row.geometry)]
+                    try:
                         clipped, _ = rio_mask(src, geom, crop=True,
                                               all_touched=True,
                                               indexes=[irr_fraction_band],
                                               nodata=np.nan)
-                    vals = clipped[0].astype(np.float64)
-                    vals = vals[~np.isnan(vals)]
-                    vals = np.clip(vals, 0, 1)
-                    if vals.size > 0:
-                        irr_counts[huc_merged.index.get_loc(idx)] += np.mean(vals)
-                except Exception:
-                    logger.debug('Irr fraction clipping failed for HUC at index %s', idx)
+                        vals = clipped[0].astype(np.float64)
+                        vals = vals[~np.isnan(vals)]
+                        vals = np.clip(vals, 0, 1)
+                        if vals.size > 0:
+                            irr_counts[huc_merged.index.get_loc(idx)] += np.mean(vals)
+                    except (ValueError, rio.errors.WindowError):
+                        logger.debug('Irr fraction clipping failed for HUC at index %s', idx)
             irr_n_years += 1
         if irr_n_years > 0:
             huc_merged['irr_fraction'] = np.clip(
@@ -1563,232 +1456,7 @@ def _compute_ratio_metrics(
     }
 
 
-# ═════════════════════════════════════════════════════════════════════════════
 # CU/IE: Time series & scatter plotting
-# ═════════════════════════════════════════════════════════════════════════════
-_CUIE_COLORS = {'ML': '#2C3E50', 'NHM': '#27AE60'}
-_CUIE_MARKERS = {'ML': 'o', 'NHM': 's'}
-
-
-def _plot_cu_ie_time_series(
-    ml_data: dict,
-    nhm_data: dict,
-    basin_names: list[str],
-    basin_areas_m2: dict[str, float],
-    output_dir: str,
-    variable: str,
-) -> None:
-    """Per-basin time series plots for CU or IE.
-
-    For CU (``variable='CU'``): two rows — depth (mm/ft) and volume (m³/AF).
-    For IE (``variable='IE'``): single row — efficiency ratio.
-    """
-    makedirs(output_dir)
-    af_to_m3 = 1.0 / M3_TO_AF
-    targets = list(basin_names) + ['AZ_Total']
-
-    for basin in targets:
-        if variable == 'CU':
-            fig, axes = plt.subplots(2, 1, figsize=(10, 8),
-                                     constrained_layout=True)
-        else:
-            fig, axes = plt.subplots(1, 1, figsize=(10, 4),
-                                     constrained_layout=True)
-            axes = [axes]
-
-        title = basin.replace('_', ' ')
-        fig.suptitle(f'{title} — Irrigation {variable}',
-                     fontsize=14, fontweight='bold')
-
-        for source_name, src_data in [('ML', ml_data), ('NHM', nhm_data)]:
-            yearly = src_data.get('yearly', {})
-            years = sorted(yearly.keys())
-            if not years:
-                continue
-
-            if variable == 'CU':
-                if basin == 'AZ_Total':
-                    af_vals = np.array([
-                        sum(yearly[yr].values()) for yr in years
-                    ])
-                    total_area = sum(basin_areas_m2.values())
-                else:
-                    af_vals = np.array([
-                        yearly[yr].get(basin, 0.0) for yr in years
-                    ])
-                    total_area = basin_areas_m2.get(basin, 1.0)
-
-                m3_vals = af_vals * af_to_m3
-                mm_vals = m3_vals / total_area * M_TO_MM
-
-                # Row 0: depth
-                ax_mm = axes[0]
-                ax_mm.plot(years, mm_vals, label=source_name,
-                           color=_CUIE_COLORS[source_name],
-                           marker=_CUIE_MARKERS[source_name],
-                           markersize=3, linewidth=1.2)
-                ax_mm.set_ylabel('Depth (mm)')
-                ax_mm.grid(True, alpha=0.3, linestyle='--')
-                ax_mm.legend(fontsize=9)
-
-                # Row 1: volume
-                ax_m3 = axes[1]
-                ax_m3.plot(years, af_vals, label=source_name,
-                           color=_CUIE_COLORS[source_name],
-                           marker=_CUIE_MARKERS[source_name],
-                           markersize=3, linewidth=1.2)
-                ax_m3.set_ylabel('Volume (AF)')
-                ax_m3.set_xlabel('Year')
-                ax_m3.grid(True, alpha=0.3, linestyle='--')
-                ax_m3.legend(fontsize=9)
-            else:
-                # IE — ratio
-                if basin == 'AZ_Total':
-                    # Area-weighted mean across basins
-                    ie_vals = []
-                    for yr in years:
-                        yr_d = yearly[yr]
-                        vals = [yr_d.get(b, np.nan) for b in basin_names]
-                        areas = [basin_areas_m2.get(b, 0) for b in basin_names]
-                        finite = [(v, a) for v, a in zip(vals, areas)
-                                  if np.isfinite(v)]
-                        if finite:
-                            v_arr = np.array([x[0] for x in finite])
-                            a_arr = np.array([x[1] for x in finite])
-                            ie_vals.append(float(np.average(v_arr, weights=a_arr)))
-                        else:
-                            ie_vals.append(np.nan)
-                    ie_vals = np.array(ie_vals)
-                else:
-                    ie_vals = np.array([
-                        yearly[yr].get(basin, np.nan) for yr in years
-                    ])
-
-                ax = axes[0]
-                ax.plot(years, ie_vals, label=source_name,
-                        color=_CUIE_COLORS[source_name],
-                        marker=_CUIE_MARKERS[source_name],
-                        markersize=3, linewidth=1.2)
-                ax.set_ylabel('Irrigation Efficiency')
-                ax.set_xlabel('Year')
-                ax.grid(True, alpha=0.3, linestyle='--')
-                ax.legend(fontsize=9)
-
-        # ── Twin y-axes: mm↔ft and AF↔m³ ──
-        if variable == 'CU':
-            ax_ft = axes[0].twinx()
-            ax_ft.set_ylabel('(ft)', fontweight='bold')
-            lo, hi = axes[0].get_ylim()
-            ax_ft.set_ylim(lo * MM_TO_FT, hi * MM_TO_FT)
-
-            ax_m3_tw = axes[1].twinx()
-            ax_m3_tw.set_ylabel('(m³)', fontweight='bold')
-            lo, hi = axes[1].get_ylim()
-            ax_m3_tw.set_ylim(lo / M3_TO_AF, hi / M3_TO_AF)
-
-        clean_name = basin.replace(' ', '_').replace('/', '_')
-        out_path = os.path.join(output_dir, f'TS_{variable}_{clean_name}.png')
-        fig.savefig(out_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
-
-    logger.info(f'{variable} time series plots saved to {output_dir}')
-
-
-def _plot_cu_ie_scatter(
-    ml_data: dict,
-    nhm_data: dict,
-    basin_names: list[str],
-    basin_areas_m2: dict[str, float],
-    output_dir: str,
-    variable: str,
-) -> None:
-    """Scatter plot of ML vs NHM per-basin mean-annual values."""
-    makedirs(output_dir)
-
-    if variable == 'CU':
-        af_to_m3 = 1.0 / M3_TO_AF
-        af_ml = np.array([ml_data['mean'].get(b, 0.0) for b in basin_names])
-        af_nhm = np.array([nhm_data['mean'].get(b, 0.0) for b in basin_names])
-        areas = np.array([basin_areas_m2.get(b, 1.0) for b in basin_names])
-        mm_ml = af_ml * af_to_m3 / areas * M_TO_MM
-        mm_nhm = af_nhm * af_to_m3 / areas * M_TO_MM
-
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
-        fig.suptitle('Irrigation CU — Per-Basin Scatter (ML vs NHM)',
-                     fontsize=14, fontweight='bold')
-        for col_i, (vals_x, vals_y, unit) in enumerate([
-            (af_ml, af_nhm, 'AF'), (mm_ml, mm_nhm, 'mm'),
-        ]):
-            ax = axes[col_i]
-            ax.scatter(vals_x, vals_y, s=30, alpha=0.7,
-                       edgecolors='white', linewidths=0.5)
-            lo = min(vals_x.min(), vals_y.min(), 0)
-            hi = max(vals_x.max(), vals_y.max()) * 1.05
-            ax.plot([lo, hi], [lo, hi], 'k--', lw=1, label='1:1')
-            if len(vals_x) > 1 and np.std(vals_x) > 0:
-                z = np.polyfit(vals_x, vals_y, 1)
-                x_fit = np.linspace(lo, hi, 100)
-                ax.plot(x_fit, np.polyval(z, x_fit), 'r-', lw=1.2,
-                        label=f'y={z[0]:.2f}x+{z[1]:.1f}')
-                ss_res = np.sum((vals_y - np.polyval(z, vals_x)) ** 2)
-                ss_tot = np.sum((vals_y - np.mean(vals_y)) ** 2)
-                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-                ax.set_title(f'ML vs NHM  (R²={r2:.3f})',
-                             fontsize=11, fontweight='bold')
-            else:
-                ax.set_title('ML vs NHM', fontsize=11)
-            ax.set_xlabel(f'ML ({unit})')
-            ax.set_ylabel(f'NHM ({unit})')
-            ax.legend(fontsize=8, loc='upper left')
-            ax.grid(True, alpha=0.3, linestyle='--')
-            ax.set_aspect('equal', adjustable='box')
-            ax.set_xlim(lo, hi)
-            ax.set_ylim(lo, hi)
-
-        out_path = os.path.join(output_dir, 'Scatter_CU.png')
-    else:
-        # IE scatter
-        ml_vals_raw = [ml_data['mean'].get(b, np.nan) for b in basin_names]
-        nhm_vals_raw = [nhm_data['mean'].get(b, np.nan) for b in basin_names]
-        valid_mask = [
-            np.isfinite(a) and np.isfinite(b)
-            for a, b in zip(ml_vals_raw, nhm_vals_raw)
-        ]
-        vals_x = np.array([v for v, m in zip(ml_vals_raw, valid_mask) if m])
-        vals_y = np.array([v for v, m in zip(nhm_vals_raw, valid_mask) if m])
-
-        fig, ax = plt.subplots(figsize=(7, 6), constrained_layout=True)
-        fig.suptitle('Irrigation Efficiency — Per-Basin Scatter (ML vs NHM)',
-                     fontsize=14, fontweight='bold')
-        if vals_x.size > 0:
-            ax.scatter(vals_x, vals_y, s=30, alpha=0.7,
-                       edgecolors='white', linewidths=0.5)
-            lo = min(vals_x.min(), vals_y.min()) * 0.9
-            hi = max(vals_x.max(), vals_y.max()) * 1.1
-            ax.plot([lo, hi], [lo, hi], 'k--', lw=1, label='1:1')
-            if len(vals_x) > 1 and np.std(vals_x) > 0:
-                z = np.polyfit(vals_x, vals_y, 1)
-                x_fit = np.linspace(lo, hi, 100)
-                ax.plot(x_fit, np.polyval(z, x_fit), 'r-', lw=1.2,
-                        label=f'y={z[0]:.2f}x+{z[1]:.2f}')
-                ss_res = np.sum((vals_y - np.polyval(z, vals_x)) ** 2)
-                ss_tot = np.sum((vals_y - np.mean(vals_y)) ** 2)
-                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-                ax.set_title(f'ML vs NHM  (R²={r2:.3f})',
-                             fontsize=11, fontweight='bold')
-            ax.set_xlim(lo, hi)
-            ax.set_ylim(lo, hi)
-        ax.set_xlabel('ML (efficiency)')
-        ax.set_ylabel('NHM (efficiency)')
-        ax.legend(fontsize=8, loc='upper left')
-        ax.grid(True, alpha=0.3, linestyle='--')
-        ax.set_aspect('equal', adjustable='box')
-
-        out_path = os.path.join(output_dir, 'Scatter_IE.png')
-
-    fig.savefig(out_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
-    logger.info(f'{variable} scatter plot saved to {out_path}')
 
 
 def run_intercomparison(
@@ -1957,6 +1625,88 @@ def run_intercomparison(
     metrics_df.to_csv(metrics_csv, index=False)
     logger.info(f'Metrics saved to {metrics_csv}')
 
+    # ── 4b. Temporal agreement metrics (Pearson r, NSE) ─────────────────
+    logger.info('--- Interannual variability metrics ---')
+    temporal_metrics = []
+    temporal_per_basin_rows = []
+    for cat in ('GW', 'SW'):
+        pairs = [
+            ('ML', 'NHM', ml_vols[cat].get('yearly', {}),
+             nhm_vols[cat].get('yearly', {})),
+            ('ML', 'Reitz', ml_vols[cat].get('yearly', {}),
+             reitz_vols[cat].get('yearly', {})),
+            ('NHM', 'Reitz', nhm_vols[cat].get('yearly', {}),
+             reitz_vols[cat].get('yearly', {})),
+        ]
+        for label_a, label_b, yearly_a, yearly_b in pairs:
+            tm = _compute_temporal_metrics(
+                basin_names, yearly_a, yearly_b, label_a, label_b,
+            )
+            summary = {
+                'Category': f'Irrigation_{cat}',
+                'Pair': tm['Pair'],
+                'Pearson_r_mean': tm['Pearson_r_mean'],
+                'Pearson_r_median': tm['Pearson_r_median'],
+                'NSE_mean': tm['NSE_mean'],
+                'NSE_median': tm['NSE_median'],
+                'n_common_years': tm['n_common_years'],
+                'n_basins_with_data': tm['n_basins_with_data'],
+            }
+            temporal_metrics.append(summary)
+            logger.info(
+                f'  Irrigation {cat} {tm["Pair"]}: '
+                f'Pearson r (mean={tm["Pearson_r_mean"]}, '
+                f'median={tm["Pearson_r_median"]}), '
+                f'NSE (mean={tm["NSE_mean"]}, '
+                f'median={tm["NSE_median"]}), '
+                f'{tm["n_common_years"]} common years, '
+                f'{tm["n_basins_with_data"]} basins'
+            )
+            for pb in tm.get('per_basin', []):
+                temporal_per_basin_rows.append({
+                    'Category': f'Irrigation_{cat}',
+                    'Pair': tm['Pair'],
+                    **pb,
+                })
+
+    temporal_df = pd.DataFrame(temporal_metrics)
+    temporal_csv = os.path.join(output_dir, 'temporal_agreement_metrics.csv')
+    temporal_df.to_csv(temporal_csv, index=False)
+    logger.info(f'Temporal agreement metrics saved to {temporal_csv}')
+
+    if temporal_per_basin_rows:
+        temporal_basin_df = pd.DataFrame(temporal_per_basin_rows)
+        temporal_basin_csv = os.path.join(
+            output_dir, 'temporal_agreement_per_basin.csv',
+        )
+        temporal_basin_df.to_csv(temporal_basin_csv, index=False)
+        logger.info(f'Per-basin temporal metrics saved to {temporal_basin_csv}')
+
+    # ── 4c. Temporal agreement visualizations ────────────────────────────
+    all_sources = {'ML': ml_vols, 'NHM': nhm_vols, 'Reitz': reitz_vols}
+    if temporal_per_basin_rows:
+        temporal_basin_df = pd.DataFrame(temporal_per_basin_rows)
+        temporal_plot_dir = os.path.join(output_dir, 'Temporal_Agreement/')
+        plot_temporal_heatmap(temporal_basin_df, temporal_plot_dir)
+        plot_temporal_box_violin(temporal_basin_df, temporal_plot_dir)
+        pair_colors_4a = {
+            'ML vs NHM': '#2C3E50', 'ML vs Reitz': '#E67E22',
+            'NHM vs Reitz': '#27AE60',
+        }
+        plot_intercomp_taylor(
+            all_sources,
+            pairs=[('ML', 'NHM'), ('ML', 'Reitz'), ('NHM', 'Reitz')],
+            categories=['GW', 'SW'],
+            basin_names=basin_names,
+            output_dir=temporal_plot_dir,
+            pair_colors=pair_colors_4a,
+            title_prefix='Irrigation ',
+        )
+        plot_temporal_r_vs_nse(
+            temporal_basin_df, temporal_plot_dir,
+            pair_colors=pair_colors_4a,
+        )
+
     # ── 5. Per-basin comparison table (mm, m³, AF) ──────────────────────
     rows = []
     for cat in ('GW', 'SW'):
@@ -1988,7 +1738,6 @@ def run_intercomparison(
     logger.info(f'Per-basin volumes saved to {basin_csv}')
 
     # ── 6. Time series CSV ───────────────────────────────────────────────
-    all_sources = {'ML': ml_vols, 'NHM': nhm_vols, 'Reitz': reitz_vols}
     ts_rows = []
     for cat in ('GW', 'SW'):
         for source_name, src_data in all_sources.items():
@@ -2013,14 +1762,29 @@ def run_intercomparison(
     logger.info(f'Time series saved to {ts_csv}')
 
     # ── 7. Time series plots ─────────────────────────────────────────────
+    _ts_colors = {'ML': '#2C3E50', 'NHM': '#27AE60', 'Reitz': '#E67E22'}
+    _ts_markers = {'ML': 'o', 'NHM': 's', 'Reitz': '^'}
     plot_dir = os.path.join(output_dir, 'Time_Series/')
-    _plot_basin_time_series(
-        all_sources, basin_names, basin_areas_m2, plot_dir,
+    plot_intercomp_time_series(
+        all_sources, categories=['GW', 'SW'],
+        basin_names=basin_names, basin_areas_m2=basin_areas_m2,
+        output_dir=plot_dir,
+        colors=_ts_colors, markers=_ts_markers,
+        title_prefix='Irrigation ', file_prefix='TS',
     )
 
     # ── 8. Scatter plots ────────────────────────────────────────────────
     scatter_dir = os.path.join(output_dir, 'Scatter/')
-    _plot_scatter(all_sources, basin_names, basin_areas_m2, scatter_dir)
+    for cat in ('GW', 'SW'):
+        scatter_pairs = [
+            (sa, sb, all_sources[sa][cat]['mean'], all_sources[sb][cat]['mean'])
+            for sa, sb in [('ML', 'NHM'), ('ML', 'Reitz'), ('NHM', 'Reitz')]
+        ]
+        plot_intercomp_scatter(
+            scatter_pairs, basin_names, basin_areas_m2, scatter_dir,
+            title=f'Irrigation {cat} — Per-Basin Scatter Comparison',
+            filename=f'Scatter_{cat}.png',
+        )
 
     # ── 9. Spatial difference maps ───────────────────────────────────────
     ml_parent = os.path.dirname(ml_pred_dir.rstrip('/'))
@@ -2275,20 +2039,39 @@ def run_cu_ie_intercomparison(
     logger.info(f'CU/IE time series saved to {ts_csv}')
 
     # ── Plots ────────────────────────────────────────────────────────────
+    _cuie_colors = {'ML': '#2C3E50', 'NHM': '#27AE60'}
+    _cuie_markers = {'ML': 'o', 'NHM': 's'}
     plot_dir = os.path.join(output_dir, 'Time_Series/')
-    _plot_cu_ie_time_series(
-        ml_cu, nhm_cu, basin_names, basin_areas_m2, plot_dir, 'CU',
+    cu_sources = {'ML': {'CU': ml_cu}, 'NHM': {'CU': nhm_cu}}
+    plot_intercomp_time_series(
+        cu_sources, categories=['CU'],
+        basin_names=basin_names, basin_areas_m2=basin_areas_m2,
+        output_dir=plot_dir,
+        colors=_cuie_colors, markers=_cuie_markers,
+        title_prefix='Irrigation ', file_prefix='TS_CU',
     )
-    _plot_cu_ie_time_series(
-        ml_ie, nhm_ie, basin_names, basin_areas_m2, plot_dir, 'IE',
+    ie_sources = {'ML': {'IE': ml_ie}, 'NHM': {'IE': nhm_ie}}
+    plot_intercomp_time_series(
+        ie_sources, categories=['IE'],
+        basin_names=basin_names, basin_areas_m2=basin_areas_m2,
+        output_dir=plot_dir,
+        colors=_cuie_colors, markers=_cuie_markers,
+        title_prefix='Irrigation ', file_prefix='TS_IE',
+        mode='ratio',
     )
 
     scatter_dir = os.path.join(output_dir, 'Scatter/')
-    _plot_cu_ie_scatter(
-        ml_cu, nhm_cu, basin_names, basin_areas_m2, scatter_dir, 'CU',
+    plot_intercomp_scatter(
+        [('ML', 'NHM', ml_cu['mean'], nhm_cu['mean'])],
+        basin_names, basin_areas_m2, scatter_dir,
+        title='Irrigation CU — Per-Basin Scatter (ML vs NHM)',
+        filename='Scatter_CU.png',
     )
-    _plot_cu_ie_scatter(
-        ml_ie, nhm_ie, basin_names, basin_areas_m2, scatter_dir, 'IE',
+    plot_intercomp_scatter(
+        [('ML', 'NHM', ml_ie['mean'], nhm_ie['mean'])],
+        basin_names, basin_areas_m2, scatter_dir,
+        title='Irrigation Efficiency — Per-Basin Scatter (ML vs NHM)',
+        filename='Scatter_IE.png', mode='ratio',
     )
 
     # ── Summary ──────────────────────────────────────────────────────────
@@ -2304,10 +2087,6 @@ def run_cu_ie_intercomparison(
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Effective Precipitation Intercomparison (ML Peff vs ML Peff PCML vs NHM)
-# ═════════════════════════════════════════════════════════════════════════════
-
-_PEFF_COLORS = {'ML_Peff': '#2C3E50', 'ML_Peff_PCML': '#8E44AD', 'NHM_Peff': '#27AE60'}
-_PEFF_MARKERS = {'ML_Peff': 'o', 'ML_Peff_PCML': 'D', 'NHM_Peff': 's'}
 
 
 def _load_ml_peff_to_basins(
@@ -2412,164 +2191,6 @@ def _load_ml_peff_to_basins(
             )
 
     return {'mean': basin_vols, 'yearly': yearly_vols}
-
-
-def _plot_peff_time_series(
-    all_sources: dict,
-    basin_names: list[str],
-    basin_areas_m2: dict[str, float],
-    output_dir: str,
-) -> None:
-    """Per-basin time series of irrigated effective precipitation.
-
-    Each basin gets a figure with two rows:
-        Row 0: Depth (mm / ft)
-        Row 1: Volume (AF / m³)
-    An additional 'AZ Total' figure sums across all basins.
-    """
-    makedirs(output_dir)
-    af_to_m3 = 1.0 / M3_TO_AF
-    targets = list(basin_names) + ['AZ_Total']
-
-    for basin in targets:
-        fig, axes = plt.subplots(2, 1, figsize=(10, 8), constrained_layout=True)
-        title = basin.replace('_', ' ')
-        fig.suptitle(f'{title} — Effective Precipitation (irrigated)',
-                     fontsize=14, fontweight='bold')
-
-        for source_key, src_data in all_sources.items():
-            yearly = src_data.get('yearly', {})
-            years = sorted(yearly.keys())
-            if not years:
-                continue
-
-            if basin == 'AZ_Total':
-                af_vals = np.array([
-                    sum(yearly[yr].values()) for yr in years
-                ])
-                total_area = sum(basin_areas_m2.values())
-            else:
-                af_vals = np.array([
-                    yearly[yr].get(basin, 0.0) for yr in years
-                ])
-                total_area = basin_areas_m2.get(basin, 1.0)
-
-            m3_vals = af_vals * af_to_m3
-            mm_vals = (
-                m3_vals / total_area * M_TO_MM if total_area > 0
-                else m3_vals * 0
-            )
-
-            label = source_key.replace('_', ' ')
-            color = _PEFF_COLORS.get(source_key, '#333333')
-            marker = _PEFF_MARKERS.get(source_key, 'o')
-
-            axes[0].plot(years, mm_vals, label=label, color=color,
-                         marker=marker, markersize=3, linewidth=1.2)
-            axes[1].plot(years, af_vals, label=label, color=color,
-                         marker=marker, markersize=3, linewidth=1.2)
-
-        axes[0].set_ylabel('Depth (mm)')
-        axes[0].grid(True, alpha=0.3, linestyle='--')
-        axes[0].legend(fontsize=9)
-        ax_ft = axes[0].twinx()
-        lo, hi = axes[0].get_ylim()
-        ax_ft.set_ylim(lo * MM_TO_FT, hi * MM_TO_FT)
-        ax_ft.set_ylabel('Depth (ft)')
-
-        axes[1].set_ylabel('Volume (AF)')
-        axes[1].set_xlabel('Year')
-        axes[1].grid(True, alpha=0.3, linestyle='--')
-        axes[1].legend(fontsize=9)
-        ax_m3 = axes[1].twinx()
-        lo, hi = axes[1].get_ylim()
-        ax_m3.set_ylim(lo * af_to_m3, hi * af_to_m3)
-        ax_m3.set_ylabel('Volume (m³)')
-
-        clean_name = basin.replace(' ', '_').replace('/', '_')
-        out_path = os.path.join(output_dir, f'TS_Peff_{clean_name}.png')
-        fig.savefig(out_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
-
-    logger.info(f'Peff time series plots saved to {output_dir}')
-
-
-def _plot_peff_scatter(
-    all_sources: dict,
-    basin_names: list[str],
-    basin_areas_m2: dict[str, float],
-    output_dir: str,
-) -> None:
-    """Pairwise scatter plots of mean-annual Peff per-basin volumes."""
-    makedirs(output_dir)
-    af_to_m3 = 1.0 / M3_TO_AF
-
-    source_keys = list(all_sources.keys())
-    pairs = [
-        (source_keys[i], source_keys[j])
-        for i in range(len(source_keys))
-        for j in range(i + 1, len(source_keys))
-    ]
-    n_pairs = len(pairs)
-
-    fig, axes = plt.subplots(
-        2, n_pairs, figsize=(7 * n_pairs, 10),
-        constrained_layout=True, squeeze=False,
-    )
-    fig.suptitle('Effective Precipitation — Per-Basin Scatter',
-                 fontsize=14, fontweight='bold')
-
-    for col_i, (src_a, src_b) in enumerate(pairs):
-        mean_a = all_sources[src_a]['mean']
-        mean_b = all_sources[src_b]['mean']
-
-        af_a = np.array([mean_a.get(b, 0.0) for b in basin_names])
-        af_b = np.array([mean_b.get(b, 0.0) for b in basin_names])
-        areas = np.array([basin_areas_m2.get(b, 1.0) for b in basin_names])
-        mm_a = af_a * af_to_m3 / areas * M_TO_MM
-        mm_b = af_b * af_to_m3 / areas * M_TO_MM
-
-        label_a = src_a.replace('_', ' ')
-        label_b = src_b.replace('_', ' ')
-
-        for row_i, (vals_x, vals_y, unit) in enumerate([
-            (af_a, af_b, 'AF'), (mm_a, mm_b, 'mm'),
-        ]):
-            ax = axes[row_i, col_i]
-
-            ax.scatter(vals_x, vals_y, s=30, alpha=0.7,
-                       edgecolors='white', linewidths=0.5)
-
-            lo = min(vals_x.min(), vals_y.min(), 0)
-            hi = max(vals_x.max(), vals_y.max()) * 1.05
-            ax.plot([lo, hi], [lo, hi], 'k--', lw=1, label='1:1')
-
-            if len(vals_x) > 1 and np.std(vals_x) > 0:
-                z = np.polyfit(vals_x, vals_y, 1)
-                x_fit = np.linspace(lo, hi, 100)
-                ax.plot(x_fit, np.polyval(z, x_fit), 'r-', lw=1.2,
-                        label=f'y={z[0]:.2f}x+{z[1]:.1f}')
-
-                ss_res = np.sum((vals_y - np.polyval(z, vals_x)) ** 2)
-                ss_tot = np.sum((vals_y - np.mean(vals_y)) ** 2)
-                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-                ax.set_title(f'{label_a} vs {label_b}  (R²={r2:.3f})',
-                             fontsize=11, fontweight='bold')
-            else:
-                ax.set_title(f'{label_a} vs {label_b}', fontsize=11)
-
-            ax.set_xlabel(f'{label_a} ({unit})')
-            ax.set_ylabel(f'{label_b} ({unit})')
-            ax.legend(fontsize=8, loc='upper left')
-            ax.grid(True, alpha=0.3, linestyle='--')
-            ax.set_aspect('equal', adjustable='box')
-            ax.set_xlim(lo, hi)
-            ax.set_ylim(lo, hi)
-
-    out_path = os.path.join(output_dir, 'Scatter_Peff.png')
-    fig.savefig(out_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
-    logger.info(f'Peff scatter plot saved to {out_path}')
 
 
 def run_peff_intercomparison(
@@ -2768,15 +2389,34 @@ def run_peff_intercomparison(
     logger.info(f'Peff time series saved to {ts_csv}')
 
     # ── 7. Time series plots ─────────────────────────────────────────────
+    _peff_colors = {
+        'ML_Peff': '#2C3E50', 'ML_Peff_PCML': '#8E44AD', 'NHM_Peff': '#27AE60',
+    }
+    _peff_markers = {'ML_Peff': 'o', 'ML_Peff_PCML': 'D', 'NHM_Peff': 's'}
+    peff_ts_sources = {k: {'Peff': v} for k, v in all_sources.items()}
     plot_dir = os.path.join(output_dir, 'Time_Series/')
-    _plot_peff_time_series(
-        all_sources, basin_names, basin_areas_m2, plot_dir,
+    plot_intercomp_time_series(
+        peff_ts_sources, categories=['Peff'],
+        basin_names=basin_names, basin_areas_m2=basin_areas_m2,
+        output_dir=plot_dir,
+        colors=_peff_colors, markers=_peff_markers,
+        labels={k: k.replace('_', ' ') for k in all_sources},
+        title_prefix='Effective Precipitation — ', file_prefix='TS_Peff',
     )
 
     # ── 8. Scatter plots ─────────────────────────────────────────────────
     scatter_dir = os.path.join(output_dir, 'Scatter/')
-    _plot_peff_scatter(
-        all_sources, basin_names, basin_areas_m2, scatter_dir,
+    source_keys = list(all_sources.keys())
+    peff_scatter_pairs = [
+        (source_keys[i].replace('_', ' '), source_keys[j].replace('_', ' '),
+         all_sources[source_keys[i]]['mean'], all_sources[source_keys[j]]['mean'])
+        for i in range(len(source_keys))
+        for j in range(i + 1, len(source_keys))
+    ]
+    plot_intercomp_scatter(
+        peff_scatter_pairs, basin_names, basin_areas_m2, scatter_dir,
+        title='Effective Precipitation — Per-Basin Scatter',
+        filename='Scatter_Peff.png',
     )
 
     # ── Summary ──────────────────────────────────────────────────────────
@@ -2804,9 +2444,6 @@ _CAP_AMA_TO_BASIN = {
     'Ranegras Plain':  'RANEGRAS PLAIN',
     'Parker':          'PARKER',
 }
-
-_CAP_SRP_COLORS = {'ML': '#2C3E50', 'CAP_SRP': '#E74C3C', 'CAP_SRP_spill': '#3498DB'}
-_CAP_SRP_MARKERS = {'ML': 'o', 'CAP_SRP': 's', 'CAP_SRP_spill': '^'}
 
 
 def _load_cap_srp_annual_sw(
@@ -2961,110 +2598,6 @@ def _load_ml_total_sw_basin_volumes(
     return result
 
 
-def _plot_cap_srp_time_series(
-    ml_basin_yearly: dict[str, dict[int, float]],
-    obs_basin_yearly: dict[str, dict[int, float]],
-    basin_areas_m2: dict[str, float],
-    output_dir: str,
-    obs_spill_basin_yearly: dict[str, dict[int, float]] | None = None,
-) -> None:
-    """Per-basin time series plots: ML Total SW vs CAP+SRP observed
-    deliveries.
-
-    Each basin with observed data gets one figure with two rows:
-        Row 0: Depth (mm / ft)
-        Row 1: Volume (AF / m³)
-    An additional 'AZ Total' figure sums across all basins with data.
-
-    When *obs_spill_basin_yearly* is provided, a third 'CAP + SRP (+ Spill)'
-    series is drawn as a sensitivity band.
-    """
-    makedirs(output_dir)
-    af_to_m3 = 1.0 / M3_TO_AF
-
-    # Only plot basins that have observed data
-    obs_basins = sorted(obs_basin_yearly.keys())
-    targets = obs_basins + ['AZ_Total']
-
-    series_list = [
-        ('ML', ml_basin_yearly, _CAP_SRP_COLORS['ML'], _CAP_SRP_MARKERS['ML'], 'ML (Total SW)'),
-        ('CAP_SRP', obs_basin_yearly, _CAP_SRP_COLORS['CAP_SRP'], _CAP_SRP_MARKERS['CAP_SRP'], 'CAP + SRP'),
-    ]
-    if obs_spill_basin_yearly:
-        series_list.append(
-            ('CAP_SRP_spill', obs_spill_basin_yearly,
-             _CAP_SRP_COLORS['CAP_SRP_spill'], _CAP_SRP_MARKERS['CAP_SRP_spill'],
-             'CAP + SRP (+ Spill)')
-        )
-
-    for basin in targets:
-        fig, axes = plt.subplots(2, 1, figsize=(10, 8), constrained_layout=True)
-        title = basin.replace('_', ' ')
-        fig.suptitle(f'{title} — Total Surface Water Withdrawals',
-                     fontsize=14, fontweight='bold')
-
-        for source, yearly, color, marker, label in series_list:
-            if basin == 'AZ_Total':
-                all_years = set()
-                for b in obs_basins:
-                    all_years.update(yearly.get(b, {}).keys())
-                years = sorted(all_years)
-                af_vals = np.array([
-                    sum(yearly.get(b, {}).get(yr, 0.0) for b in obs_basins)
-                    for yr in years
-                ])
-                total_area = sum(
-                    basin_areas_m2.get(b, 0.0) for b in obs_basins
-                )
-            else:
-                bdata = yearly.get(basin, {})
-                years = sorted(bdata.keys())
-                af_vals = np.array([bdata[yr] for yr in years])
-                total_area = basin_areas_m2.get(basin, 1.0)
-
-            if not years:
-                continue
-
-            m3_vals = af_vals * af_to_m3
-            mm_vals = m3_vals / total_area * M_TO_MM if total_area > 0 else m3_vals * 0
-
-            # Row 0: depth
-            ax_mm = axes[0]
-            ax_mm.plot(years, mm_vals, label=label, color=color,
-                       marker=marker, markersize=3, linewidth=1.2)
-
-            # Row 1: volume
-            ax_af = axes[1]
-            ax_af.plot(years, af_vals, label=label, color=color,
-                       marker=marker, markersize=3, linewidth=1.2)
-
-        axes[0].set_ylabel('Depth (mm)')
-        axes[0].grid(True, alpha=0.3, linestyle='--')
-        axes[0].legend(fontsize=9)
-        # Add twin ft axis
-        ax_ft = axes[0].twinx()
-        mm_lo, mm_hi = axes[0].get_ylim()
-        ax_ft.set_ylim(mm_lo * MM_TO_FT, mm_hi * MM_TO_FT)
-        ax_ft.set_ylabel('Depth (ft)')
-
-        axes[1].set_ylabel('Volume (AF)')
-        axes[1].set_xlabel('Year')
-        axes[1].grid(True, alpha=0.3, linestyle='--')
-        axes[1].legend(fontsize=9)
-        # Add twin m³ axis
-        ax_m3 = axes[1].twinx()
-        af_lo, af_hi = axes[1].get_ylim()
-        ax_m3.set_ylim(af_lo * af_to_m3, af_hi * af_to_m3)
-        ax_m3.set_ylabel('Volume (m³)')
-
-        clean_name = basin.replace(' ', '_').replace('/', '_')
-        out_path = os.path.join(output_dir, f'TS_Total_SW_{clean_name}.png')
-        fig.savefig(out_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
-
-    logger.info(f'CAP/SRP time series plots saved to {output_dir}')
-
-
 def _compute_cap_srp_metrics(
     ml_basin_yearly: dict[str, dict[int, float]],
     obs_basin_yearly: dict[str, dict[int, float]],
@@ -3156,73 +2689,6 @@ def _compute_cap_srp_metrics(
         rows.append(row)
 
     return pd.DataFrame(rows)
-
-
-def _plot_cap_srp_scatter(
-    ml_basin_yearly: dict[str, dict[int, float]],
-    obs_basin_yearly: dict[str, dict[int, float]],
-    output_dir: str,
-) -> None:
-    """Scatter plot of ML vs observed (CAP+SRP) annual basin volumes.
-
-    Plots one point per basin-year pair (AF), with a 1:1 line, linear fit,
-    and R² annotation.  An additional panel shows the same data in mm.
-    """
-    makedirs(output_dir)
-
-    obs_basins = sorted(obs_basin_yearly.keys())
-    ml_vals_list, obs_vals_list, labels = [], [], []
-    for basin in obs_basins:
-        common_years = sorted(
-            set(ml_basin_yearly.get(basin, {}).keys())
-            & set(obs_basin_yearly[basin].keys())
-        )
-        for yr in common_years:
-            ml_vals_list.append(ml_basin_yearly[basin][yr])
-            obs_vals_list.append(obs_basin_yearly[basin][yr])
-            labels.append(basin)
-
-    if not ml_vals_list:
-        return
-
-    ml_af = np.array(ml_vals_list)
-    obs_af = np.array(obs_vals_list)
-
-    fig, ax = plt.subplots(figsize=(8, 8), constrained_layout=True)
-    fig.suptitle('ML Total SW vs CAP + SRP — Per Basin-Year',
-                 fontsize=14, fontweight='bold')
-
-    ax.scatter(obs_af, ml_af, s=30, alpha=0.7,
-               edgecolors='white', linewidths=0.5)
-
-    # 1:1 line
-    lo = min(obs_af.min(), ml_af.min(), 0)
-    hi = max(obs_af.max(), ml_af.max()) * 1.05
-    ax.plot([lo, hi], [lo, hi], 'k--', lw=1, label='1:1')
-
-    # Linear fit
-    if len(obs_af) > 1 and np.std(obs_af) > 0:
-        z = np.polyfit(obs_af, ml_af, 1)
-        x_fit = np.linspace(lo, hi, 100)
-        ax.plot(x_fit, np.polyval(z, x_fit), 'r-', lw=1.2,
-                label=f'y={z[0]:.2f}x+{z[1]:.1f}')
-        ss_res = np.sum((ml_af - np.polyval(z, obs_af)) ** 2)
-        ss_tot = np.sum((ml_af - np.mean(ml_af)) ** 2)
-        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-        ax.set_title(f'R² = {r2:.3f}', fontsize=12, fontweight='bold')
-
-    ax.set_xlabel('Observed CAP + SRP (AF)')
-    ax.set_ylabel('ML Total SW (AF)')
-    ax.legend(fontsize=9, loc='upper left')
-    ax.grid(True, alpha=0.3, linestyle='--')
-    ax.set_aspect('equal', adjustable='box')
-    ax.set_xlim(lo, hi)
-    ax.set_ylim(lo, hi)
-
-    out_path = os.path.join(output_dir, 'Scatter_ML_vs_CAP_SRP.png')
-    fig.savefig(out_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
-    logger.info(f'CAP/SRP scatter plot saved to {out_path}')
 
 
 def run_cap_srp_validation(
@@ -3353,16 +2819,54 @@ def run_cap_srp_validation(
     logger.info(f'Time series saved to {ts_csv}')
 
     # ── Time series plots ────────────────────────────────────────────────
+    _cap_colors = {
+        'ML': '#2C3E50', 'CAP_SRP': '#E74C3C', 'CAP_SRP_spill': '#3498DB',
+    }
+    _cap_markers = {'ML': 'o', 'CAP_SRP': 's', 'CAP_SRP_spill': '^'}
+    _cap_labels = {
+        'ML': 'ML (Total SW)', 'CAP_SRP': 'CAP + SRP',
+        'CAP_SRP_spill': 'CAP + SRP (+ Spill)',
+    }
+    cap_ts_sources = {
+        'ML': {'SW': {'yearly': ml_basin_yearly}},
+        'CAP_SRP': {'SW': {'yearly': obs_basin_yearly}},
+    }
+    if obs_spill_basin_yearly:
+        cap_ts_sources['CAP_SRP_spill'] = {
+            'SW': {'yearly': obs_spill_basin_yearly},
+        }
     plot_dir = os.path.join(output_dir, 'Time_Series/')
-    _plot_cap_srp_time_series(
-        ml_basin_yearly, obs_basin_yearly, basin_areas_m2, plot_dir,
-        obs_spill_basin_yearly=obs_spill_basin_yearly,
+    plot_intercomp_time_series(
+        cap_ts_sources, categories=['SW'],
+        basin_names=sorted(obs_basin_yearly.keys()),
+        basin_areas_m2=basin_areas_m2,
+        output_dir=plot_dir,
+        colors=_cap_colors, markers=_cap_markers, labels=_cap_labels,
+        title_prefix='Total Surface Water — ', file_prefix='TS_Total_SW',
     )
 
     # ── Scatter plot ─────────────────────────────────────────────────────
     scatter_dir = os.path.join(output_dir, 'Scatter/')
-    _plot_cap_srp_scatter(
-        ml_basin_yearly, obs_basin_yearly, scatter_dir,
+    # Build per-basin-year scatter (mean values from yearly overlap)
+    obs_basins = sorted(obs_basin_yearly.keys())
+    ml_mean_vals, obs_mean_vals = {}, {}
+    for basin in obs_basins:
+        common_years = sorted(
+            set(ml_basin_yearly.get(basin, {}).keys())
+            & set(obs_basin_yearly[basin].keys())
+        )
+        if common_years:
+            ml_mean_vals[basin] = float(np.mean([
+                ml_basin_yearly[basin][yr] for yr in common_years
+            ]))
+            obs_mean_vals[basin] = float(np.mean([
+                obs_basin_yearly[basin][yr] for yr in common_years
+            ]))
+    plot_intercomp_scatter(
+        [('Observed CAP + SRP', 'ML Total SW', obs_mean_vals, ml_mean_vals)],
+        list(ml_mean_vals.keys()), basin_areas_m2, scatter_dir,
+        title='ML Total SW vs CAP + SRP — Per Basin',
+        filename='Scatter_ML_vs_CAP_SRP.png',
     )
 
     # ── Summary ──────────────────────────────────────────────────────────
@@ -3375,37 +2879,487 @@ def run_cap_srp_validation(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Recommendations
+# PS (Public Supply) Intercomparison — Non-Irrigation vs USGS PS
 # ═════════════════════════════════════════════════════════════════════════════
-RECOMMENDATIONS = """
-Intercomparison Recommendations
-================================
-1. **Common overlap period**: The default range is 1980-2020, covering the
-   full span of all three datasets (ML 2002-2020, NHM 2000-2020,
-   Reitz 1980-2018).  Years without data for a given dataset will
-   appear as blank/zero.
 
-2. **Spatial aggregation**: Because the three datasets have fundamentally
-   different native resolutions (2 km ML, ~800 m Reitz, HUC12 polygons NHM),
-   aggregating to groundwater basin totals (in AF) removes artefacts
-   from pixel-level misalignment and allows direct volumetric comparison.
 
-3. **Caution with NHM rasterisation**: NHM withdrawals are tabular per
-   HUC12; rasterising them assumes uniform depth within each polygon.
-   Comparison is most meaningful at the basin or state total level.
+def _load_ps_huc12_annual(
+    csv_path: str,
+    huc12_geojson: str,
+    year_range: tuple[int, int],
+) -> pd.DataFrame:
+    """Load a USGS PS HUC12 CSV, filter to AZ HUC12s, aggregate monthly
+    to annual totals.
 
-4. **ML category rasters**: If the pipeline has produced separate
-   ``Irrigation_GW_YYYY_mm.tif`` and ``Irrigation_SW_YYYY_mm.tif`` rasters,
-   use those directly (set *irr_gw_dir* / *irr_sw_dir*).  Otherwise the
-   total ``pred_YYYY.tif`` rasters are used as a rough upper bound.
+    The raw data is in million gallons per day (Mgal/d).  For each
+    HUC12 × year we compute the annual total volume in acre-feet:
 
-5. **Additional diagnostics** *(implemented)*: Scatter plots of per-basin
-   mean-annual volumes (ML vs NHM, ML vs Reitz, NHM vs Reitz) with 1:1 lines
-   and linear fits are produced via ``_plot_scatter``.  Spatial maps of
-   pixel-wise mean-annual depth differences (diverging colourmap centred on
-   zero) are produced via ``_plot_spatial_diff_maps``.
+        annual_vol_AF = Σ_months (rate_Mgal_d × days_in_month) × Mgal_to_m3 × m3_to_AF
 
-6. **Unit consistency**: All rasters are internally converted to mm depth
-   before aggregation; final basin totals are reported in mm, ft, m³,
-   and AF across all output CSVs and plots.
-"""
+    Returns a long-form DataFrame with columns: ``huc12, year, volume_AF``.
+    """
+    import calendar
+
+    logger.info(f'Loading PS data: {csv_path}')
+    df = pd.read_csv(csv_path)
+    df.columns = df.columns.astype(str)
+
+    # Identify AZ HUC12 columns
+    huc_gdf = gpd.read_file(huc12_geojson)
+    az_huc12_set = set(huc_gdf['huc12'].astype(str).values)
+    all_huc_cols = [c for c in df.columns if c not in ('Year', 'Month')]
+    az_cols = [c for c in all_huc_cols if c in az_huc12_set]
+    logger.info(f'  {len(az_cols)}/{len(all_huc_cols)} HUC12s in AZ')
+
+    if not az_cols:
+        logger.warning('  No AZ HUC12 matches in PS CSV')
+        return pd.DataFrame(columns=['huc12', 'year', 'volume_AF'])
+
+    start_yr, end_yr = year_range
+    df = df[(df['Year'] >= start_yr) & (df['Year'] <= end_yr)].copy()
+
+    # Vectorised approach: melt to long form, then aggregate
+    id_vars = ['Year', 'Month']
+    melted = df[id_vars + az_cols].melt(
+        id_vars=id_vars, var_name='huc12', value_name='rate_mgald',
+    )
+    melted['rate_mgald'] = pd.to_numeric(melted['rate_mgald'], errors='coerce')
+    melted = melted[melted['rate_mgald'] > 0].copy()
+
+    # Days per month
+    melted['ndays'] = melted.apply(
+        lambda r: calendar.monthrange(int(r['Year']), int(r['Month']))[1],
+        axis=1,
+    )
+    # Mgal/d × days → Mgal; × MGAL_TO_M3 → m³; × M3_TO_AF → AF
+    melted['volume_AF'] = (
+        melted['rate_mgald'] * melted['ndays'] * MGAL_TO_M3 * M3_TO_AF
+    )
+
+    # Sum months → annual per HUC12
+    annual = (
+        melted.groupby(['huc12', 'Year'])['volume_AF']
+        .sum()
+        .reset_index()
+        .rename(columns={'Year': 'year'})
+    )
+    return annual
+
+
+def _ps_annual_to_basin_volumes(
+    annual_df: pd.DataFrame,
+    huc12_geojson: str,
+    basin_gdf: gpd.GeoDataFrame,
+    basin_col: str,
+    ref_crs,
+) -> dict:
+    """Aggregate PS annual HUC12 volumes to basin totals.
+
+    Returns ``{'mean': {basin: AF}, 'yearly': {year: {basin: AF}}}``.
+    """
+    if annual_df.empty:
+        basins = basin_gdf[basin_col].unique()
+        return {
+            'mean': {b: 0.0 for b in basins},
+            'yearly': {},
+        }
+
+    huc_gdf = gpd.read_file(huc12_geojson)
+    huc_gdf['huc12'] = huc_gdf['huc12'].astype(str)
+    huc_reproj = huc_gdf.to_crs(ref_crs)
+    huc_reproj['area_m2'] = huc_reproj.geometry.area
+
+    basin_reproj = (
+        basin_gdf.to_crs(ref_crs) if basin_gdf.crs != ref_crs else basin_gdf
+    )
+
+    # Spatial overlay: HUC12 → basin fractional membership
+    overlay = gpd.overlay(
+        huc_reproj[['huc12', 'area_m2', 'geometry']],
+        basin_reproj[[basin_col, 'geometry']],
+        how='intersection',
+    )
+    overlay['overlap_area'] = overlay.geometry.area
+    overlay['area_frac'] = overlay['overlap_area'] / overlay['area_m2']
+
+    years = sorted(annual_df['year'].unique())
+    yearly_vols = {}
+    for year in years:
+        yr_data = annual_df[annual_df.year == year].set_index('huc12')['volume_AF']
+        merged = overlay.merge(
+            yr_data, left_on='huc12', right_index=True, how='left',
+        ).fillna(0.0)
+        merged['weighted_vol'] = merged['volume_AF'] * merged['area_frac']
+        basin_sums = merged.groupby(basin_col)['weighted_vol'].sum()
+        yearly_vols[year] = {
+            b: basin_sums.get(b, 0.0)
+            for b in basin_reproj[basin_col]
+        }
+
+    # Mean annual
+    basin_names = basin_reproj[basin_col].unique()
+    mean_vols = {}
+    for b in basin_names:
+        vals = [yearly_vols[y].get(b, 0.0) for y in years]
+        mean_vols[b] = float(np.mean(vals)) if vals else 0.0
+
+    return {'mean': mean_vols, 'yearly': yearly_vols}
+
+
+def run_ps_intercomparison(
+    nonirr_dir: str,
+    nonirr_gw_dir: str,
+    nonirr_sw_dir: str,
+    ps_data_dir: str,
+    huc12_geojson: str,
+    basin_shp: str,
+    basin_col: str,
+    output_dir: str,
+    year_range: tuple[int, int] = (2000, 2020),
+) -> pd.DataFrame:
+    """Compare ML non-irrigation withdrawal predictions with USGS Public
+    Supply (PS) reanalysis data (Alzraiee et al. 2024, WRR).
+
+    Public supply is a **subset** of non-irrigation water use.  ML
+    Non_Irrigation predictions should be >= PS estimates in most basins.
+    This comparison quantifies how much of the non-irrigation sector is
+    attributable to public supply, and validates the GW/SW source
+    partitioning independently.
+
+    Categories compared:
+        * Non_Irrigation (total) vs PS Total
+        * Non_Irrigation_GW vs PS GW
+        * Non_Irrigation_SW vs PS SW
+
+    Parameters
+    ----------
+    nonirr_dir : str
+        Directory with ``Non_Irrigation_YYYY_mm.tif`` rasters.
+    nonirr_gw_dir : str
+        Directory with ``Non_Irrigation_GW_YYYY_mm.tif`` rasters.
+    nonirr_sw_dir : str
+        Directory with ``Non_Irrigation_SW_YYYY_mm.tif`` rasters.
+    ps_data_dir : str
+        Directory with PS HUC12 CSVs (Tot, GW, SW).
+    huc12_geojson : str
+        Path to ``AZ_HUC12.geojson``.
+    basin_shp : str
+        Basin boundary shapefile.
+    basin_col : str
+        Column in *basin_shp* naming each basin.
+    output_dir : str
+        Root output directory.
+    year_range : tuple[int, int]
+        Year range (default 2000-2020 to match PS data availability).
+
+    Returns
+    -------
+    pd.DataFrame
+        Summary metrics table.
+    """
+    makedirs(output_dir)
+    logger.info('=' * 60)
+    logger.info('Non-Irrigation vs USGS Public Supply Intercomparison')
+    logger.info('=' * 60)
+
+    basin_gdf = gpd.read_file(basin_shp)
+    logger.info(f'Loaded {len(basin_gdf)} basins from {basin_shp}')
+
+    # ── Find reference raster for CRS ─────────────────────────────────
+    ref_raster = None
+    start_yr, end_yr = year_range
+    for yr in range(start_yr, end_yr + 1):
+        candidate = os.path.join(
+            nonirr_dir, f'Non_Irrigation_{yr}_mm.tif',
+        )
+        if os.path.isfile(candidate):
+            ref_raster = candidate
+            break
+    if ref_raster is None:
+        raise FileNotFoundError(
+            f'No Non_Irrigation rasters found in {nonirr_dir}'
+        )
+    with rio.open(ref_raster) as src:
+        ref_crs = src.crs
+        pixel_area_m2 = abs(src.transform.a * src.transform.e)
+
+    basin_reproj = (
+        basin_gdf.to_crs(ref_crs)
+        if basin_gdf.crs != ref_crs else basin_gdf
+    )
+    basin_areas_m2 = {
+        row[basin_col]: row.geometry.area
+        for _, row in basin_reproj.iterrows()
+    }
+
+    # ── 1. Load ML non-irrigation basin volumes ──────────────────────
+    logger.info('--- Loading ML non-irrigation predictions ---')
+    ml_cats = {
+        'Total': (nonirr_dir, 'Non_Irrigation_{year}_mm.tif'),
+        'GW': (nonirr_gw_dir, 'Non_Irrigation_GW_{year}_mm.tif'),
+        'SW': (nonirr_sw_dir, 'Non_Irrigation_SW_{year}_mm.tif'),
+    }
+    ml_vols = {}
+    for cat_label, (cat_dir, pattern) in ml_cats.items():
+        mean_depth = None
+        n_years = 0
+        yearly_vols = {}
+        for year in range(start_yr, end_yr + 1):
+            raster_path = os.path.join(cat_dir, pattern.format(year=year))
+            if not os.path.isfile(raster_path):
+                continue
+            yearly_vols[year] = _raster_basin_volumes(
+                raster_path, basin_reproj, basin_col,
+                pixel_area_m2, depth_unit='mm',
+            )
+            arr = read_raster_as_arr(raster_path, get_file=False).astype(np.float64)
+            arr[np.isnan(arr)] = 0.0
+            arr[arr < 0] = 0.0
+            if mean_depth is None:
+                mean_depth = arr.copy()
+            else:
+                mean_depth += arr
+            n_years += 1
+
+        if n_years > 0:
+            mean_depth /= n_years
+            # Write mean-annual raster
+            out_tif = os.path.join(
+                output_dir, f'ML_mean_annual_NonIrr_{cat_label}_mm.tif',
+            )
+            with rio.open(ref_raster) as ref_src:
+                profile = ref_src.profile.copy()
+            profile.update(dtype='float64', nodata=np.nan, count=1)
+            tmp = mean_depth.copy()
+            tmp[tmp == 0] = np.nan
+            with rio.open(out_tif, 'w', **profile) as dst:
+                dst.write(tmp, 1)
+            logger.info(f'  Wrote ML mean-annual raster: {out_tif}')
+
+            basin_vols = _raster_basin_volumes(
+                out_tif, basin_reproj, basin_col,
+                pixel_area_m2, depth_unit='mm',
+            )
+        else:
+            logger.warning(f'No ML Non_Irrigation {cat_label} rasters found')
+            basin_vols = {b: 0.0 for b in basin_gdf[basin_col]}
+
+        ml_vols[cat_label] = {'mean': basin_vols, 'yearly': yearly_vols}
+
+    # ── 2. Load USGS PS data ─────────────────────────────────────────
+    logger.info('--- Loading USGS Public Supply data ---')
+    ps_files = {
+        'Total': os.path.join(ps_data_dir, 'PS_HUC12_Tot_2000_2020.csv'),
+        'GW': os.path.join(ps_data_dir, 'PS_HUC12_GW_2000_2020.csv'),
+        'SW': os.path.join(ps_data_dir, 'PS_HUC12_SW_2000_2020.csv'),
+    }
+    ps_vols = {}
+    for cat_label, csv_path in ps_files.items():
+        if not os.path.isfile(csv_path):
+            logger.warning(f'PS file not found: {csv_path}')
+            ps_vols[cat_label] = {
+                'mean': {b: 0.0 for b in basin_gdf[basin_col]},
+                'yearly': {},
+            }
+            continue
+        annual_df = _load_ps_huc12_annual(csv_path, huc12_geojson, year_range)
+        ps_vols[cat_label] = _ps_annual_to_basin_volumes(
+            annual_df, huc12_geojson, basin_gdf, basin_col, ref_crs,
+        )
+
+    # ── 3. Compute metrics ───────────────────────────────────────────
+    basin_names = sorted(basin_gdf[basin_col].unique().tolist())
+    all_metrics = []
+
+    cat_labels = {
+        'Total': 'Non_Irrigation',
+        'GW': 'Non_Irrigation_GW',
+        'SW': 'Non_Irrigation_SW',
+    }
+    for cat_key, cat_name in cat_labels.items():
+        m = _compute_metrics(
+            basin_names,
+            ml_vols[cat_key]['mean'],
+            ps_vols[cat_key]['mean'],
+            'ML', 'PS',
+            basin_areas_m2=basin_areas_m2,
+        )
+        m['Category'] = cat_name
+        all_metrics.append(m)
+        logger.info(
+            f'  {cat_name}: RMSD={m["RMSD_AF"]:.2f} AF, '
+            f'MAD={m["MAD_AF"]:.2f} AF, PctDiff={m["Pct_Diff"]:.2f}%'
+        )
+
+        # Check: ML should be >= PS (PS is a subset of non-irrigation)
+        ml_total = sum(ml_vols[cat_key]['mean'].get(b, 0.0) for b in basin_names)
+        ps_total = sum(ps_vols[cat_key]['mean'].get(b, 0.0) for b in basin_names)
+        ps_fraction = ps_total / ml_total * 100 if ml_total > 0 else np.nan
+        logger.info(
+            f'    PS / ML ratio: {ps_fraction:.1f}% '
+            f'(PS={ps_total:,.0f} AF, ML={ml_total:,.0f} AF)'
+        )
+        if ml_total > 0 and ps_total > ml_total:
+            logger.warning(
+                f'    PS exceeds ML for {cat_name} — expected PS <= ML '
+                f'since public supply is a subset of non-irrigation use'
+            )
+
+    metrics_df = pd.DataFrame(all_metrics)
+    metrics_csv = os.path.join(output_dir, 'ps_intercomparison_metrics.csv')
+    metrics_df.to_csv(metrics_csv, index=False)
+    logger.info(f'Metrics saved to {metrics_csv}')
+
+    # ── 4. Temporal agreement ─────────────────────────────────────────
+    logger.info('--- Temporal agreement metrics ---')
+    temporal_metrics = []
+    temporal_per_basin_rows = []
+    for cat_key, cat_name in cat_labels.items():
+        tm = _compute_temporal_metrics(
+            basin_names,
+            ml_vols[cat_key].get('yearly', {}),
+            ps_vols[cat_key].get('yearly', {}),
+            'ML', 'PS',
+        )
+        summary = {
+            'Category': cat_name,
+            'Pair': tm['Pair'],
+            'Pearson_r_mean': tm['Pearson_r_mean'],
+            'Pearson_r_median': tm['Pearson_r_median'],
+            'NSE_mean': tm['NSE_mean'],
+            'NSE_median': tm['NSE_median'],
+            'n_common_years': tm['n_common_years'],
+            'n_basins_with_data': tm['n_basins_with_data'],
+        }
+        temporal_metrics.append(summary)
+        logger.info(
+            f'  {cat_name}: r (mean={tm["Pearson_r_mean"]}, '
+            f'median={tm["Pearson_r_median"]}), '
+            f'NSE (mean={tm["NSE_mean"]}, median={tm["NSE_median"]})'
+        )
+        for pb in tm.get('per_basin', []):
+            temporal_per_basin_rows.append({
+                'Category': cat_name,
+                'Pair': tm['Pair'],
+                **pb,
+            })
+
+    temporal_df = pd.DataFrame(temporal_metrics)
+    temporal_csv = os.path.join(output_dir, 'ps_temporal_agreement.csv')
+    temporal_df.to_csv(temporal_csv, index=False)
+
+    if temporal_per_basin_rows:
+        tb_df = pd.DataFrame(temporal_per_basin_rows)
+        tb_csv = os.path.join(output_dir, 'ps_temporal_per_basin.csv')
+        tb_df.to_csv(tb_csv, index=False)
+
+        # Temporal agreement plots
+        temporal_plot_dir = os.path.join(output_dir, 'Temporal_Agreement/')
+        plot_temporal_heatmap(tb_df, temporal_plot_dir)
+        plot_temporal_box_violin(tb_df, temporal_plot_dir)
+        plot_temporal_r_vs_nse(tb_df, temporal_plot_dir)
+
+        # Taylor diagram
+        taylor_sources = {}
+        cat_name_list = []
+        for cat_key, cat_name in cat_labels.items():
+            taylor_sources.setdefault('ML', {})[cat_name] = ml_vols[cat_key]
+            taylor_sources.setdefault('PS', {})[cat_name] = ps_vols[cat_key]
+            cat_name_list.append(cat_name)
+        plot_intercomp_taylor(
+            taylor_sources,
+            pairs=[('ML', 'PS')],
+            categories=cat_name_list,
+            basin_names=basin_names,
+            output_dir=temporal_plot_dir,
+            pair_colors={'ML vs PS': '#E74C3C'},
+        )
+
+    # ── 5. Per-basin comparison table ─────────────────────────────────
+    af_to_m3 = 1.0 / M3_TO_AF
+    rows = []
+    for cat_key, cat_name in cat_labels.items():
+        for basin in basin_names:
+            ml_af = ml_vols[cat_key]['mean'].get(basin, 0.0)
+            ps_af = ps_vols[cat_key]['mean'].get(basin, 0.0)
+            area = basin_areas_m2.get(basin, 1.0)
+            ps_frac = ps_af / ml_af * 100 if ml_af > 0 else np.nan
+            rows.append({
+                'Category': cat_name,
+                'Basin': basin,
+                'ML_mm': round(ml_af * af_to_m3 / area * M_TO_MM, 4),
+                'ML_ft': round(ml_af * af_to_m3 / area * M_TO_MM * MM_TO_FT, 6),
+                'ML_m3': round(ml_af * af_to_m3, 2),
+                'ML_AF': round(ml_af, 2),
+                'PS_mm': round(ps_af * af_to_m3 / area * M_TO_MM, 4),
+                'PS_ft': round(ps_af * af_to_m3 / area * M_TO_MM * MM_TO_FT, 6),
+                'PS_m3': round(ps_af * af_to_m3, 2),
+                'PS_AF': round(ps_af, 2),
+                'PS_pct_of_ML': round(ps_frac, 1) if np.isfinite(ps_frac) else np.nan,
+            })
+    basin_df = pd.DataFrame(rows)
+    basin_csv = os.path.join(output_dir, 'ps_per_basin_volumes.csv')
+    basin_df.to_csv(basin_csv, index=False)
+    logger.info(f'Per-basin volumes saved to {basin_csv}')
+
+    # ── 6. Time series CSV ────────────────────────────────────────────
+    ts_rows = []
+    all_sources = {'ML': ml_vols, 'PS': ps_vols}
+    for cat_key, cat_name in cat_labels.items():
+        for source_name, src_data in all_sources.items():
+            yearly = src_data[cat_key].get('yearly', {})
+            for year in sorted(yearly.keys()):
+                for basin in basin_names:
+                    af_val = yearly[year].get(basin, 0.0)
+                    area = basin_areas_m2.get(basin, 1.0)
+                    ts_rows.append({
+                        'Category': cat_name,
+                        'Source': source_name,
+                        'Year': year,
+                        'Basin': basin,
+                        'Volume_mm': round(af_val * af_to_m3 / area * M_TO_MM, 4),
+                        'Volume_ft': round(af_val * af_to_m3 / area * M_TO_MM * MM_TO_FT, 6),
+                        'Volume_m3': round(af_val * af_to_m3, 2),
+                        'Volume_AF': round(af_val, 2),
+                    })
+    ts_df = pd.DataFrame(ts_rows)
+    ts_csv = os.path.join(output_dir, 'ps_time_series_volumes.csv')
+    ts_df.to_csv(ts_csv, index=False)
+    logger.info(f'Time series saved to {ts_csv}')
+
+    # ── 7. Time series plots ──────────────────────────────────────────
+    _ps_colors = {'ML': '#2C3E50', 'PS': '#E74C3C'}
+    _ps_markers = {'ML': 'o', 'PS': 's'}
+    _ps_labels = {'ML': 'ML Non-Irrigation', 'PS': 'USGS Public Supply'}
+    ps_ts_sources = {}
+    for cat_key, cat_name in cat_labels.items():
+        ps_ts_sources.setdefault('ML', {})[cat_name] = ml_vols[cat_key]
+        ps_ts_sources.setdefault('PS', {})[cat_name] = ps_vols[cat_key]
+    cat_name_list_ts = list(cat_labels.values())
+    plot_dir = os.path.join(output_dir, 'Time_Series/')
+    plot_intercomp_time_series(
+        ps_ts_sources, categories=cat_name_list_ts,
+        basin_names=basin_names, basin_areas_m2=basin_areas_m2,
+        output_dir=plot_dir,
+        colors=_ps_colors, markers=_ps_markers, labels=_ps_labels,
+        file_prefix='PS',
+    )
+
+    # ── 8. Scatter plots ──────────────────────────────────────────────
+    scatter_dir = os.path.join(output_dir, 'Scatter/')
+    for cat_key, cat_name in cat_labels.items():
+        plot_intercomp_scatter(
+            [('ML Non-Irrigation', 'USGS Public Supply',
+              ml_vols[cat_key]['mean'], ps_vols[cat_key]['mean'])],
+            basin_names, basin_areas_m2, scatter_dir,
+            title=f'{cat_name} — ML vs USGS Public Supply',
+            filename=f'Scatter_{cat_name}.png',
+        )
+
+    # ── Summary ───────────────────────────────────────────────────────
+    logger.info('\n' + '=' * 60)
+    logger.info('PS Intercomparison Summary')
+    logger.info('=' * 60)
+    logger.info(f'\n{metrics_df.to_string(index=False)}')
+
+    return metrics_df

@@ -872,6 +872,23 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     # ---- 3b. Predict pumping for each year 1896-2099 ----
     logger.info('Predicting pumping for all years 1896-2099...')
 
+    # Fit out-of-distribution detector on training features
+    ood_detector = mlops.OODDetector(alpha=0.01)
+    ood_detector.fit(x_train)
+
+    # Per-pixel prediction range check — training-era ceiling.
+    # Modern pump infrastructure sets a physical upper bound on per-pixel
+    # withdrawal rates.  Predictions exceeding the training-era maximum
+    # are flagged as physically implausible extrapolations.
+    train_pixel_max_mm = float(np.abs(y_train).max())
+    train_pixel_p99_mm = float(np.percentile(np.abs(y_train), 99))
+    logger.info(
+        'Training-era per-pixel pumping ceiling: max=%.2f mm, '
+        'P99=%.2f mm',
+        train_pixel_max_mm, train_pixel_p99_mm,
+    )
+    exceedance_summary = []  # collect per-year exceedance stats
+
     feature_cols = list(x_train.columns)
     raster_dir = os.path.join(prediction_dir, 'Predicted_Rasters')
     raster_dirs = {
@@ -944,9 +961,20 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     mm_to_ft = 1 / 304.8                     # mm → ft
 
     def _pixel_stats(pred_vals):
-        """Compute depth and volume stats in multiple units."""
+        """Compute depth and volume stats in multiple units.
+
+        Returns NaN for all fields when *pred_vals* is empty (no valid
+        pixels), so "no data" is distinguishable from "zero pumping".
+        """
         n = len(pred_vals)
-        mean_mm = float(np.nanmean(pred_vals)) if n > 0 else 0.0
+        if n == 0:
+            return {
+                'Mean_Depth_mm': np.nan,
+                'Mean_Depth_ft': np.nan,
+                'Volume_m3': np.nan,
+                'Volume_AF': np.nan,
+            }
+        mean_mm = float(np.nanmean(pred_vals))
         vol_m3 = float(np.nansum(pred_vals)) * mm_to_m3
         return {
             'Mean_Depth_mm': round(mean_mm, 4),
@@ -979,6 +1007,20 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     ie_basin_yearly = {cat: {} for cat in IE_CATEGORIES}
     ie_subbasin_yearly = {cat: {} for cat in IE_CATEGORIES}
 
+    # Out-of-distribution detection output
+    ood_raster_dir = os.path.join(prediction_dir, 'OOD_Rasters')
+    makedirs(ood_raster_dir)
+    ood_summary = []  # collect per-year OOD stats
+
+    # Era-specific feature collection for interpretability analysis
+    ERA_BOUNDS = {
+        'Hindcast': (START_YEAR, 1983),
+        'Training': (1984, 2024),
+        'Projection': (2025, END_YEAR),
+    }
+    era_features: dict[str, list[pd.DataFrame]] = {e: [] for e in ERA_BOUNDS}
+    ERA_SAMPLE_PER_YEAR = 2000  # max pixels sampled per year per era
+
     for year in range(START_YEAR, END_YEAR + 1):
         year_df = az_df[az_df.Year == year].copy()
         if year_df.empty:
@@ -992,9 +1034,14 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             errors='ignore'
         )
         # Ensure same columns and order as training
-        for c in feature_cols:
-            if c not in pred_features.columns:
-                pred_features[c] = 0
+        missing_cols = [c for c in feature_cols if c not in pred_features.columns]
+        if missing_cols:
+            logger.warning(
+                'Year %d: %d missing feature(s) imputed to 0: %s',
+                year, len(missing_cols), missing_cols,
+            )
+        for c in missing_cols:
+            pred_features[c] = 0
         pred_features = pred_features[feature_cols]
         inf_counts = np.isinf(pred_features.values).sum(axis=0)
         nan_counts = pred_features.isna().sum(axis=0).values
@@ -1008,7 +1055,47 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                     )
         pred_features = pred_features.replace([np.inf, -np.inf], np.nan).fillna(0)
 
+        # Collect subsampled features for era-specific interpretability
+        for era_name, (y1, y2) in ERA_BOUNDS.items():
+            if y1 <= year <= y2:
+                n_sample = min(ERA_SAMPLE_PER_YEAR, len(pred_features))
+                era_features[era_name].append(
+                    pred_features.sample(n=n_sample, random_state=RANDOM_STATE)
+                )
+                break
+
         predictions = np.abs(model.predict(pred_features))
+
+        # Per-pixel prediction range check against training-era ceiling
+        n_pixels = len(predictions)
+        exceed_max = int((predictions > train_pixel_max_mm).sum())
+        exceed_p99 = int((predictions > train_pixel_p99_mm).sum())
+        exceedance_summary.append({
+            'year': year,
+            'n_pixels': n_pixels,
+            'n_exceed_max': exceed_max,
+            'pct_exceed_max': round(100.0 * exceed_max / n_pixels, 2) if n_pixels else 0.0,
+            'n_exceed_P99': exceed_p99,
+            'pct_exceed_P99': round(100.0 * exceed_p99 / n_pixels, 2) if n_pixels else 0.0,
+            'pred_max_mm': round(float(predictions.max()), 4) if n_pixels else 0.0,
+            'pred_mean_mm': round(float(predictions.mean()), 4) if n_pixels else 0.0,
+        })
+
+        # Out-of-distribution detection
+        ood_stats = ood_detector.score_and_summarise(pred_features, year=year)
+        ood_stats['year'] = year
+        ood_summary.append(ood_stats)
+        # Write OOD flag raster (1 = OOD, 0 = in-distribution)
+        ood_flags = ood_detector.is_ood(pred_features).astype(np.float32)
+        ood_raster = _valid_pixels_to_raster(ood_flags, valid_mask, raster_shape)
+        _, ood_ref_obj = read_raster_as_arr(ref_raster_file, get_file=True)
+        write_raster(
+            ood_raster, ood_ref_obj,
+            ood_ref_obj.transform,
+            os.path.join(ood_raster_dir, f'OOD_Flag_{year}.tif'),
+            no_data_value=np.nan,
+        )
+        ood_ref_obj.close()
 
         # Partition into irrigation/non-irrigation and GW/SW categories
         cat_predictions = partops.partition_predictions(
@@ -1247,8 +1334,325 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         gw_vector_dir=gw_vector_dir,
     )
 
+    # Write OOD summary CSV
+    if ood_summary:
+        ood_df = pd.DataFrame(ood_summary)
+        ood_csv = os.path.join(ood_raster_dir, 'OOD_Summary.csv')
+        ood_df.to_csv(ood_csv, index=False)
+        total_ood_pct = ood_df['pct_ood'].mean()
+        logger.info(
+            'OOD summary: mean %.1f%% OOD pixels across %d years. '
+            'Details in %s',
+            total_ood_pct, len(ood_df), ood_csv,
+        )
+        # Flag eras with high OOD rates
+        for era, (y1, y2) in [
+            ('Hindcast (1896-1983)', (1896, 1983)),
+            ('Training (1984-2024)', (1984, 2024)),
+            ('Projection (2025-2099)', (2025, 2099)),
+        ]:
+            era_df = ood_df[(ood_df['year'] >= y1) & (ood_df['year'] <= y2)]
+            if not era_df.empty:
+                era_pct = era_df['pct_ood'].mean()
+                if era_pct > 10:
+                    logger.warning(
+                        'OOD %s: %.1f%% mean OOD rate — predictions in this '
+                        'era extrapolate substantially beyond training features',
+                        era, era_pct,
+                    )
+                else:
+                    logger.info('OOD %s: %.1f%% mean OOD rate', era, era_pct)
+
+    # Write prediction exceedance summary CSV
+    if exceedance_summary:
+        exc_df = pd.DataFrame(exceedance_summary)
+        exc_csv = os.path.join(prediction_dir, 'Prediction_Exceedance_Summary.csv')
+        exc_df.to_csv(exc_csv, index=False)
+        logger.info(
+            'Prediction exceedance summary (training max=%.2f mm, '
+            'P99=%.2f mm) saved to %s',
+            train_pixel_max_mm, train_pixel_p99_mm, exc_csv,
+        )
+        # Per-era exceedance report
+        for era, (y1, y2) in ERA_BOUNDS.items():
+            era_exc = exc_df[(exc_df['year'] >= y1) & (exc_df['year'] <= y2)]
+            if era_exc.empty:
+                continue
+            mean_pct_max = era_exc['pct_exceed_max'].mean()
+            mean_pct_p99 = era_exc['pct_exceed_P99'].mean()
+            max_pred = era_exc['pred_max_mm'].max()
+            if mean_pct_max > 1:
+                logger.warning(
+                    'Exceedance %s (%d-%d): %.1f%% pixels exceed training '
+                    'max (%.2f mm), %.1f%% exceed P99 (%.2f mm), '
+                    'peak prediction=%.2f mm',
+                    era, y1, y2, mean_pct_max, train_pixel_max_mm,
+                    mean_pct_p99, train_pixel_p99_mm, max_pred,
+                )
+            else:
+                logger.info(
+                    'Exceedance %s (%d-%d): %.1f%% exceed max, '
+                    '%.1f%% exceed P99, peak=%.2f mm',
+                    era, y1, y2, mean_pct_max, mean_pct_p99, max_pred,
+                )
+
+    # ---- 3e. Era-specific model interpretability ----
+    # Generate SHAP, ALE, and permutation importance plots per era to
+    # characterise how feature contributions change between the training
+    # window and extrapolation periods (hindcast, projection).
+    logger.info('Computing era-specific interpretability plots...')
+    for era_name, frames in era_features.items():
+        if not frames:
+            continue
+        era_df = pd.concat(frames, ignore_index=True)
+        # Cap at 10 000 samples for computational tractability
+        if len(era_df) > 10_000:
+            era_df = era_df.sample(n=10_000, random_state=RANDOM_STATE)
+        era_dir = os.path.join(interp_dir, era_name)
+        y1, y2 = ERA_BOUNDS[era_name]
+        logger.info(
+            f'  {era_name} ({y1}-{y2}): {len(era_df)} samples'
+        )
+
+        # SHAP plots
+        mlops.compute_shap_plots(
+            model_name, model, era_df, era_dir,
+        )
+
+        # ALE plots (use era features for both train/test since we only
+        # need the partial-dependence profiles, not goodness-of-fit)
+        y_dummy = model.predict(era_df)
+        mlops.compute_ale_plots(
+            model_name, model,
+            era_df, y_dummy, era_df, y_dummy,
+            era_dir,
+        )
+
+        # Permutation importance (uses model predictions as pseudo-targets
+        # to measure feature reliance, not prediction accuracy)
+        mlops.compute_perm_imp(
+            model_name, era_df, era_df, y_dummy, y_dummy,
+            model, era_dir, scoring_metric='scaled_rmse',
+            random_state=RANDOM_STATE, create_plots=True,
+        )
+
+    # ---- 3f. Graphical abstract / Figure 1 ----
+    vizops.create_graphical_abstract(
+        raster_dir=raster_dirs['mm'],
+        basin_shp=AZ_GW_BASIN,
+        output_dir=prediction_dir,
+        start_year=START_YEAR,
+        end_year=END_YEAR,
+        ref_raster=ref_raster_file,
+        yearly_predictions=yearly_predictions,
+    )
+
     logger.info(f'Full-period prediction complete. Results in {prediction_dir}')
     return model, feature_cols, x_train, y_train
+
+
+def create_all_raster_maps() -> None:
+    """Create era-mean raster maps for every predicted output category
+    and an actual-vs-predicted comparison for the metered GW period.
+
+    Iterates over all raster output directories (depth, volume
+    partitions, CU, IE, OOD, and uncertainty) and produces 2×2
+    era-mean panel figures with basin boundaries and AMA/INA labels.
+    """
+    logger.info('=' * 60)
+    logger.info('Step 3g: Creating raster maps for all output categories')
+    logger.info('=' * 60)
+
+    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_XGB')
+    maps_dir = os.path.join(prediction_dir, 'Raster_Maps')
+
+    # ── Depth-based categories (use Depth_mm sub-directory) ──────────
+    depth_categories = [
+        ('Predicted_Rasters', 'Total Predicted GW Pumping'),
+    ]
+    for cat in partops.CATEGORIES:
+        pretty = cat.replace('_', ' ')
+        depth_categories.append((f'{cat}_Rasters', pretty))
+
+    CU_CATEGORIES = ('Irrigation_CU', 'Irrigation_GW_CU', 'Irrigation_SW_CU')
+    for cu in CU_CATEGORIES:
+        pretty = cu.replace('_', ' ')
+        depth_categories.append((f'{cu}_Rasters', pretty))
+
+    for folder, title in depth_categories:
+        raster_dir = os.path.join(prediction_dir, folder, 'Depth_mm')
+        if not os.path.isdir(raster_dir):
+            logger.info(f'  Skipping {folder}/Depth_mm (not found)')
+            continue
+        vizops.create_era_raster_maps(
+            raster_dir=raster_dir,
+            basin_shp=AZ_GW_BASIN,
+            output_dir=maps_dir,
+            title=title,
+            unit_label='Depth (mm)',
+            cmap='YlOrRd',
+        )
+
+    # ── Irrigation Efficiency (dimensionless, no unit sub-dir) ───────
+    IE_CATEGORIES = (
+        'Irrigation_Efficiency', 'Irrigation_GW_Efficiency',
+        'Irrigation_SW_Efficiency',
+    )
+    for ie in IE_CATEGORIES:
+        raster_dir = os.path.join(prediction_dir, f'{ie}_Rasters')
+        if not os.path.isdir(raster_dir):
+            continue
+        pretty = ie.replace('_', ' ')
+        vizops.create_era_raster_maps(
+            raster_dir=raster_dir,
+            basin_shp=AZ_GW_BASIN,
+            output_dir=maps_dir,
+            title=pretty,
+            unit_label='Efficiency (CU / Withdrawal)',
+            cmap='YlGn',
+        )
+
+    # ── OOD Rasters (binary flags) ──────────────────────────────────
+    ood_dir = os.path.join(prediction_dir, 'OOD_Rasters')
+    if os.path.isdir(ood_dir):
+        vizops.create_era_raster_maps(
+            raster_dir=ood_dir,
+            basin_shp=AZ_GW_BASIN,
+            output_dir=maps_dir,
+            title='Out-of-Distribution Flag',
+            unit_label='Mean OOD Fraction',
+            cmap='RdYlGn_r',
+        )
+
+    # ── Uncertainty (Sigma components: band 1 = σ, band 2 = CV) ────
+    unc_dir = os.path.join(prediction_dir, 'Uncertainty')
+    sigma_components = [
+        'Sigma_Total', 'Sigma_MACA', 'Sigma_Model',
+        'Sigma_Irr', 'Sigma_LULC', 'Sigma_GW',
+    ]
+    for comp in sigma_components:
+        raster_dir = os.path.join(unc_dir, comp, 'Rasters')
+        if not os.path.isdir(raster_dir):
+            continue
+        pretty = comp.replace('_', ' ')
+        # Band 1: σ (standard deviation in mm)
+        vizops.create_era_raster_maps(
+            raster_dir=raster_dir,
+            basin_shp=AZ_GW_BASIN,
+            output_dir=maps_dir,
+            title=f'{pretty} — Std Dev',
+            unit_label='σ (mm)',
+            cmap='Purples',
+            band=1,
+        )
+        # Band 2: CV (coefficient of variation)
+        vizops.create_era_raster_maps(
+            raster_dir=raster_dir,
+            basin_shp=AZ_GW_BASIN,
+            output_dir=maps_dir,
+            title=f'{pretty} — CV',
+            unit_label='CV (σ / |prediction|)',
+            cmap='inferno',
+            band=2,
+            mask_nan_only=True,
+        )
+
+    # ── Augmented prediction rasters (band 3 = CV, band 4 = SNR) ────
+    pred_mm_dir = os.path.join(prediction_dir, 'Predicted_Rasters', 'Depth_mm')
+    if os.path.isdir(pred_mm_dir):
+        vizops.create_era_raster_maps(
+            raster_dir=pred_mm_dir,
+            basin_shp=AZ_GW_BASIN,
+            output_dir=maps_dir,
+            title='Prediction CV',
+            unit_label='CV (σ / |prediction|)',
+            cmap='inferno',
+            band=3,
+            mask_nan_only=True,
+        )
+        vizops.create_era_raster_maps(
+            raster_dir=pred_mm_dir,
+            basin_shp=AZ_GW_BASIN,
+            output_dir=maps_dir,
+            title='Prediction SNR',
+            unit_label='SNR (|prediction| / σ)',
+            cmap='viridis',
+            band=4,
+            mask_nan_only=True,
+        )
+
+    # ── Actual vs Predicted comparison (metered GW, 1984-2024) ──────
+    predicted_mm_dir = os.path.join(prediction_dir, 'Predicted_Rasters', 'Depth_mm')
+    actual_gw_dir = GW_CROPPED_RASTER_DIR
+    if os.path.isdir(actual_gw_dir) and os.path.isdir(predicted_mm_dir):
+        vizops.create_actual_vs_predicted_maps(
+            actual_dir=actual_gw_dir,
+            predicted_dir=predicted_mm_dir,
+            basin_shp=AZ_GW_BASIN,
+            output_dir=maps_dir,
+            title='Total GW Pumping',
+            unit_label='Depth (mm)',
+            start_year=YEAR_LIST[0],
+            end_year=YEAR_LIST[-1],
+        )
+
+    # ── Trend analysis (Mann-Kendall + Sen's slope) ────────────────
+    trend_dir = os.path.join(maps_dir, 'Trend_Analysis')
+
+    # Total predicted GW pumping
+    if os.path.isdir(predicted_mm_dir):
+        vizops.create_trend_maps(
+            raster_dir=predicted_mm_dir,
+            basin_shp=AZ_GW_BASIN,
+            output_dir=trend_dir,
+            title='Total Predicted GW Pumping',
+            unit_label='mm',
+            subbasin_shp=ADWR_SUBBASIN_SHP,
+        )
+
+    # All depth-based partition categories
+    for cat in partops.CATEGORIES:
+        cat_dir = os.path.join(prediction_dir, f'{cat}_Rasters', 'Depth_mm')
+        if not os.path.isdir(cat_dir):
+            continue
+        vizops.create_trend_maps(
+            raster_dir=cat_dir,
+            basin_shp=AZ_GW_BASIN,
+            output_dir=trend_dir,
+            title=cat.replace('_', ' '),
+            unit_label='mm',
+            subbasin_shp=ADWR_SUBBASIN_SHP,
+        )
+
+    # Consumptive Use categories
+    for cu in CU_CATEGORIES:
+        cu_dir = os.path.join(prediction_dir, f'{cu}_Rasters', 'Depth_mm')
+        if not os.path.isdir(cu_dir):
+            continue
+        vizops.create_trend_maps(
+            raster_dir=cu_dir,
+            basin_shp=AZ_GW_BASIN,
+            output_dir=trend_dir,
+            title=cu.replace('_', ' '),
+            unit_label='mm',
+            subbasin_shp=ADWR_SUBBASIN_SHP,
+        )
+
+    # Irrigation Efficiency categories (dimensionless)
+    for ie in IE_CATEGORIES:
+        ie_dir = os.path.join(prediction_dir, f'{ie}_Rasters')
+        if not os.path.isdir(ie_dir):
+            continue
+        vizops.create_trend_maps(
+            raster_dir=ie_dir,
+            basin_shp=AZ_GW_BASIN,
+            output_dir=trend_dir,
+            title=ie.replace('_', ' '),
+            unit_label='ratio',
+            subbasin_shp=ADWR_SUBBASIN_SHP,
+        )
+
+    logger.info(f'All raster maps saved to {maps_dir}')
 
 
 # =============================================================================
@@ -1396,6 +1800,45 @@ def run_peff_usgs_intercomparison() -> pd.DataFrame:
     )
 
 
+def run_ps_intercomparison() -> pd.DataFrame:
+    """
+    Compare ML non-irrigation withdrawal predictions with USGS Public
+    Supply reanalysis data (Alzraiee et al. 2024, WRR) for each basin.
+
+    Categories compared:
+        Non_Irrigation (total) vs PS Total
+        Non_Irrigation_GW vs PS GW
+        Non_Irrigation_SW vs PS SW
+
+    Returns
+    -------
+    pd.DataFrame
+        Summary metrics for PS intercomparisons.
+    """
+    logger.info('=' * 60)
+    logger.info('Step 4e: Non-Irrigation vs USGS Public Supply Intercomparison')
+    logger.info('=' * 60)
+
+    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_XGB')
+    nonirr_dir = os.path.join(prediction_dir, 'Non_Irrigation_Rasters/Depth_mm')
+    nonirr_gw_dir = os.path.join(prediction_dir, 'Non_Irrigation_GW_Rasters/Depth_mm')
+    nonirr_sw_dir = os.path.join(prediction_dir, 'Non_Irrigation_SW_Rasters/Depth_mm')
+    ps_data_dir = os.path.join(INPUT_DIR, 'USGS WU', 'USGS_PS_Data')
+    huc12_geojson = os.path.join(INPUT_DIR, 'GEE_Data', 'AZ_HUC12.geojson')
+    output_dir = os.path.join(prediction_dir, 'PS_Intercomparison')
+
+    return intercompops.run_ps_intercomparison(
+        nonirr_dir=nonirr_dir,
+        nonirr_gw_dir=nonirr_gw_dir,
+        nonirr_sw_dir=nonirr_sw_dir,
+        ps_data_dir=ps_data_dir,
+        huc12_geojson=huc12_geojson,
+        basin_shp=AZ_GW_BASIN,
+        basin_col='BASIN_NAME',
+        output_dir=output_dir,
+    )
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -1408,10 +1851,12 @@ Pipeline steps (comma-separated or 'all'):
   2c   Evaluate LOO spatial holdout
   3    Full-period XGBoost prediction (1896-2099)
   3b   Hybrid uncertainty quantification
+  3g   Raster maps, actual vs predicted, and trend analysis
   4    USGS intercomparison
   4b   CU / IE intercomparison
   4c   CAP/SRP surface-water validation
   4d   Effective precipitation intercomparison
+  4e   Non-irrigation vs USGS Public Supply intercomparison
 
 Step 0 sub-steps (use with --skip-prep to skip individual sub-steps):
   gee           GEE tile download & mosaic
@@ -1583,6 +2028,10 @@ def main() -> None:
                 basin_shp=AZ_GW_BASIN,
             )
 
+    # Step 3g — Era-mean raster maps for all output categories
+    if should_run('3g'):
+        create_all_raster_maps()
+
     # Step 4
     if should_run('4'):
         run_usgs_intercomparison()
@@ -1598,6 +2047,10 @@ def main() -> None:
     # Step 4d — Effective precipitation intercomparison
     if should_run('4d'):
         run_peff_usgs_intercomparison()
+
+    # Step 4e — Non-irrigation vs USGS Public Supply intercomparison
+    if should_run('4e'):
+        run_ps_intercomparison()
 
     logger.info('\n' + '='*60)
     logger.info('Pipeline complete!')

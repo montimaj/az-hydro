@@ -5,7 +5,7 @@ This module provides comprehensive ML model building, hyperparameter optimizatio
 and evaluation capabilities for groundwater pumping prediction.
 
 Features:
-- Multiple ensemble tree algorithms (XGB, LGBM, RF, ETR, HGBR, CatBoost, GBR, AdaBoost)
+- Baseline linear models (LR, Ridge, Lasso) and ensemble tree algorithms (XGB, LGBM, RF, ETR, HGBR, CatBoost, GBR, AdaBoost)
 - Optuna-based hyperparameter optimization with Dask parallelization
 - Model comparison and evaluation utilities
 """
@@ -38,6 +38,7 @@ from sklearn.ensemble import (
     RandomForestRegressor,
 )
 from sklearn.inspection import permutation_importance
+from sklearn.linear_model import Lasso, LinearRegression, Ridge
 from sklearn.metrics import make_scorer, mean_absolute_error, r2_score, root_mean_squared_error
 from sklearn.model_selection import (
     GridSearchCV,
@@ -74,8 +75,9 @@ def get_model_param_dict(
         random_state (int): Random state (seed) for some ML algorithms.
         use_dask (bool): Set True if using Dask in a distributed computing environment.
         get_model_names_only (bool): Set True to return only model names.
-        include_all_models (bool): Set True to include additional ensemble models 
+        include_all_models (bool): Set True to include additional ensemble models
                                    (GBR, AdaBoost, Bagging, CatBoost).
+                                   Baseline linear models (LR, Ridge, Lasso) are always included.
 
     Returns:
         Either a list of model names (if get_model_names_only is True) or a tuple of
@@ -113,6 +115,13 @@ def get_model_param_dict(
             max_depth=None, random_state=random_state
         )
     }
+
+    # Baseline linear models (always available for comparison)
+    model_dict.update({
+        'LR': LinearRegression(n_jobs=n_jobs),
+        'RIDGE': Ridge(random_state=random_state),
+        'LASSO': Lasso(random_state=random_state, max_iter=10000),
+    })
 
     # Additional ensemble models
     # Note: GBR and ADA don't support n_jobs (sequential only)
@@ -210,7 +219,14 @@ def get_model_param_dict(
             'max_leaf_nodes': [31, 63, 127],
             'max_bins': [127, 255],
             'l2_regularization': [0.0, 0.1, 0.5],
-        }
+        },
+        'LR': {},
+        'RIDGE': {
+            'alpha': [0.01, 0.1, 1.0, 10.0, 100.0],
+        },
+        'LASSO': {
+            'alpha': [0.0001, 0.001, 0.01, 0.1, 1.0],
+        },
     }
 
     # Additional model hyperparameters
@@ -1101,6 +1117,17 @@ def get_optuna_params_for_model(
             'border_count': trial.suggest_categorical('border_count', [32, 64, 128, 255]),
             'bagging_temperature': trial.suggest_float('bagging_temperature', 0, 1)
         }
+    elif model_name == 'LR':
+        # No hyperparameters — single trial is sufficient
+        return {}
+    elif model_name == 'RIDGE':
+        return {
+            'alpha': trial.suggest_float('alpha', 1e-3, 1e3, log=True),
+        }
+    elif model_name == 'LASSO':
+        return {
+            'alpha': trial.suggest_float('alpha', 1e-5, 1e1, log=True),
+        }
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
@@ -1206,6 +1233,8 @@ def build_ml_model_optuna_dask(
             )
             study.set_metric_names(['NRMSE_with_Overfitting_Penalty'])
 
+            # For parameter-free models (LR), a single trial suffices
+            effective_n_trials = 1 if model_name == 'LR' else n_trials
             # Run optimization — sequential trials since cross_validate already
             # parallelises across CV folds and saturates all cores
             study.optimize(
@@ -1214,7 +1243,7 @@ def build_ml_model_optuna_dask(
                     model_name, cv, scoring_metrics,
                     alpha, random_state, pruning
                 ),
-                n_trials=n_trials,
+                n_trials=effective_n_trials,
                 n_jobs=1,
                 show_progress_bar=True,
                 gc_after_trial=True
@@ -2106,10 +2135,19 @@ def perform_bias_correction(
 
     train_data_ecdf = train_df.copy(deep=True).drop(columns=[error_gw_col])
     test_data_ecdf = test_df.copy(deep=True).drop(columns=[error_gw_col])
-    m_roe = np.cov(
-        train_data_ecdf.Pred_GW_mm, train_data_ecdf.Actual_GW_mm
-    )[0, 1] / np.var(train_data_ecdf.Pred_GW_mm)
-    b_roe = np.mean(train_data_ecdf.Actual_GW_mm) - m_roe * np.mean(train_data_ecdf.Pred_GW_mm)
+    pred_var = np.var(train_data_ecdf.Pred_GW_mm)
+    if pred_var == 0:
+        logger.warning(
+            'Zero prediction variance in bias correction — '
+            'all predictions are constant; skipping regression correction.'
+        )
+        m_roe = 1.0
+        b_roe = 0.0
+    else:
+        m_roe = np.cov(
+            train_data_ecdf.Pred_GW_mm, train_data_ecdf.Actual_GW_mm
+        )[0, 1] / pred_var
+        b_roe = np.mean(train_data_ecdf.Actual_GW_mm) - m_roe * np.mean(train_data_ecdf.Pred_GW_mm)
     train_data_ecdf['BC_GW_mm'] = np.abs(m_roe * train_data_ecdf.Pred_GW_mm + b_roe)
     train_r2_ecdf = r2_score(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm)
     _p = n_features if n_features is not None else train_data_ecdf.shape[1]
@@ -2508,3 +2546,156 @@ def generate_model_comparison_visualization(
         use_ama_ina=use_ama_ina,
         unit=unit
     )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Out-of-Distribution Detection
+# ═════════════════════════════════════════════════════════════════════════════
+
+class OODDetector:
+    """Mahalanobis distance-based out-of-distribution detector.
+
+    Fits on training features and flags prediction-time pixels whose feature
+    vectors fall outside the training distribution.  The Mahalanobis distance
+    is computed using the training covariance matrix (regularised for numerical
+    stability).
+
+    Attributes
+    ----------
+    mean_ : np.ndarray
+        Training feature means (n_features,).
+    cov_inv_ : np.ndarray
+        Inverse of the regularised training covariance matrix.
+    threshold_ : float
+        Chi-squared threshold at the chosen significance level.
+    n_features_ : int
+        Number of features.
+    """
+
+    def __init__(self, alpha: float = 0.01, reg: float = 1e-6):
+        """
+        Parameters
+        ----------
+        alpha : float
+            Significance level for the chi-squared threshold.  Pixels with
+            Mahalanobis distance exceeding the (1 - alpha) quantile of
+            chi-squared(n_features) are flagged as OOD.  Default 0.01.
+        reg : float
+            Tikhonov regularisation added to the covariance diagonal for
+            numerical stability.  Default 1e-6.
+        """
+        self.alpha = alpha
+        self.reg = reg
+        self.mean_ = None
+        self.cov_inv_ = None
+        self.threshold_ = None
+        self.n_features_ = None
+
+    def fit(self, x_train: np.ndarray | pd.DataFrame) -> 'OODDetector':
+        """Fit the detector on training features.
+
+        Parameters
+        ----------
+        x_train : array-like of shape (n_samples, n_features)
+            Training feature matrix.
+
+        Returns
+        -------
+        self
+        """
+        from scipy.stats import chi2
+
+        x = np.asarray(x_train, dtype=np.float64)
+        n_nan = np.isnan(x).sum()
+        if n_nan:
+            logger.warning(
+                'OODDetector.fit(): %d NaN values in x_train (%s); '
+                'dropping rows with NaNs before covariance estimation.',
+                n_nan, x.shape,
+            )
+            x = x[~np.isnan(x).any(axis=1)]
+        self.n_features_ = x.shape[1]
+        self.mean_ = np.mean(x, axis=0)
+        cov = np.cov(x, rowvar=False)
+        # Regularise for numerical stability
+        cov += np.eye(self.n_features_) * self.reg
+        self.cov_inv_ = np.linalg.inv(cov)
+        self.threshold_ = chi2.ppf(1 - self.alpha, df=self.n_features_)
+        logger.info(
+            'OOD detector fitted on %d samples, %d features.  '
+            'Chi-squared threshold (alpha=%.3f): %.2f',
+            x.shape[0], self.n_features_, self.alpha, self.threshold_,
+        )
+        return self
+
+    def mahalanobis(self, x: np.ndarray | pd.DataFrame) -> np.ndarray:
+        """Compute Mahalanobis distances for new data.
+
+        Parameters
+        ----------
+        x : array-like of shape (n_samples, n_features)
+
+        Returns
+        -------
+        np.ndarray of shape (n_samples,)
+            Squared Mahalanobis distances.
+        """
+        x = np.asarray(x, dtype=np.float64)
+        diff = x - self.mean_
+        # Efficient batch computation: d² = diag(diff @ cov_inv @ diff.T)
+        left = diff @ self.cov_inv_
+        return np.einsum('ij,ij->i', left, diff)
+
+    def is_ood(self, x: np.ndarray | pd.DataFrame) -> np.ndarray:
+        """Flag OOD samples.
+
+        Returns
+        -------
+        np.ndarray of bool, shape (n_samples,)
+            True for samples exceeding the chi-squared threshold.
+        """
+        return self.mahalanobis(x) > self.threshold_
+
+    def score_and_summarise(
+        self,
+        x: np.ndarray | pd.DataFrame,
+        year: int | None = None,
+    ) -> dict:
+        """Compute OOD statistics for a batch of prediction features.
+
+        Parameters
+        ----------
+        x : array-like of shape (n_samples, n_features)
+        year : int, optional
+            Year label for logging.
+
+        Returns
+        -------
+        dict with keys: 'n_total', 'n_ood', 'pct_ood', 'mean_d2', 'max_d2'.
+        """
+        d2 = self.mahalanobis(x)
+        ood_mask = d2 > self.threshold_
+        n_total = len(d2)
+        n_ood = int(ood_mask.sum())
+        pct_ood = n_ood / n_total * 100 if n_total > 0 else 0.0
+        stats = {
+            'n_total': n_total,
+            'n_ood': n_ood,
+            'pct_ood': round(pct_ood, 2),
+            'mean_d2': round(float(np.mean(d2)), 2),
+            'max_d2': round(float(np.max(d2)), 2),
+            'threshold': round(self.threshold_, 2),
+        }
+        label = f'Year {year}' if year is not None else 'Batch'
+        if pct_ood > 10:
+            logger.warning(
+                '%s: %.1f%% of pixels (%d/%d) are out-of-distribution '
+                '(Mahalanobis d² > %.1f)',
+                label, pct_ood, n_ood, n_total, self.threshold_,
+            )
+        elif pct_ood > 0:
+            logger.info(
+                '%s: %.1f%% of pixels (%d/%d) are out-of-distribution',
+                label, pct_ood, n_ood, n_total,
+            )
+        return stats
