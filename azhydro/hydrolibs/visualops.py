@@ -1311,6 +1311,8 @@ def explore_az_data(
             )
             ax.set_xlabel(label)
             ax.set_title(f'{label} — Histogram + KDE by Era (P1–P99)')
+            if ax.get_legend() is not None:
+                ax.legend(loc='upper right', title='Era')
             _plt.tight_layout()
             _plt.savefig(os.path.join(output_dir, f'{safe}_kde_era.png'))
             _plt.close()
@@ -1323,6 +1325,8 @@ def explore_az_data(
         )
         ax.set_xlabel(label)
         ax.set_title(f'{label} — Histogram + KDE by Basin Type (P1–P99)')
+        if ax.get_legend() is not None:
+            ax.legend(loc='upper right', title='Basin Type')
         _plt.tight_layout()
         _plt.savefig(os.path.join(output_dir, f'{safe}_kde_basin_type.png'))
         _plt.close()
@@ -1341,6 +1345,7 @@ def explore_az_data(
             ax.set_title(f'{label} — Histogram + KDE by GW Basin (AMA/INA) (P1–P99)')
             legend = ax.get_legend()
             if legend:
+                legend.set_title('GW Basin')
                 legend.set_bbox_to_anchor((1.02, 1))
                 for text in legend.get_texts():
                     text.set_fontsize(7)
@@ -1383,7 +1388,7 @@ def explore_az_data(
             )
             ax.set_title(f'{label} — by Basin Type & Era')
             ax.set_xlabel('Basin Type')
-            ax.legend(loc='best', fontsize=9)
+            ax.legend(loc='best', fontsize=9, title='Era')
             _plt.tight_layout()
             _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_basin_type.png'))
             _plt.close()
@@ -1401,7 +1406,7 @@ def explore_az_data(
             ax.set_title(f'{label} — by GW Basin (AMA/INA) & Era')
             ax.set_xlabel('GW Basin')
             ax.tick_params(axis='x', rotation=35)
-            ax.legend(loc='best', fontsize=8)
+            ax.legend(loc='best', fontsize=8, title='Era')
             _plt.tight_layout()
             _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_gw_basin.png'))
             _plt.close()
