@@ -3,7 +3,21 @@ Well-level withdrawal package generation.
 
 Samples predicted withdrawal rasters at well locations from the ADWR Well
 Registry and produces a GeoPackage with annual per-well values across all
-withdrawal categories (Total, Irrigation, Non-Irrigation, GW/SW splits).
+withdrawal categories (Total, Irrigation, Non-Irrigation, GW/SW splits)
+and consumptive-use categories (Irrigation_CU, Irrigation_GW_CU,
+Irrigation_SW_CU).
+
+When augmented 6-band rasters are available (after the UQ step), the
+package also includes per-well uncertainty metrics (σ, lower/upper 95 % CI)
+for every category.  Pixel-level σ (band 2) is distributed to wells using
+the same capacity-proportional weight as the prediction itself:
+
+    well_σ = pixel_σ × well_share
+
+This is a simplification: it assumes within-pixel uncertainty distributes
+proportionally to capacity weight.  True per-well uncertainty would
+require well-specific error models, which are beyond the scope of this
+dataset.
 
 Distribution logic
 -------------------
@@ -128,12 +142,19 @@ def create_well_package(
         end_year: int = 2099,
         water_use: str | None = None,
         gw_vector_dir: str | None = None,
+        cu_raster_dirs: dict[str, dict[str, str]] | None = None,
 ) -> str:
     """
     Sample all withdrawal rasters at well locations and write a GeoPackage.
 
     Only the **mm** rasters are read; ft, m³, and acre-ft values are
     computed arithmetically, reducing I/O by 75 %.
+
+    When called after the UQ augmentation step, the mm rasters are 6-band
+    GeoTIFFs.  Band 1 is the prediction and band 2 is σ.  Both are sampled
+    and weighted identically, producing per-well uncertainty columns
+    (``{Cat}_{unit}_sigma``, ``{Cat}_{unit}_ci_lower``,
+    ``{Cat}_{unit}_ci_upper``).
 
     Args:
         well_registry_file (str): Path to the (reprojected) ADWR Well Registry shapefile.
@@ -152,6 +173,8 @@ def create_well_package(
             with ``AF Pumped`` column.  Used to build capacity-proportional
             weights.  If *None*, falls back to ``PUMPRATE`` and then
             equal-share.
+        cu_raster_dirs (dict or None): ``{cu_category: {'mm': dir, ...}, ...}`` for the 3
+            CU categories.  If *None*, CU columns are omitted.
 
     Returns:
         str: Path to the written GeoPackage file.
@@ -220,11 +243,16 @@ def create_well_package(
     cat_mm_info = [('Total', raster_dirs['mm'], 'Predicted_GW')]
     for cat in CATEGORIES:
         cat_mm_info.append((cat, cat_raster_dirs[cat]['mm'], cat))
+    if cu_raster_dirs:
+        for cu_cat, unit_dirs in cu_raster_dirs.items():
+            cat_mm_info.append((cu_cat, unit_dirs['mm'], cu_cat))
 
-    n_cats = len(cat_mm_info)  # 9
+    n_cats = len(cat_mm_info)  # 9 (withdrawal) + up to 3 (CU)
     n_years = end_year - start_year + 1
 
     all_mm = np.full((n_years, n_wells, n_cats), np.nan, dtype=np.float64)
+    all_sigma_mm = np.full((n_years, n_wells, n_cats), np.nan, dtype=np.float64)
+    has_sigma = False
 
     years_sampled = []
     for yi, year in enumerate(range(start_year, end_year + 1)):
@@ -239,6 +267,14 @@ def create_well_package(
                     ).ravel()
                     all_mm[yi, :, ci] = vals * well_share
                     sampled_any = True
+                    # Read σ from band 2 if augmented (6-band) raster
+                    if src.count >= 6:
+                        sigma_vals = np.array(
+                            list(src.sample(coords, indexes=2)),
+                            dtype=np.float64,
+                        ).ravel()
+                        all_sigma_mm[yi, :, ci] = sigma_vals * well_share
+                        has_sigma = True
             except FileNotFoundError:
                 pass
         if sampled_any:
@@ -250,18 +286,24 @@ def create_well_package(
         logger.warning('No raster data found for well package.')
         return out_gpkg
 
+    if has_sigma:
+        logger.info('  Uncertainty bands detected — including σ and 95%% CI columns')
+
     # ---- Floor at zero (remove negative model artifacts) ----
     np.maximum(all_mm, 0, out=all_mm)
+    np.maximum(all_sigma_mm, 0, out=all_sigma_mm)
 
     # ---- Build DataFrame ----
     year_indices = [y - start_year for y in years_sampled]
     mm_data = all_mm[year_indices]  # (n_sampled_years, n_wells, n_cats)
+    sigma_mm_data = all_sigma_mm[year_indices]
 
     n_sampled = len(years_sampled)
     total_rows = n_sampled * n_wells
 
     # Flatten: year-major order (year0-well0, year0-well1, ...)
     mm_flat = mm_data.reshape(total_rows, n_cats)
+    sigma_mm_flat = sigma_mm_data.reshape(total_rows, n_cats)
 
     col_names = [info[0] for info in cat_mm_info]  # Total, Irrigation, ...
     data = {}
@@ -271,6 +313,20 @@ def create_well_package(
         data[f'{cat}_ft'] = mm_col * _MM_TO_FT
         data[f'{cat}_m3'] = mm_col * mm_to_m3
         data[f'{cat}_AF'] = mm_col * mm_to_m3 * _M3_TO_AF
+
+        if has_sigma:
+            s_mm = sigma_mm_flat[:, ci]
+            data[f'{cat}_mm_sigma'] = s_mm
+            data[f'{cat}_ft_sigma'] = s_mm * _MM_TO_FT
+            data[f'{cat}_m3_sigma'] = s_mm * mm_to_m3
+            data[f'{cat}_AF_sigma'] = s_mm * mm_to_m3 * _M3_TO_AF
+            # 95% CI
+            for unit, scale in (('mm', 1.0), ('ft', _MM_TO_FT),
+                                ('m3', mm_to_m3), ('AF', mm_to_m3 * _M3_TO_AF)):
+                s_u = s_mm * scale
+                pred_u = data[f'{cat}_{unit}']
+                data[f'{cat}_{unit}_ci_lower'] = np.maximum(pred_u - 1.96 * s_u, 0)
+                data[f'{cat}_{unit}_ci_upper'] = pred_u + 1.96 * s_u
 
     data['Year'] = np.repeat(years_sampled, n_wells)
 
@@ -290,6 +346,10 @@ def create_well_package(
     result = result[id_cols + val_cols + ['geometry']]
 
     result.to_file(out_gpkg, driver='GPKG', layer='well_withdrawals')
+    n_val_cols = len([c for c in result.columns if c not in
+                      ('REGISTRY_I', 'WATER_USE', 'Year', 'geometry')])
     logger.info(f'Well package written: {out_gpkg}  '
-                f'({n_wells} wells × {n_sampled} years)')
+                f'({n_wells} wells × {n_sampled} years, '
+                f'{n_val_cols} value columns'
+                f'{", incl. σ/CI" if has_sigma else ""})')
     return out_gpkg

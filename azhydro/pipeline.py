@@ -962,12 +962,19 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         for d in cu_raster_dirs[cu_cat].values():
             makedirs(d)
 
-    # Irrigation efficiency raster directories (dimensionless ratios)
-    IE_CATEGORIES = ('Irrigation_Efficiency', 'Irrigation_GW_Efficiency', 'Irrigation_SW_Efficiency')
-    ie_raster_dirs = {}
-    for ie_cat in IE_CATEGORIES:
-        ie_raster_dirs[ie_cat] = os.path.join(prediction_dir, f'{ie_cat}_Rasters')
-        makedirs(ie_raster_dirs[ie_cat])
+    # Load USGS NHM basin-level irrigation efficiencies
+    nhm_ie_csv = os.path.join(INPUT_DIR, 'USGS WU', 'USGS_NHM_Withdrawals',
+                              'IR_HUC12_Eff_annual_2000_2020.csv')
+    huc12_geojson = os.path.join(INPUT_DIR, 'GEE_Data', 'AZ_HUC12.geojson')
+    nhm_ie_out = os.path.join(prediction_dir, 'NHM_IE_Basins')
+    nhm_basin_ie = intercompops.load_nhm_basin_ie(
+        nhm_ie_csv=nhm_ie_csv,
+        huc12_geojson=huc12_geojson,
+        basin_shp=AZ_GW_BASIN,
+        basin_col='BASIN_NAME',
+        ref_raster=ref_raster_file,
+        output_dir=nhm_ie_out,
+    )
 
     # Build a valid-pixel mask from the GW_Basin raster (same for all years).
     # In create_az_data_parquet, pixels with NaN or 0 in GW_Basin are labelled
@@ -1036,11 +1043,6 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     cu_yearly = {cat: {} for cat in CU_CATEGORIES}
     cu_basin_yearly = {cat: {} for cat in CU_CATEGORIES}
     cu_subbasin_yearly = {cat: {} for cat in CU_CATEGORIES}
-
-    # Irrigation efficiency tracking dicts
-    ie_yearly = {cat: {} for cat in IE_CATEGORIES}
-    ie_basin_yearly = {cat: {} for cat in IE_CATEGORIES}
-    ie_subbasin_yearly = {cat: {} for cat in IE_CATEGORIES}
 
     # Out-of-distribution detection output
     ood_raster_dir = os.path.join(prediction_dir, 'OOD_Rasters')
@@ -1154,58 +1156,33 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                 ref_raster_file, mm_to_ft, mm_to_m3, m3_to_af,
             )
 
-        # ---- Consumptive use and irrigation efficiency ----
-        et_vals = year_df['annual_et_ensemble_mm'].values.copy()
-        peff_vals = year_df['annual_peff_mm'].values.copy()
+        # ---- Consumptive use (CU = IE × Withdrawal) ----
+        # Map basin-level USGS NHM irrigation efficiency to each pixel.
+        # For 2000-2020 use per-year basin IE; otherwise use long-term mean.
+        ie_per_year = nhm_basin_ie['per_year']
+        ie_mean = nhm_basin_ie['mean']
+        pixel_basins = year_df['GW_Basin'].values
+        pixel_ie = np.full(len(pixel_basins), nhm_basin_ie['overall_mean'],
+                           dtype=np.float64)
+        if year in ie_per_year:
+            for i, b in enumerate(pixel_basins):
+                val = ie_per_year[year].get(b, np.nan)
+                pixel_ie[i] = val if np.isfinite(val) else ie_mean.get(b, nhm_basin_ie['overall_mean'])
+        else:
+            for i, b in enumerate(pixel_basins):
+                val = ie_mean.get(b, np.nan)
+                pixel_ie[i] = val if np.isfinite(val) else nhm_basin_ie['overall_mean']
+        pixel_ie = np.clip(pixel_ie, 0, 1)
 
-        # Reuse the same irr_fraction logic as partition_predictions
-        irr_frac = year_df['annual_irr_fraction'].values.copy() \
-            if 'annual_irr_fraction' in year_df.columns else np.ones(len(et_vals))
-        well_dens = year_df['well_density'].values \
-            if 'well_density' in year_df.columns else None
-        if well_dens is not None and 'annual_irr_fraction' in year_df.columns:
-            irr_frac = partops.focal_fill_irr_fraction(
-                irr_frac, well_dens, raster_shape, valid_mask,
-            )
-        gw_frac = year_df['annual_gw_fraction'].values.copy() \
-            if 'annual_gw_fraction' in year_df.columns else np.ones(len(et_vals))
-        gw_frac = np.clip(np.nan_to_num(gw_frac, nan=1.0), 0, 1)
-
-        # Partition ET and Peff into irrigation / GW / SW
-        et_irr = et_vals * irr_frac
-        peff_irr = peff_vals * irr_frac
-
-        # Consumptive use = irrigation ET − effective precip (≥ 0)
-        cu_total = np.maximum(et_irr - peff_irr, 0)
-        cu_gw = cu_total * gw_frac
-        cu_sw = cu_total - cu_gw
+        cu_total = cat_predictions['Irrigation'] * pixel_ie
+        cu_gw = cat_predictions['Irrigation_GW'] * pixel_ie
+        cu_sw = cat_predictions['Irrigation_SW'] * pixel_ie
 
         cu_dict = {
             'Irrigation_CU': cu_total,
             'Irrigation_GW_CU': cu_gw,
             'Irrigation_SW_CU': cu_sw,
         }
-
-        # Irrigation efficiency = CU / withdrawal
-        withdrawal_map = {
-            'Irrigation_Efficiency': 'Irrigation',
-            'Irrigation_GW_Efficiency': 'Irrigation_GW',
-            'Irrigation_SW_Efficiency': 'Irrigation_SW',
-        }
-        cu_for_ie = {
-            'Irrigation_Efficiency': cu_total,
-            'Irrigation_GW_Efficiency': cu_gw,
-            'Irrigation_SW_Efficiency': cu_sw,
-        }
-        ie_dict = {}
-        wd_min_threshold = 0.01  # mm — suppress noise from near-zero withdrawals
-        for ie_cat, wd_cat in withdrawal_map.items():
-            wd_vals = cat_predictions[wd_cat]
-            with np.errstate(invalid='ignore', divide='ignore'):
-                ie_vals = np.where(wd_vals > wd_min_threshold,
-                                   cu_for_ie[ie_cat] / wd_vals, np.nan)
-            ie_vals = np.clip(np.where(np.isfinite(ie_vals), ie_vals, np.nan), 0, 1)
-            ie_dict[ie_cat] = ie_vals
 
         # Write consumptive use rasters (multiple units)
         for cu_cat, cu_pred in cu_dict.items():
@@ -1215,29 +1192,12 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                 ref_raster_file, mm_to_ft, mm_to_m3, m3_to_af,
             )
 
-        # Write irrigation efficiency rasters (dimensionless)
-        for ie_cat, ie_vals in ie_dict.items():
-            ie_grid = _valid_pixels_to_raster(ie_vals, valid_mask, raster_shape)
-            _, raster_file_obj = read_raster_as_arr(ref_raster_file, get_file=True)
-            out_path = os.path.join(ie_raster_dirs[ie_cat], f'{ie_cat}_{year}.tif')
-            write_raster(
-                ie_grid, raster_file_obj,
-                raster_file_obj.transform, out_path,
-                no_data_value=np.nan,
-            )
-            raster_file_obj.close()
-
         # AZ-wide annual total (all valid pixels)
         yearly_predictions[year] = _pixel_stats(predictions)
         for cat, cat_pred in cat_predictions.items():
             cat_yearly[cat][year] = _pixel_stats(cat_pred)
         for cu_cat, cu_pred in cu_dict.items():
             cu_yearly[cu_cat][year] = _pixel_stats(cu_pred)
-        for ie_cat, ie_vals in ie_dict.items():
-            valid_ie = ie_vals[np.isfinite(ie_vals)]
-            ie_yearly[ie_cat][year] = {
-                'Mean_Efficiency': round(float(np.nanmean(valid_ie)), 4) if len(valid_ie) > 0 else np.nan,
-            }
 
         # Collect actual meter data for metered years
         if year in YEAR_LIST and 'gw_pumping_mm' in year_df.columns:
@@ -1258,7 +1218,6 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         basin_totals = {}
         cat_basin_totals = {cat: {} for cat in partops.CATEGORIES}
         cu_basin_totals = {cat: {} for cat in CU_CATEGORIES}
-        ie_basin_totals = {cat: {} for cat in IE_CATEGORIES}
         for basin in all_basins:
             bmask = (year_df.GW_Basin == basin).values
             basin_totals[basin] = _pixel_stats(predictions[bmask])
@@ -1266,25 +1225,16 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                 cat_basin_totals[cat][basin] = _pixel_stats(cat_pred[bmask])
             for cu_cat, cu_pred in cu_dict.items():
                 cu_basin_totals[cu_cat][basin] = _pixel_stats(cu_pred[bmask])
-            for ie_cat, ie_vals in ie_dict.items():
-                valid_ie = ie_vals[bmask]
-                valid_ie = valid_ie[np.isfinite(valid_ie)]
-                ie_basin_totals[ie_cat][basin] = {
-                    'Mean_Efficiency': round(float(np.nanmean(valid_ie)), 4) if len(valid_ie) > 0 else np.nan,
-                }
         basin_yearly[year] = basin_totals
         for cat in partops.CATEGORIES:
             cat_basin_yearly[cat][year] = cat_basin_totals[cat]
         for cu_cat in CU_CATEGORIES:
             cu_basin_yearly[cu_cat][year] = cu_basin_totals[cu_cat]
-        for ie_cat in IE_CATEGORIES:
-            ie_basin_yearly[ie_cat][year] = ie_basin_totals[ie_cat]
 
         # Per-sub-basin annual stats
         subbasin_totals = {}
         cat_subbasin_totals = {cat: {} for cat in partops.CATEGORIES}
         cu_subbasin_totals = {cat: {} for cat in CU_CATEGORIES}
-        ie_subbasin_totals = {cat: {} for cat in IE_CATEGORIES}
         for sb in subbasins:
             sbmask = (year_df.GW_Subbasin == sb).values
             subbasin_totals[sb] = _pixel_stats(predictions[sbmask])
@@ -1292,19 +1242,11 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                 cat_subbasin_totals[cat][sb] = _pixel_stats(cat_pred[sbmask])
             for cu_cat, cu_pred in cu_dict.items():
                 cu_subbasin_totals[cu_cat][sb] = _pixel_stats(cu_pred[sbmask])
-            for ie_cat, ie_vals in ie_dict.items():
-                valid_ie = ie_vals[sbmask]
-                valid_ie = valid_ie[np.isfinite(valid_ie)]
-                ie_subbasin_totals[ie_cat][sb] = {
-                    'Mean_Efficiency': round(float(np.nanmean(valid_ie)), 4) if len(valid_ie) > 0 else np.nan,
-                }
         subbasin_yearly[year] = subbasin_totals
         for cat in partops.CATEGORIES:
             cat_subbasin_yearly[cat][year] = cat_subbasin_totals[cat]
         for cu_cat in CU_CATEGORIES:
             cu_subbasin_yearly[cu_cat][year] = cu_subbasin_totals[cu_cat]
-        for ie_cat in IE_CATEGORIES:
-            ie_subbasin_yearly[ie_cat][year] = ie_subbasin_totals[ie_cat]
 
         if year % 20 == 0 or year == END_YEAR:
             vol_af = yearly_predictions[year]['Volume_AF']
@@ -1313,12 +1255,11 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             nigw = cat_yearly['Non_Irrigation_GW'][year]['Volume_AF']
             nisw = cat_yearly['Non_Irrigation_SW'][year]['Volume_AF']
             cu_af = cu_yearly['Irrigation_CU'][year]['Volume_AF']
-            ie_mean = ie_yearly['Irrigation_Efficiency'][year]['Mean_Efficiency']
             logger.info(
                 f'  Year {year}: total = {vol_af:,.0f} AF'
                 f'  |  irr_GW = {irr_gw:,.0f}  irr_SW = {irr_sw:,.0f}'
                 f'  |  non-irr_GW = {nigw:,.0f}  non-irr_SW = {nisw:,.0f}'
-                f'  |  CU = {cu_af:,.0f} AF  IE = {ie_mean:.2f}'
+                f'  |  CU = {cu_af:,.0f} AF'
             )
 
     # ---- 3c. Era summary maps (time series plots deferred to UQ step) ----
@@ -1352,22 +1293,6 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             cu_yearly[cu_cat], cu_dir,
             title_prefix=title,
         )
-
-    # ---- 3d. Well package (per-well annual withdrawals as GeoPackage) ----
-    well_registry_file = os.path.join(OUTPUT_DIR, 'GW_Data', 'Vector_Reproj', 'Well_Registry.shp')
-    gw_vector_dir = os.path.join(OUTPUT_DIR, f'GW/Vectors/{WNAME}')
-    wellops.create_well_package(
-        well_registry_file,
-        raster_dirs=raster_dirs,
-        cat_raster_dirs=cat_raster_dirs,
-        output_dir=os.path.join(prediction_dir, 'Well_Package'),
-        ref_raster_file=ref_raster_file,
-        pixel_area_m2=pixel_area_m2,
-        start_year=START_YEAR,
-        end_year=END_YEAR,
-        water_use='All' if WATER_USE == 'All' else 'IRRIGATION',
-        gw_vector_dir=gw_vector_dir,
-    )
 
     # Write OOD summary CSV
     if ood_summary:
@@ -1486,12 +1411,74 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     return model, feature_cols, x_train, y_train
 
 
+def create_well_package_step() -> None:
+    """Create the per-well GeoPackage from (augmented) prediction rasters.
+
+    Runs *after* UQ augmentation (Step 3b) so that the 6-band rasters are
+    available and per-well σ / 95 % CI columns can be included.  When the
+    rasters are still single-band (e.g. Step 3b was skipped), deterministic
+    columns are written without uncertainty.
+    """
+    logger.info('=' * 60)
+    logger.info('Step 3e: Creating well package (per-well GeoPackage)')
+    logger.info('=' * 60)
+
+    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_XGB')
+    pixel_area_m2 = MOSAIC_RASTER_RES ** 2
+
+    # Reconstruct raster directory paths (same structure as predict_full_period)
+    raster_dirs = {
+        'mm': os.path.join(prediction_dir, 'Predicted_Rasters', 'Depth_mm'),
+        'ft': os.path.join(prediction_dir, 'Predicted_Rasters', 'Depth_ft'),
+        'm3': os.path.join(prediction_dir, 'Predicted_Rasters', 'Volume_m3'),
+        'AF': os.path.join(prediction_dir, 'Predicted_Rasters', 'Volume_AF'),
+    }
+    cat_raster_dirs = {}
+    for cat in partops.CATEGORIES:
+        base = os.path.join(prediction_dir, f'{cat}_Rasters')
+        cat_raster_dirs[cat] = {
+            'mm': os.path.join(base, 'Depth_mm'),
+            'ft': os.path.join(base, 'Depth_ft'),
+            'm3': os.path.join(base, 'Volume_m3'),
+            'AF': os.path.join(base, 'Volume_AF'),
+        }
+    cu_raster_dirs = {}
+    for cu_cat in ('Irrigation_CU', 'Irrigation_GW_CU', 'Irrigation_SW_CU'):
+        base = os.path.join(prediction_dir, f'{cu_cat}_Rasters')
+        cu_raster_dirs[cu_cat] = {
+            'mm': os.path.join(base, 'Depth_mm'),
+            'ft': os.path.join(base, 'Depth_ft'),
+            'm3': os.path.join(base, 'Volume_m3'),
+            'AF': os.path.join(base, 'Volume_AF'),
+        }
+
+    ref_raster_file = os.path.join(PRED_DATA_DIR, f'Predictor_{YEAR_LIST[0]}.tif')
+    well_registry_file = os.path.join(
+        OUTPUT_DIR, 'GW_Data', 'Vector_Reproj', 'Well_Registry.shp',
+    )
+    gw_vector_dir = os.path.join(OUTPUT_DIR, f'GW/Vectors/{WNAME}')
+
+    wellops.create_well_package(
+        well_registry_file,
+        raster_dirs=raster_dirs,
+        cat_raster_dirs=cat_raster_dirs,
+        output_dir=os.path.join(prediction_dir, 'Well_Package'),
+        ref_raster_file=ref_raster_file,
+        pixel_area_m2=pixel_area_m2,
+        start_year=START_YEAR,
+        end_year=END_YEAR,
+        water_use='All' if WATER_USE == 'All' else 'IRRIGATION',
+        gw_vector_dir=gw_vector_dir,
+        cu_raster_dirs=cu_raster_dirs,
+    )
+
+
 def create_all_raster_maps() -> None:
     """Create era-mean raster maps for every predicted output category
     and an actual-vs-predicted comparison for the metered GW period.
 
     Iterates over all raster output directories (depth, volume
-    partitions, CU, IE, OOD, and uncertainty) and produces 2×2
+    partitions, CU, OOD, and uncertainty) and produces 2×2
     era-mean panel figures with basin boundaries and AMA/INA labels.
 
     Returns:
@@ -1529,25 +1516,6 @@ def create_all_raster_maps() -> None:
             title=title,
             unit_label='Depth (mm)',
             cmap='YlOrRd',
-        )
-
-    # ── Irrigation Efficiency (dimensionless, no unit sub-dir) ───────
-    IE_CATEGORIES = (
-        'Irrigation_Efficiency', 'Irrigation_GW_Efficiency',
-        'Irrigation_SW_Efficiency',
-    )
-    for ie in IE_CATEGORIES:
-        raster_dir = os.path.join(prediction_dir, f'{ie}_Rasters')
-        if not os.path.isdir(raster_dir):
-            continue
-        pretty = ie.replace('_', ' ')
-        vizops.create_era_raster_maps(
-            raster_dir=raster_dir,
-            basin_shp=AZ_GW_BASIN,
-            output_dir=maps_dir,
-            title=pretty,
-            unit_label='Efficiency (CU / Withdrawal)',
-            cmap='YlGn',
         )
 
     # ── OOD Rasters (binary flags) ──────────────────────────────────
@@ -1676,20 +1644,6 @@ def create_all_raster_maps() -> None:
             subbasin_shp=ADWR_SUBBASIN_SHP,
         )
 
-    # Irrigation Efficiency categories (dimensionless)
-    for ie in IE_CATEGORIES:
-        ie_dir = os.path.join(prediction_dir, f'{ie}_Rasters')
-        if not os.path.isdir(ie_dir):
-            continue
-        vizops.create_trend_maps(
-            raster_dir=ie_dir,
-            basin_shp=AZ_GW_BASIN,
-            output_dir=trend_dir,
-            title=ie.replace('_', ' '),
-            unit_label='ratio',
-            subbasin_shp=ADWR_SUBBASIN_SHP,
-        )
-
     logger.info(f'All raster maps saved to {maps_dir}')
 
 
@@ -1735,33 +1689,29 @@ def run_usgs_intercomparison() -> pd.DataFrame:
     )
 
 
-def run_cu_ie_usgs_intercomparison() -> pd.DataFrame:
+def run_cu_usgs_intercomparison() -> pd.DataFrame:
     """
-    Compare ML-based Irrigation CU and IE predictions with USGS NHM
+    Compare ML-based Irrigation CU predictions with USGS NHM
     HUC12-scale data across Arizona groundwater basins.
 
     Returns:
-        pd.DataFrame: Summary metrics for CU and IE intercomparisons.
+        pd.DataFrame: Summary metrics for CU intercomparison.
     """
     logger.info('=' * 60)
-    logger.info('Step 4b: CU / IE Intercomparison')
+    logger.info('Step 4b: CU Intercomparison')
     logger.info('=' * 60)
 
     prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_XGB')
     irr_cu_dir = os.path.join(prediction_dir, 'Irrigation_CU_Rasters/Depth_mm')
-    irr_ie_dir = os.path.join(prediction_dir, 'Irrigation_Efficiency_Rasters')
 
     nhm_cu_csv = os.path.join(INPUT_DIR, 'USGS WU', 'USGS_NHM_CUIrr', 'Irr_CU_HUC12_Tot_annual_2000_2020.csv')
-    nhm_ie_csv = os.path.join(INPUT_DIR, 'USGS WU', 'USGS_NHM_Withdrawals', 'IR_HUC12_Eff_annual_2000_2020.csv')
     huc12_geojson = os.path.join(INPUT_DIR, 'GEE_Data', 'AZ_HUC12.geojson')
 
-    output_dir = os.path.join(prediction_dir, 'CU_IE_Intercomparison')
+    output_dir = os.path.join(prediction_dir, 'CU_Intercomparison')
 
-    return intercompops.run_cu_ie_intercomparison(
+    return intercompops.run_cu_intercomparison(
         irr_cu_dir=irr_cu_dir,
-        irr_ie_dir=irr_ie_dir,
         nhm_cu_csv=nhm_cu_csv,
-        nhm_ie_csv=nhm_ie_csv,
         huc12_geojson=huc12_geojson,
         basin_shp=AZ_GW_BASIN,
         basin_col='BASIN_NAME',
@@ -1879,9 +1829,10 @@ Pipeline steps (comma-separated or 'all'):
   2c   Evaluate LOO spatial holdout
   3    Full-period XGBoost prediction (1896-2099)
   3b   Hybrid uncertainty quantification
+  3e   Well package (per-well GeoPackage with uncertainty)
   3g   Raster maps, actual vs predicted, and trend analysis
   4    USGS intercomparison
-  4b   CU / IE intercomparison
+  4b   CU intercomparison
   4c   CAP/SRP surface-water validation
   4d   Effective precipitation intercomparison
   4e   Non-irrigation vs USGS Public Supply intercomparison
@@ -2065,6 +2016,10 @@ def main() -> None:
                 basin_shp=AZ_GW_BASIN,
             )
 
+    # Step 3e — Well package (after UQ so augmented rasters include σ)
+    if should_run('3e'):
+        create_well_package_step()
+
     # Step 3g — Era-mean raster maps for all output categories
     if should_run('3g'):
         create_all_raster_maps()
@@ -2073,9 +2028,9 @@ def main() -> None:
     if should_run('4'):
         run_usgs_intercomparison()
 
-    # Step 4b — CU / IE intercomparison
+    # Step 4b — CU intercomparison
     if should_run('4b'):
-        run_cu_ie_usgs_intercomparison()
+        run_cu_usgs_intercomparison()
 
     # Step 4c — CAP/SRP total surface water validation
     if should_run('4c'):

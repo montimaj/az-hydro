@@ -145,23 +145,8 @@ COMPONENT_N = {
     'GW': len(GW_FRACTION_SNAPSHOTS),         # 4
 }
 
-# Category / CU / IE raster groups
+# Category / CU raster groups
 CU_CATEGORIES = ('Irrigation_CU', 'Irrigation_GW_CU', 'Irrigation_SW_CU')
-IE_CATEGORIES = (
-    'Irrigation_Efficiency',
-    'Irrigation_GW_Efficiency',
-    'Irrigation_SW_Efficiency',
-)
-IE_WITHDRAWAL_MAP = {
-    'Irrigation_Efficiency': 'Irrigation',
-    'Irrigation_GW_Efficiency': 'Irrigation_GW',
-    'Irrigation_SW_Efficiency': 'Irrigation_SW',
-}
-IE_CU_MAP = {
-    'Irrigation_Efficiency': 'Irrigation_CU',
-    'Irrigation_GW_Efficiency': 'Irrigation_GW_CU',
-    'Irrigation_SW_Efficiency': 'Irrigation_SW_CU',
-}
 
 
 # ── Helper ───────────────────────────────────────────────────────────────────
@@ -1780,106 +1765,179 @@ def compute_basin_sigma_total(output_dir: str) -> None:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def compute_sigma_cu(
-        gcm_mosaic_dirs: dict[str, str],
-        pred_data_dir: str,
+        prediction_dir: str,
         output_dir: str,
+        basin_shp: str,
+        input_dir: str,
+        start_year: int,
         end_year: int,
-        year_list: list[int],
         mosaic_res: int,
 ) -> None:
     """
-    Compute σ_CU: per-pixel std of consumptive use across 5 GCMs.
+    Compute σ_CU via error propagation from CU = IE × Withdrawal.
 
-    CU = max(ET_irr − Peff_irr, 0).  Per-GCM ET and Peff are read from
-    the per-GCM predictor rasters built during σ_MACA.  Irrigation and
-    GW fractions are taken from the ensemble predictor (fixed across GCMs).
+    Two uncertainty sources are combined in quadrature:
+
+        σ_CU = √((IE × σ_wd)² + (wd × σ_IE)²)
+
+    where σ_wd is the per-category total uncertainty from the augmented
+    Irrigation rasters (band 2) and σ_IE is the inter-annual std of
+    USGS NHM basin-level irrigation efficiency (2000–2020).
+
+    For NHM-covered years (2000–2020), per-year basin IEs are used and
+    σ_IE = 0 (observed efficiency).  For all other years, σ_IE equals
+    the basin-level temporal std of IE.
 
     Writes σ rasters for Irrigation_CU, Irrigation_GW_CU, and
-    Irrigation_SW_CU for future years (2026-2099).
+    Irrigation_SW_CU.
 
     Args:
-        gcm_mosaic_dirs (dict[str, str]): Per-GCM mosaic directory paths
-            from ``compute_sigma_maca``.
-        pred_data_dir (str): Directory containing ensemble predictor rasters.
+        prediction_dir (str): Base prediction directory (``Full_Prediction_XGB``).
         output_dir (str): Base output directory for uncertainty products.
+        basin_shp (str): Path to groundwater basin shapefile.
+        input_dir (str): Root input directory (for NHM IE CSV paths).
+        start_year (int): First year of prediction period.
         end_year (int): Last year of prediction period.
-        year_list (list[int]): Full list of prediction years.
         mosaic_res (int): Raster resolution in metres.
 
     Returns:
         None.
     """
     from hydrolibs.sysops import makedirs
+    import hydrolibs.intercompops as intercompops
+    from rasterio.mask import mask as rio_mask
+    from shapely.geometry import mapping
 
-    logger.info('Computing σ_CU (consumptive-use inter-GCM spread)...')
+    logger.info('Computing σ_CU (IE × Withdrawal error propagation)...')
     sigma_cu_dir = os.path.join(output_dir, 'Sigma_CU/Rasters')
     makedirs(sigma_cu_dir)
 
     pixel_area_m2 = mosaic_res ** 2
     mm_to_m3 = pixel_area_m2 / 1000
 
+    # Load basin-level NHM IEs
+    nhm_ie_csv = os.path.join(input_dir, 'USGS WU', 'USGS_NHM_Withdrawals',
+                              'IR_HUC12_Eff_annual_2000_2020.csv')
+    huc12_geojson = os.path.join(input_dir, 'GEE_Data', 'AZ_HUC12.geojson')
+    nhm_ie_out = os.path.join(output_dir, 'Sigma_CU', 'NHM_IE')
+    # Find a reference raster
+    irr_dir = os.path.join(prediction_dir, 'Irrigation_Rasters/Depth_mm')
+    ref_raster = None
+    for yr in range(start_year, end_year + 1):
+        candidate = os.path.join(irr_dir, f'Irrigation_{yr}_mm.tif')
+        if os.path.isfile(candidate):
+            ref_raster = candidate
+            break
+    if ref_raster is None:
+        logger.warning('No Irrigation rasters found — skipping σ_CU')
+        return
+
+    nhm_basin_ie = intercompops.load_nhm_basin_ie(
+        nhm_ie_csv=nhm_ie_csv,
+        huc12_geojson=huc12_geojson,
+        basin_shp=basin_shp,
+        basin_col='BASIN_NAME',
+        ref_raster=ref_raster,
+        output_dir=nhm_ie_out,
+    )
+
+    # Build a per-pixel basin label raster for IE mapping
+    basin_gdf = gpd.read_file(basin_shp)
+    with rio.open(ref_raster) as src:
+        ref_crs = src.crs
+        ref_profile = src.profile.copy()
+        ref_shape = (src.height, src.width)
+
+    basin_reproj = basin_gdf.to_crs(ref_crs) if basin_gdf.crs != ref_crs else basin_gdf
+    basin_names = sorted(basin_gdf['BASIN_NAME'].unique().tolist())
+    basin_to_idx = {name: i + 1 for i, name in enumerate(basin_names)}
+
+    # Rasterize basin labels
+    from rasterio.features import rasterize
+    shapes = [
+        (mapping(row.geometry), basin_to_idx[row['BASIN_NAME']])
+        for _, row in basin_reproj.iterrows()
+        if row['BASIN_NAME'] in basin_to_idx
+    ]
+    basin_raster = rasterize(
+        shapes, out_shape=ref_shape,
+        transform=ref_profile['transform'],
+        fill=0, dtype='int32',
+    )
+
+    ie_per_year = nhm_basin_ie['per_year']
+    ie_mean = nhm_basin_ie['mean']
+    ie_std = nhm_basin_ie['std']
+    overall_mean = nhm_basin_ie['overall_mean']
+
+    # Category mapping: CU category → withdrawal category raster dir
+    cu_wd_map = {
+        'Irrigation_CU': 'Irrigation',
+        'Irrigation_GW_CU': 'Irrigation_GW',
+        'Irrigation_SW_CU': 'Irrigation_SW',
+    }
+
     yearly_stats = {}
 
-    for year in range(MACA_FUTURE_START, end_year + 1):
-        ensemble_raster = os.path.join(pred_data_dir, f'Predictor_{year}.tif')
-        if not os.path.exists(ensemble_raster):
-            continue
+    for year in range(start_year, end_year + 1):
+        # Build pixel-level IE mean and IE std arrays
+        ie_grid = np.full(ref_shape, overall_mean, dtype=np.float32)
+        ie_std_grid = np.zeros(ref_shape, dtype=np.float32)
 
-        with rio.open(ensemble_raster) as src:
-            irr_frac = src.read(IRR_FRACTION_BAND_INDEX).astype(np.float32)
-            gw_frac = src.read(GW_FRACTION_BAND_INDEX).astype(np.float32)
-        irr_frac = np.clip(np.nan_to_num(irr_frac, nan=0.0), 0, 1)
-        gw_frac = np.clip(np.nan_to_num(gw_frac, nan=1.0), 0, 1)
+        for basin_name, idx in basin_to_idx.items():
+            bmask = basin_raster == idx
+            if year in ie_per_year:
+                val = ie_per_year[year].get(basin_name, np.nan)
+                ie_grid[bmask] = val if np.isfinite(val) else ie_mean.get(
+                    basin_name, overall_mean)
+                # NHM year: observed IE → σ_IE = 0
+            else:
+                ie_grid[bmask] = ie_mean.get(basin_name, overall_mean)
+                ie_std_grid[bmask] = ie_std.get(basin_name, 0.0)
 
-        cu_stack, cu_gw_stack, cu_sw_stack = [], [], []
+        ie_grid = np.clip(ie_grid, 0, 1)
 
-        for gcm in MACA_REPRESENTATIVE_GCMS:
-            gcm_raster = os.path.join(gcm_mosaic_dirs[gcm], f'Predictor_{year}.tif')
-            if not os.path.exists(gcm_raster):
+        ref_profile.update(count=1, dtype=np.float32, nodata=np.nan)
+
+        for cu_cat, wd_cat in cu_wd_map.items():
+            wd_file = os.path.join(
+                prediction_dir, f'{wd_cat}_Rasters/Depth_mm',
+                f'{wd_cat}_{year}_mm.tif',
+            )
+            if not os.path.isfile(wd_file):
                 continue
-            with rio.open(gcm_raster) as src:
-                et = src.read(ET_BAND_INDEX).astype(np.float32)
-                peff = src.read(PEFF_BAND_INDEX).astype(np.float32)
 
-            et_irr = et * irr_frac
-            peff_irr = peff * irr_frac
-            cu = np.maximum(et_irr - peff_irr, 0)
-            cu_gw = cu * gw_frac
-            cu_sw = cu - cu_gw
+            with rio.open(wd_file) as src:
+                if src.count >= 2:
+                    wd_pred = src.read(1).astype(np.float32)
+                    sigma_wd = src.read(2).astype(np.float32)
+                else:
+                    wd_pred = src.read(1).astype(np.float32)
+                    sigma_wd = np.zeros_like(wd_pred)
 
-            cu_stack.append(cu)
-            cu_gw_stack.append(cu_gw)
-            cu_sw_stack.append(cu_sw)
+            # σ_CU = √((IE × σ_wd)² + (wd × σ_IE)²)
+            with np.errstate(invalid='ignore'):
+                sigma_cu = np.sqrt(
+                    (ie_grid * sigma_wd) ** 2
+                    + (wd_pred * ie_std_grid) ** 2
+                ).astype(np.float32)
 
-        if len(cu_stack) < 2:
-            continue
+            out_path = os.path.join(sigma_cu_dir, f'Sigma_{cu_cat}_mm_{year}.tif')
+            with rio.open(out_path, 'w', **ref_profile) as dst:
+                dst.write(sigma_cu, 1)
 
-        with rio.open(ensemble_raster) as src:
-            raster_profile = src.profile.copy()
-        raster_profile.update(count=1, dtype=np.float32, nodata=np.nan)
-
-        for label, stack in [
-            ('Irrigation_CU', cu_stack),
-            ('Irrigation_GW_CU', cu_gw_stack),
-            ('Irrigation_SW_CU', cu_sw_stack),
-        ]:
-            sigma_arr = np.nanstd(
-                np.stack(stack), axis=0, ddof=1,
-            ).astype(np.float32)
-            out_path = os.path.join(sigma_cu_dir, f'Sigma_{label}_mm_{year}.tif')
-            with rio.open(out_path, 'w', **raster_profile) as dst:
-                dst.write(sigma_arr, 1)
-
-        sigma_cu_total = np.nanstd(
-            np.stack(cu_stack), axis=0, ddof=1,
-        )
-        yearly_stats[year] = _pixel_stats(
-            sigma_cu_total.ravel(), mm_to_m3, M3_TO_AF,
-        )
-
-        if year % 10 == 0 or year == end_year:
-            logger.info(f'    Year {year}: mean σ_CU = '
-                        f'{yearly_stats[year]["Mean_Depth_mm"]:.2f} mm')
+        # Track stats for the total CU sigma
+        sigma_total_file = os.path.join(sigma_cu_dir,
+                                        f'Sigma_Irrigation_CU_mm_{year}.tif')
+        if os.path.isfile(sigma_total_file):
+            with rio.open(sigma_total_file) as src:
+                sigma_total = src.read(1)
+            yearly_stats[year] = _pixel_stats(
+                sigma_total.ravel(), mm_to_m3, M3_TO_AF,
+            )
+            if year % 20 == 0 or year == end_year:
+                logger.info(f'    Year {year}: mean σ_CU = '
+                            f'{yearly_stats[year]["Mean_Depth_mm"]:.2f} mm')
 
     _save_summary(yearly_stats, os.path.join(output_dir, 'Sigma_CU'), 'CU')
     logger.info('  σ_CU complete.')
@@ -2076,13 +2134,14 @@ def run_uncertainty_quantification(
         mosaic_res=mosaic_res,
     )
 
-    # ── σ_CU (inter-GCM spread in consumptive use) ──
+    # ── σ_CU (error propagation: CU = IE × Withdrawal) ──
     compute_sigma_cu(
-        gcm_mosaic_dirs=gcm_mosaic_dirs,
-        pred_data_dir=pred_data_dir,
+        prediction_dir=full_pred_dir,
         output_dir=unc_dir,
+        basin_shp=basin_shp,
+        input_dir=input_dir,
+        start_year=start_year,
         end_year=end_year,
-        year_list=year_list,
         mosaic_res=mosaic_res,
     )
 
@@ -2093,13 +2152,6 @@ def run_uncertainty_quantification(
         start_year=start_year,
         end_year=end_year,
         mosaic_res=mosaic_res,
-    )
-
-    # ── Augment IE rasters (needs augmented CU + category rasters) ──
-    augment_ie_rasters(
-        prediction_dir=full_pred_dir,
-        start_year=start_year,
-        end_year=end_year,
     )
 
     # ── Re-plot prediction time series with uncertainty bounds ──
@@ -2399,84 +2451,6 @@ def augment_cu_rasters(
     logger.info('  CU raster augmentation complete.')
 
 
-def augment_ie_rasters(
-        prediction_dir: str,
-        start_year: int,
-        end_year: int,
-) -> None:
-    """
-    Augment IE (irrigation efficiency) rasters with uncertainty bands.
-
-    IE = CU / withdrawal.  σ_IE is propagated via the standard ratio
-    formula::
-
-        σ_IE / IE = √( (σ_CU / CU)² + (σ_wd / wd)² )
-
-    CU and withdrawal rasters must already be augmented (6-band) so
-    that band 3 = CV is available.
-
-    Args:
-        prediction_dir (str): Base directory for IE/CU/withdrawal rasters.
-        start_year (int): First year of prediction period.
-        end_year (int): Last year of prediction period.
-
-    Returns:
-        None.
-    """
-    logger.info('Augmenting IE rasters with uncertainty bands...')
-
-    band_descriptions = [
-        'efficiency', 'sigma', 'CV', 'SNR',
-        'lower_95CI', 'upper_95CI',
-    ]
-
-    for ie_cat in IE_CATEGORIES:
-        cu_cat = IE_CU_MAP[ie_cat]
-        wd_cat = IE_WITHDRAWAL_MAP[ie_cat]
-
-        ie_dir = os.path.join(prediction_dir, f'{ie_cat}_Rasters')
-        cu_dir = os.path.join(prediction_dir, f'{cu_cat}_Rasters/Depth_mm')
-        wd_dir = os.path.join(prediction_dir, f'{wd_cat}_Rasters/Depth_mm')
-
-        for year in range(start_year, end_year + 1):
-            ie_file = os.path.join(ie_dir, f'{ie_cat}_{year}.tif')
-            cu_file = os.path.join(cu_dir, f'{cu_cat}_{year}_mm.tif')
-            wd_file = os.path.join(wd_dir, f'{wd_cat}_{year}_mm.tif')
-
-            if not (os.path.exists(ie_file) and os.path.exists(cu_file)
-                    and os.path.exists(wd_file)):
-                continue
-
-            with rio.open(ie_file) as src:
-                ie_pred = src.read(1)
-                profile = src.profile.copy()
-
-            # CU raster (augmented): band 3 = CV_CU
-            with rio.open(cu_file) as src:
-                cv_cu = (src.read(3).astype(np.float32)
-                         if src.count >= 3
-                         else np.zeros_like(ie_pred, dtype=np.float32))
-
-            # Withdrawal raster (augmented): band 3 = CV_wd
-            with rio.open(wd_file) as src:
-                cv_wd = (src.read(3).astype(np.float32)
-                         if src.count >= 3
-                         else np.zeros_like(ie_pred, dtype=np.float32))
-
-            # σ_IE = IE × √(CV_CU² + CV_wd²)
-            with np.errstate(invalid='ignore'):
-                cv_cu_sq = np.nan_to_num(cv_cu, nan=0.0) ** 2
-                cv_wd_sq = np.nan_to_num(cv_wd, nan=0.0) ** 2
-                combined_cv = np.sqrt(cv_cu_sq + cv_wd_sq).astype(np.float32)
-            sigma_ie = (np.abs(ie_pred) * combined_cv).astype(np.float32)
-
-            _write_augmented_raster(
-                ie_pred, sigma_ie, ie_file, profile, band_descriptions,
-            )
-
-        logger.info(f'  Augmented {ie_cat} rasters')
-
-    logger.info('  IE raster augmentation complete.')
 
 
 def _replot_with_uncertainty(
@@ -2719,7 +2693,7 @@ def _replot_from_augmented_rasters(
     """Re-plot all time series with uncertainty bounds derived directly
     from the 6-band augmented rasters via zonal statistics.
 
-    For each raster group (total pumping, categories, CU, IE) the
+    For each raster group (total pumping, categories, CU) the
     augmented 6-band rasters are clipped to each basin / sub-basin
     geometry via ``rasterio.mask`` and summary statistics (mean depth,
     total volume, σ, 95 % CI) are computed from:
@@ -2964,189 +2938,6 @@ def _replot_from_augmented_rasters(
 
         logger.info(f'  {label}: time series with uncertainty complete.')
 
-    # ── process one IE (efficiency) raster group ──────────────────────────
-
-    def _process_ie_group(label, raster_dir, file_pattern, out_subdir,
-                          title_prefix=''):
-        """Zonal stats → time-series plots for efficiency rasters."""
-        yearly_mean, yearly_sigma = {}, {}
-        basin_mean, basin_sigma = {}, {}
-        subbasin_mean, subbasin_sigma = {}, {}
-
-        for year in range(start_year, end_year + 1):
-            raster_file = os.path.join(raster_dir, f'{file_pattern.format(year=year)}')
-            if not os.path.exists(raster_file):
-                continue
-            with rio.open(raster_file) as src:
-                if src.count < 6:
-                    continue
-                pred = src.read(1).astype(np.float64)
-                sig = src.read(2).astype(np.float64)
-            valid = np.isfinite(pred)
-            if not np.any(valid):
-                continue
-            yearly_mean[year] = float(np.nanmean(pred[valid]))
-            yearly_sigma[year] = float(np.nanmean(sig[valid]))
-
-            # Basin zonal stats
-            with rio.open(raster_file) as src:
-                zr = basin_gdf.to_crs(src.crs)
-                for _, row in zr.iterrows():
-                    name = row['BASIN_NAME']
-                    try:
-                        out_img, _ = rio_mask(
-                            src, [mapping(row.geometry)],
-                            crop=True, nodata=np.nan, all_touched=True,
-                        )
-                    except Exception:
-                        logger.debug('Basin mask failed for %s', name)
-                        continue
-                    p, s = out_img[0], out_img[1]
-                    v = np.isfinite(p)
-                    if not np.any(v):
-                        continue
-                    basin_mean.setdefault(year, {})[name] = float(
-                        np.nanmean(p[v]))
-                    basin_sigma.setdefault(year, {})[name] = float(
-                        np.nanmean(s[v]))
-
-            # Sub-basin zonal stats
-            with rio.open(raster_file) as src:
-                zr = subbasin_gdf.to_crs(src.crs)
-                for _, row in zr.iterrows():
-                    name = row['SUBBASIN_N']
-                    try:
-                        out_img, _ = rio_mask(
-                            src, [mapping(row.geometry)],
-                            crop=True, nodata=np.nan, all_touched=True,
-                        )
-                    except Exception:
-                        logger.debug('Subbasin mask failed for %s', name)
-                        continue
-                    p, s = out_img[0], out_img[1]
-                    v = np.isfinite(p)
-                    if not np.any(v):
-                        continue
-                    subbasin_mean.setdefault(year, {})[name] = float(
-                        np.nanmean(p[v]))
-                    subbasin_sigma.setdefault(year, {})[name] = float(
-                        np.nanmean(s[v]))
-
-            if year % 20 == 0 or year == end_year:
-                logger.info(f'    {label}: zonal stats year {year}')
-
-        if not yearly_mean:
-            return
-
-        out_dir = os.path.join(prediction_dir, f'{out_subdir}')
-        makedirs(out_dir)
-
-        # ---- AZ-wide efficiency time series with 95 % CI -----------------
-        vizops.apply_journal_style()
-        years = sorted(yearly_mean.keys())
-        means = np.array([yearly_mean[y] for y in years])
-        sigs = np.array([yearly_sigma.get(y, 0) for y in years])
-
-        fig, ax = plt.subplots(figsize=(16, 6))
-        for era, (s, e) in vizops.ERA_PERIODS.items():
-            ax.axvspan(s, e, color=vizops.ERA_COLORS[era], alpha=0.10)
-        ax.plot(years, means, color='#2C3E50', linewidth=1.5, marker='.',
-                markersize=3, label='Predicted')
-        ax.fill_between(
-            years, means - CI_Z * sigs, means + CI_Z * sigs,
-            alpha=0.2, color='#D5DBDB', label='95 % CI', zorder=1,
-        )
-        ax.set_xlabel('Year', fontweight='bold')
-        ax.set_ylabel('Efficiency', fontweight='bold')
-        ax.set_title(
-            f'{title_prefix} (1896–2099) ± 95 % CI',
-            fontweight='bold', fontsize=14,
-        )
-        era_handles = [
-            mpatches.Patch(
-                color=vizops.ERA_COLORS[e], alpha=0.4,
-                label=(f'{e} ({vizops.ERA_PERIODS[e][0]}–'
-                       f'{vizops.ERA_PERIODS[e][1]})'),
-            )
-            for e in vizops.ERA_PERIODS
-        ]
-        ax.legend(
-            handles=ax.get_legend_handles_labels()[0] + era_handles,
-            loc='upper left', framealpha=0.9,
-        )
-        ax.set_xlim(start_year - 1, end_year + 1)
-        ax.grid(True, alpha=0.3, linestyle='--')
-        plt.tight_layout()
-        fig.savefig(
-            os.path.join(out_dir, 'Full_Period_Time_Series.png'), dpi=600,
-            bbox_inches='tight',
-        )
-        plt.close()
-        pd.DataFrame({
-            'Year': years,
-            'Mean_Efficiency': means,
-            'Sigma_Efficiency': sigs,
-        }).to_csv(os.path.join(out_dir, 'Full_Period_Time_Series.csv'), index=False)
-
-        # ---- Per-basin IE plots -------------------------------------------
-        _plot_ie_per_zone(
-            basin_mean, basin_sigma, 'Basin',
-            os.path.join(out_dir, 'Basin_Time_Series'), title_prefix,
-        )
-
-        # ---- Per-sub-basin IE plots ---------------------------------------
-        _plot_ie_per_zone(
-            subbasin_mean, subbasin_sigma, 'Subbasin',
-            os.path.join(out_dir, 'Subbasin_Time_Series'), title_prefix,
-        )
-
-        logger.info(f'  {label}: efficiency time series with CI complete.')
-
-    def _plot_ie_per_zone(zone_mean, zone_sigma, level, plot_dir,
-                          title_prefix):
-        """Plot per-zone efficiency time series with 95 % CI."""
-        if not zone_mean:
-            return
-        makedirs(plot_dir)
-        vizops.apply_journal_style()
-        zones = sorted(
-            set().union(*(zone_mean[y].keys() for y in zone_mean)),
-        )
-        for zone in zones:
-            zyears = sorted(y for y in zone_mean if zone in zone_mean[y])
-            if not zyears:
-                continue
-            zmeans = np.array([zone_mean[y][zone] for y in zyears])
-            zsigs = np.array([
-                zone_sigma.get(y, {}).get(zone, 0) for y in zyears
-            ])
-
-            fig, ax = plt.subplots(figsize=(14, 6))
-            for era, (s, e) in vizops.ERA_PERIODS.items():
-                ax.axvspan(s, e, color=vizops.ERA_COLORS[era], alpha=0.10)
-            ax.plot(zyears, zmeans, color='#2C3E50', linewidth=1.5,
-                    marker='.', markersize=3, label='Predicted')
-            ax.fill_between(
-                zyears, zmeans - CI_Z * zsigs, zmeans + CI_Z * zsigs,
-                alpha=0.2, color='#D5DBDB', label='95 % CI',
-            )
-            ax.set_xlabel('Year', fontweight='bold')
-            ax.set_ylabel('Efficiency', fontweight='bold')
-            ax.set_title(
-                f'{zone} — {title_prefix}',
-                fontweight='bold', fontsize=13,
-            )
-            ax.legend(fontsize=8, loc='upper left', framealpha=0.9)
-            ax.set_xlim(start_year - 1, end_year + 1)
-            ax.grid(True, alpha=0.3, linestyle='--')
-            plt.tight_layout()
-            safe = zone.replace(' ', '_').replace('.', '')
-            fig.savefig(
-                os.path.join(plot_dir, f'{safe}_Time_Series.png'), dpi=600,
-                bbox_inches='tight',
-            )
-            plt.close()
-
     # ══════════════════════════════════════════════════════════════════════
     # 1. Total pumping
     # ══════════════════════════════════════════════════════════════════════
@@ -3193,23 +2984,6 @@ def _replot_from_augmented_rasters(
             os.path.join(prediction_dir, f'{cu_cat}_Rasters/Depth_mm'),
             f'{cu_cat}_{{year}}_mm.tif',
             f'{cu_cat}/',
-            title_prefix=title,
-        )
-
-    # ══════════════════════════════════════════════════════════════════════
-    # 4. Irrigation efficiency
-    # ══════════════════════════════════════════════════════════════════════
-    ie_titles = {
-        'Irrigation_Efficiency':    'Irrigation Efficiency',
-        'Irrigation_GW_Efficiency': 'Irrigation GW Efficiency',
-        'Irrigation_SW_Efficiency': 'Irrigation SW Efficiency',
-    }
-    for ie_cat, title in ie_titles.items():
-        _process_ie_group(
-            ie_cat,
-            os.path.join(prediction_dir, f'{ie_cat}_Rasters'),
-            f'{ie_cat}_{{year}}.tif',
-            f'{ie_cat}/',
             title_prefix=title,
         )
 

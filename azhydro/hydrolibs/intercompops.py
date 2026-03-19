@@ -1221,6 +1221,78 @@ def _nhm_ie_ratio_path(
     return {'mean': basin_means, 'yearly': yearly_means}
 
 
+def load_nhm_basin_ie(
+    nhm_ie_csv: str,
+    huc12_geojson: str,
+    basin_shp: str,
+    basin_col: str,
+    ref_raster: str,
+    output_dir: str,
+    year_range: tuple[int, int] = (2000, 2020),
+) -> dict:
+    """
+    Load USGS NHM irrigation efficiencies and aggregate to basin means.
+
+    Returns per-year basin-level IEs (for years within the NHM range) and
+    a long-term mean + std for each basin (used outside the NHM range).
+
+    Args:
+        nhm_ie_csv (str): Path to NHM IE CSV
+            (``IR_HUC12_Eff_annual_2000_2020.csv``).
+        huc12_geojson (str): Path to ``AZ_HUC12.geojson``.
+        basin_shp (str): Shapefile or GeoJSON for Arizona groundwater basins.
+        basin_col (str): Column in *basin_shp* identifying each basin.
+        ref_raster (str): Reference raster for CRS/grid information.
+        output_dir (str): Directory for intermediate rasters.
+        year_range (tuple[int, int]): ``(start_year, end_year)`` inclusive.
+
+    Returns:
+        dict: ``{'per_year': {year: {basin: ie}},
+               'mean': {basin: mean_ie},
+               'std': {basin: std_ie},
+               'overall_mean': float}``
+    """
+    basin_gdf = gpd.read_file(basin_shp)
+    result = _load_nhm_annual_csv_to_basins(
+        csv_path=nhm_ie_csv,
+        huc12_geojson=huc12_geojson,
+        basin_gdf=basin_gdf,
+        basin_col=basin_col,
+        ref_raster=ref_raster,
+        year_range=year_range,
+        output_dir=output_dir,
+        mode='ratio',
+    )
+
+    # result = {'mean': {basin: ratio}, 'yearly': {year: {basin: ratio}}}
+    yearly = result.get('yearly', {})
+    basin_names = sorted(basin_gdf[basin_col].unique().tolist())
+
+    # Compute per-basin std of IE across NHM years
+    basin_std = {}
+    for basin in basin_names:
+        vals = [
+            yearly[yr][basin]
+            for yr in yearly
+            if basin in yearly[yr] and np.isfinite(yearly[yr][basin])
+        ]
+        basin_std[basin] = float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0
+
+    # Overall mean IE (across all basins)
+    mean_vals = [v for v in result['mean'].values() if np.isfinite(v)]
+    overall_mean = float(np.nanmean(mean_vals)) if mean_vals else 0.5
+
+    logger.info(f'NHM basin IE: overall mean = {overall_mean:.3f}, '
+                f'{len(yearly)} years, {len(basin_names)} basins')
+
+    return {
+        'per_year': yearly,
+        'mean': result['mean'],
+        'std': basin_std,
+        'overall_mean': overall_mean,
+    }
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # CU/IE: Load ML rasters → basin aggregates
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1733,13 +1805,11 @@ def run_intercomparison(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# CU/IE Intercomparison (ML vs NHM)
+# CU Intercomparison (ML vs NHM)
 # ═════════════════════════════════════════════════════════════════════════════
-def run_cu_ie_intercomparison(
+def run_cu_intercomparison(
     irr_cu_dir: str,
-    irr_ie_dir: str,
     nhm_cu_csv: str,
-    nhm_ie_csv: str,
     huc12_geojson: str,
     basin_shp: str,
     basin_col: str,
@@ -1750,24 +1820,20 @@ def run_cu_ie_intercomparison(
     nhm_year_range: tuple[int, int] = (2000, 2020),
 ) -> pd.DataFrame:
     """
-    Run basin-scale intercomparisons of Irrigation Consumptive Use (CU) and
-    Irrigation Efficiency (IE) between ML predictions and USGS NHM data.
+    Run basin-scale intercomparison of Irrigation Consumptive Use (CU)
+    between ML predictions and USGS NHM data.
 
     CU comparison follows the same volume-based framework as withdrawals
-    (metrics in AF, m³, mm).  IE comparison uses dimensionless ratios
-    (area-weighted basin means).
+    (metrics in AF, m³, mm).
 
     Args:
         irr_cu_dir (str): Directory with ``Irrigation_CU_{year}_mm.tif`` rasters.
-        irr_ie_dir (str): Directory with ``Irrigation_Efficiency_{year}.tif`` rasters.
         nhm_cu_csv (str): Path to NHM CU CSV
             (``Irr_CU_HUC12_Tot_annual_2000_2020.csv``).
-        nhm_ie_csv (str): Path to NHM IE CSV
-            (``IR_HUC12_Eff_annual_2000_2020.csv``).
         huc12_geojson (str): Path to ``AZ_HUC12.geojson``.
         basin_shp (str): Shapefile or GeoJSON for Arizona groundwater basins.
         basin_col (str): Column in *basin_shp* identifying each basin.
-        output_dir (str): Root output directory for all CU/IE results.
+        output_dir (str): Root output directory for CU results.
         ref_raster (str or None): Reference raster for CRS/grid.  Defaults to the first ML CU raster.
         predictor_dir (str or None): Directory with ``Predictor_YYYY.tif`` rasters for irrigated-area
             scaling in NHM CU conversion.
@@ -1778,7 +1844,7 @@ def run_cu_ie_intercomparison(
     """
     makedirs(output_dir)
     logger.info('=' * 60)
-    logger.info('Irrigation CU / IE Intercomparison')
+    logger.info('Irrigation CU Intercomparison')
     logger.info('=' * 60)
 
     # ── Load basins ──────────────────────────────────────────────────────
@@ -1845,46 +1911,16 @@ def run_cu_ie_intercomparison(
         f'MAD={m_cu["MAD_AF"]:.2f} AF, PctDiff={m_cu["Pct_Diff"]:.2f}%'
     )
 
-    # ═════════════════════════════════════════════════════════════════════
-    # IE comparison
-    # ═════════════════════════════════════════════════════════════════════
-    logger.info('--- Loading ML IE rasters ---')
-    ml_ie = _load_ml_rasters_to_basins(
-        irr_ie_dir, basin_gdf, basin_col, ml_year_range,
-        file_pattern='Irrigation_Efficiency_{year}.tif',
-        mode='ratio',
-    )
-
-    logger.info('--- Loading NHM IE data ---')
-    nhm_ie_out = os.path.join(output_dir, 'NHM_IE_Rasters/')
-    nhm_ie = _load_nhm_annual_csv_to_basins(
-        nhm_ie_csv, huc12_geojson, basin_gdf, basin_col,
-        ref_raster, nhm_year_range, nhm_ie_out,
-        mode='ratio',
-    )
-
-    logger.info('--- IE metrics ---')
-    m_ie = _compute_ratio_metrics(
-        basin_names, ml_ie['mean'], nhm_ie['mean'], 'ML', 'NHM',
-    )
-    m_ie['Category'] = 'Irrigation_Efficiency'
-    all_metrics.append(m_ie)
-    logger.info(
-        f'  ML vs NHM IE: RMSD={m_ie["RMSD"]}, '
-        f'MAD={m_ie["MAD"]}, PctDiff={m_ie["Pct_Diff"]}%'
-    )
-
     # ── Metrics CSV ──────────────────────────────────────────────────────
     metrics_df = pd.DataFrame(all_metrics)
-    metrics_csv = os.path.join(output_dir, 'cu_ie_intercomparison_metrics.csv')
+    metrics_csv = os.path.join(output_dir, 'cu_intercomparison_metrics.csv')
     metrics_df.to_csv(metrics_csv, index=False)
-    logger.info(f'CU/IE metrics saved to {metrics_csv}')
+    logger.info(f'CU metrics saved to {metrics_csv}')
 
     # ── Per-basin comparison tables ──────────────────────────────────────
     rows = []
     for basin in basin_names:
         area = basin_areas_m2.get(basin, 1.0)
-        # CU
         ml_af = ml_cu['mean'].get(basin, 0.0)
         nhm_af = nhm_cu['mean'].get(basin, 0.0)
         rows.append({
@@ -1895,26 +1931,14 @@ def run_cu_ie_intercomparison(
             'NHM_mm': round(nhm_af * af_to_m3 / area * M_TO_MM, 4),
             'NHM_AF': round(nhm_af, 2),
         })
-        # IE
-        ml_ie_val = ml_ie['mean'].get(basin, np.nan)
-        nhm_ie_val = nhm_ie['mean'].get(basin, np.nan)
-        rows.append({
-            'Category': 'Irrigation_Efficiency',
-            'Basin': basin,
-            'ML_IE': round(ml_ie_val, 4) if np.isfinite(ml_ie_val) else np.nan,
-            'NHM_IE': round(nhm_ie_val, 4) if np.isfinite(nhm_ie_val) else np.nan,
-        })
     basin_df = pd.DataFrame(rows)
-    basin_csv = os.path.join(output_dir, 'cu_ie_per_basin.csv')
+    basin_csv = os.path.join(output_dir, 'cu_per_basin.csv')
     basin_df.to_csv(basin_csv, index=False)
-    logger.info(f'Per-basin CU/IE saved to {basin_csv}')
+    logger.info(f'Per-basin CU saved to {basin_csv}')
 
     # ── Time series CSV ──────────────────────────────────────────────────
     ts_rows = []
-    for source_name, cu_src, ie_src in [
-        ('ML', ml_cu, ml_ie), ('NHM', nhm_cu, nhm_ie),
-    ]:
-        # CU time series
+    for source_name, cu_src in [('ML', ml_cu), ('NHM', nhm_cu)]:
         cu_yearly = cu_src.get('yearly', {})
         for year in sorted(cu_yearly.keys()):
             for basin in basin_names:
@@ -1928,43 +1952,22 @@ def run_cu_ie_intercomparison(
                     'Value_mm': round(af_val * af_to_m3 / area * M_TO_MM, 4),
                     'Value_AF': round(af_val, 2),
                 })
-        # IE time series
-        ie_yearly = ie_src.get('yearly', {})
-        for year in sorted(ie_yearly.keys()):
-            for basin in basin_names:
-                ie_val = ie_yearly[year].get(basin, np.nan)
-                ts_rows.append({
-                    'Category': 'Irrigation_Efficiency',
-                    'Source': source_name,
-                    'Year': year,
-                    'Basin': basin,
-                    'Value_IE': round(ie_val, 4) if np.isfinite(ie_val) else np.nan,
-                })
     ts_df = pd.DataFrame(ts_rows)
-    ts_csv = os.path.join(output_dir, 'cu_ie_time_series.csv')
+    ts_csv = os.path.join(output_dir, 'cu_time_series.csv')
     ts_df.to_csv(ts_csv, index=False)
-    logger.info(f'CU/IE time series saved to {ts_csv}')
+    logger.info(f'CU time series saved to {ts_csv}')
 
     # ── Plots ────────────────────────────────────────────────────────────
-    _cuie_colors = {'ML': '#2C3E50', 'NHM': '#27AE60'}
-    _cuie_markers = {'ML': 'o', 'NHM': 's'}
+    _cu_colors = {'ML': '#2C3E50', 'NHM': '#27AE60'}
+    _cu_markers = {'ML': 'o', 'NHM': 's'}
     plot_dir = os.path.join(output_dir, 'Time_Series/')
     cu_sources = {'ML': {'CU': ml_cu}, 'NHM': {'CU': nhm_cu}}
     plot_intercomp_time_series(
         cu_sources, categories=['CU'],
         basin_names=basin_names, basin_areas_m2=basin_areas_m2,
         output_dir=plot_dir,
-        colors=_cuie_colors, markers=_cuie_markers,
+        colors=_cu_colors, markers=_cu_markers,
         title_prefix='Irrigation ', file_prefix='TS_CU',
-    )
-    ie_sources = {'ML': {'IE': ml_ie}, 'NHM': {'IE': nhm_ie}}
-    plot_intercomp_time_series(
-        ie_sources, categories=['IE'],
-        basin_names=basin_names, basin_areas_m2=basin_areas_m2,
-        output_dir=plot_dir,
-        colors=_cuie_colors, markers=_cuie_markers,
-        title_prefix='Irrigation ', file_prefix='TS_IE',
-        mode='ratio',
     )
 
     scatter_dir = os.path.join(output_dir, 'Scatter/')
@@ -1974,16 +1977,10 @@ def run_cu_ie_intercomparison(
         title='Irrigation CU — Per-Basin Scatter (ML vs NHM)',
         filename='Scatter_CU.png',
     )
-    plot_intercomp_scatter(
-        [('ML', 'NHM', ml_ie['mean'], nhm_ie['mean'])],
-        basin_names, basin_areas_m2, scatter_dir,
-        title='Irrigation Efficiency — Per-Basin Scatter (ML vs NHM)',
-        filename='Scatter_IE.png', mode='ratio',
-    )
 
     # ── Summary ──────────────────────────────────────────────────────────
     logger.info('\n' + '=' * 60)
-    logger.info('CU/IE Intercomparison Summary')
+    logger.info('CU Intercomparison Summary')
     logger.info('=' * 60)
     logger.info(f'\n{metrics_df.to_string(index=False)}')
     logger.info(f'\nML year range: {ml_year_range}')

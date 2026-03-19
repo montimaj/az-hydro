@@ -9,7 +9,7 @@ Maintainers [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majum
 
 ## Citations
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). The Arizona Water Use Dataset (1896–2099): Withdrawals, consumptive use, and irrigation efficiency partitioned by source. _In prep. for Nature Scientific Data_.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Historical and projected groundwater/surface-water withdrawals and irrigation consumptive use for Arizona, 1896–2099. _In prep. for Nature Scientific Data_.
 
 Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Where Arizona's Water Goes: Two Centuries of Groundwater and Surface Water Withdrawals, Consumptive Use, and Irrigation Efficiency (1896–2099). _In prep. for AGU Earth's Future_.
 
@@ -97,9 +97,10 @@ python pipeline.py --skip-prep gee,vectors,reproject        # skip multiple sub-
 | `2c` | Evaluate LOO spatial holdout |
 | `3`  | Full-period XGBoost prediction (1896–2099) |
 | `3b` | Hybrid uncertainty quantification |
+| `3e` | Well package (per-well GeoPackage with uncertainty) |
 | `3g` | Raster maps, actual vs predicted, and trend analysis for all output categories |
 | `4`  | USGS intercomparison |
-| `4b` | CU / IE intercomparison |
+| `4b` | CU intercomparison |
 | `4c` | CAP/SRP surface-water validation |
 | `4d` | Effective precipitation intercomparison |
 | `4e` | Non-irrigation vs USGS Public Supply intercomparison |
@@ -269,8 +270,9 @@ Step 0   ─  Data Preparation
 Step 1   ─  Create AZ Predictor DataFrame
 Step 2   ─  Model Evaluation (3 strategies: Random, Temporal LOO, Spatial LOO)
 Step 3   ─  Full-Period XGBoost Prediction (1896–2099)
+Step 3e  ─  Well Package (per-well GeoPackage with uncertainty)
 Step 3g  ─  Raster Maps & Trend Analysis for All Output Categories
-Step 4   ─  USGS Intercomparison (Withdrawals, CU, IE, Peff)
+Step 4   ─  USGS Intercomparison (Withdrawals, CU, Peff)
 ```
 
 ### Configuration constants
@@ -509,30 +511,26 @@ For each year the pipeline:
    `partitionops.partition_predictions()`:
    Irrigation, Non-Irrigation, Irrigation\_GW, Irrigation\_SW,
    Non\_Irrigation\_GW, Non\_Irrigation\_SW, Total\_GW, Total\_SW.
-5. **Computes consumptive use (CU):**
+5. **Computes consumptive use (CU)** using USGS NHM basin-level
+   irrigation efficiencies:
    ```
-   CU = max(Irrigation_ET − Effective_Precip, 0)
+   CU = IE × Irrigation_Withdrawal
    ```
-   Split into Irrigation\_CU, Irrigation\_GW\_CU, Irrigation\_SW\_CU using
+   Basin-specific IEs are loaded from USGS NHM data (2000–2020).
+   For years within that range, per-year basin IEs are used; for all
+   other years, the long-term basin mean IE is applied.  CU is split
+   into Irrigation\_CU, Irrigation\_GW\_CU, Irrigation\_SW\_CU using
    the GW fraction.
-6. **Computes irrigation efficiency (IE):**
-   ```
-   IE = CU / Withdrawal
-   ```
-   Producing Irrigation\_Efficiency, Irrigation\_GW\_Efficiency,
-   Irrigation\_SW\_Efficiency.
-7. **Writes rasters** in four units for depth/volume products and as
-   dimensionless ratios for IE:
+6. **Writes rasters** in four units for depth/volume products:
 
 | Product | Units written | File naming |
 |---|---|---|
 | Total pumping | mm, ft, m³, AF | `Predicted_GW_{year}_{unit}.tif` |
 | 8 withdrawal categories | mm, ft, m³, AF | `{Category}_{year}_{unit}.tif` |
 | 3 CU categories | mm, ft, m³, AF | `{CU_Category}_{year}_{unit}.tif` |
-| 3 IE categories | dimensionless | `{IE_Category}_{year}.tif` |
 | OOD flags | binary (0/1) | `OOD_Flag_{year}.tif` |
 
-8. **Accumulates statistics** for AZ-wide, per-basin, and per-sub-basin
+7. **Accumulates statistics** for AZ-wide, per-basin, and per-sub-basin
    totals (volume in m³ and AF, mean depth in mm) for every category.
 
 Unit conversions:
@@ -550,7 +548,7 @@ per-sub-basin) are **deferred to the UQ step** (§3d) so that they include
 
 | Plot type | Function | Applied to |
 |---|---|---|
-| Era summary maps | `vizops.create_era_summary_maps()` | Total, 8 categories, 3 CU |
+| Era summary maps | `vizops.create_era_summary_maps()` | Total, 8 categories, 3 CU  |
 
 Four temporal eras are distinguished in the plots:
 
@@ -812,22 +810,23 @@ Full_Prediction_XGB/Uncertainty/
         └── Subbasin_All_Sigma_{Component}_Summary.png
 ```
 
-##### σ_CU — Consumptive-use inter-GCM spread (future only, 2026–2099)
+##### σ_CU — Consumptive-use uncertainty (error propagation)
 
-Consumptive use is defined as CU = max(ET_irr − Peff_irr, 0), which
-depends on ET and Peff — both climate-model-dependent quantities.  σ_CU
-captures how CU varies across the 5 representative GCMs:
+Consumptive use is defined as CU = IE × Withdrawal, where IE (irrigation
+efficiency) comes from USGS NHM basin-level data (2000–2020).  σ_CU is
+computed via error propagation from two sources:
 
-1. For each GCM, per-GCM ET (band 1) and Peff (band 4) are read from the
-   per-GCM predictor rasters (already built during σ_MACA).
-2. Ensemble `irr_frac` and `gw_frac` (from the ensemble predictor) are
-   applied to derive per-GCM `CU = max(ET × irr_frac − Peff × irr_frac, 0)`.
-3. CU is split into CU_GW (`CU × gw_frac`) and CU_SW (`CU − CU_GW`).
-4. σ_CU is the per-pixel sample standard deviation across the 5 GCMs for
-   each CU category (Irrigation_CU, Irrigation_GW_CU, Irrigation_SW_CU).
+```
+σ_CU = √((IE × σ_wd)² + (wd × σ_IE)²)
+```
 
-For historical years (1896–2025), σ_CU = 0 because ET and Peff are
-observation-derived.
+where σ_wd is the per-category total withdrawal uncertainty (from the
+augmented Irrigation rasters, band 2), and σ_IE is the inter-annual
+standard deviation of NHM basin-level IE across 2000–2020.
+
+For NHM-covered years (2000–2020), per-year basin IEs are used and
+σ_IE = 0 (observed efficiency).  For all other years, the basin mean
+IE is applied with σ_IE equal to the basin-level temporal std.
 
 ##### Augmented prediction rasters (6-band)
 
@@ -849,8 +848,7 @@ This augmentation is applied to:
 |---------|----------|----------------|---------|
 | **Total pumping** (32 rasters/yr) | σ_total × unit scale | mm, ft, m³, AF | σ_total computed in mm, scaled by conversion factor per unit |
 | **8 withdrawal categories** (256 rasters/yr) | σ_cat via quadrature of per-category ensemble spreads | mm, ft, m³, AF | Each ensemble member is partitioned before computing std |
-| **3 CU categories** (48 rasters/yr) | σ_CU (inter-GCM spread) | mm, ft, m³, AF | σ_CU in mm, scaled to target unit |
-| **3 IE categories** (12 rasters/yr) | Ratio error propagation | dimensionless | $\sigma_{\text{IE}} = \text{IE} \times \sqrt{\text{CV}_{\text{CU}}^2 + \text{CV}_{\text{wd}}^2}$ |
+| **3 CU categories** (48 rasters/yr) | σ_CU (error propagation) | mm, ft, m³, AF | σ_CU in mm, scaled to target unit |
 
 **Unit conversion for σ:** σ_total is natively in mm.  For other units
 the same conversion factors as the predictions are applied:
@@ -875,20 +873,11 @@ uncertainty (σ_irr and σ_gw perturb `irr_fraction` and `gw_fraction`
 respectively, so per-category spreads differ from simple linear scaling
 of the total σ).
 
-**IE uncertainty:** IE = CU / withdrawal is a ratio of two uncertain
-quantities.  Standard ratio error propagation gives:
-
-$$\frac{\sigma_{\text{IE}}}{\text{IE}} = \sqrt{\left(\frac{\sigma_{\text{CU}}}{\text{CU}}\right)^2 + \left(\frac{\sigma_{\text{wd}}}{\text{wd}}\right)^2} = \sqrt{\text{CV}_{\text{CU}}^2 + \text{CV}_{\text{wd}}^2}$$
-
-CV_CU and CV_wd are read from band 3 of the already-augmented CU and
-withdrawal category rasters respectively.
-
 **Execution order** (dependencies require sequential processing):
 
 1. Compute σ_total → augment total prediction rasters (all 4 units)
 2. Augment category rasters (reads augmented total rasters for σ)
-3. Compute σ_CU → augment CU rasters
-4. Augment IE rasters (reads augmented CU + category rasters for CV)
+3. Compute σ_CU (reads augmented category rasters for σ_wd) → augment CU rasters
 
 ##### Basin / sub-basin scale uncertainty
 
@@ -959,7 +948,7 @@ the time-series plots that were previously generated in Step 3c without
 uncertainty bounds.
 
 `_replot_from_augmented_rasters()` performs the following for each of the
-15 product groups (total, 8 categories, 3 CU, 3 IE):
+12 product groups (total, 8 categories, 3 CU):
 
 1. **AZ-wide statistics** (`_az_wide_stats`) — Reads bands 1/2/5/6 from
    each year's 6-band raster to compute mean depth, total volume (m³/AF),
@@ -976,9 +965,6 @@ uncertainty bounds.
    `vizops.create_subbasin_time_series()` with `sigma_data`,
    `sigma_basin_yearly`, and `sigma_subbasin_yearly` arguments to render
    95 % CI shading on all time-series plots.
-
-For the 3 IE products, `_process_ie_group()` uses the dimensionless
-efficiency values directly (mean ± 1.96 σ) rather than volume conversions.
 
 All plots are written to the `Visualizations/` directory, overwriting any
 earlier plots from Step 3c that lacked uncertainty bounds.
@@ -997,7 +983,6 @@ on every panel.  No-data pixels appear as gray background.
 | Category group | Colormap | Count |
 |---|---|---|
 | Total predicted GW + 8 partition categories + 3 CU | `YlOrRd` | 12 figures |
-| 3 Irrigation Efficiency categories | `YlGn` | 3 figures |
 | OOD flags (mean fraction) | `RdYlGn_r` | 1 figure |
 | 6 sigma components — band 1 (σ in mm) | `Purples` | 6 figures |
 | 6 sigma components — band 2 (CV) | `inferno` | 6 figures |
@@ -1028,8 +1013,8 @@ per-era).  Each figure shows:
 - Basin boundaries and AMA/INA labels overlaid.
 
 Trend maps are generated for: total predicted GW, 8 partition categories,
-3 CU categories, and 3 IE categories — each with up to 5 periods (full +
-4 eras), yielding ~60–75 trend figures.
+and 3 CU categories — each with up to 5 periods (full +
+4 eras), yielding ~60 trend figures.
 
 **Zonal trend statistics** — For each category × period, per-basin and
 per-sub-basin CSV files are written alongside the trend maps.  Each CSV
@@ -1044,14 +1029,33 @@ All outputs are saved to `{prediction_dir}Raster_Maps/` (era maps and
 actual vs predicted) and `{prediction_dir}Raster_Maps/Trend_Analysis/`
 (trend maps and zonal statistics CSVs).
 
-#### 3e. Well package
+#### 3e. Well package (`create_well_package_step()`)
 
-`wellops.create_well_package()` disaggregates pixel-level withdrawal
+`wellops.create_well_package()` disaggregates pixel-level prediction
 rasters to individual wells from the ADWR Well Registry and writes a
 GeoPackage (`Well_Package.gpkg`).  See the `wellops` module description
 below for the capacity-proportional distribution logic.
 
-**Outputs:** `{MODEL_DIR}Full_Prediction_XGB/`
+This step runs **after** UQ augmentation (Step 3b) so that the 6-band
+augmented rasters are available.  When augmented rasters are present,
+per-well uncertainty columns are included:
+
+| Column pattern | Description |
+|---|---|
+| `{Cat}_{unit}` | Prediction (capacity-weighted share of pixel value) |
+| `{Cat}_{unit}_sigma` | σ (capacity-weighted share of pixel σ) |
+| `{Cat}_{unit}_ci_lower` | Lower 95 % CI = max(pred − 1.96·σ, 0) |
+| `{Cat}_{unit}_ci_upper` | Upper 95 % CI = pred + 1.96·σ |
+
+Categories include 9 withdrawal categories (Total + 8 partitions) and
+3 CU categories (Irrigation_CU, Irrigation_GW_CU, Irrigation_SW_CU),
+each in 4 units (mm, ft, m³, AF).
+
+**Caveat:** Per-well σ assumes pixel-level uncertainty distributes
+proportionally to capacity weight.  This is a simplification — true
+per-well uncertainty would require well-specific error models.
+
+**Outputs:** `{MODEL_DIR}Full_Prediction_XGB/Well_Package/`
 
 ### Step 4 — USGS intercomparison
 
@@ -1088,20 +1092,19 @@ comparison.  The intercomparison produces:
 
 All outputs are written to `{prediction_dir}Intercomparison/`.
 
-#### Step 4b — CU / IE intercomparison (`run_cu_ie_usgs_intercomparison()`)
+#### Step 4b — CU intercomparison (`run_cu_usgs_intercomparison()`)
 
-Compares ML-based Irrigation Consumptive Use and Irrigation Efficiency with
-USGS NHM HUC12-scale data ([Martin et al., 2025](https://doi.org/10.1016/j.jhydrol.2025.133909); [Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM)) at the basin scale:
+Compares ML-based Irrigation Consumptive Use with USGS NHM HUC12-scale
+data ([Martin et al., 2025](https://doi.org/10.1016/j.jhydrol.2025.133909); [Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM)) at the basin scale:
 
 | Product | ML source | USGS source |
 |---|---|---|
 | **CU** | `Irrigation_CU_Rasters/Depth_mm/` (mm) | `Irr_CU_HUC12_Tot_annual_2000_2020.csv` (Mgal/d) |
-| **IE** | `Irrigation_Efficiency_Rasters/` (ratio) | `IR_HUC12_Eff_annual_2000_2020.csv` (ratio) |
 
 CU follows the same volume-based framework as withdrawals (RMSD, MAD, %
-Difference in AF, m³, mm).  IE uses dimensionless ratio metrics.  Outputs
-include metrics CSVs, per-basin tables, time series, and scatter plots,
-written to `{prediction_dir}CU_IE_Intercomparison/`.
+Difference in AF, m³, mm).  Outputs include metrics CSVs, per-basin
+tables, time series, and scatter plots, written to
+`{prediction_dir}CU_Intercomparison/`.
 
 #### Step 4c — CAP/SRP surface-water validation (`run_cap_srp_sw_validation()`)
 
@@ -1385,39 +1388,11 @@ Key helpers:
 All partitions use subtraction from the parent total (e.g., `nonirr = total − irr`)
 to guarantee exact budget closure with no floating-point drift.
 
-### `wellops.py` — Well-level withdrawal package
-
-Disaggregates pixel-level withdrawal rasters to individual wells from the
-ADWR Well Registry and writes a GeoPackage (`Well_Package.gpkg`).
-
-**Sampling**: Only the **mm** rasters are read (9 categories per year); ft, m³,
-and acre-ft values are computed arithmetically, reducing I/O by 75 %.
-
-**Distribution logic** — when multiple wells share a 2 km pixel, the pixel
-total is split using capacity-proportional weights with a three-tier fallback:
-
-1. **Historical pumping** — mean `AF Pumped` across all years a well appears
-   in the per-year GW shapefiles (`GW_YYYY.shp`).  These cover metered wells
-   within AMA/INA management areas (~3 k wells/year, 1984–2024).
-2. **PUMPRATE fallback** — for unmetered wells, the `PUMPRATE` field (GPM)
-   from the Well Registry is used (~79 k wells have this attribute).
-3. **Equal-share fallback** — wells with neither record receive weight 1.0.
-
-Within each pixel the raw weights are normalised to sum to 1, so the pixel
-budget is preserved regardless of which tier each well belongs to.
-
-**Nodata masking**: Wells landing in raster nodata or out-of-bounds pixels
-are dropped before weight computation, preventing valid wells from losing
-share to neighbours in invalid pixels.
-
-**Zero floor**: A `np.maximum(all_mm, 0)` clamp is applied after sampling to
-eliminate any negative model artifacts before unit conversion.
-
 ### `uncertaintyops.py` — Hybrid uncertainty quantification
 
 Computes pixel-level prediction uncertainty for all products (total
-pumping, withdrawal categories, consumptive use, irrigation efficiency)
-and writes augmented 6-band GeoTIFFs.
+pumping, withdrawal categories, consumptive use) and writes augmented
+6-band GeoTIFFs.
 
 Key functions:
 - **`run_uncertainty_quantification()`** — Master orchestrator.  Computes
@@ -1448,13 +1423,10 @@ Key functions:
 - **`compute_basin_sigma_total()`** — Reads per-component basin/sub-basin
   σ CSVs and combines via quadrature into `Basin_Sigma_Total.csv` /
   `Subbasin_Sigma_Total.csv`.
-- **`compute_sigma_cu()`** — CU inter-GCM spread (5 GCMs, future only).
-  Writes per-category σ_CU rasters (Irrigation_CU, Irrigation_GW_CU,
-  Irrigation_SW_CU).  **Known limitation:** `irr_fraction` and
-  `gw_fraction` are fixed from the ensemble-mean predictor raster when
-  computing CU = max(ET_irr − Peff_irr, 0), so σ_CU captures only the
-  inter-GCM ET/Peff spread and not the partitioning uncertainty already
-  quantified in σ_LULC and σ_gw.
+- **`compute_sigma_cu()`** — CU uncertainty via error propagation from
+  CU = IE × Withdrawal.  Reads augmented per-category withdrawal σ (band 2)
+  and basin-level NHM IE std (2000–2020).  Writes per-category σ_CU rasters
+  (Irrigation_CU, Irrigation_GW_CU, Irrigation_SW_CU).
 - **`run_gw_fraction_sensitivity()`** — Standalone sensitivity analysis
   perturbing `gw_fraction` by ±0.2 for all years (1896–2099) and
   reporting per-category volume changes.  Years < 2005 and ≥ 2015 are
@@ -1466,8 +1438,6 @@ Key functions:
   using per-category σ_total rasters computed directly from ensemble
   spreads (not fraction-scaled from total σ).
 - **`augment_cu_rasters()`** — Augments 3 CU category rasters using σ_CU.
-- **`augment_ie_rasters()`** — Augments 3 IE rasters using ratio error
-  propagation from augmented CU and withdrawal CV bands.
 - **`_replot_from_augmented_rasters()`** — Regenerates all time-series
   plots (AZ-wide, per-basin, per-sub-basin) with 95 % CI uncertainty
   bounds by reading the 6-band augmented rasters via zonal statistics
@@ -1476,6 +1446,38 @@ Key functions:
 - **`_plot_component_basin_sigma()`** — Generates per-component (MACA,
   Model, Irr, LULC, GW) basin and sub-basin σ time-series plots with
   dual y-axes (m³/AF) and era shading.
+
+### `wellops.py` — Well-level withdrawal package
+
+Disaggregates pixel-level withdrawal and CU rasters to individual wells
+from the ADWR Well Registry and writes a GeoPackage (`Well_Package.gpkg`).
+
+**Sampling**: Only the **mm** rasters are read (12 categories per year:
+9 withdrawal + 3 CU); ft, m³, and acre-ft values are computed
+arithmetically, reducing I/O by 75 %.  When augmented 6-band rasters are
+available (after Step 3b), band 2 (σ) is also sampled and per-well
+uncertainty columns (σ, lower/upper 95 % CI) are included for every
+category and unit.
+
+**Distribution logic** — when multiple wells share a 2 km pixel, the pixel
+total is split using capacity-proportional weights with a three-tier fallback:
+
+1. **Historical pumping** — mean `AF Pumped` across all years a well appears
+   in the per-year GW shapefiles (`GW_YYYY.shp`).  These cover metered wells
+   within AMA/INA management areas (~3 k wells/year, 1984–2024).
+2. **PUMPRATE fallback** — for unmetered wells, the `PUMPRATE` field (GPM)
+   from the Well Registry is used (~79 k wells have this attribute).
+3. **Equal-share fallback** — wells with neither record receive weight 1.0.
+
+Within each pixel the raw weights are normalised to sum to 1, so the pixel
+budget is preserved regardless of which tier each well belongs to.
+
+**Nodata masking**: Wells landing in raster nodata or out-of-bounds pixels
+are dropped before weight computation, preventing valid wells from losing
+share to neighbours in invalid pixels.
+
+**Zero floor**: A `np.maximum(all_mm, 0)` clamp is applied after sampling to
+eliminate any negative model artifacts before unit conversion.
 
 ### `intercompops.py` — USGS intercomparison
 
@@ -1489,10 +1491,9 @@ Basin-scale comparison of ML predictions with independent USGS datasets.
   and temporal agreement visualizations (heatmaps, box/violin plots,
   Taylor diagrams, r-vs-NSE scatter).
 
-**CU / IE intercomparison** (`run_cu_ie_intercomparison()`):
-- Compares ML CU (mm) and IE (ratio) with NHM HUC12 annual data ([Martin et al., 2025](https://doi.org/10.1016/j.jhydrol.2025.133909); [Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM)).
+**CU intercomparison** (`run_cu_intercomparison()`):
+- Compares ML CU (mm) with NHM HUC12 annual data ([Martin et al., 2025](https://doi.org/10.1016/j.jhydrol.2025.133909); [Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM)).
 - CU: Mgal/d → m³/yr → depth (mm) → basin volumes (AF).
-- IE: dimensionless ratio → area-weighted basin means.
 - Produces metrics, per-basin tables, time series, and scatter plots.
 
 **CAP/SRP validation** (`run_cap_srp_validation()`):
@@ -1502,7 +1503,7 @@ Basin-scale comparison of ML predictions with independent USGS datasets.
 - Produces per-basin time series, scatter plots, and validation metrics.
 
 **Peff intercomparison** (`run_peff_intercomparison()`):
-- Compares ML Peff (SCS, band 4) and Peff PCML (band 5) with NHM PPTeff ([Martin et al., 2023](https://doi.org/10.5066/P9YWR0OJ)).
+- Compares USDA-SCS Peff ([USDA SCS, 1993](https://www.wcc.nrcs.usda.gov/ftpref/wntsc/waterMgt/irrigation/NEH15/ch2.pdf), band 4) and Peff PCML ([Hasan et al., 2025](https://doi.org/10.1016/j.agwat.2025.109821), band 5) with NHM PPTeff ([Martin et al., 2023](https://doi.org/10.5066/P9YWR0OJ)).
 - All three scaled by `irr_fraction` to represent irrigated-area Peff.
 - NHM PPTeff: Mgal/d → m³/yr → depth (mm) → basin volumes (AF).
 - Produces metrics, per-basin tables, time series, and scatter plots.
@@ -1588,7 +1589,6 @@ Data/Outputs/
         │   └── Volume_AF/
         ├── {Category}_Rasters/              # 8 withdrawal categories (4 units, 6-band)
         ├── Irrigation_CU_Rasters/           # CU (4 units, 6-band)
-        ├── Irrigation_Efficiency_Rasters/   # IE (dimensionless, 6-band)
         ├── OOD_Rasters/                     # Out-of-distribution detection
         │   ├── OOD_Flag_{year}.tif          #   Binary flag (1=OOD, 0=in-distribution)
         │   └── OOD_Summary.csv              #   Per-year OOD statistics
@@ -1599,7 +1599,7 @@ Data/Outputs/
         │   ├── Sigma_LULC/                  #   LULC projection spread
         │   ├── Sigma_GW/                    #   GW fraction spread
         │   ├── Sigma_Total/                 #   Quadrature combination (σ, CV, per-category σ)
-        │   ├── Sigma_CU/                    #   CU inter-GCM spread
+        │   ├── Sigma_CU/                    #   CU error-propagation σ
         │   └── Plots/                       #   Time-series plots
         ├── Graphical_Abstract_Fig1.png         # Publication Figure 1 (map + time series)
         ├── Prediction_Exceedance_Summary.csv   # Per-year exceedance stats
@@ -1611,10 +1611,11 @@ Data/Outputs/
         │       ├── Basin_Trend_*.csv        #   Per-basin zonal trend statistics
         │       └── Subbasin_Trend_*.csv     #   Per-sub-basin zonal trend statistics
         ├── Visualizations/                  # Time series & era summary maps
-        ├── Well_Package/                    # Per-well GeoPackage
+        ├── Well_Package/                    # Step 3e — per-well GeoPackage
+        │   └── Well_Package.gpkg           #   12 categories × 4 units × (pred + σ + CI)
         ├── Intercomparison/                 # Step 4a — withdrawal comparison
         │   └── Temporal_Agreement/          #   Heatmaps, box/violin, Taylor, r-vs-NSE
-        ├── CU_IE_Intercomparison/           # Step 4b — CU/IE comparison
+        ├── CU_Intercomparison/              # Step 4b — CU comparison
         ├── CAP_SRP_Validation/              # Step 4c — CAP/SRP SW validation
         ├── Peff_Intercomparison/            # Step 4d — Peff comparison
         └── PS_Intercomparison/              # Step 4e — Non-irrigation vs USGS PS
