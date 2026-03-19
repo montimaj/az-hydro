@@ -370,7 +370,7 @@ def _train_and_evaluate(
         model_name: str, output_dir: str,
 ) -> dict:
     """Train a single model with Optuna+Dask and return train/test metrics."""
-    model, cv_df = mlops.build_ml_model_optuna_dask(
+    model, cv_df = mlops.build_ml_model_optuna(
         x_train, y_train, output_dir, model_name,
         random_state=RANDOM_STATE,
         fold_count=FOLD_COUNT,
@@ -406,7 +406,7 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
     logger.info('Step 2a: Random 80/20 evaluation')
     logger.info('='*60)
 
-    ml_models = mlops.get_model_param_dict(
+    ml_models = mlops.get_model_dict(
         get_model_names_only=True,
         include_all_models=INCLUDE_ALL_MODELS,
     )
@@ -492,7 +492,7 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
     logger.info('Step 2b: LOO Temporal evaluation (T1-T6)')
     logger.info('='*60)
 
-    ml_models = mlops.get_model_param_dict(
+    ml_models = mlops.get_model_dict(
         get_model_names_only=True,
         include_all_models=INCLUDE_ALL_MODELS,
     )
@@ -662,7 +662,7 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
     logger.info('Step 2c: LOO Spatial evaluation (ADWR sub-basins)')
     logger.info('='*60)
 
-    ml_models = mlops.get_model_param_dict(
+    ml_models = mlops.get_model_dict(
         get_model_names_only=True,
         include_all_models=INCLUDE_ALL_MODELS,
     )
@@ -871,7 +871,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
 
     logger.info(f'Training XGBoost on {len(x_train)} samples '
                 f'({YEAR_LIST[0]}-{YEAR_LIST[-1]}, all years)...')
-    model, _ = mlops.build_ml_model_optuna_dask(
+    model, _ = mlops.build_ml_model_optuna(
         x_train, y_train,
         os.path.join(prediction_dir, 'Model'),
         model_name, RANDOM_STATE,
@@ -967,6 +967,9 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                               'IR_HUC12_Eff_annual_2000_2020.csv')
     huc12_geojson = os.path.join(INPUT_DIR, 'GEE_Data', 'AZ_HUC12.geojson')
     nhm_ie_out = os.path.join(prediction_dir, 'NHM_IE_Basins')
+    # Reference raster for spatial metadata (CRS, transform)
+    ref_raster_file = os.path.join(PRED_DATA_DIR, f'Predictor_{YEAR_LIST[0]}.tif')
+
     nhm_basin_ie = intercompops.load_nhm_basin_ie(
         nhm_ie_csv=nhm_ie_csv,
         huc12_geojson=huc12_geojson,
@@ -986,9 +989,6 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
     raster_shape = basin_arr.shape
     basin_file_obj.close()
-
-    # Reference raster for spatial metadata (CRS, transform)
-    ref_raster_file = os.path.join(PRED_DATA_DIR, f'Predictor_{YEAR_LIST[0]}.tif')
 
     # All AZ basin names (for per-basin summary statistics)
     all_basins = sorted(az_df['GW_Basin'].unique().tolist())
@@ -1996,7 +1996,6 @@ def main() -> None:
                 pred_data_dir=PRED_DATA_DIR,
                 model_dir=MODEL_DIR,
                 input_dir=INPUT_DIR,
-                output_dir=OUTPUT_DIR,
                 vector_dir=VECTOR_DIR,
                 mosaic_res=MOSAIC_RASTER_RES,
                 gcloud_project=GCLOUD_PROJECT,

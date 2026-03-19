@@ -51,9 +51,6 @@ from hydrolibs.sysops import makedirs
 
 logger = logging.getLogger(__name__)
 
-# Category prefixes used as column-name stems
-_ALL_CATS = ('Total',) + CATEGORIES
-
 # Unit conversion constants
 _MM_TO_FT = 1 / 304.8
 _M3_TO_AF = 1 / 1233.48

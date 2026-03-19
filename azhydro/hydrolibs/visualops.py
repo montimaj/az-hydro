@@ -1107,6 +1107,7 @@ def get_variable_name_dict() -> dict[str, str]:
         'URBAN': 'Urban Density',
         'SW': 'Surface Water Density',
         'streamflow_mm': 'Streamflow (mm)',
+        'canal_weighted_streamflow_mm': 'Canal-Weighted Streamflow (mm)',
         'gw_basin_type': 'Groundwater Basin Type',
         'GW_Basin': 'Groundwater Basin',
         'soil_depth_mm': 'Soil Depth (mm)',
@@ -1115,8 +1116,30 @@ def get_variable_name_dict() -> dict[str, str]:
         'annual_gw_fraction': 'Annual Groundwater Irrigation Fraction',
         'annual_crop_fraction': 'Annual Crop Fraction',
         'annual_irr_fraction': 'Annual Irrigated Fraction',
+        'well_density': 'Well Density (count/pixel)',
+        'canal_density': 'Canal Density (segments/pixel)',
+        'lulc': 'Land Use / Land Cover Class',
     }
     return var_name_dict
+
+
+def _clean_col_label(col: str) -> str:
+    """Auto-clean a column name into a human-readable label.
+
+    Replaces underscores with spaces and applies title case, preserving
+    known unit suffixes in parentheses.
+    """
+    unit_map = {
+        '_mm': ' (mm)', '_m': ' (m)', '_ft': ' (ft)',
+        '_K': ' (K)', '_micromps': ' (µm/s)',
+    }
+    suffix = ''
+    for key, unit in unit_map.items():
+        if col.endswith(key):
+            col = col[:-len(key)]
+            suffix = unit
+            break
+    return col.replace('_', ' ').title() + suffix
 
 
 # ─── Exploratory data analysis ───────────────────────────────────────────────
@@ -1217,7 +1240,7 @@ def explore_az_data(
         apply_journal_style()
 
         safe = col.replace('/', '_')
-        label = var_name_dict.get(col, col)
+        label = var_name_dict.get(col, _clean_col_label(col))
 
         # For gw_pumping_mm restrict to 1984-2024 (metered years) and AMA/INA
         if col == 'gw_pumping_mm':
@@ -1368,6 +1391,7 @@ def explore_az_data(
                 data=era_df, x='Era', y=col, hue='Era', order=present_eras,
                 palette=present_palette, ax=ax, fliersize=2, legend=False,
             )
+            ax.set_ylabel(label)
             ax.set_title(f'{label} — Distribution by Era')
             _plt.tight_layout()
             _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_era.png'))
@@ -1379,6 +1403,7 @@ def explore_az_data(
                 data=era_df, x='Era', y=col, hue='Era', order=present_eras,
                 palette=present_palette, ax=ax, inner='quartile', cut=0, legend=False,
             )
+            ax.set_ylabel(label)
             ax.set_title(f'{label} — Violin by Era')
             _plt.tight_layout()
             _plt.savefig(os.path.join(output_dir, f'{safe}_violin_era.png'))
@@ -1391,6 +1416,7 @@ def explore_az_data(
                 hue='Era', hue_order=era_order,
                 palette=ERA_COLORS, ax=ax, fliersize=2,
             )
+            ax.set_ylabel(label)
             ax.set_title(f'{label} — by Basin Type & Era')
             ax.set_xlabel('Basin Type')
             ax.legend(loc='best', fontsize=9, title='Era')
@@ -1408,6 +1434,7 @@ def explore_az_data(
                 hue='Era', hue_order=era_order,
                 palette=ERA_COLORS, ax=ax, fliersize=1,
             )
+            ax.set_ylabel(label)
             ax.set_title(f'{label} — by GW Basin (AMA/INA) & Era')
             ax.set_xlabel('GW Basin')
             ax.tick_params(axis='x', rotation=35)
@@ -1423,6 +1450,7 @@ def explore_az_data(
                 data=col_df, x='Basin_Type_Label', y=col,
                 ax=ax, fliersize=2,
             )
+            ax.set_ylabel(label)
             ax.set_title(f'{label} — by Basin Type')
             ax.set_xlabel('Basin Type')
             _plt.tight_layout()
@@ -1437,6 +1465,7 @@ def explore_az_data(
                 data=basin_df, x=gw_basin_col, y=col,
                 order=basin_list, ax=ax, fliersize=1,
             )
+            ax.set_ylabel(label)
             ax.set_title(f'{label} — by GW Basin (AMA/INA)')
             ax.set_xlabel('GW Basin')
             ax.tick_params(axis='x', rotation=35)

@@ -12,22 +12,17 @@ Features:
 import logging
 import os
 import pickle
+import time
 import warnings
 from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
 import optuna
-
-# Author: Sayantan Majumdar
-# Email: sayantan.majumdar@dri.edu
 import pandas as pd
 import seaborn as sns
 import skexplain
 from dask.distributed import Client, LocalCluster
-from dask_jobqueue import SLURMCluster
-from dask_ml.model_selection import GridSearchCV as DaskGCV
-from dask_ml.model_selection import RandomizedSearchCV as DaskRCV
 from lightgbm import LGBMRegressor
 from sklearn.ensemble import (
     AdaBoostRegressor,
@@ -41,8 +36,6 @@ from sklearn.inspection import permutation_importance
 from sklearn.linear_model import Lasso, LinearRegression, Ridge
 from sklearn.metrics import make_scorer, mean_absolute_error, r2_score, root_mean_squared_error
 from sklearn.model_selection import (
-    GridSearchCV,
-    RandomizedSearchCV,
     RepeatedKFold,
     RepeatedStratifiedKFold,
     cross_validate,
@@ -64,33 +57,32 @@ warnings.filterwarnings('ignore', category=optuna.exceptions.ExperimentalWarning
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
-def get_model_param_dict(
+def get_model_dict(
         random_state: int = 0,
         use_dask: bool = False,
         get_model_names_only: bool = False,
         include_all_models: bool = False
-) -> list[str] | tuple[dict[str, Any], dict[str, dict[str, list]]]:
-    """Get model object dictionaries and parameter dictionary for different models.
+) -> list[str] | dict[str, Any]:
+    """Get model object dictionary for different models.
 
     Args:
         random_state (int): Random state (seed) for some ML algorithms.
         use_dask (bool): Set True if using Dask in a distributed computing environment.
         get_model_names_only (bool): Set True to return only model names.
         include_all_models (bool): Set True to include additional ensemble models
-                                   (GBR, AdaBoost, Bagging, CatBoost).
-                                   Baseline linear models (LR, Ridge, Lasso) are always included.
+                                   (RF, ETR, HGBR, GBR, AdaBoost, Bagging, CatBoost).
+                                   Core models (XGB, XGBRF, LGBM, LR, Ridge, Lasso) are always included.
 
     Returns:
-        Either a list of model names (if get_model_names_only is True) or a tuple of
-        dict (str, Any) : Dictionary of the model objects.
-        dict (str, dict (str, list)): Dictionary of models containing dictionary of the corresponding
-                                      hyperparameters.
+        Either a list of model names (if get_model_names_only is True) or a
+        dict (str, Any) of model objects.
     """
     n_jobs = -2
     if use_dask:
         n_jobs = 1
 
     # Core models (always available)
+    # Core models: XGB/XGBRF/LGBM + baseline linear models
     model_dict = {
         'XGB': XGBRegressor(
             n_jobs=n_jobs,
@@ -105,24 +97,10 @@ def get_model_param_dict(
             verbosity=-1, n_estimators=300, max_depth=16, num_leaves=31,
             n_jobs=n_jobs
         ),
-        'RF': RandomForestRegressor(
-            n_jobs=n_jobs, oob_score=False,
-            n_estimators=300, max_features=None,
-            random_state=random_state, max_depth=None
-        ),
-        'ETR': ExtraTreesRegressor(random_state=random_state, n_jobs=n_jobs, bootstrap=True),
-        'HGBR': HistGradientBoostingRegressor(
-            max_iter=300, learning_rate=0.1,
-            max_depth=None, random_state=random_state
-        )
-    }
-
-    # Baseline linear models (always available for comparison)
-    model_dict.update({
         'LR': LinearRegression(n_jobs=n_jobs),
         'RIDGE': Ridge(random_state=random_state),
         'LASSO': Lasso(random_state=random_state, max_iter=10000),
-    })
+    }
 
     # Additional ensemble models
     # Note: GBR and ADA don't support n_jobs (sequential only)
@@ -130,6 +108,16 @@ def get_model_param_dict(
     thread_count = -1 if n_jobs == -2 else n_jobs
     if include_all_models:
         model_dict.update({
+            'RF': RandomForestRegressor(
+                n_jobs=n_jobs, oob_score=False,
+                n_estimators=300, max_features=None,
+                random_state=random_state, max_depth=None
+            ),
+            'ETR': ExtraTreesRegressor(random_state=random_state, n_jobs=n_jobs, bootstrap=True),
+            'HGBR': HistGradientBoostingRegressor(
+                max_iter=300, learning_rate=0.1,
+                max_depth=None, random_state=random_state
+            ),
             'GBR': GradientBoostingRegressor(
                 n_estimators=300, learning_rate=0.1,
                 max_depth=5, random_state=random_state,
@@ -155,119 +143,7 @@ def get_model_param_dict(
     if get_model_names_only:
         return list(model_dict.keys())
 
-    # Core model hyperparameters
-    param_dict = {
-        'XGB': {
-            'eta': [0.01],
-            'max_depth': [0],
-            'grow_policy': ['depthwise', 'lossguide'],
-            'subsample': [0.8, 0.9, 1],
-            'colsample_bytree': [0.8, 0.9, 1],
-            'colsample_bynode': [0.8, 0.9, 1],
-            'colsample_bylevel': [0.8, 0.9, 1],
-            'reg_lambda': [0, 0.1, 0.5, 1],
-            'reg_alpha': [0, 0.1, 0.5, 1],
-            'gamma': [0, 0.1, 0.5, 1],
-            'num_parallel_tree': [1],
-            'min_child_weight': [80, 90, 100],
-            'n_estimators': [300, 400, 500],
-        },
-        'XGBRF': {
-            'eta': [0.01],
-            'max_depth': [0],
-            'grow_policy': ['depthwise', 'lossguide'],
-            'subsample': [0.8, 0.9, 1],
-            'colsample_bytree': [0.8, 0.9, 1],
-            'colsample_bynode': [0.8, 0.9, 1],
-            'colsample_bylevel': [0.8, 0.9, 1],
-            'reg_lambda': [0, 0.1, 0.5, 1],
-            'reg_alpha': [0, 0.1, 0.5, 1],
-            'gamma': [0, 0.1, 0.5, 1],
-            'num_parallel_tree': [300, 400, 500],
-            'min_child_weight': [30, 40]
-        },
-        'LGBM': {
-            'n_estimators': [300, 400, 500],
-            'max_depth': [16, 20, -1],
-            'learning_rate': [0.01, 0.05],
-            'subsample': [1, 0.9],
-            'colsample_bytree': [1, 0.9],
-            'colsample_bynode': [1, 0.9],
-            'path_smooth': [0.1, 0.2],
-            'num_leaves': [31, 32],
-            'min_child_samples': [30, 40]
-        },
-        'RF': {
-            'n_estimators': [300, 400, 500],
-            'max_features': [None, 10, 8],
-            'max_depth': [None],
-            'max_leaf_nodes': [None],
-            'max_samples': [None],
-            'min_samples_leaf': [1, 2, 3]
-        },
-        'ETR': {
-            'n_estimators': [300, 400, 500],
-            'max_features': [None, 10, 8],
-            'max_depth': [None],
-            'max_leaf_nodes': [None],
-            'max_samples': [None],
-            'min_samples_leaf': [1, 2, 3]
-        },
-        'HGBR': {
-            'max_iter': [300, 400, 500],
-            'max_depth': [None, 10, 20],
-            'learning_rate': [0.01, 0.05, 0.1],
-            'max_leaf_nodes': [31, 63, 127],
-            'max_bins': [127, 255],
-            'l2_regularization': [0.0, 0.1, 0.5],
-        },
-        'LR': {},
-        'RIDGE': {
-            'alpha': [0.01, 0.1, 1.0, 10.0, 100.0],
-        },
-        'LASSO': {
-            'alpha': [0.0001, 0.001, 0.01, 0.1, 1.0],
-        },
-    }
-
-    # Additional model hyperparameters
-    if include_all_models:
-        param_dict.update({
-            'GBR': {
-                'n_estimators': [200, 300, 400],
-                'learning_rate': [0.01, 0.05, 0.1],
-                'max_depth': [3, 5, 7, 10],
-                'min_samples_split': [2, 5, 10],
-                'min_samples_leaf': [1, 2, 4],
-                'subsample': [0.7, 0.8, 0.9],
-                'max_features': ['sqrt', 'log2', None]
-            },
-            'ADA': {
-                'n_estimators': [50, 100, 200],
-                'learning_rate': [0.01, 0.05, 0.1, 0.5, 1.0],
-                'estimator__max_depth': [3, 5, 7, 10],
-                'estimator__min_samples_split': [2, 5, 10],
-                'estimator__min_samples_leaf': [1, 2, 4]
-            },
-            'BAG': {
-                'n_estimators': [50, 100, 200],
-                'max_samples': [0.5, 0.7, 0.8, 1.0],
-                'max_features': [0.5, 0.7, 0.8, 1.0],
-                'estimator__max_depth': [None, 10, 20, 30],
-                'estimator__min_samples_split': [2, 5, 10],
-                'estimator__min_samples_leaf': [1, 2, 4]
-            },
-            'CAT': {
-                'iterations': [200, 300, 500],
-                'learning_rate': [0.01, 0.05, 0.1],
-                'depth': [4, 6, 8, 10],
-                'l2_leaf_reg': [1, 3, 5, 7, 9],
-                'border_count': [32, 64, 128],
-                'bagging_temperature': [0, 0.5, 1]
-            }
-        })
-
-    return model_dict, param_dict
+    return model_dict
 
 
 def adjusted_r2(y: np.array, y_pred: np.array, p: int) -> float:
@@ -722,287 +598,6 @@ def compute_shap_plots(
 
 
 
-def build_ml_model(
-        x_train: np.ndarray | pd.DataFrame,
-        y_train: np.array,
-        model_dir: str,
-        model_name: str = 'LGBM',
-        random_state: int = 42,
-        load_model: bool = False,
-        fold_count: int = 5,
-        repeats: int = 3,
-        randomized_search: bool = False,
-        stratified_kfold: bool = False,
-        use_dask: bool = False,
-        tune_params: bool = True,
-        **kwargs: Any
-) -> tuple[Any, pd.DataFrame]:
-    """Build an ML model.
-
-    Args:
-        x_train (np.ndarray or pd.DataFrame): X_train numpy array or pandas dataframe.
-        y_train (np.array): y_train numpy array.
-        model_dir (str): Model directory to store/load model.
-        model_name (str): ML model name as per the model_dict keys. 
-        Has to be one of 'XGB', 'XGBRF', 'RF', 'ETR', 'LGBM', or 'HGBR'. Default is 'LGBM'.
-        random_state (int): Random state (seed) for some ML algorithms.
-        load_model (bool): Set model name to load existing model.
-        fold_count (int): Number of folds for KFold.
-        repeats (int): Number of repeats for KFold.
-        randomized_search (bool): Set True to use the more computationally efficient RandomizedSearchCV.
-        stratified_kfold (bool): Set True to use RepeatedStratifiedKFold based on the crop type.
-        use_dask (bool): Flag for using dask.
-        tune_params (bool): Set True to tune hyperparameters.
-        kwargs (dict (str, str)): Pass the 'year_train' Pandas dataframe if stratified_kfold is True.
-
-    Returns:
-        tuple[Any, pd.DataFrame]: Trained model object and dataframe containing CV stats.
-    """
-    model_file = os.path.join(model_dir, model_name)
-    metric_csv = os.path.join(model_dir, f'CV_Metrics_{model_name}.csv')
-    if not load_model:
-        dask_client = None
-        cv_lib = 'sklearn'
-        if use_dask:
-            cluster = SLURMCluster(
-                cores=32,
-                processes=1,
-                memory="10G",
-                walltime="00:30:00",
-                env_extra=['#SBATCH --out=Foundry-Dask-%j.out']
-            )
-            cluster.adapt(
-                minimum=10, maximum=50,
-                minimum_jobs=10, maximum_jobs=50,
-                minimum_memory='8G', maximum_memory='10G'
-            )
-            dask_client = Client(cluster)
-            logger.info('Waiting for dask workers...')
-            dask_client.wait_for_workers(1)
-            cv_lib = 'dask_ml'
-        try:
-            model_dict, param_dict = get_model_param_dict(random_state, use_dask)
-            if not tune_params:
-                param_dict = {model_name: {}}
-            model = model_dict[model_name]
-            cv = RepeatedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
-            if stratified_kfold:
-                stratify_labels = kwargs['stratify_labels'].to_numpy().ravel()
-                cv = RepeatedStratifiedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
-                cv = cv.split(x_train, stratify_labels)
-            makedirs(make_proper_dir_name(model_dir))
-            logger.info(f'Searching best params for {model_name}...')
-            scoring_metrics = {
-                'r2': make_scorer(_abs_r2_score),
-                'adjusted_r2': make_scorer(_abs_adjusted_r2, p=x_train.shape[1], greater_is_better=True),
-                'normalized_rmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
-                'normalized_mae': make_scorer(_abs_normalized_mae, greater_is_better=False),
-                'normalized_mbe': make_scorer(_abs_normalized_mbe, greater_is_better=False)
-            }
-            main_scorer = 'normalized_rmse'
-            cv_func_dict = {
-                'dask_ml': {1: DaskRCV, 0: DaskGCV},
-                'sklearn': {1: RandomizedSearchCV, 0: GridSearchCV}
-            }
-            cv_func = cv_func_dict[cv_lib][int(randomized_search)]
-            if randomized_search:
-                model_grid = cv_func(
-                    estimator=model, param_distributions=param_dict[model_name],
-                    scoring=scoring_metrics, n_jobs=-1, cv=cv, refit=main_scorer,
-                    return_train_score=True, random_state=random_state
-                )
-            else:
-                model_grid = cv_func(
-                    estimator=model, param_grid=param_dict[model_name],
-                    scoring=scoring_metrics, n_jobs=-1, cv=cv, refit=main_scorer,
-                    return_train_score=True
-                )
-            model_grid.fit(x_train, y_train)
-            metric_df = get_grid_search_stats(model_grid, metric_csv)
-            logger.info(f'Best params: {model_grid.best_params_}')
-            model = model_dict[model_name]
-            model.set_params(**model_grid.best_params_)
-            model.fit(x_train, y_train)
-            with open(model_file, 'wb') as f:
-                pickle.dump(model, f)
-        finally:
-            if dask_client:
-                dask_client.close()
-    else:
-        with open(model_file, 'rb') as f:
-            model = pickle.load(f)
-        metric_df = pd.read_csv(metric_csv)
-    return model, metric_df
-
-
-def objective_with_cv(
-        trial: Any,
-        x_train: np.ndarray | pd.DataFrame,
-        y_train: np.ndarray,
-        model_name: str,
-        cv: Any,
-        scoring_metrics: dict[str, Any],
-        alpha: float = 0.1,
-        random_state: int = 42
-) -> float:
-    """
-    Objective function for Optuna hyperparameter tuning with cross-validation.
-    
-    Args:
-        trial (Any): Optuna trial object.
-        x_train (np.ndarray or pd.DataFrame): Training features.
-        y_train (np.ndarray): Training labels.
-        model_name (str): Name of the ML model. Has to be one of 'XGB', 'XGBRF', 'RF', 'ETR', 'LGBM', or 'HGBR.'
-        cv (Any): Cross-validation strategy.
-        scoring_metrics (dict (str, Any)): Scoring metrics for cross-validation.
-        alpha (float): Weighting factor for combining training and validation scores. Default is 0.1.
-        random_state (int): Random state (seed) for some ML algorithms. Default is 42.
-
-    Returns:
-        float: Mean negative normalized RMSE across cross-validation folds.
-    """
-    params = get_optuna_params_for_model(trial, model_name)
-    model = get_model_param_dict(random_state)[0][model_name]
-    model.set_params(**params)
-    # Single-threaded model training — cross_validate parallelises across folds
-    if hasattr(model, 'n_jobs'):
-        model.set_params(n_jobs=1)
-    elif hasattr(model, 'thread_count'):
-        model.set_params(thread_count=1)
-    cv_results = cross_validate(
-        estimator=model,
-        X=x_train,
-        y=y_train,
-        cv=cv,
-        n_jobs=-1,
-        scoring=scoring_metrics,
-        return_train_score=True
-    )
-    for data in ['train', 'test']:
-        r2_key = f'{data}_r2'
-        adj_r2_key = f'{data}_adjusted_r2'
-        neg_rmse_key = f'{data}_normalized_rmse'
-        neg_mae_key = f'{data}_normalized_mae'
-        mbe_key = f'{data}_normalized_mbe'
-        r2 = cv_results[r2_key].mean()
-        adj_r2 = cv_results[adj_r2_key].mean()
-        rmse = -cv_results[neg_rmse_key].mean()
-        if data == 'test':
-            test_mean_rmse = rmse
-            test_std_rmse = abs(cv_results[neg_rmse_key].std())
-        if data == 'train':
-            train_mean_rmse = rmse
-        mae = -cv_results[neg_mae_key].mean()
-        mbe = cv_results[mbe_key].mean()
-        trial.set_user_attr(r2_key, r2)
-        trial.set_user_attr(adj_r2_key, adj_r2)
-        trial.set_user_attr(neg_rmse_key, rmse)
-        trial.set_user_attr(neg_mae_key, mae)
-        trial.set_user_attr(mbe_key, mbe)
-    beta = 0.5 * alpha
-    trial_obj = test_mean_rmse + alpha * abs(train_mean_rmse - test_mean_rmse) + beta * test_std_rmse
-    return trial_obj
-
-
-def build_ml_model_optuna(
-        x_train: np.ndarray | pd.DataFrame,
-        y_train: np.array,
-        model_dir: str,
-        model_name: str = 'LGBM',
-        random_state: int = 42,
-        load_model: bool = False,
-        fold_count: int = 5,
-        repeats: int = 3,
-        stratified_kfold: bool = False,
-        n_trials: int = 100,
-        alpha: float = 0.1,
-        **kwargs: Any
-) -> tuple[Any, pd.DataFrame]:
-    """
-    Build an ML model using Optuna for hyperparameter tuning.
-
-    Args:
-        x_train (np.ndarray or pd.DataFrame): X_train numpy array or pandas dataframe.
-        y_train (np.array): y_train numpy array.
-        model_dir (str): Model directory to store/load model.
-        model_name (str): ML model name as per the model_dict keys. 
-        Has to be one of 'XGB', 'XGBRF', 'RF', 'ETR', 'LGBM', 'HGBR'. Default is 'LGBM'.
-        random_state (int): Random state (seed) for some ML algorithms.
-        load_model (bool): Set model name to load existing model.
-        fold_count (int): Number of folds for KFold.
-        repeats (int): Number of repeats for KFold.
-        stratified_kfold (bool): Set True to use RepeatedStratifiedKFold based on the crop type.
-        n_trials (int): Number of Optuna trials for hyperparameter tuning. Default is 100.
-        alpha (float): Weighting factor for combining training and validation scores. Default is 0.1.
-        kwargs (dict (str, str)): Pass the 'year_train' Pandas dataframe if stratified_kfold is True.
-
-    Returns:
-        tuple[Any, pd.DataFrame]: Trained model object and dataframe containing CV stats.
-    """
-
-    if not load_model:
-        scoring_metrics = {
-            'r2': make_scorer(_abs_r2_score),
-            'adjusted_r2': make_scorer(_abs_adjusted_r2, p=x_train.shape[1], greater_is_better=True),
-            'normalized_rmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
-            'normalized_mae': make_scorer(_abs_normalized_mae, greater_is_better=False),
-            'normalized_mbe': make_scorer(_abs_normalized_mbe, greater_is_better=False)
-        }
-        cv = RepeatedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
-        if stratified_kfold:
-            stratify_labels = kwargs['stratify_labels'].to_numpy().ravel()
-            cv = RepeatedStratifiedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
-            cv = cv.split(x_train, stratify_labels)
-        optuna.logging.set_verbosity(optuna.logging.WARNING)
-        optuna_storage = os.path.join(model_dir, f'optuna_study_{model_name}.db')
-        study = optuna.create_study(
-            direction='minimize',
-            storage=f'sqlite:///{optuna_storage}',
-            study_name=f'Optuna_{model_name}',
-            load_if_exists=True,
-            sampler=optuna.samplers.TPESampler(seed=random_state)
-        )
-        study.set_metric_names(['NRMSE_with_Overfitting_Penalty'])
-
-        completed = len([t for t in study.trials
-                         if t.state == optuna.trial.TrialState.COMPLETE])
-        remaining = max(0, n_trials - completed)
-
-        if remaining > 0:
-            logger.info(f'Running {remaining} remaining trials '
-                        f'(target={n_trials}, completed={completed})')
-            study.optimize(
-                lambda trial: objective_with_cv(
-                    trial, x_train, y_train,
-                    model_name, cv, scoring_metrics,
-                    alpha, random_state
-                ),
-                n_trials=remaining,
-                show_progress_bar=True
-            )
-        else:
-            logger.info(f'Study already has {completed} completed trials '
-                        f'(target={n_trials}) — skipping optimization')
-        best_params = study.best_params
-        logger.info(f'Best params: {best_params}')
-        model_dict, _ = get_model_param_dict(random_state)
-        model = model_dict[model_name]
-        model.set_params(**best_params)
-        model.fit(x_train, y_train)
-        model_file = os.path.join(model_dir, model_name)
-        with open(model_file, 'wb') as f:
-            pickle.dump(model, f)
-        metric_csv = os.path.join(model_dir, f'CV_Metrics_{model_name}.csv')
-        metric_df = get_grid_search_stats(study, metric_csv, search_type='optuna')
-    else:
-        model_file = os.path.join(model_dir, model_name)
-        with open(model_file, 'rb') as f:
-            model = pickle.load(f)
-        metric_csv = os.path.join(model_dir, f'CV_Metrics_{model_name}.csv')
-        metric_df = pd.read_csv(metric_csv)
-    return model, metric_df
-
-
 def get_optuna_params_for_model(
         trial: Any,
         model_name: str
@@ -1124,7 +719,7 @@ def get_optuna_params_for_model(
         raise ValueError(f"Unknown model name: {model_name}")
 
 
-def build_ml_model_optuna_dask(
+def build_ml_model_optuna(
         x_train: np.ndarray | pd.DataFrame,
         y_train: np.array,
         model_dir: str,
@@ -1219,10 +814,23 @@ def build_ml_model_optuna_dask(
                          if t.state == optuna.trial.TrialState.COMPLETE])
         logger.info(f'Study has {completed} completed trials')
 
-        # For parameter-free models (LR), a single trial suffices
-        effective_n_trials = 1 if model_name == 'LR' else n_trials
+        # For parameter-free models (LR), a single trial suffices.
+        # Scikit-learn tree ensembles (RF, ETR, GBR, ADA, BAG) are much
+        # slower per trial than histogram-based models, so cap at 5 trials.
+        # RIDGE/LASSO are simple models and don't need capping.
+        _FAST_MODELS = {'XGB', 'XGBRF', 'LGBM', 'CAT', 'HGBR'}
+        _SIMPLE_MODELS = {'LR', 'RIDGE', 'LASSO'}
+        if model_name == 'LR':
+            effective_n_trials = 1
+        elif model_name in _SIMPLE_MODELS:
+            effective_n_trials = n_trials
+        elif model_name not in _FAST_MODELS:
+            effective_n_trials = min(n_trials, 5)
+        else:
+            effective_n_trials = n_trials
         remaining = max(0, effective_n_trials - completed)
 
+        t0 = time.perf_counter()
         if remaining > 0:
             logger.info(f'Running {remaining} remaining trials '
                         f'(target={effective_n_trials}, completed={completed})')
@@ -1240,6 +848,8 @@ def build_ml_model_optuna_dask(
         else:
             logger.info(f'Study already has {completed} completed trials '
                         f'(target={effective_n_trials}) — skipping optimization')
+        tuning_runtime_sec = round(time.perf_counter() - t0, 2)
+        logger.info(f'Tuning runtime for {model_name}: {tuning_runtime_sec:.2f}s')
 
         # Cleanup Dask
         if dask_client:
@@ -1250,8 +860,8 @@ def build_ml_model_optuna_dask(
         logger.info(f'Best value: {study.best_value:.4f}')
 
         # Train final model with best parameters
-        include_all = model_name in ['GBR', 'ADA', 'BAG', 'CAT']
-        model_dict, _ = get_model_param_dict(random_state, include_all_models=include_all)
+        include_all = model_name in ['RF', 'ETR', 'HGBR', 'GBR', 'ADA', 'BAG', 'CAT']
+        model_dict = get_model_dict(random_state, include_all_models=include_all)
         model = model_dict[model_name]
         model.set_params(**best_params)
         model.fit(x_train, y_train)
@@ -1261,6 +871,8 @@ def build_ml_model_optuna_dask(
             pickle.dump(model, f)
         metric_csv = os.path.join(model_dir, f'CV_Metrics_{model_name}.csv')
         metric_df = get_grid_search_stats(study, metric_csv, search_type='optuna')
+        metric_df['Tuning_Runtime_Sec'] = tuning_runtime_sec
+        metric_df.to_csv(metric_csv, index=False)
     else:
         model_file = os.path.join(model_dir, model_name)
         with open(model_file, 'rb') as f:
@@ -1303,8 +915,8 @@ def objective_with_cv_enhanced(
     params = get_optuna_params_for_model(trial, model_name)
 
     # Get model
-    include_all = model_name in ['GBR', 'ADA', 'BAG', 'CAT']
-    model = get_model_param_dict(random_state, include_all_models=include_all)[0][model_name]
+    include_all = model_name in ['RF', 'ETR', 'HGBR', 'GBR', 'ADA', 'BAG', 'CAT']
+    model = get_model_dict(random_state, include_all_models=include_all)[model_name]
     model.set_params(**params)
     # Single-threaded model training — cross_validate parallelises across folds
     if hasattr(model, 'n_jobs'):
@@ -1437,14 +1049,14 @@ def compare_all_models(
         model_subdir = os.path.join(model_dir, model_name)
 
         if use_optuna:
-            model, cv_metric_df = build_ml_model_optuna_dask(
+            model, cv_metric_df = build_ml_model_optuna(
                 x_train, y_train, model_subdir, model_name,
                 random_state=random_state, fold_count=fold_count,
                 repeats=repeats, n_trials=n_trials,
                 n_dask_workers=n_dask_workers, use_dask=use_dask
             )
         else:
-            model_dict, _ = get_model_param_dict(random_state)
+            model_dict = get_model_dict(random_state, include_all_models=True)
             model = model_dict[model_name]
             model.fit(x_train, y_train)
             cv_metric_df = pd.DataFrame()
@@ -2209,7 +1821,7 @@ def perform_bias_correction(
         }
     ).round(2)
     metrics_df_test_linear.to_csv(os.path.join(output_dir, 'Test_Metrics_Linear.csv'), index=False)
-    model_dict, _ = get_model_param_dict(random_state=42, use_dask=False)
+    model_dict = get_model_dict(random_state=42, use_dask=False, include_all_models=True)
     model = model_dict[model_name]
     drop_cols = ['Year', 'DATA', 'Actual_GW_mm', 'Pred_GW_mm'] + [error_gw_col]
     train_data_ecdf_ml = train_df.copy(deep=True).drop(columns=[error_gw_col])

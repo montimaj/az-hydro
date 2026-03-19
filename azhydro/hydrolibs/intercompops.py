@@ -62,7 +62,6 @@ from hydrolibs.visualops import (
 logger = logging.getLogger(__name__)
 
 # ── Unit-conversion constants ────────────────────────────────────────────────
-MGAL_D_TO_M3_YR = 3785.41178 * 365.25  # 1 Mgal/d → m³/yr
 MGAL_TO_M3 = 3785.41178                # 1 Mgal → m³
 M3_TO_AF = 1 / 1233.48184              # m³ → acre-feet
 M_TO_MM = 1000.0                        # metres → millimetres
@@ -259,8 +258,8 @@ def load_nhm_basin_volumes(
                         year % 100 != 0 or year % 400 == 0):
                     ndays = 29
                 vals = row[az_cols].values.astype(np.float64)
-                # Mgal/d × days → Mgal; × 3785.41178 → m³
-                annual_vol += vals * ndays * 3785.41178
+                # Mgal/d × days → Mgal; × MGAL_TO_M3 → m³
+                annual_vol += vals * ndays * MGAL_TO_M3
             for i, huc_id in enumerate(az_cols):
                 annual_records.append({
                     'huc12': huc_id,
@@ -1005,7 +1004,7 @@ def _load_nhm_annual_csv_to_basins(
     if mode == 'volume':
         return _nhm_cu_volume_path(
             df_az, az_cols, huc_reproj, basin_reproj, basin_col,
-            ref_raster, ref_crs, ref_transform, ref_shape,
+            ref_raster, ref_transform, ref_shape,
             pixel_area_m2, start_yr, end_yr, output_dir,
             predictor_dir, irr_fraction_band,
             raster_label=raster_label,
@@ -1013,14 +1012,14 @@ def _load_nhm_annual_csv_to_basins(
     else:
         return _nhm_ie_ratio_path(
             df_az, az_cols, huc_reproj, basin_reproj, basin_col,
-            ref_raster, ref_crs, ref_transform, ref_shape,
+            ref_raster, ref_transform, ref_shape,
             start_yr, end_yr, output_dir,
         )
 
 
 def _nhm_cu_volume_path(
     df_az, az_cols, huc_reproj, basin_reproj, basin_col,
-    ref_raster, ref_crs, ref_transform, ref_shape,
+    ref_raster, ref_transform, ref_shape,
     pixel_area_m2, start_yr, end_yr, output_dir,
     predictor_dir, irr_fraction_band,
     raster_label='CU',
@@ -1142,7 +1141,7 @@ def _nhm_cu_volume_path(
 
 def _nhm_ie_ratio_path(
     df_az, az_cols, huc_reproj, basin_reproj, basin_col,
-    ref_raster, ref_crs, ref_transform, ref_shape,
+    ref_raster, ref_transform, ref_shape,
     start_yr, end_yr, output_dir,
 ) -> dict:
     """Process NHM IE CSV into basin-mean efficiency ratios."""

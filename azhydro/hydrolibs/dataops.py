@@ -1491,7 +1491,7 @@ def create_train_test_data(
             ama_ina_basins = get_ama_ina_basin_names()
             ama_ina_basins = [b for b in ama_ina_basins if b not in drop_gw_basins]
             input_df = input_df[input_df[gw_basin_col].isin(ama_ina_basins)]
-        drop_attr = [attr for attr in drop_attr]
+        drop_attr = list(drop_attr)
         if year_list and year_col in input_df.columns:
             input_df = input_df[input_df[year_col].isin(year_list)]
         cols_before = set(input_df.columns)

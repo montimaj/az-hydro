@@ -106,9 +106,6 @@ USGS_LULC_SCENARIOS = ['B1', 'B2', 'A1B', 'A2']
 # 1-based band indices in Predictor_{year}.tif for LULC-derived columns
 LULC_BAND_INDEX = 8            # integer LULC class
 CROP_FRACTION_BAND_INDEX = 13  # annual_crop_fraction
-ET_BAND_INDEX = 1              # annual_et_ensemble_mm
-PEFF_BAND_INDEX = 4            # annual_peff_mm
-IRR_FRACTION_BAND_INDEX = 14   # annual_irr_fraction
 
 # ── 95 % CI multiplier and t-distribution corrections ────────────────────
 # The normal approximation z = 1.96 is the default 95 % CI multiplier.
@@ -233,7 +230,7 @@ def _compute_category_sigmas(
     return cat_sigmas
 
 
-def _pixel_stats(pred_vals, mm_to_m3, m3_to_af):
+def _pixel_stats(pred_vals, mm_to_m3):
     """Compute summary statistics in multiple units."""
     n = len(pred_vals)
     mean_mm = float(np.nanmean(pred_vals)) if n > 0 else 0.0
@@ -568,7 +565,7 @@ def compute_sigma_maca(
                           os.path.join(raster_dir, f'Sigma_MACA_mm_{year}.tif'),
                           read_raster_as_arr, write_raster)
 
-        yearly_stats[year] = _pixel_stats(std, mm_to_m3, M3_TO_AF)
+        yearly_stats[year] = _pixel_stats(std, mm_to_m3)
 
         if year % 10 == 0 or year == end_year:
             logger.info(f'    Year {year}: mean σ_MACA = '
@@ -740,7 +737,7 @@ def compute_sigma_model(
                 m = pickle.load(f)
         else:
             logger.info(f'  Training seed={seed} model...')
-            m, _ = mlops.build_ml_model_optuna_dask(
+            m, _ = mlops.build_ml_model_optuna(
                 x_train, y_train, seed_dir,
                 model_name, seed,
                 fold_count=fold_count,
@@ -789,7 +786,7 @@ def compute_sigma_model(
                           os.path.join(raster_dir, f'Sigma_Model_mm_{year}.tif'),
                           read_raster_as_arr, write_raster)
 
-        yearly_stats[year] = _pixel_stats(std, mm_to_m3, M3_TO_AF)
+        yearly_stats[year] = _pixel_stats(std, mm_to_m3)
 
         if year % 20 == 0 or year == end_year:
             logger.info(f'    Year {year}: mean σ_model = '
@@ -973,7 +970,7 @@ def compute_sigma_irr(
                           os.path.join(raster_dir, f'Sigma_Irr_mm_{year}.tif'),
                           read_raster_as_arr, write_raster)
 
-        yearly_stats[year] = _pixel_stats(std, mm_to_m3, M3_TO_AF)
+        yearly_stats[year] = _pixel_stats(std, mm_to_m3)
 
         if year % 20 == 0 or year == end_year:
             logger.info(f'    Year {year}: mean σ_irr = '
@@ -1164,7 +1161,7 @@ def compute_sigma_lulc(
                           os.path.join(raster_dir, f'Sigma_LULC_mm_{year}.tif'),
                           read_raster_as_arr, write_raster)
 
-        yearly_stats[year] = _pixel_stats(std, mm_to_m3, M3_TO_AF)
+        yearly_stats[year] = _pixel_stats(std, mm_to_m3)
 
         if year % 10 == 0 or year == end_year:
             logger.info(f'    Year {year}: mean σ_LULC = '
@@ -1294,7 +1291,7 @@ def compute_sigma_gw(
                           os.path.join(raster_dir, f'Sigma_GW_mm_{year}.tif'),
                           read_raster_as_arr, write_raster)
 
-        yearly_stats[year] = _pixel_stats(std, mm_to_m3, M3_TO_AF)
+        yearly_stats[year] = _pixel_stats(std, mm_to_m3)
 
         if year % 20 == 0 or year == end_year:
             logger.info(f'    Year {year}: mean σ_gw = '
@@ -1613,7 +1610,7 @@ def compute_sigma_total(
             read_raster_as_arr,
         )
 
-        stats = _pixel_stats(total_std, mm_to_m3, M3_TO_AF)
+        stats = _pixel_stats(total_std, mm_to_m3)
         yearly_stats[year] = stats
         year_contributions['Mean_Sigma_Total_mm'] = stats['Mean_Depth_mm']
         year_contributions['Volume_AF'] = stats['Volume_AF']
@@ -1805,8 +1802,6 @@ def compute_sigma_cu(
     """
     from hydrolibs.sysops import makedirs
     import hydrolibs.intercompops as intercompops
-    from rasterio.mask import mask as rio_mask
-    from shapely.geometry import mapping
 
     logger.info('Computing σ_CU (IE × Withdrawal error propagation)...')
     sigma_cu_dir = os.path.join(output_dir, 'Sigma_CU/Rasters')
@@ -1933,7 +1928,7 @@ def compute_sigma_cu(
             with rio.open(sigma_total_file) as src:
                 sigma_total = src.read(1)
             yearly_stats[year] = _pixel_stats(
-                sigma_total.ravel(), mm_to_m3, M3_TO_AF,
+                sigma_total.ravel(), mm_to_m3,
             )
             if year % 20 == 0 or year == end_year:
                 logger.info(f'    Year {year}: mean σ_CU = '
@@ -1957,7 +1952,6 @@ def run_uncertainty_quantification(
         pred_data_dir: str,
         model_dir: str,
         input_dir: str,
-        output_dir: str,
         vector_dir: str,
         mosaic_res: int,
         gcloud_project: str,
@@ -1994,7 +1988,6 @@ def run_uncertainty_quantification(
         pred_data_dir (str): Directory containing predictor rasters.
         model_dir (str): Base model output directory.
         input_dir (str): Base input directory for GEE downloads.
-        output_dir (str): Base output directory.
         vector_dir (str): Directory containing vector shapefiles.
         mosaic_res (int): Raster resolution in metres.
         gcloud_project (str): Google Cloud project ID.
@@ -2106,8 +2099,7 @@ def run_uncertainty_quantification(
 
     # ── Visualisations ──
     _plot_uncertainty_time_series(
-        sigma_components, unc_dir, start_year, end_year,
-        year_list, mosaic_res, pred_data_dir, vizops,
+        sigma_components, unc_dir, mosaic_res, vizops,
     )
 
     # ── Augment prediction rasters with uncertainty bands ──
@@ -2707,13 +2699,10 @@ def _replot_from_augmented_rasters(
     ``σ_V = (Σ upper_CI − Σ lower_CI) / (2 × CI_Z)``,
     which corresponds to a spatially-correlated (conservative) bound.
     """
-    import matplotlib.patches as mpatches
-    import matplotlib.pyplot as plt
     from rasterio.mask import mask as rio_mask
     from shapely.geometry import mapping
 
     import hydrolibs.visualops as vizops
-    from hydrolibs.sysops import makedirs
 
     logger.info('Re-plotting time series from augmented rasters '
                 'via zonal statistics...')
@@ -2992,8 +2981,7 @@ def _replot_from_augmented_rasters(
 
 
 def _plot_uncertainty_time_series(
-        sigma_components, unc_dir, start_year, end_year,
-        year_list, mosaic_res, pred_data_dir, vizops,
+        sigma_components, unc_dir, mosaic_res, vizops,
 ):
     """Generate per-component and combined time-series plots.
 
@@ -3030,7 +3018,7 @@ def _plot_uncertainty_time_series(
         makedirs(comp_dir)
         yearly = {}
         for year in sorted(comp.keys()):
-            yearly[year] = _pixel_stats(comp[year], mm_to_m3, M3_TO_AF)
+            yearly[year] = _pixel_stats(comp[year], mm_to_m3)
 
         title = comp_titles.get(name, name)
         comp_start = min(comp.keys())
