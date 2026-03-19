@@ -1242,19 +1242,19 @@ def explore_az_data(
             ax.plot(yearly[year_col], yearly['mean'], color='#2C3E50', lw=1.5)
             ax.fill_between(
                 yearly[year_col],
-                yearly['mean'] - yearly['std'],
+                np.maximum(yearly['mean'] - yearly['std'], 0),
                 yearly['mean'] + yearly['std'],
                 color='#2C3E50', alpha=0.15,
             )
-            # shade era backgrounds
-            for era, (s, e) in eda_periods.items():
-                ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
             ax.set_xlabel('Year')
             ax.set_ylabel(label)
             ax.set_title(f'{label} — Annual Mean ± Std')
-            handles = [_mpatches.Patch(color=ERA_COLORS[e], label=f'{e} ({eda_periods[e][0]}–{eda_periods[e][1]})')
-                       for e in era_order]
-            ax.legend(handles=handles, loc='best', fontsize=9)
+            if not skip_era:
+                for era, (s, e) in eda_periods.items():
+                    ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
+                handles = [_mpatches.Patch(color=ERA_COLORS[e], label=f'{e} ({eda_periods[e][0]}–{eda_periods[e][1]})')
+                           for e in era_order]
+                ax.legend(handles=handles, loc='best', fontsize=9)
             _plt.tight_layout()
             _plt.savefig(os.path.join(output_dir, f'{safe}_timeseries.png'))
             _plt.close()
@@ -1264,17 +1264,18 @@ def explore_az_data(
             for bt_label, bt_df in col_df.groupby('Basin_Type_Label'):
                 yt = bt_df.groupby(year_col)[col].mean().reset_index()
                 ax.plot(yt[year_col], yt[col], label=bt_label, lw=1.3)
-            for era, (s, e) in eda_periods.items():
-                ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.06)
             ax.set_xlabel('Year')
             ax.set_ylabel(label)
             ax.set_title(f'{label} — Annual Mean by Basin Type')
             bt_handles, _ = ax.get_legend_handles_labels()
-            bt_handles.extend([
-                _mpatches.Patch(color=ERA_COLORS[e], alpha=0.35,
-                                label=f'{e} ({eda_periods[e][0]}–{eda_periods[e][1]})')
-                for e in era_order
-            ])
+            if not skip_era:
+                for era, (s, e) in eda_periods.items():
+                    ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.06)
+                bt_handles.extend([
+                    _mpatches.Patch(color=ERA_COLORS[e], alpha=0.35,
+                                    label=f'{e} ({eda_periods[e][0]}–{eda_periods[e][1]})')
+                    for e in era_order
+                ])
             ax.legend(handles=bt_handles, loc='best', fontsize=9)
             _plt.tight_layout()
             _plt.savefig(os.path.join(output_dir, f'{safe}_timeseries_by_basin_type.png'))
