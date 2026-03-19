@@ -615,7 +615,10 @@ def download_gee_tile(
         'projects/earthengine-legacy/assets/projects/sat-io/open-datasets/CSRL_soil_properties/physical/ksat_mean'
     ).rename('ksat_mean_micromps')
     ee_geom = ee.Geometry.Rectangle(tile_values[1:])
-    peff_pcml_1896 = None
+    # Pre-compute the PCML Peff climatological mean (used for all years
+    # outside 2000-2024).  Must be computed before the loop so that it is
+    # available even when the 1896 tile is already cached on disk.
+    peff_pcml_1896 = get_annual_peff_pcml(1896)
     for year in year_list:
         local_file_name = os.path.join(download_dir, f'Tile_{tile_values[0]}_{year}.tif')
         if os.path.exists(local_file_name):
@@ -660,12 +663,7 @@ def download_gee_tile(
         else:
             peff = monthly_peff_ic.filterDate(start_year_gee, end_year_gee) \
                     .select('peff').sum().rename('annual_peff_mm')
-        if year == 1896:
-            # get mean annual 2000-2023 if year is 1896, and save it for use in other years outside 2000-2024
-            # since PCML data only starts in 2000
-            peff_pcml = get_annual_peff_pcml(1896)
-            peff_pcml_1896 = peff_pcml
-        elif 2000 <= year <= 2024:
+        if 2000 <= year <= 2024:
             peff_pcml = get_annual_peff_pcml(year)
         else:
             peff_pcml = peff_pcml_1896

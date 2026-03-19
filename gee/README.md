@@ -23,7 +23,7 @@ The scripts use the GEE high-volume endpoint (`https://earthengine-highvolume.go
 | `openet_reitz_et_ratio` | 12 | — (monthly climatology) | `ratio` | 800 | `export_openet_reitz_ratio.py` |
 | `monthly_etof` | 12 | — (monthly climatology) | `etof` | 4638.3 | `export_monthly_etof.py` |
 | `prism_hargreaves_eto` | 996 | 1896–1978 | `eto` | 4638.3 | `export_prism_hargreaves_eto.py` |
-| `usgs_adjusted_et` | 1,248 | 1896–1999 | `actual_et` | 800 | `export_usgs_adjusted_et.py` |
+| `usgs_adjusted_et` | 1,473 | 1896–2018 | `actual_et` | 800 | `export_usgs_adjusted_et.py` |
 | `maca_monthly_eto_v2` | 888 | 2026–2099 | `eto` | 4638.3 | `export_maca_monthly_eto.py` |
 | `maca_monthly_et_v2` | 888 | 2026–2099 | `actual_et` | 4638.3 | `export_maca_monthly_et.py` |
 | `lulc_projection_ensemble` | 74 | 2026–2099 | `landcover` | 250 | `export_lulc_ensemble.py` |
