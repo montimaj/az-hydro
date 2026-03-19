@@ -1311,8 +1311,10 @@ def explore_az_data(
             )
             ax.set_xlabel(label)
             ax.set_title(f'{label} — Histogram + KDE by Era (P1–P99)')
-            if ax.get_legend() is not None:
-                ax.legend(loc='upper right', title='Era')
+            legend = ax.get_legend()
+            if legend is not None:
+                legend.set_title('Era')
+                legend.set_loc('upper right')
             _plt.tight_layout()
             _plt.savefig(os.path.join(output_dir, f'{safe}_kde_era.png'))
             _plt.close()
@@ -1325,8 +1327,10 @@ def explore_az_data(
         )
         ax.set_xlabel(label)
         ax.set_title(f'{label} — Histogram + KDE by Basin Type (P1–P99)')
-        if ax.get_legend() is not None:
-            ax.legend(loc='upper right', title='Basin Type')
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.set_title('Basin Type')
+            legend.set_loc('upper right')
         _plt.tight_layout()
         _plt.savefig(os.path.join(output_dir, f'{safe}_kde_basin_type.png'))
         _plt.close()
