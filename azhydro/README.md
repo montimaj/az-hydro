@@ -193,6 +193,12 @@ Twelve custom ImageCollections are pre-computed via scripts in [`gee/`](../gee/)
 
 Data are downloaded as tiles using a Dask-parallelized worker pool (40 workers, 1 GB each). Each tile covers an 80 km × 80 km region at 2 km resolution. Tiles are later mosaicked and reprojected for the ML pipeline.
 
+> **Tile retry note:** Each tile is retried up to 10 times on transient GEE
+> failures. If a tile still fails after all retries, re-running the same
+> download step after the remaining tiles have finished will fix the issue—
+> already-downloaded tiles are skipped automatically, so only the failed
+> tiles are re-attempted.
+
 ### Streamflow analysis
 
 The [`streamflowops`](hydrolibs/streamflowops.py) module handles streamflow data acquisition and rasterization. It covers all 16 Arizona surface watersheds from 1896 to 2099.
