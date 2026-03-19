@@ -342,37 +342,3 @@ def build_daily_maca_single(year, model, scenario):
     ))
 
 
-# ─── LULC-stratified EToF helpers ────────────────────────────────────────────
-
-LULC_ETOF_ASSET = f'{ASSET_PREFIX}/lulc_stratified_etof'
-
-
-def build_lulc_varying_etof(year, month):
-    """
-    Composite per-LULC-class EToF climatologies into a single EToF grid
-    using the projected LULC map for *year*.
-
-    The raw USGS LULC ensemble is reclassified (13→1 AGRI, 2/6→2 URBAN,
-    1→3 SW), matching ``_get_lulc_image`` in ``dataops.py``.  The 'other'
-    (natural/barren) EToF is used as the base layer, then pixels classified
-    as AGRI, URBAN, or SW are overwritten with their class-specific EToF.
-
-    Returns ee.Image with band 'etof'.
-    """
-    lulc_ic = ee.ImageCollection(f'{ASSET_PREFIX}/lulc_projection_ensemble')
-    lulc_raw = lulc_ic.filterDate(
-        ee.Date.fromYMD(year, 1, 1), ee.Date.fromYMD(ee.Number(year).add(1), 1, 1)
-    ).first()
-    # Reclassify raw USGS classes → 1=AGRI, 2=URBAN, 3=SW (same as _get_lulc_image)
-    lulc = lulc_raw.remap([13, 2, 6, 1], [1, 2, 2, 3])
-
-    etof_img = ee.Image(f'{LULC_ETOF_ASSET}/month_{month:02d}')
-
-    # Start with 'other' as the base (unmask so .where() can write into
-    # pixels where etof_other has no data — e.g. always-agri NLCD pixels)
-    return etof_img.select('etof_other').unmask(0) \
-        .where(lulc.eq(1), etof_img.select('etof_agri')) \
-        .where(lulc.eq(2), etof_img.select('etof_urban')) \
-        .where(lulc.eq(3), etof_img.select('etof_sw')) \
-        .rename('etof') \
-        .set('month', month)

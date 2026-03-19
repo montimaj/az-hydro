@@ -7,19 +7,16 @@ Dependency graph:
     - export_openet_reitz_ratio.py
     - export_monthly_etof.py
     - export_lulc_ensemble.py
-    - export_lulc_stratified_etof.py
   Level 2 (depends on Level 1 ratios):
     - export_prism_hargreaves_eto.py  (needs gridmet_hargreaves ratio)
     - export_usgs_adjusted_et.py      (needs openet_reitz ratio)
     - export_maca_monthly_eto.py      (no custom dep, uses gridMET ratios)
   Level 3 (depends on Level 1 + Level 2):
     - export_maca_monthly_et.py       (needs monthly_etof + maca_monthly_eto_v2)
-    - export_maca_monthly_et_v3.py    (needs lulc_stratified_etof + lulc_ensemble + maca_monthly_eto_v2)
     - export_monthly_peff.py          (needs prism_hargreaves_eto + maca_monthly_eto_v2)
   Level 4 — per-GCM uncertainty (uses gridMET ratios + etof):
     - export_maca_gcm_annual_eto.py      (5 GCMs × 74 years = 370 images)
     - export_maca_gcm_annual_et.py       (5 GCMs × 74 years = 370 images)
-    - export_maca_gcm_annual_et_v2.py    (5 GCMs × 74 years = 370 images, LULC-varying EToF)
     - export_maca_gcm_annual_peff.py     (5 GCMs × 74 years = 370 images)
 
 Usage:
@@ -42,7 +39,6 @@ LEVELS = {
         ('export_openet_reitz_ratio.py', 'OpenET/Reitz ET ratio (12 images)'),
         ('export_monthly_etof.py', 'Monthly EToF (12 images)'),
         ('export_lulc_ensemble.py', 'LULC projection ensemble (74 images)'),
-        ('export_lulc_stratified_etof.py', 'LULC-stratified EToF (12 images × 4 bands)'),
     ],
     2: [
         ('export_prism_hargreaves_eto.py', 'PRISM Hargreaves ETo 1896-1978 (996 images)'),
@@ -51,13 +47,11 @@ LEVELS = {
     ],
     3: [
         ('export_maca_monthly_et.py', 'MACA monthly ET 2026-2099 (888 images)'),
-        ('export_maca_monthly_et_v3.py', 'MACA monthly ET v3 — LULC-varying EToF (888 images)'),
         ('export_monthly_peff.py', 'Monthly USDA SCS peff 1896-2099 (2448 images)'),
     ],
     4: [
         ('export_maca_gcm_annual_eto.py', 'Per-GCM annual ETo 2026-2099 (370 images)'),
         ('export_maca_gcm_annual_et.py', 'Per-GCM annual ET 2026-2099 (370 images)'),
-        ('export_maca_gcm_annual_et_v2.py', 'Per-GCM annual ET v2 — LULC-varying EToF (370 images)'),
         ('export_maca_gcm_annual_peff.py', 'Per-GCM annual peff 2026-2099 (370 images)'),
     ],
 }

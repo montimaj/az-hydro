@@ -479,7 +479,7 @@ def _get_climate_images(year, gcm, prism_ic, prism_hargreaves_eto_ic,
     else:
         if gcm is not None:
             actual_et = ee.Image(
-                f'{_ASSET_PREFIX}/maca_gcm_annual_et_v2/{gcm}_{year}'
+                f'{_ASSET_PREFIX}/maca_gcm_annual_et/{gcm}_{year}'
             ).select('actual_et')
         else:
             actual_et = maca_monthly_et_ic \
@@ -591,7 +591,7 @@ def download_gee_tile(
     prism_hargreaves_eto_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/prism_hargreaves_eto')
     usgs_adjusted_et_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/usgs_adjusted_et')
     maca_monthly_eto_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_eto_v2')
-    maca_monthly_et_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_et_v3')
+    maca_monthly_et_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/maca_monthly_et_v2')
     lulc_projection_ensemble_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/lulc_projection_ensemble')
     lulc_projection_raw_ic = ee.ImageCollection('projects/nwi-usgs/assets/USGS-LULC-CONUS')
     monthly_peff_ic = ee.ImageCollection(f'{_ASSET_PREFIX}/monthly_peff_v2')
