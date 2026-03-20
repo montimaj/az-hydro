@@ -23,6 +23,7 @@ import pandas as pd
 import seaborn as sns
 import skexplain
 from dask.distributed import Client, LocalCluster
+from scipy.linalg import LinAlgWarning
 from lightgbm import LGBMRegressor
 from sklearn.ensemble import (
     AdaBoostRegressor,
@@ -834,17 +835,20 @@ def build_ml_model_optuna(
         if remaining > 0:
             logger.info(f'Running {remaining} remaining trials '
                         f'(target={effective_n_trials}, completed={completed})')
-            study.optimize(
-                lambda trial: objective_with_cv_enhanced(
-                    trial, x_train, y_train,
-                    model_name, cv, scoring_metrics,
-                    alpha, random_state, pruning
-                ),
-                n_trials=remaining,
-                n_jobs=1,
-                show_progress_bar=True,
-                gc_after_trial=True
-            )
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', message='Ill-conditioned matrix',
+                                        category=LinAlgWarning)
+                study.optimize(
+                    lambda trial: objective_with_cv_enhanced(
+                        trial, x_train, y_train,
+                        model_name, cv, scoring_metrics,
+                        alpha, random_state, pruning
+                    ),
+                    n_trials=remaining,
+                    n_jobs=1,
+                    show_progress_bar=True,
+                    gc_after_trial=True
+                )
         else:
             logger.info(f'Study already has {completed} completed trials '
                         f'(target={effective_n_trials}) — skipping optimization')
@@ -871,7 +875,6 @@ def build_ml_model_optuna(
             pickle.dump(model, f)
         metric_csv = os.path.join(model_dir, f'CV_Metrics_{model_name}.csv')
         metric_df = get_grid_search_stats(study, metric_csv, search_type='optuna')
-        metric_df['Tuning_Runtime_Sec'] = tuning_runtime_sec
         metric_df.to_csv(metric_csv, index=False)
     else:
         model_file = os.path.join(model_dir, model_name)

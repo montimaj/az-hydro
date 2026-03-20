@@ -1100,7 +1100,7 @@ def get_variable_name_dict() -> dict[str, str]:
         'annual_precip_mm': 'Annual Precipitation (mm)',
         'annual_peff_mm': 'Annual USDA-SCS Effective Precipitation (mm)',
         'annual_peff_pcml_mm': 'Annual PCML Effective Precipitation (mm)',
-        'annual_cu_mm': 'Annual Consumptive Use (mm) [ET − Peff]',
+        'annual_netet_mm': 'Annual Net ET (mm) [ET − Peff]',
         'annual_tmmx_K': 'Annual Maximum Air Temperature (K)',
         'annual_tmmn_K': 'Annual Minimum Air Temperature (K)',
         'AGRI': 'Agricultural Density',
@@ -1212,9 +1212,9 @@ def explore_az_data(
     basin_type_map = {0: 'AMA', 1: 'INA', 2: 'Other'}
     df['Basin_Type_Label'] = df[basin_type_col].map(basin_type_map)
 
-    # Derived EDA column: Consumptive Use = max(ET − Peff, 0)
+    # Derived EDA column: Net ET = max(ET − Peff, 0)
     if 'annual_et_ensemble_mm' in df.columns and 'annual_peff_mm' in df.columns:
-        df['annual_cu_mm'] = (df['annual_et_ensemble_mm'] - df['annual_peff_mm']).clip(lower=0)
+        df['annual_netet_mm'] = (df['annual_et_ensemble_mm'] - df['annual_peff_mm']).clip(lower=0)
 
     numeric_cols = [
         c for c in df.select_dtypes(include='number').columns

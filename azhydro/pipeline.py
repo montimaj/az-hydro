@@ -99,7 +99,7 @@ N_DASK_WORKERS = 10
 N_DASK_WORKERS_DATA_PREP = 40 # more workers for data prep since it involves many independent raster operations
 USE_OPTUNA = True
 USE_DASK = True
-INCLUDE_ALL_MODELS = False
+INCLUDE_ALL_MODELS = True
 
 USE_AMA_INA = True
 DROP_GW_BASINS = ('WILLCOX AMA', 'HUALAPAI VALLEY INA')
