@@ -955,7 +955,7 @@ def objective_with_cv_enhanced(
         trial.set_user_attr(adj_r2_key, cv_results[adj_r2_key].mean())
         trial.set_user_attr(neg_rmse_key, -cv_results[neg_rmse_key].mean())
         trial.set_user_attr(neg_mae_key, -cv_results[neg_mae_key].mean())
-        trial.set_user_attr(mbe_key, cv_results[mbe_key].mean())
+        trial.set_user_attr(mbe_key, -cv_results[mbe_key].mean())
 
     # Calculate objective with overfitting penalty
     beta = 0.5 * alpha
@@ -1697,7 +1697,7 @@ def get_grid_search_stats(
             adj_r2 = scores[f'mean_{data}_adjusted_r2'].mean()
             rmse = -scores[f'mean_{data}_normalized_rmse'].mean()
             mae = -scores[f'mean_{data}_normalized_mae'].mean()
-            mbe = scores[f'mean_{data}_normalized_mbe'].mean()
+            mbe = -scores[f'mean_{data}_normalized_mbe'].mean()
         else:
             r2 = scores[f'{data}_r2']
             adj_r2 = scores[f'{data}_adjusted_r2']
