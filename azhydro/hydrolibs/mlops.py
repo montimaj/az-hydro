@@ -171,19 +171,19 @@ def normalized_rmse(
         y_pred: np.array
 ) -> float:
     """
-    Normalized RMSE using standard deviation.
+    Normalized RMSE using mean.
 
     Args:
         y (np.array): Actual values.
         y_pred (np.array): Predicted values.
 
     Returns:
-        float: Normalized RMSE using standard deviation.
+        float: Normalized RMSE (%) using mean of observed values.
     """
-    std_y = np.std(y)
-    if std_y == 0:
+    mean_y = np.mean(y)
+    if mean_y == 0:
         return np.nan
-    nrmse = root_mean_squared_error(y, y_pred) * 100 / std_y
+    nrmse = root_mean_squared_error(y, y_pred) * 100 / mean_y
     return nrmse
 
 
@@ -192,19 +192,19 @@ def normalized_mae(
         y_pred: np.array
 ) -> float:
     """
-    Normalized MAE using standard deviation.
+    Normalized MAE using mean.
 
     Args:
         y (np.array): Actual values.
         y_pred (np.array): Predicted values.
 
     Returns:
-        float: Normalized MAE using standard deviation.
+        float: Normalized MAE (%) using mean of observed values.
     """
-    std_y = np.std(y)
-    if std_y == 0:
+    mean_y = np.mean(y)
+    if mean_y == 0:
         return np.nan
-    nmae = mean_absolute_error(y, y_pred) * 100 / std_y
+    nmae = mean_absolute_error(y, y_pred) * 100 / mean_y
     return nmae
 
 
@@ -825,7 +825,7 @@ def build_ml_model_optuna(
         elif model_name in _SIMPLE_MODELS:
             effective_n_trials = n_trials
         elif model_name not in _FAST_MODELS:
-            effective_n_trials = min(n_trials, 5)
+            effective_n_trials = min(n_trials, 10)
         else:
             effective_n_trials = n_trials
         remaining = max(0, effective_n_trials - completed)

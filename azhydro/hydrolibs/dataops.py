@@ -1150,8 +1150,9 @@ def split_data_train_test(
         split_strategy (int): If 1, Split train test data based on year_col. If 2, then test_size amount of data from
                               year_col are kept for testing and rest for training;
                               for this option, test-year should have a tuple of integers or a True value. If 3, then
-                              test_gw_basins are used for spatial holdouts. For any other value of split-strategy,
-                              the data are randomly split.
+                              test_gw_basins are used for spatial holdouts. If 5, pixel-level spatial holdout where
+                              test_size fraction of unique pixels are held out across all years. For any other value
+                              of split-strategy, the data are randomly split.
 
     Returns:
         tuple[pd.DataFrame, ...]: A tuple of X_train, X_test, y_train, y_test data frames.
@@ -1174,6 +1175,11 @@ def split_data_train_test(
             input_df, pred_attr=pred_attr, gw_basin_col=gw_basin_col,
             test_gw_basins=test_gw_basins, shuffle=shuffle,
             random_state=random_state
+        )
+    elif split_strategy == 5:
+        x_train, x_test, y_train, y_test = split_pixel_holdout(
+            input_df, pred_attr=pred_attr, test_size=test_size,
+            shuffle=shuffle, random_state=random_state
         )
     else:
         x_train, x_test, y_train, y_test = train_test_split(
@@ -1310,6 +1316,65 @@ def split_spatial(
     return x_train_df, x_test_df, y_train_df, y_test_df
 
 
+def split_pixel_holdout(
+        input_df: pd.DataFrame,
+        pred_attr: str = 'gw_pumping_mm',
+        test_size: float = 0.2,
+        easting_col: str = 'easting_m',
+        northing_col: str = 'northing_m',
+        shuffle: bool = True,
+        random_state: int = 0
+) -> tuple[pd.DataFrame, ...]:
+    """Split data by holding out entire pixels (spatial locations) across all years.
+
+    Unique pixels are identified by their (easting, northing) coordinates.
+    A random fraction of pixels is assigned to the test set; all years for
+    those pixels become test rows, and all years for the remaining pixels
+    become training rows.
+
+    Args:
+        input_df (pd.DataFrame): Input pandas DataFrame with pixel-year rows.
+        pred_attr (str): Prediction attribute name.
+        test_size (float): Fraction of unique pixels to hold out for testing.
+        easting_col (str): Name of the easting coordinate column.
+        northing_col (str): Name of the northing coordinate column.
+        shuffle (bool): Set False to stop data shuffling.
+        random_state (int): Random state for reproducibility.
+
+    Returns:
+        tuple[pd.DataFrame, ...]: A tuple of X_train, X_test, y_train, y_test data frames.
+    """
+    # Identify unique pixel locations
+    pixel_coords = input_df[[easting_col, northing_col]].drop_duplicates()
+    n_test = max(1, int(len(pixel_coords) * test_size))
+    test_pixels = pixel_coords.sample(n=n_test, random_state=random_state)
+
+    # Vectorized merge to flag test rows (preserve original index for alignment)
+    test_pixels = test_pixels.assign(_pixel_test=True)
+    merged = input_df[[easting_col, northing_col]].merge(
+        test_pixels, on=[easting_col, northing_col], how='left'
+    )
+    is_test = merged['_pixel_test'].fillna(False).values
+
+    x_train_df = input_df[~is_test]
+    x_test_df = input_df[is_test]
+    y_train_df = x_train_df[pred_attr].to_frame()
+    y_test_df = x_test_df[pred_attr].to_frame()
+
+    if shuffle:
+        x_train_df, y_train_df = sk.shuffle(x_train_df, y_train_df, random_state=random_state)
+        x_test_df, y_test_df = sk.shuffle(x_test_df, y_test_df, random_state=random_state)
+
+    logger.info(
+        'Pixel holdout: %d unique pixels → %d train, %d test (%.1f%%); '
+        '%d train rows, %d test rows',
+        len(pixel_coords), len(pixel_coords) - n_test, n_test,
+        100.0 * n_test / len(pixel_coords),
+        len(x_train_df), len(x_test_df),
+    )
+    return x_train_df, x_test_df, y_train_df, y_test_df
+
+
 def reindex_df(
         df: pd.DataFrame,
         column_names: tuple[str, ...] | None,
@@ -1430,9 +1495,11 @@ def create_train_test_data(
         shuffle: bool = True,
         use_ama_ina: bool = False,
         drop_gw_basins: tuple[str, ...] = ('JOSEPH CITY INA', 'WILLCOX AMA', 'HUALAPAI VALLEY INA'),
-        water_use: str = 'IRRIGATION'
 ) -> tuple:
     """Create train and test data.
+
+    Rows with ``pred_attr <= 0`` are always excluded so that the model is
+    trained only on positive pumping observations.
 
     Args:
         input_df (pd.DataFrame): Input pandas DataFrame.
@@ -1454,18 +1521,18 @@ def create_train_test_data(
         split_strategy (int): If 1, Split train test data based on year_col. If 2, then test_size amount of data from
                               year_col are kept for testing and rest for training;
                               for this option, test-year should have a tuple of integers or a True value. If 3, then
-                              test_gw_basins are used for spatial holdouts. For any other value of split-strategy,
-                              the data are randomly split.
+                              test_gw_basins are used for spatial holdouts. If 5, pixel-level spatial holdout where
+                              test_size fraction of unique pixels are held out across all years. For any other value
+                              of split-strategy, the data are randomly split.
         outlier_op (int): Outlier operation to perform. Set to 1 for removing outlier directly or 2 for removing
-                          outliers by each basin and each year. Set to 3 to remove all values less than min_gw_pumping 
+                          outliers by each basin and each year. Set to 3 to remove all values less than min_gw_pumping
                           and greater than max_gw_pumping.
         min_gw_pumping (float): Minimum gw pumping value in mm. Default is 0.
         max_gw_pumping (float): Maximum gw pumping value in mm. Default is np.inf.
         shuffle (bool): Set False to stop data shuffling.
         use_ama_ina (bool): Set True to use AMA-INA basins.
-        drop_gw_basins (tuple (str, ...)): Tuple of GW basins to drop from the data set. Default basins are: 
+        drop_gw_basins (tuple (str, ...)): Tuple of GW basins to drop from the data set. Default basins are:
         ('JOSEPH CITY INA', 'WILLCOX AMA', 'HUALAPAI VALLEY INA'). These basins have very less data.
-        water_use (str): Type of water use to consider. Default is 'IRRIGATION'. Other option is 'All'.
 
     Returns:
         tuple: A tuple containing X_train, X_test as pandas data frames, y_train, y_test as numpy arrays.
@@ -1503,7 +1570,7 @@ def create_train_test_data(
         input_df = input_df.dropna()
         if len(input_df) < n_before:
             logger.info(f'Dropped {n_before - len(input_df)} rows with NaN values')
-        input_df = input_df[input_df[pred_attr] > 0] if water_use == 'IRRIGATION' else input_df
+        input_df = input_df[input_df[pred_attr] > 0]
         if outlier_op is not None:
             input_df = process_outliers(
                 input_df, pred_attr,

@@ -419,7 +419,8 @@ def create_streamflow_rasters(
         start_year: int = 1896,
         end_year: int = 2099,
         canal_density_file: str | None = None,
-        already_created: bool = False
+        already_created: bool = False,
+        verbose: bool = False
 ) -> None:
     """
     Create annual streamflow rasters (mm/yr) for Arizona surface watersheds.
@@ -446,6 +447,7 @@ def create_streamflow_rasters(
         canal_density_file (str or None): Path to the canal density raster. If
             provided, also creates Canal_Weighted_Streamflow_YYYY.tif rasters.
         already_created (bool): If True, skip creation.
+        verbose (bool): If True, show detailed progress logs. Defaults to False.
 
     Returns:
         None
@@ -461,6 +463,7 @@ def create_streamflow_rasters(
         output_dir=streamflow_dir,
         start_year=start_year,
         end_year=end_year,
+        verbose=verbose,
     )
     makedirs(streamflow_dir)
 
@@ -529,7 +532,8 @@ def create_streamflow_rasters(
             canal_arr = cd_arr_native
         cd_file.close()
         canal_arr[np.isnan(canal_arr)] = 0.0
-        logger.info('Loaded canal density raster for weighted streamflow')
+        if verbose:
+            logger.info('Loaded canal density raster for weighted streamflow')
 
     # Step 3: Map gauges to watersheds and compute watershed areas (m²)
     ws_sites = _get_site_watershed_map(sites_csv, watershed_geojson)
@@ -554,7 +558,8 @@ def create_streamflow_rasters(
     co_river_sites = ['09380000', '09426650']
 
     # Step 4: Compute annual streamflow per watershed
-    logger.info('Computing annual streamflow per watershed...')
+    if verbose:
+        logger.info('Computing annual streamflow per watershed...')
     ws_annual = {}
     for oid in unique_oids:
         site_ids = ws_sites.get(oid, [])

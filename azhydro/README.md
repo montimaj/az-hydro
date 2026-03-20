@@ -93,6 +93,7 @@ python pipeline.py --skip-prep gee,vectors,reproject        # skip multiple sub-
 | `0`  | Data preparation (GEE download, GW processing, rasterisation) |
 | `1`  | Create AZ predictor dataset (Parquet) |
 | `2a` | Evaluate random 80/20 train/test split |
+| `2a2` | Evaluate pixel holdout (spatial locations held out across all years) |
 | `2b` | Evaluate LOO temporal holdout |
 | `2c` | Evaluate LOO spatial holdout |
 | `3`  | Full-period XGBoost prediction (1896–2099) |
@@ -274,7 +275,7 @@ numbered steps plus a cross-strategy summary:
 ```
 Step 0   ─  Data Preparation
 Step 1   ─  Create AZ Predictor DataFrame
-Step 2   ─  Model Evaluation (3 strategies: Random, Temporal LOO, Spatial LOO)
+Step 2   ─  Model Evaluation (4 strategies: Random, Pixel Holdout, Temporal LOO, Spatial LOO)
 Step 3   ─  Full-Period XGBoost Prediction (1896–2099)
 Step 3e  ─  Well Package (per-well GeoPackage with uncertainty)
 Step 3g  ─  Raster Maps & Trend Analysis for All Output Categories
@@ -363,18 +364,17 @@ steps.
 
 ### Step 2 — Model evaluation
 
-Three complementary strategies assess model performance.  Each strategy
+Four complementary strategies assess model performance.  Each strategy
 trains all available models — baseline linear regressors (Linear Regression,
 Ridge, Lasso) and ensemble tree models (XGBoost, LightGBM, Random Forest,
 Extra Trees, Histogram Gradient Boosting, CatBoost, Gradient Boosting,
-AdaBoost) — using Optuna + Dask hyperparameter optimisation (100 TPE trials,
+AdaBoost) — using Optuna + Dask hyperparameter optimisation (100 TPE trials
+for fast histogram-based models, 10 for traditional sklearn ensembles,
 5-fold CV; 1 trial for parameter-free baselines) and reports R², normalised
-RMSE (% of σ), normalised MAE (% of σ), and normalised MBE (%).  NRMSE and
-NMAE are normalized by the standard deviation of observed values rather than
-the mean, which is more appropriate for the right-skewed pumping distribution
-(where mean-normalisation underestimates relative error).  NMBE remains
-mean-normalised since bias direction relative to the mean is the meaningful
-quantity.  The linear baselines
+RMSE (% of mean), normalised MAE (% of mean), and normalised MBE (%).
+All three normalised metrics use the mean of observed values as the
+denominator, giving a physically interpretable percentage error relative
+to the average pumping magnitude.  The linear baselines
 provide a reference for quantifying the value added by nonlinear models.
 
 #### Step 2a — Random 80/20 split (`evaluate_random()`)
@@ -385,6 +385,19 @@ prediction plots, scatter diagrams, and residual maps via
 `mlops.compare_all_models()` and `mlops.generate_model_visualizations()`.
 
 **Outputs:** `{MODEL_DIR}Model_Evaluation/Random/`
+
+#### Step 2a2 — Pixel holdout (`evaluate_pixel_holdout()`)
+
+A pixel-level spatial holdout where 20 % of unique spatial locations
+(identified by their easting/northing coordinates) are held out across
+**all years**.  Unlike the random split (where the same pixel may appear
+in both train and test for different years), this strategy ensures the
+model is evaluated on entirely unseen locations.  It provides a
+finer-grained spatial generalization test than the basin-level spatial
+LOO (Step 2c), revealing how well the model interpolates to new pixels
+within known basins.
+
+**Outputs:** `{MODEL_DIR}Model_Evaluation/Pixel_Holdout/`
 
 #### Step 2b — Temporal leave-one-out (`evaluate_temporal_loo()`)
 
@@ -417,7 +430,7 @@ are included.  Bias correction is applied at level 1 (global).
 
 #### Cross-strategy summary
 
-After all three strategies complete,
+After at least three strategies complete,
 `vizops.create_cross_strategy_summary()` produces:
 
 - **`Cross_Strategy_Summary.csv`** — all models × all strategies with R²,
@@ -1246,8 +1259,8 @@ Key functions:
   bias correction.
 - **`perform_bias_correction()`** — Applies basin-level or global bias
   correction using linear scaling.
-- **`calc_train_test_metrics()`** — Computes R², normalised RMSE (% of σ),
-  normalised MAE (% of σ), and normalised MBE (% of mean).
+- **`calc_train_test_metrics()`** — Computes R², normalised RMSE (% of mean),
+  normalised MAE (% of mean), and normalised MBE (% of mean).
 - **`compute_perm_imp()`**, **`compute_ale_plots()`**,
   **`compute_shap_plots()`** — Model interpretability diagnostics.
 - **`generate_model_visualizations()`** — Scatter, residual, and time series

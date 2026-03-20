@@ -4,8 +4,9 @@ ML Pipeline Script for Arizona Groundwater Pumping Prediction.
 This script executes the remaining pipeline:
 1. Creates dummy annual predictor data from 1896-2099 for AZ and assigns each
    pixel an ADWR groundwater sub-basin label (``GW_Subbasin``).
-2. Evaluates tree-based ML models (1984-2024) on three splitting strategies:
+2. Evaluates tree-based ML models (1984-2024) on four splitting strategies:
    a) Random 80/20 train/test split.
+   a2) Pixel holdout — 20% of unique spatial locations held out across all years.
    b) Leave-one-out temporal holdout over multiple test-year ranges (T1-T6),
       reporting per-holdout and averaged metrics.
    c) Leave-one-out spatial holdout over every AMA/INA sub-basin (ADWR),
@@ -260,6 +261,7 @@ def prepare_data(
         end_year=END_YEAR,
         canal_density_file=canal_density_file,
         already_created=skip_streamflow,
+        verbose=verbose,
     )
 
     # GW basin, sub-basin & well density rasters
@@ -424,7 +426,6 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
         test_gw_basins=(),
         use_ama_ina=USE_AMA_INA,
         drop_gw_basins=DROP_GW_BASINS,
-        water_use=WATER_USE,
     )
     (x_train, x_test, y_train, y_test,
      x_scaler, y_scaler,
@@ -475,6 +476,92 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
     return {'comparison_df': comparison_df, 'strategy': 'Random'}
 
 
+# ---- 2a2. Pixel holdout evaluation ----------------------------------------
+def evaluate_pixel_holdout(az_df: pd.DataFrame) -> dict:
+    """Pixel-level spatial holdout — 80/20 split on unique pixel locations.
+
+    All years for a given pixel are assigned to either train or test, ensuring
+    the model is evaluated on entirely unseen spatial locations.
+
+    Args:
+        az_df (pd.DataFrame): Arizona training DataFrame.
+
+    Returns:
+        dict: Evaluation results containing comparison DataFrame and
+            best model metadata.
+    """
+    logger.info('=' * 60)
+    logger.info('Step 2a2: Pixel holdout evaluation')
+    logger.info('=' * 60)
+
+    ml_models = mlops.get_model_dict(
+        get_model_names_only=True,
+        include_all_models=INCLUDE_ALL_MODELS,
+    )
+    strategy_dir = os.path.join(MODEL_DIR, 'Model_Evaluation/Pixel_Holdout')
+    test_year_limits = ((min(YEAR_LIST), max(YEAR_LIST)),)
+
+    data_dir = os.path.join(strategy_dir, 'data')
+    ret_vals = dataops.create_train_test_data(
+        az_df, data_dir,
+        drop_attr=DROP_ATTRS,
+        random_state=RANDOM_STATE,
+        scaling=False, already_created=False,
+        year_list=YEAR_LIST, split_strategy=5,
+        test_year=True, outlier_op=None,
+        test_gw_basins=(),
+        use_ama_ina=USE_AMA_INA,
+        drop_gw_basins=DROP_GW_BASINS,
+    )
+    (x_train, x_test, y_train, y_test,
+     x_scaler, y_scaler,
+     year_train, year_test,
+     basin_train, basin_test) = ret_vals
+
+    comparison_dir = os.path.join(strategy_dir, 'Model_Comparison')
+    comparison_df = mlops.compare_all_models(
+        x_train, x_test, y_train, y_test,
+        comparison_dir,
+        model_names=ml_models,
+        random_state=RANDOM_STATE,
+        use_optuna=USE_OPTUNA,
+        fold_count=FOLD_COUNT,
+        repeats=REPEATS,
+        n_trials=N_TRIALS,
+        n_dask_workers=N_DASK_WORKERS,
+        use_dask=USE_DASK,
+        year_train=year_train,
+        year_test=year_test,
+        basin_train=basin_train,
+        basin_test=basin_test,
+        x_scaler=x_scaler,
+        y_scaler=y_scaler,
+        use_ama_ina=USE_AMA_INA,
+        apply_bias_correction=2,
+    )
+    logger.info(f'\nPixel holdout model comparison:\n{comparison_df.to_string(index=False)}')
+
+    # Per-model visualisations
+    for model_name in ml_models:
+        bc_pq = os.path.join(comparison_dir, model_name, f'Predictions_{model_name}_BC.parquet')
+        raw_pq = os.path.join(comparison_dir, model_name, f'Predictions_{model_name}.parquet')
+        pq = bc_pq if os.path.exists(bc_pq) else raw_pq
+        if os.path.exists(pq):
+            pred_df = pd.read_parquet(pq)
+            mlops.generate_model_visualizations(
+                pred_df=pred_df,
+                output_dir=os.path.join(comparison_dir, model_name, 'Visualizations'),
+                model_name=model_name,
+                test_case='Pixel_Holdout',
+                test_year_limits=test_year_limits,
+                raster_res=MOSAIC_RASTER_RES,
+                use_ama_ina=USE_AMA_INA,
+                create_basin_plots=True,
+            )
+
+    return {'comparison_df': comparison_df, 'strategy': 'Pixel_Holdout'}
+
+
 # ---- 2b. Leave-one-out temporal holdout ------------------------------------
 def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
     """
@@ -520,7 +607,6 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
             test_gw_basins=(),
             use_ama_ina=USE_AMA_INA,
             drop_gw_basins=DROP_GW_BASINS,
-            water_use=WATER_USE,
         )
         (x_train, x_test, y_train, y_test,
          x_scaler, y_scaler,
@@ -699,7 +785,6 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
             gw_basin_col='GW_Subbasin',
             use_ama_ina=False,  # filtering is handled by subbasin list
             drop_gw_basins=(),
-            water_use=WATER_USE,
         )
         (x_train, x_test, y_train, y_test,
          x_scaler, y_scaler,
@@ -865,7 +950,6 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         test_gw_basins=(),
         use_ama_ina=USE_AMA_INA,
         drop_gw_basins=DROP_GW_BASINS,
-        water_use=WATER_USE,
     )
     x_train, y_train = ret_vals[0], ret_vals[2]
 
@@ -1825,6 +1909,7 @@ Pipeline steps (comma-separated or 'all'):
   0    Data preparation (GEE download, GW processing)
   1    Create AZ dataset (Parquet)
   2a   Evaluate random 80/20 split
+  2a2  Evaluate pixel holdout (spatial locations held out across all years)
   2b   Evaluate LOO temporal holdout
   2c   Evaluate LOO spatial holdout
   3    Full-period XGBoost prediction (1896-2099)
@@ -1955,6 +2040,11 @@ def main() -> None:
     if should_run('2a'):
         random_results = evaluate_random(get_az_df())
 
+    # Step 2a2 — Pixel Holdout
+    pixel_results = None
+    if should_run('2a2'):
+        pixel_results = evaluate_pixel_holdout(get_az_df())
+
     # Step 2b — LOO Temporal
     temporal_results = None
     if should_run('2b'):
@@ -1965,14 +2055,17 @@ def main() -> None:
     if should_run('2c'):
         spatial_results = evaluate_spatial_loo(get_az_df())
 
-    # Cross-strategy summary (only if all 3 evaluations ran)
-    if all(r is not None for r in (random_results, temporal_results, spatial_results)):
+    # Cross-strategy summary (only if all evaluations ran)
+    eval_strategies = {
+        'Random': random_results,
+        'Pixel_Holdout': pixel_results,
+        'Temporal_LOO': temporal_results,
+        'Spatial_LOO': spatial_results,
+    }
+    eval_strategies = {k: v for k, v in eval_strategies.items() if v is not None}
+    if len(eval_strategies) >= 3:
         vizops.create_cross_strategy_summary(
-            {
-                'Random': random_results,
-                'Temporal_LOO': temporal_results,
-                'Spatial_LOO': spatial_results,
-            },
+            eval_strategies,
             os.path.join(MODEL_DIR, 'Model_Evaluation'),
         )
 
