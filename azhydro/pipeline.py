@@ -28,6 +28,7 @@ import os
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+from sklearn.base import clone
 from sklearn.metrics import r2_score
 
 import hydrolibs.dataops as dataops
@@ -1008,6 +1009,62 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     )
     exceedance_summary = []  # collect per-year exceedance stats
 
+    # ---- Global bias correction from training residuals ----
+    # A single correction is learned from ALL AMA/INA training data so
+    # it generalises to non-AMA/INA basins during full-period prediction.
+    # Compare raw (no correction), linear (pred_corrected = |m*pred + b|),
+    # and ML (secondary XGBoost: features → residuals).  The method with
+    # the lowest training RMSE is kept.
+    train_preds = np.abs(model.predict(x_train))
+    train_residuals = y_train - train_preds
+
+    bc_dir = os.path.join(prediction_dir, 'Bias_Correction')
+    makedirs(bc_dir)
+
+    raw_rmse = float(np.sqrt(np.mean((y_train - train_preds) ** 2)))
+
+    # Linear correction: actual ≈ m * pred + b
+    pv = np.var(train_preds)
+    if pv > 0:
+        m = np.cov(train_preds, y_train)[0, 1] / pv
+        b = np.mean(y_train) - m * np.mean(train_preds)
+    else:
+        m, b = 1.0, 0.0
+    linear_corrected = np.abs(m * train_preds + b)
+    linear_rmse = float(np.sqrt(np.mean((y_train - linear_corrected) ** 2)))
+
+    # ML correction: secondary model predicts residuals from features
+    bc_model_dict = mlops.get_model_dict(random_state=RANDOM_STATE, use_dask=False,
+                                         include_all_models=True)
+    bc_base_model = bc_model_dict[model_name]
+    bc_ml = clone(bc_base_model)
+    bc_ml.fit(x_train, train_residuals)
+    ml_corrected = np.abs(train_preds + bc_ml.predict(x_train))
+    ml_rmse = float(np.sqrt(np.mean((y_train - ml_corrected) ** 2)))
+
+    if raw_rmse <= linear_rmse and raw_rmse <= ml_rmse:
+        bc_model = ('none',)
+        bc_chosen = 'None'
+    elif linear_rmse <= ml_rmse:
+        bc_model = ('linear', m, b)
+        bc_chosen = 'Linear'
+    else:
+        bc_model = ('ml', bc_ml)
+        bc_chosen = 'ML'
+
+    bc_summary = pd.DataFrame([{
+        'Method': bc_chosen,
+        'N_Samples': len(train_preds),
+        'Raw_RMSE': round(raw_rmse, 4),
+        'Linear_RMSE': round(linear_rmse, 4),
+        'ML_RMSE': round(ml_rmse, 4),
+    }])
+    bc_summary.to_csv(os.path.join(bc_dir, 'Global_BC_Summary.csv'), index=False)
+    logger.info(
+        'Global bias correction: method=%s  (Raw RMSE=%.4f, Linear=%.4f, ML=%.4f, N=%d)',
+        bc_chosen, raw_rmse, linear_rmse, ml_rmse, len(train_preds),
+    )
+
     feature_cols = list(x_train.columns)
     raster_dir = os.path.join(prediction_dir, 'Predicted_Rasters')
     raster_dirs = {
@@ -1186,6 +1243,13 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                 break
 
         predictions = np.abs(model.predict(pred_features))
+
+        # Apply global bias correction ('none' → passthrough unchanged)
+        if bc_model[0] == 'linear':
+            m_bc, b_bc = bc_model[1], bc_model[2]
+            predictions = np.abs(m_bc * predictions + b_bc)
+        elif bc_model[0] == 'ml':
+            predictions = np.abs(predictions + bc_model[1].predict(pred_features))
 
         # Per-pixel prediction range check against training-era ceiling
         n_pixels = len(predictions)

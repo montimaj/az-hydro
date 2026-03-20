@@ -513,9 +513,18 @@ is unlikely to change substantially over the projection horizon.  Per-year
 exceedance statistics are accumulated and written to
 `Prediction_Exceedance_Summary.csv` with era-level summaries.
 
+Before the loop, a **global bias correction** is learned from all AMA/INA
+training data.  Three strategies are compared — raw (no correction), linear
+(`|m × pred + b|`), and ML (secondary XGBoost trained on
+features → residuals) — and the one with the lowest training RMSE is kept.
+Because a single correction is learned from all basins, it generalises to
+non-AMA/INA basins during prediction.  A summary is saved to
+`Bias_Correction/Global_BC_Summary.csv`.
+
 For each year the pipeline:
 
 1. **Predicts** total pumping (mm) across all valid pixels.
+1. **Applies global bias correction** using the strategy chosen above.
 2. **Checks prediction exceedance** against the training-era per-pixel
    maximum and P99 pumping depth.  Pixels exceeding these thresholds are
    counted per year.
@@ -1257,8 +1266,8 @@ Key functions:
   ranks them by test R².
 - **`get_prediction_results()`** — Makes predictions and applies multi-level
   bias correction.
-- **`perform_bias_correction()`** — Applies basin-level or global bias
-  correction using linear scaling.
+- **`perform_bias_correction()`** — Applies global bias correction using
+  linear scaling.
 - **`calc_train_test_metrics()`** — Computes R², normalised RMSE (% of mean),
   normalised MAE (% of mean), and normalised MBE (% of mean).
 - **`compute_perm_imp()`**, **`compute_ale_plots()`**,
