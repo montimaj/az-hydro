@@ -86,6 +86,15 @@ python pipeline.py --recreate --skip-prep streamflow        # recreate everythin
 python pipeline.py --skip-prep gee,vectors,reproject        # skip multiple sub-steps
 ```
 
+Evaluation strategies (Steps 2a/2a2/2b/2c) support `--skip-eval`:
+
+```bash
+python pipeline.py --skip-eval random,spatial         # skip random and spatial LOO evaluations
+python pipeline.py --skip-eval temporal               # skip temporal LOO evaluation
+python pipeline.py --skip-eval summary                # skip cross-strategy summary
+python pipeline.py --skip-eval pixel,temporal,summary # skip multiple strategies
+```
+
 #### Available steps
 
 | Step | Description |
@@ -118,6 +127,16 @@ python pipeline.py --skip-prep gee,vectors,reproject        # skip multiple sub-
 | `basin-rasters` | GW basin, sub-basin & well density rasters |
 | `reproject` | Reproject GEE mosaics to match GW grid |
 
+#### Evaluation sub-steps
+
+| Sub-step | Description |
+|----------|-------------|
+| `random` | Skip random 80/20 evaluation (Step 2a) |
+| `pixel` | Skip pixel holdout evaluation (Step 2a2) |
+| `temporal` | Skip LOO temporal holdout evaluation (Step 2b) |
+| `spatial` | Skip LOO spatial holdout evaluation (Step 2c) |
+| `summary` | Skip cross-strategy summary |
+
 #### CLI flags
 
 | Flag | Default | Description |
@@ -129,6 +148,7 @@ python pipeline.py --skip-prep gee,vectors,reproject        # skip multiple sub-
 | `--recreate` | — | Force recreation of intermediate files. |
 | `--skip-eda` | `False` | Skip EDA plot generation in Step 1. |
 | `--skip-prep` | — | Comma-separated Step 0 sub-steps to skip. |
+| `--skip-eval` | — | Comma-separated evaluation strategies to skip. |
 | `-v`, `--verbose` | `False` | Enable verbose (DEBUG-level) logging. |
 
 The pipeline executes the selected steps in sequence (details below).

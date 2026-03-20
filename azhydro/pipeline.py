@@ -1994,6 +1994,13 @@ Step 0 sub-steps (use with --skip-prep to skip individual sub-steps):
   streamflow    Canal density & streamflow rasters
   basin-rasters GW basin, sub-basin & well density rasters
   reproject     Reproject GEE mosaics to match GW grid
+
+Evaluation sub-steps (use with --skip-eval to skip individual strategies):
+  random        Skip random 80/20 evaluation (Step 2a)
+  pixel         Skip pixel holdout evaluation (Step 2a2)
+  temporal      Skip LOO temporal holdout evaluation (Step 2b)
+  spatial       Skip LOO spatial holdout evaluation (Step 2c)
+  summary       Skip cross-strategy summary
 """
 
 
@@ -2051,6 +2058,13 @@ def main() -> None:
             'basin-rasters, reproject.'
         ),
     )
+    parser.add_argument(
+        '--skip-eval', type=str, default='',
+        help=(
+            'Comma-separated evaluation strategies to skip: '
+            'random, pixel, temporal, spatial, summary.'
+        ),
+    )
     args = parser.parse_args()
 
     if args.verbose:
@@ -2061,6 +2075,7 @@ def main() -> None:
     skip_download = args.skip_download
     load_files = args.load_files
     skip_prep = set(s.strip().lower() for s in args.skip_prep.split(',') if s.strip())
+    skip_eval = set(s.strip().lower() for s in args.skip_eval.split(',') if s.strip())
 
     data_band_names = None
 
@@ -2101,23 +2116,31 @@ def main() -> None:
 
     # Step 2a — Random
     random_results = None
-    if should_run('2a'):
+    if should_run('2a') and 'random' not in skip_eval:
         random_results = evaluate_random(get_az_df())
+    elif 'random' in skip_eval:
+        logger.info('Skipping Step 2a (random) per --skip-eval.')
 
     # Step 2a2 — Pixel Holdout
     pixel_results = None
-    if should_run('2a2'):
+    if should_run('2a2') and 'pixel' not in skip_eval:
         pixel_results = evaluate_pixel_holdout(get_az_df())
+    elif 'pixel' in skip_eval:
+        logger.info('Skipping Step 2a2 (pixel holdout) per --skip-eval.')
 
     # Step 2b — LOO Temporal
     temporal_results = None
-    if should_run('2b'):
+    if should_run('2b') and 'temporal' not in skip_eval:
         temporal_results = evaluate_temporal_loo(get_az_df())
+    elif 'temporal' in skip_eval:
+        logger.info('Skipping Step 2b (temporal LOO) per --skip-eval.')
 
     # Step 2c — LOO Spatial (ADWR sub-basins)
     spatial_results = None
-    if should_run('2c'):
+    if should_run('2c') and 'spatial' not in skip_eval:
         spatial_results = evaluate_spatial_loo(get_az_df())
+    elif 'spatial' in skip_eval:
+        logger.info('Skipping Step 2c (spatial LOO) per --skip-eval.')
 
     # Cross-strategy summary (only if all evaluations ran)
     eval_strategies = {
@@ -2127,11 +2150,13 @@ def main() -> None:
         'Spatial_LOO': spatial_results,
     }
     eval_strategies = {k: v for k, v in eval_strategies.items() if v is not None}
-    if len(eval_strategies) >= 3:
+    if 'summary' not in skip_eval and len(eval_strategies) >= 3:
         vizops.create_cross_strategy_summary(
             eval_strategies,
             os.path.join(MODEL_DIR, 'Model_Evaluation'),
         )
+    elif 'summary' in skip_eval:
+        logger.info('Skipping cross-strategy summary per --skip-eval.')
 
     # Step 3
     model = feature_cols = x_train = y_train = None

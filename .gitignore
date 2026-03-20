@@ -180,4 +180,5 @@ GRAIN_v.1.0.zip
 _*.py
 recommendations.md
 Data/Outputs
+catboost_info/
 
