@@ -634,6 +634,8 @@ def get_feature_dict(get_units: bool = False) -> dict[str, str] | tuple[dict[str
         'annual_tmmn_K': 'K',
         'streamflow_mm': 'mm',
         'canal_weighted_streamflow_mm': 'mm',
+        'canal_density': 'segments/pixel',
+        'well_density': 'count/pixel',
         'soil_depth_mm': 'mm',
         'awc_mm': 'mm',
         'ksat_mean_micromps': r'$\mu$m/s',
