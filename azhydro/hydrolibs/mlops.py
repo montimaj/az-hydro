@@ -1561,11 +1561,11 @@ def generate_interp_plots(
     # SHAP plots (train + test, separate labels)
     compute_shap_plots(
         model_name, model, x_tr, interp_dir,
-        log_target=log_target, data_label='train',
+        data_label='train',
     )
     compute_shap_plots(
         model_name, model, x_te, interp_dir,
-        log_target=log_target, data_label='test',
+        data_label='test',
     )
 
 
