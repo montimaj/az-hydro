@@ -181,4 +181,5 @@ _*.py
 recommendations.md
 Data/Outputs
 catboost_info/
+.claude/
 
