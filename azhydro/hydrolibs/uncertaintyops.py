@@ -1789,7 +1789,7 @@ def compute_sigma_cu(
     Irrigation_SW_CU.
 
     Args:
-        prediction_dir (str): Base prediction directory (``Full_Prediction_XGB``).
+        prediction_dir (str): Base prediction directory (``Full_Prediction_PIML_XGB``).
         output_dir (str): Base output directory for uncertainty products.
         basin_shp (str): Path to groundwater basin shapefile.
         input_dir (str): Root input directory (for NHM IE CSV paths).
@@ -2016,7 +2016,7 @@ def run_uncertainty_quantification(
     logger.info('Step 3b: Hybrid Uncertainty Quantification')
     logger.info('=' * 60)
 
-    unc_dir = os.path.join(model_dir, 'Full_Prediction_XGB/Uncertainty')
+    unc_dir = os.path.join(model_dir, 'Full_Prediction_PIML_XGB/Uncertainty')
     makedirs(unc_dir)
 
     # ── σ_MACA ──
@@ -2084,7 +2084,7 @@ def run_uncertainty_quantification(
         'GW': cat_sigma_gw,
     }
     prediction_raster_dir = (
-        os.path.join(model_dir, 'Full_Prediction_XGB/Predicted_Rasters/Depth_mm')
+        os.path.join(model_dir, 'Full_Prediction_PIML_XGB/Predicted_Rasters/Depth_mm')
     )
     compute_sigma_total(
         sigma_components, pred_data_dir, unc_dir,
@@ -2104,9 +2104,9 @@ def run_uncertainty_quantification(
 
     # ── Augment prediction rasters with uncertainty bands ──
     prediction_base_dir = (
-        os.path.join(model_dir, 'Full_Prediction_XGB/Predicted_Rasters')
+        os.path.join(model_dir, 'Full_Prediction_PIML_XGB/Predicted_Rasters')
     )
-    full_pred_dir = os.path.join(model_dir, 'Full_Prediction_XGB')
+    full_pred_dir = os.path.join(model_dir, 'Full_Prediction_PIML_XGB')
     augment_prediction_rasters(
         sigma_total_raster_dir=os.path.join(unc_dir, 'Sigma_Total', 'Rasters'),
         prediction_base_dir=prediction_base_dir,

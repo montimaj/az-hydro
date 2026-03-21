@@ -44,6 +44,16 @@ from hydrolibs.mlops import (
     _abs_normalized_rmse,
     _abs_normalized_mae,
     _abs_normalized_mbe,
+    compute_irrigation_demand_floor,
+    make_physics_floor_objective,
+    _build_monotone_constraints,
+    _build_interaction_constraints,
+    MONOTONE_CONSTRAINT_MAP,
+    INTERACTION_GROUPS,
+    PhysicsXGBRegressor,
+    PhysicsLGBMRegressor,
+    PhysicsXGBRFRegressor,
+    _PHYS_COL,
 )
 from hydrolibs.rasterops import read_raster_as_arr, write_raster
 from hydrolibs.uncertaintyops import (
@@ -304,8 +314,8 @@ class TestNormalizedRMSE:
         y_pred = np.array([12.0, 18.0, 32.0])
         assert normalized_rmse(y, y_pred) > 0
 
-    def test_zero_std_returns_nan(self):
-        y = np.array([5.0, 5.0, 5.0])
+    def test_zero_mean_returns_nan(self):
+        y = np.array([0.0, 0.0, 0.0])
         assert np.isnan(normalized_rmse(y, y + 0.1))
 
 
@@ -319,8 +329,8 @@ class TestNormalizedMAE:
         y_pred = np.array([6.0, 9.0, 14.0])
         assert normalized_mae(y, y_pred) > 0
 
-    def test_zero_std_returns_nan(self):
-        y = np.array([5.0, 5.0, 5.0])
+    def test_zero_mean_returns_nan(self):
+        y = np.array([0.0, 0.0, 0.0])
         assert np.isnan(normalized_mae(y, y + 0.5))
 
 
@@ -524,7 +534,7 @@ class TestPixelStats:
     def test_basic_stats(self):
         vals = np.array([10.0, 20.0, 30.0])
         mm_to_m3 = 1000.0  # arbitrary scale
-        result = _pixel_stats(vals, mm_to_m3, M3_TO_AF)
+        result = _pixel_stats(vals, mm_to_m3)
         assert result['Mean_Depth_mm'] == pytest.approx(20.0)
         assert result['Mean_Depth_ft'] == pytest.approx(20.0 * MM_TO_FT, rel=1e-4)
         assert result['Volume_m3'] == pytest.approx(60.0 * mm_to_m3, rel=1e-4)
@@ -532,7 +542,7 @@ class TestPixelStats:
 
     def test_empty_input(self):
         vals = np.array([])
-        result = _pixel_stats(vals, 1.0, M3_TO_AF)
+        result = _pixel_stats(vals, 1.0)
         assert result['Mean_Depth_mm'] == 0.0
         assert result['Volume_m3'] == 0.0
 
@@ -617,3 +627,225 @@ class TestEraShadedTs:
         # axvspan creates patches; should have one per era
         assert len(ax.patches) >= len(ERA_PERIODS)
         plt.close(fig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Physics-Informed ML tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestIrrigationDemandFloor:
+    """Tests for compute_irrigation_demand_floor()."""
+
+    def _make_data(self, n=100):
+        rng = np.random.default_rng(42)
+        x = pd.DataFrame({
+            'annual_et_ensemble_mm': rng.uniform(200, 800, n),
+            'annual_peff_mm': rng.uniform(50, 300, n),
+            'annual_irr_fraction': rng.uniform(0, 1, n),
+            'annual_gw_fraction': rng.uniform(0, 1, n),
+            'well_density': rng.uniform(0, 10, n),
+        })
+        basins = pd.Series(rng.choice(['PHOENIX AMA', 'TUCSON AMA', 'PINAL AMA'], n))
+        nhm_ie = {
+            'mean': {'PHOENIX AMA': 0.65, 'TUCSON AMA': 0.70, 'PINAL AMA': 0.60},
+            'overall_mean': 0.65,
+        }
+        return x, basins, nhm_ie
+
+    def test_output_shape(self):
+        x, basins, nhm_ie = self._make_data()
+        y_floor = compute_irrigation_demand_floor(x, basins, nhm_ie)
+        assert y_floor.shape == (len(x),)
+
+    def test_non_negative(self):
+        x, basins, nhm_ie = self._make_data()
+        y_floor = compute_irrigation_demand_floor(x, basins, nhm_ie)
+        assert np.all(y_floor >= 0)
+
+    def test_zero_for_non_irrigated(self):
+        x, basins, nhm_ie = self._make_data(10)
+        x['annual_irr_fraction'] = 0.0
+        y_floor = compute_irrigation_demand_floor(x, basins, nhm_ie)
+        np.testing.assert_array_equal(y_floor, 0.0)
+
+    def test_unknown_basin_uses_fallback(self):
+        x, _, nhm_ie = self._make_data(5)
+        basins = pd.Series(['UNKNOWN'] * 5)
+        y_floor = compute_irrigation_demand_floor(x, basins, nhm_ie)
+        # Should not raise; uses overall_mean IE
+        assert y_floor.shape == (5,)
+
+
+class TestMonotoneConstraints:
+    """Tests for _build_monotone_constraints()."""
+
+    def test_known_features(self):
+        features = ['annual_et_ensemble_mm', 'well_density', 'annual_peff_mm', 'AGRI']
+        mc = _build_monotone_constraints(features)
+        assert mc == (1, 1, -1, 1)
+
+    def test_unconstrained_features(self):
+        features = ['streamflow_mm', 'canal_density', 'soil_depth_mm']
+        mc = _build_monotone_constraints(features)
+        assert mc == (0, 0, 0)
+
+    def test_mixed(self):
+        features = ['annual_et_ensemble_mm', 'streamflow_mm', 'annual_peff_mm']
+        mc = _build_monotone_constraints(features)
+        assert mc == (1, 0, -1)
+
+
+class TestInteractionConstraints:
+    """Tests for _build_interaction_constraints()."""
+
+    def test_returns_lists_of_indices(self):
+        features = ['annual_et_ensemble_mm', 'annual_peff_mm',
+                     'annual_irr_fraction', 'annual_gw_fraction',
+                     'well_density', 'AGRI', 'URBAN', 'annual_crop_fraction']
+        ic = _build_interaction_constraints(features)
+        assert ic is not None
+        assert all(isinstance(g, list) for g in ic)
+        # All indices should be valid
+        for group in ic:
+            for idx in group:
+                assert 0 <= idx < len(features)
+
+    def test_disabled_returns_none(self):
+        features = ['annual_et_ensemble_mm', 'annual_peff_mm']
+        ic = _build_interaction_constraints(features, use_interaction_constraints=False)
+        assert ic is None
+
+
+class TestPhysicsFloorObjective:
+    """Tests for make_physics_floor_objective() gradient/hessian."""
+
+    def test_gradient_hessian_shapes(self):
+        n = 50
+        y_phys_log = np.random.default_rng(42).uniform(0, 5, n)
+        obj = make_physics_floor_objective(y_phys_log, physics_lambda=0.1)
+
+        y_pred = np.random.default_rng(0).uniform(0, 6, n)
+        y_true = np.random.default_rng(1).uniform(0, 6, n)
+        grad, hess = obj(y_pred, y_true)
+        assert grad.shape == (n,)
+        assert hess.shape == (n,)
+
+    def test_lambda_zero_is_pure_mse(self):
+        """When lambda=0, objective reduces to pure MSE gradient."""
+        n = 20
+        y_phys_log = np.ones(n) * 3.0
+        obj = make_physics_floor_objective(y_phys_log, physics_lambda=0.0)
+
+        y_pred = np.linspace(1, 5, n)
+        y_true = np.linspace(2, 4, n)
+        grad, hess = obj(y_pred, y_true)
+
+        # Pure MSE: grad = 2*(y_pred - y_true), hess = 2
+        expected_grad = 2.0 * (y_pred - y_true)
+        expected_hess = np.full(n, 2.0)
+        np.testing.assert_allclose(grad, expected_grad)
+        np.testing.assert_allclose(hess, expected_hess)
+
+    def test_numerical_gradient(self):
+        """Verify gradient against finite differences."""
+        n = 30
+        rng = np.random.default_rng(42)
+        y_phys_log = rng.uniform(1, 4, n)
+        lam = 0.2
+        obj = make_physics_floor_objective(y_phys_log, physics_lambda=lam)
+
+        y_pred = rng.uniform(0, 5, n)
+        y_true = rng.uniform(1, 4, n)
+
+        grad, _ = obj(y_pred, y_true)
+
+        # Numerical gradient via central differences
+        eps = 1e-5
+        num_grad = np.zeros(n)
+        mask = (y_phys_log > 0).astype(np.float64)
+        for i in range(n):
+            yp_plus = y_pred.copy(); yp_plus[i] += eps
+            yp_minus = y_pred.copy(); yp_minus[i] -= eps
+
+            def loss(yp):
+                res = (yp - y_true) ** 2
+                viol = np.clip(y_phys_log - yp, 0, None)
+                return (res + lam * mask * viol ** 2).sum()
+
+            num_grad[i] = (loss(yp_plus) - loss(yp_minus)) / (2 * eps)
+
+        np.testing.assert_allclose(grad, num_grad, atol=1e-4)
+
+    def test_one_sided_penalty(self):
+        """Penalty only applies when prediction is below floor."""
+        n = 10
+        y_phys_log = np.full(n, 3.0)
+        obj = make_physics_floor_objective(y_phys_log, physics_lambda=0.3)
+
+        # Predictions above floor
+        y_pred_above = np.full(n, 5.0)
+        y_true = np.full(n, 4.0)
+        grad_above, hess_above = obj(y_pred_above, y_true)
+
+        # Pure MSE grad (no floor penalty)
+        expected_grad = 2.0 * (y_pred_above - y_true)
+        np.testing.assert_allclose(grad_above, expected_grad)
+        np.testing.assert_allclose(hess_above, np.full(n, 2.0))
+
+
+class TestPhysicsWrappers:
+    """Tests for PhysicsXGBRegressor / PhysicsLGBMRegressor / PhysicsXGBRFRegressor."""
+
+    def _make_train_data(self, n=200):
+        rng = np.random.default_rng(42)
+        x = pd.DataFrame({
+            f'feat_{i}': rng.uniform(0, 1, n) for i in range(5)
+        })
+        x[_PHYS_COL] = rng.uniform(0, 3, n)
+        y = rng.uniform(0, 5, n)
+        return x, y
+
+    def test_physics_xgb_fit_predict(self):
+        x, y = self._make_train_data()
+        model = PhysicsXGBRegressor(physics_lambda=0.1, n_estimators=10, max_depth=3)
+        model.fit(x, y)
+        preds = model.predict(x)
+        assert preds.shape == (len(x),)
+
+    def test_physics_lgbm_fit_predict(self):
+        x, y = self._make_train_data()
+        model = PhysicsLGBMRegressor(
+            physics_lambda=0.1, n_estimators=10, max_depth=3,
+            num_leaves=8, verbosity=-1,
+        )
+        model.fit(x, y)
+        preds = model.predict(x)
+        assert preds.shape == (len(x),)
+
+    def test_physics_xgbrf_fit_predict(self):
+        x, y = self._make_train_data()
+        model = PhysicsXGBRFRegressor(
+            physics_lambda=0.1, num_parallel_tree=10, max_depth=3,
+        )
+        model.fit(x, y)
+        preds = model.predict(x)
+        assert preds.shape == (len(x),)
+
+    def test_lambda_zero_uses_squarederror(self):
+        """When lambda=0, wrapper falls back to reg:squarederror."""
+        x, y = self._make_train_data(50)
+        model = PhysicsXGBRegressor(physics_lambda=0.0, n_estimators=5, max_depth=3)
+        model.fit(x, y)
+        # Should have objective = 'reg:squarederror'
+        assert model.get_params()['objective'] == 'reg:squarederror'
+
+    def test_predict_strips_phys_column(self):
+        """Predict should work even when __y_phys_log__ is in X."""
+        x, y = self._make_train_data(50)
+        model = PhysicsXGBRegressor(physics_lambda=0.1, n_estimators=5, max_depth=3)
+        model.fit(x, y)
+        # Predict with physics column present
+        preds_with = model.predict(x)
+        # Predict without physics column
+        preds_without = model.predict(x.drop(columns=[_PHYS_COL]))
+        np.testing.assert_array_equal(preds_with, preds_without)

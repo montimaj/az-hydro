@@ -5,7 +5,7 @@ For each of the 5 representative GCMs, computes bias-corrected monthly ETo
 internally (same flat pipeline as the ensemble version), multiplies by monthly
 EToF, and sums to annual ET before export.
 
-Annual export is sufficient because the downstream XGBoost model operates on
+Annual export is sufficient because the downstream ML model operates on
 annual predictor variables.
 
 Dependencies: Run these first:

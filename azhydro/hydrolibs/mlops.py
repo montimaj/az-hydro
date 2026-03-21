@@ -59,11 +59,277 @@ warnings.filterwarnings('ignore', category=optuna.exceptions.ExperimentalWarning
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Physics-Informed ML: constraints, custom objectives, and wrapper estimators
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Monotone constraint map: +1 = increasing, -1 = decreasing, 0 = unconstrained
+MONOTONE_CONSTRAINT_MAP: dict[str, int] = {
+    'annual_et_ensemble_mm': 1,
+    'well_density': 1,
+    'AGRI': 1,
+    'URBAN': 1,
+    'annual_peff_mm': -1,
+    'canal_weighted_streamflow_mm': -1,
+}
+
+# Interaction constraint groups (overlapping allowed in XGBoost)
+INTERACTION_GROUPS: list[list[str]] = [
+    # Water-balance core
+    ['annual_et_ensemble_mm', 'annual_peff_mm', 'annual_irr_fraction', 'annual_gw_fraction'],
+    # Climate drivers
+    ['annual_et_ensemble_mm', 'annual_eto_mm', 'annual_tmmx_K', 'annual_tmmn_K',
+     'annual_peff_mm', 'annual_precip_mm'],
+    # Pumping infrastructure
+    ['well_density', 'AGRI', 'URBAN', 'annual_crop_fraction'],
+    # Water source
+    ['streamflow_mm', 'canal_weighted_streamflow_mm', 'canal_density', 'annual_gw_fraction'],
+    # Soil properties
+    ['soil_depth_mm', 'awc_mm', 'ksat_mean_micromps'],
+]
+
+# Models that receive physics-informed treatment
+_PIML_MODELS = {'PIML_XGB', 'PIML_LGBM', 'PIML_XGBRF'}
+
+# Optional models (require include_all_models=True)
+_OPTIONAL_MODELS = {'ETR', 'HGBR', 'GBR', 'ADA', 'BAG', 'CAT', 'LR', 'RIDGE', 'LASSO'}
+
+
+def compute_irrigation_demand_floor(
+        x: pd.DataFrame,
+        basin_series: pd.Series,
+        nhm_basin_ie: dict,
+        et_col: str = 'annual_et_ensemble_mm',
+        peff_col: str = 'annual_peff_mm',
+        irr_frac_col: str = 'annual_irr_fraction',
+        gw_frac_col: str = 'annual_gw_fraction',
+) -> np.ndarray:
+    """Compute irrigation demand floor for each training sample.
+
+    The water balance ``(ET - Peff) × irr_frac × gw_frac / IE`` estimates
+    only the irrigation component of GW pumping.  Since the model predicts
+    total GW pumping (irrigation + municipal/industrial), this serves as a
+    **lower bound**.
+
+    Args:
+        x: Feature DataFrame (must contain ET, Peff, irr_fraction, gw_fraction).
+        basin_series: Per-sample basin name (aligned with x).
+        nhm_basin_ie: Dict from ``load_nhm_basin_ie()`` with key ``'mean'``
+            mapping basin names to mean irrigation efficiency, and
+            ``'overall_mean'`` as fallback.
+        et_col: Column name for annual ET.
+        peff_col: Column name for annual effective precipitation.
+        irr_frac_col: Column name for irrigated fraction.
+        gw_frac_col: Column name for groundwater fraction.
+
+    Returns:
+        1-D array of irrigation demand floor values (mm), clipped to ≥ 0.
+    """
+    et = x[et_col].values
+    peff = x[peff_col].values
+    irr_frac = x[irr_frac_col].values
+    gw_frac = x[gw_frac_col].values
+
+    ie_mean = nhm_basin_ie['mean']
+    overall_ie = nhm_basin_ie.get('overall_mean', 0.5)
+    ie_arr = np.array([ie_mean.get(b, overall_ie) for b in basin_series.values])
+    # Avoid division by zero
+    ie_arr = np.where(ie_arr > 0, ie_arr, overall_ie)
+
+    y_floor = (et - peff) * irr_frac * gw_frac / ie_arr
+    return np.clip(y_floor, 0, None)
+
+
+def _build_monotone_constraints(feature_names: list[str]) -> tuple[int, ...]:
+    """Build monotone constraint tuple aligned with feature column order."""
+    return tuple(MONOTONE_CONSTRAINT_MAP.get(f, 0) for f in feature_names)
+
+
+def _build_interaction_constraints(
+        feature_names: list[str],
+        use_interaction_constraints: bool = True,
+) -> list[list[int]] | None:
+    """Build interaction constraint index lists aligned with feature columns.
+
+    Returns None when disabled or when no group maps to the feature set.
+    """
+    if not use_interaction_constraints:
+        return None
+    name_to_idx = {name: i for i, name in enumerate(feature_names)}
+    constraints = []
+    for group in INTERACTION_GROUPS:
+        idx_list = [name_to_idx[f] for f in group if f in name_to_idx]
+        if len(idx_list) >= 2:
+            constraints.append(idx_list)
+    return constraints if constraints else None
+
+
+def make_physics_floor_objective(y_phys_log: np.ndarray, physics_lambda: float):
+    """Factory for XGBoost/LightGBM custom objective with irrigation-demand floor.
+
+    The penalty is **one-sided**: only active when the prediction falls below
+    the physics-derived irrigation demand floor (in log1p space).
+
+    Args:
+        y_phys_log: 1-D array of ``log1p(irrigation_demand_floor)`` per sample.
+        physics_lambda: Strength of the floor penalty (tuned by Optuna).
+
+    Returns:
+        Callable ``(y_pred, y_true) -> (grad, hess)`` suitable for
+        ``XGBRegressor(objective=...)`` or ``LGBMRegressor(objective=...)``.
+    """
+    mask = (y_phys_log > 0).astype(np.float64)
+
+    def _objective(y_pred: np.ndarray, y_true) -> tuple[np.ndarray, np.ndarray]:
+        # y_true may be a DMatrix (XGB) or array (LGBM)
+        if hasattr(y_true, 'get_label'):
+            y_true = y_true.get_label()
+        y_true = np.asarray(y_true, dtype=np.float64)
+        y_pred = np.asarray(y_pred, dtype=np.float64)
+
+        residual = y_pred - y_true                     # MSE component
+        violation = np.clip(y_phys_log - y_pred, 0, None)  # floor violation
+
+        grad = 2.0 * residual - 2.0 * physics_lambda * mask * violation
+        hess = 2.0 + 2.0 * physics_lambda * mask * (violation > 0).astype(np.float64)
+        return grad, hess
+
+    return _objective
+
+
+# ── Physics wrapper estimators ───────────────────────────────────────────────
+# These wrap XGBRegressor / LGBMRegressor / XGBRFRegressor and smuggle the
+# physics floor (y_phys_log) through sklearn's cross_validate by appending it
+# as an extra column ``__y_phys_log__`` in X.  fit() strips it, builds the
+# custom objective, and delegates to the underlying estimator.
+
+_PHYS_COL = '__y_phys_log__'
+
+
+def _real_n_features(x: pd.DataFrame | np.ndarray) -> int:
+    """Return the number of real features (excluding the physics column)."""
+    n = x.shape[1]
+    if isinstance(x, pd.DataFrame) and _PHYS_COL in x.columns:
+        n -= 1
+    return n
+
+
+class _PhysicsXGBMixin:
+    """Shared logic for physics-informed XGBoost-family estimators."""
+
+    def _extract_phys(self, X):
+        """Strip the physics column from X and return (X_clean, y_phys_log)."""
+        if isinstance(X, pd.DataFrame) and _PHYS_COL in X.columns:
+            y_phys = X[_PHYS_COL].values
+            X_clean = X.drop(columns=[_PHYS_COL])
+            return X_clean, y_phys
+        elif isinstance(X, np.ndarray) and hasattr(self, '_phys_col_idx'):
+            y_phys = X[:, self._phys_col_idx]
+            X_clean = np.delete(X, self._phys_col_idx, axis=1)
+            return X_clean, y_phys
+        return X, None
+
+    def fit(self, X, y, **kwargs):
+        X_clean, y_phys = self._extract_phys(X)
+        if y_phys is not None and self.physics_lambda > 0:
+            self.set_params(
+                objective=make_physics_floor_objective(y_phys, self.physics_lambda)
+            )
+        else:
+            # Pure MSE fallback (λ=0 or no physics column)
+            self.set_params(objective='reg:squarederror')
+        return super().fit(X_clean, y, **kwargs)
+
+    def predict(self, X, **kwargs):
+        X_clean, _ = self._extract_phys(X)
+        return super().predict(X_clean, **kwargs)
+
+    def score(self, X, y, **kwargs):
+        X_clean, _ = self._extract_phys(X)
+        return super().score(X_clean, y, **kwargs)
+
+    def get_xgb_params(self):
+        """Exclude physics_lambda from XGBoost's internal parameter dict."""
+        params = super().get_xgb_params()
+        params.pop('physics_lambda', None)
+        return params
+
+    def get_n_features(self, X):
+        """Return the number of real features (excluding physics column)."""
+        if isinstance(X, pd.DataFrame) and _PHYS_COL in X.columns:
+            return X.shape[1] - 1
+        return X.shape[1]
+
+
+class _PhysicsLGBMMixin:
+    """Shared logic for physics-informed LightGBM estimators."""
+
+    def _extract_phys(self, X):
+        if isinstance(X, pd.DataFrame) and _PHYS_COL in X.columns:
+            y_phys = X[_PHYS_COL].values
+            X_clean = X.drop(columns=[_PHYS_COL])
+            return X_clean, y_phys
+        elif isinstance(X, np.ndarray) and hasattr(self, '_phys_col_idx'):
+            y_phys = X[:, self._phys_col_idx]
+            X_clean = np.delete(X, self._phys_col_idx, axis=1)
+            return X_clean, y_phys
+        return X, None
+
+    def fit(self, X, y, **kwargs):
+        X_clean, y_phys = self._extract_phys(X)
+        if y_phys is not None and self.physics_lambda > 0:
+            self.set_params(
+                objective=make_physics_floor_objective(y_phys, self.physics_lambda)
+            )
+        else:
+            self.set_params(objective='regression')
+        return super().fit(X_clean, y, **kwargs)
+
+    def predict(self, X, **kwargs):
+        X_clean, _ = self._extract_phys(X)
+        return super().predict(X_clean, **kwargs)
+
+    def score(self, X, y, **kwargs):
+        X_clean, _ = self._extract_phys(X)
+        return super().score(X_clean, y, **kwargs)
+
+    def get_n_features(self, X):
+        if isinstance(X, pd.DataFrame) and _PHYS_COL in X.columns:
+            return X.shape[1] - 1
+        return X.shape[1]
+
+
+class PhysicsXGBRegressor(_PhysicsXGBMixin, XGBRegressor):
+    """XGBRegressor with physics-informed floor constraint objective."""
+
+    def __init__(self, physics_lambda: float = 0.0, **kwargs):
+        self.physics_lambda = physics_lambda
+        super().__init__(**kwargs)
+
+
+class PhysicsXGBRFRegressor(_PhysicsXGBMixin, XGBRFRegressor):
+    """XGBRFRegressor with physics-informed floor constraint objective."""
+
+    def __init__(self, physics_lambda: float = 0.0, **kwargs):
+        self.physics_lambda = physics_lambda
+        super().__init__(**kwargs)
+
+
+class PhysicsLGBMRegressor(_PhysicsLGBMMixin, LGBMRegressor):
+    """LGBMRegressor with physics-informed floor constraint objective."""
+
+    def __init__(self, physics_lambda: float = 0.0, **kwargs):
+        self.physics_lambda = physics_lambda
+        super().__init__(**kwargs)
+
+
 def get_model_dict(
         random_state: int = 0,
         use_dask: bool = False,
         get_model_names_only: bool = False,
-        include_all_models: bool = False
+        include_all_models: bool = False,
+        feature_names: list[str] | None = None,
+        use_interaction_constraints: bool = True,
 ) -> list[str] | dict[str, Any]:
     """Get model object dictionary for different models.
 
@@ -72,8 +338,15 @@ def get_model_dict(
         use_dask (bool): Set True if using Dask in a distributed computing environment.
         get_model_names_only (bool): Set True to return only model names.
         include_all_models (bool): Set True to include additional ensemble models
-                                   (RF, ETR, HGBR, GBR, AdaBoost, Bagging, CatBoost).
-                                   Core models (XGB, XGBRF, LGBM, LR, Ridge, Lasso) are always included.
+                                   (ETR, HGBR, GBR, AdaBoost, Bagging, CatBoost,
+                                   LR, Ridge, Lasso).
+                                   Core models (XGB, LGBM, RF, XGBRF, PIML_XGB,
+                                   PIML_LGBM, PIML_XGBRF) are always included.
+        feature_names (list[str] | None): Feature column names for building
+            monotone/interaction constraints on PIML models.  Required when
+            ``get_model_names_only`` is False.
+        use_interaction_constraints (bool): Whether to apply Tier 2 interaction
+            constraints to PIML models.
 
     Returns:
         Either a list of model names (if get_model_names_only is True) or a
@@ -83,14 +356,17 @@ def get_model_dict(
     if use_dask:
         n_jobs = 1
 
-    # Core models (always available)
-    # Core models: XGB/XGBRF/LGBM + baseline linear models
+    # Build physics constraints from feature names
+    mono = None
+    interaction = None
+    if feature_names is not None:
+        mono = _build_monotone_constraints(feature_names)
+        interaction = _build_interaction_constraints(feature_names, use_interaction_constraints)
+
+    # Core models (always available — 7 models)
     model_dict = {
+        # Standard baselines (4)
         'XGB': XGBRegressor(
-            n_jobs=n_jobs,
-            seed=random_state,
-        ),
-        'XGBRF': XGBRFRegressor(
             n_jobs=n_jobs,
             seed=random_state,
         ),
@@ -99,22 +375,48 @@ def get_model_dict(
             verbosity=-1, n_estimators=300, max_depth=16, num_leaves=31,
             n_jobs=n_jobs
         ),
-        'LR': LinearRegression(n_jobs=n_jobs),
-        'RIDGE': Ridge(random_state=random_state),
-        'LASSO': Lasso(random_state=random_state, max_iter=10000),
+        'RF': RandomForestRegressor(
+            n_jobs=n_jobs, oob_score=False,
+            n_estimators=300, max_features=None,
+            random_state=random_state, max_depth=None
+        ),
+        'XGBRF': XGBRFRegressor(
+            n_jobs=n_jobs,
+            seed=random_state,
+        ),
     }
 
-    # Additional ensemble models
+    # Physics-informed models (3) — add constraints if feature_names provided
+    piml_xgb_kwargs = dict(n_jobs=n_jobs, seed=random_state)
+    piml_lgbm_kwargs = dict(
+        tree_learner='feature', random_state=random_state,
+        verbosity=-1, n_estimators=300, max_depth=16, num_leaves=31,
+        n_jobs=n_jobs,
+    )
+    piml_xgbrf_kwargs = dict(n_jobs=n_jobs, seed=random_state)
+
+    if mono is not None:
+        piml_xgb_kwargs['monotone_constraints'] = mono
+        piml_xgbrf_kwargs['monotone_constraints'] = mono
+        # LGBM uses a string format for monotone constraints
+        piml_lgbm_kwargs['monotone_constraints'] = list(mono)
+
+    if interaction is not None:
+        piml_xgb_kwargs['interaction_constraints'] = interaction
+        piml_xgbrf_kwargs['interaction_constraints'] = interaction
+        # LGBM uses interaction_constraints as list of lists
+        piml_lgbm_kwargs['interaction_constraints'] = interaction
+
+    model_dict['PIML_XGB'] = PhysicsXGBRegressor(**piml_xgb_kwargs)
+    model_dict['PIML_LGBM'] = PhysicsLGBMRegressor(**piml_lgbm_kwargs)
+    model_dict['PIML_XGBRF'] = PhysicsXGBRFRegressor(**piml_xgbrf_kwargs)
+
+    # Additional ensemble models (optional)
     # Note: GBR and ADA don't support n_jobs (sequential only)
     # CatBoost uses thread_count instead of n_jobs
     thread_count = -1 if n_jobs == -2 else n_jobs
     if include_all_models:
         model_dict.update({
-            'RF': RandomForestRegressor(
-                n_jobs=n_jobs, oob_score=False,
-                n_estimators=300, max_features=None,
-                random_state=random_state, max_depth=None
-            ),
             'ETR': ExtraTreesRegressor(random_state=random_state, n_jobs=n_jobs, bootstrap=True),
             'HGBR': HistGradientBoostingRegressor(
                 max_iter=300, learning_rate=0.1,
@@ -140,6 +442,9 @@ def get_model_dict(
                 depth=8, random_state=random_state,
                 verbose=False, thread_count=thread_count
             ),
+            'LR': LinearRegression(n_jobs=n_jobs),
+            'RIDGE': Ridge(random_state=random_state),
+            'LASSO': Lasso(random_state=random_state, max_iter=10000),
         })
 
     if get_model_names_only:
@@ -367,7 +672,8 @@ def compute_perm_imp(
     Compute permutation importances.
 
     Args:
-        model_name (str): Name of the ML model. Has to be one of 'XGB', 'XGBRF', 'RF', 'ETR', 'LGBM', or 'HGBR.'
+        model_name (str): Name of the ML model. Supported: 'XGB', 'XGBRF', 'RF',
+            'ETR', 'LGBM', 'HGBR', 'PIML_XGB', 'PIML_LGBM', 'PIML_XGBRF'.
         x_train (pd.DataFrame): Training dataframe containing the predictor data.
         x_test (pd.DataFrame): Test dataframe containing the predictor data.
         y_train (np.array): Training labels containing the observed streamflow.
@@ -380,9 +686,13 @@ def compute_perm_imp(
 
     Returns:
         Tuple of training and test importance dataframes or
-        None if model_name is not one of 'RF', 'ETR', 'LGBM', or 'DRF.'
+        None if model_name is not in the supported set.
     """
-    if model_name in ['RF', 'ETR', 'LGBM', 'XGB', 'XGBRF', 'HGBR']:
+    _perm_imp_models = {
+        'RF', 'ETR', 'LGBM', 'XGB', 'XGBRF', 'HGBR',
+        'PIML_XGB', 'PIML_LGBM', 'PIML_XGBRF',
+    }
+    if model_name in _perm_imp_models:
         logger.info('Computing permutation importance...')
         if log_target:
             model = _OrigScaleModelWrapper(model)
@@ -461,7 +771,8 @@ def compute_ale_plots(
     Create accumulated local effects (ALE) plots.
 
     Args:
-        model_name (str): Name of the ML model. Has to be one of 'XGB', 'XGBRF', 'RF', 'ETR', 'LGBM', or 'HGBR.'
+        model_name (str): Name of the ML model. Supported: 'XGB', 'XGBRF', 'RF',
+            'ETR', 'LGBM', 'HGBR', 'PIML_XGB', 'PIML_LGBM', 'PIML_XGBRF'.
         model (Any): Fitted model object.
         x_train (pd.DataFrame): Training dataframe containing the predictor data.
         y_train (np.ndarray): Training array containing the target data.
@@ -545,6 +856,7 @@ def compute_shap_plots(
         n_dependence: int = 10,
         subsample: int = 5000,
         log_target: bool = False,
+        data_label: str = '',
 ) -> None:
     """
     Create SHAP beeswarm, bar, dependence, and waterfall plots.
@@ -558,6 +870,7 @@ def compute_shap_plots(
         n_dependence (int): Number of top features for dependence plots (default 10).
         subsample (int): Maximum number of samples for SHAP computation.
             Set to 0 to use all samples (may be slow for large datasets).
+        data_label (str): Optional label appended to filenames (e.g. 'train', 'test').
 
     Returns:
         None
@@ -566,6 +879,7 @@ def compute_shap_plots(
 
     makedirs(output_dir)
     feature_dict = get_feature_dict()
+    suffix = f'_{data_label}' if data_label else ''
 
     # Subsample if necessary
     if 0 < subsample < len(x_data):
@@ -576,7 +890,7 @@ def compute_shap_plots(
     # Rename columns to display names
     x_display = x_sub.rename(columns=feature_dict)
 
-    logger.info(f'Computing SHAP values for {model_name} ({len(x_sub)} samples)...')
+    logger.info(f'Computing SHAP values for {model_name} {data_label} ({len(x_sub)} samples)...')
     explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(x_sub)
 
@@ -587,7 +901,7 @@ def compute_shap_plots(
         max_display=max_display, show=False,
     )
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Summary.png'), dpi=600)
+    plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Summary{suffix}.png'), dpi=600)
     plt.clf()
     plt.close()
 
@@ -598,12 +912,12 @@ def compute_shap_plots(
         plot_type='bar', max_display=max_display, show=False,
     )
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Bar.png'), dpi=600)
+    plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Bar{suffix}.png'), dpi=600)
     plt.clf()
     plt.close()
 
     # 3. Dependence plots for top N features
-    dep_dir = os.path.join(output_dir, 'Dependence')
+    dep_dir = os.path.join(output_dir, f'Dependence{suffix}')
     makedirs(dep_dir)
     mean_abs_shap = np.abs(shap_values).mean(axis=0)
     top_indices = np.argsort(mean_abs_shap)[::-1][:n_dependence]
@@ -637,7 +951,7 @@ def compute_shap_plots(
     plt.figure(figsize=(12, 8))
     shap.waterfall_plot(explanation[median_idx], max_display=max_display, show=False)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Waterfall.png'), dpi=600)
+    plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Waterfall{suffix}.png'), dpi=600)
     plt.clf()
     plt.close()
 
@@ -659,8 +973,8 @@ def get_optuna_params_for_model(
     Returns:
         dict[str, Any]: Dictionary of suggested hyperparameters.
     """
-    if model_name == 'XGB':
-        return {
+    if model_name in ('XGB', 'PIML_XGB'):
+        params = {
             'eta': trial.suggest_float('eta', 0.01, 0.3, log=True),
             'max_depth': trial.suggest_int('max_depth', 3, 10),
             'n_estimators': trial.suggest_int('n_estimators', 300, 600, step=100),
@@ -669,8 +983,11 @@ def get_optuna_params_for_model(
             'reg_lambda': trial.suggest_float('reg_lambda', 1e-3, 10.0, log=True),
             'min_child_weight': trial.suggest_int('min_child_weight', 1, 50),
         }
-    elif model_name == 'XGBRF':
-        return {
+        if model_name == 'PIML_XGB':
+            params['physics_lambda'] = trial.suggest_float('physics_lambda', 0.0, 0.5)
+        return params
+    elif model_name in ('XGBRF', 'PIML_XGBRF'):
+        params = {
             'eta': trial.suggest_float('eta', 0.01, 0.3, log=True),
             'max_depth': trial.suggest_categorical('max_depth', [0, 10, 16]),
             'num_parallel_tree': trial.suggest_int('num_parallel_tree', 300, 500, step=100),
@@ -679,8 +996,11 @@ def get_optuna_params_for_model(
             'reg_lambda': trial.suggest_float('reg_lambda', 1e-3, 10.0, log=True),
             'min_child_weight': trial.suggest_int('min_child_weight', 1, 50),
         }
-    elif model_name == 'LGBM':
-        return {
+        if model_name == 'PIML_XGBRF':
+            params['physics_lambda'] = trial.suggest_float('physics_lambda', 0.0, 0.5)
+        return params
+    elif model_name in ('LGBM', 'PIML_LGBM'):
+        params = {
             'n_estimators': trial.suggest_int('n_estimators', 300, 600, step=100),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
             'num_leaves': trial.suggest_categorical('num_leaves', [31, 63, 127]),
@@ -689,6 +1009,9 @@ def get_optuna_params_for_model(
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
             'min_child_samples': trial.suggest_int('min_child_samples', 10, 50, step=10)
         }
+        if model_name == 'PIML_LGBM':
+            params['physics_lambda'] = trial.suggest_float('physics_lambda', 0.0, 0.5)
+        return params
     elif model_name == 'RF':
         return {
             'n_estimators': trial.suggest_int('n_estimators', 300, 500, step=100),
@@ -840,10 +1163,17 @@ def build_ml_model_optuna(
         best_params = study.best_params
         logger.info(f'Best params for {model_name}: {best_params}')
 
-        include_all = model_name in ['RF', 'ETR', 'HGBR', 'GBR', 'ADA', 'BAG', 'CAT']
-        model_dict = get_model_dict(random_state, include_all_models=include_all)
+        include_all = model_name in _OPTIONAL_MODELS
+        feature_names = list(x_train.columns) if isinstance(x_train, pd.DataFrame) else None
+        if feature_names and _PHYS_COL in feature_names:
+            feature_names = [f for f in feature_names if f != _PHYS_COL]
+        model_dict = get_model_dict(random_state, include_all_models=include_all,
+                                    feature_names=feature_names)
         model = model_dict[model_name]
-        model.set_params(**best_params)
+        fit_params = dict(best_params)
+        if model_name in _PIML_MODELS and 'physics_lambda' in fit_params:
+            model.physics_lambda = fit_params.pop('physics_lambda')
+        model.set_params(**fit_params)
         model.fit(x_train, y_train)
 
         model_file = os.path.join(model_dir, model_name)
@@ -860,7 +1190,7 @@ def build_ml_model_optuna(
             # R² is scale-invariant for the model's operating space;
             # use log-space R² to avoid Jensen's inequality bias from expm1.
             'r2': make_scorer(_abs_r2_score),
-            'adjusted_r2': make_scorer(_abs_adjusted_r2, p=x_train.shape[1], greater_is_better=True),
+            'adjusted_r2': make_scorer(_abs_adjusted_r2, p=_real_n_features(x_train), greater_is_better=True),
             # Log-space NRMSE — used as Optuna objective so that
             # hyperparameter search optimises in the same space as the
             # tree model's internal MSE loss.
@@ -873,7 +1203,7 @@ def build_ml_model_optuna(
     else:
         scoring_metrics = {
             'r2': make_scorer(_abs_r2_score),
-            'adjusted_r2': make_scorer(_abs_adjusted_r2, p=x_train.shape[1], greater_is_better=True),
+            'adjusted_r2': make_scorer(_abs_adjusted_r2, p=_real_n_features(x_train), greater_is_better=True),
             'normalized_rmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
             'normalized_mae': make_scorer(_abs_normalized_mae, greater_is_better=False),
             'normalized_mbe': make_scorer(_abs_normalized_mbe, greater_is_better=False)
@@ -937,7 +1267,8 @@ def build_ml_model_optuna(
     # Scikit-learn tree ensembles (RF, ETR, GBR, ADA, BAG) are much
     # slower per trial than histogram-based models, so cap at 5 trials.
     # RIDGE/LASSO are simple models and don't need capping.
-    _FAST_MODELS = {'XGB', 'XGBRF', 'LGBM', 'CAT', 'HGBR', 'ETR'}
+    _FAST_MODELS = {'XGB', 'XGBRF', 'LGBM', 'CAT', 'HGBR', 'ETR',
+                     'PIML_XGB', 'PIML_LGBM', 'PIML_XGBRF'}
     _SIMPLE_MODELS = {'LR', 'RIDGE', 'LASSO'}
     if model_name == 'LR':
         effective_n_trials = 1
@@ -983,10 +1314,19 @@ def build_ml_model_optuna(
     logger.info(f'Best value: {study.best_value:.4f}')
 
     # Train final model with best parameters
-    include_all = model_name in ['RF', 'ETR', 'HGBR', 'GBR', 'ADA', 'BAG', 'CAT']
-    model_dict = get_model_dict(random_state, include_all_models=include_all)
+    include_all = model_name in _OPTIONAL_MODELS
+    feature_names = list(x_train.columns) if isinstance(x_train, pd.DataFrame) else None
+    # Strip physics column from feature_names for constraint building
+    if feature_names and _PHYS_COL in feature_names:
+        feature_names = [f for f in feature_names if f != _PHYS_COL]
+    model_dict = get_model_dict(random_state, include_all_models=include_all,
+                                feature_names=feature_names)
     model = model_dict[model_name]
-    model.set_params(**best_params)
+    # Extract physics_lambda for PIML wrappers (not a tree hyperparameter)
+    fit_params = dict(best_params)
+    if model_name in _PIML_MODELS and 'physics_lambda' in fit_params:
+        model.physics_lambda = fit_params.pop('physics_lambda')
+    model.set_params(**fit_params)
     model.fit(x_train, y_train)
 
     model_file = os.path.join(model_dir, model_name)
@@ -1033,9 +1373,17 @@ def objective_with_cv_enhanced(
     params = get_optuna_params_for_model(trial, model_name)
 
     # Get model
-    include_all = model_name in ['RF', 'ETR', 'HGBR', 'GBR', 'ADA', 'BAG', 'CAT']
-    model = get_model_dict(random_state, include_all_models=include_all)[model_name]
-    model.set_params(**params)
+    include_all = model_name in _OPTIONAL_MODELS
+    feature_names = list(x_train.columns) if isinstance(x_train, pd.DataFrame) else None
+    if feature_names and _PHYS_COL in feature_names:
+        feature_names = [f for f in feature_names if f != _PHYS_COL]
+    model = get_model_dict(random_state, include_all_models=include_all,
+                           feature_names=feature_names)[model_name]
+    # Extract physics_lambda for PIML wrappers before set_params
+    fit_params = dict(params)
+    if model_name in _PIML_MODELS and 'physics_lambda' in fit_params:
+        model.physics_lambda = fit_params.pop('physics_lambda')
+    model.set_params(**fit_params)
     # Single-threaded model training — cross_validate parallelises across folds
     if hasattr(model, 'n_jobs'):
         model.set_params(n_jobs=1)
@@ -1093,6 +1441,55 @@ def objective_with_cv_enhanced(
     return trial_obj
 
 
+def generate_interp_plots(
+        model: Any,
+        model_name: str,
+        x_train: pd.DataFrame,
+        x_test: pd.DataFrame,
+        y_train: np.ndarray,
+        y_test: np.ndarray,
+        output_dir: str,
+        random_state: int,
+        log_target: bool = False,
+) -> None:
+    """Generate permutation importance, ALE, and SHAP plots for a trained model.
+
+    Strips the physics column (if present) before passing data to the
+    interpretability functions.
+    """
+    # Strip physics column — interp functions expect real features only
+    x_tr = x_train.drop(columns=[_PHYS_COL], errors='ignore')
+    x_te = x_test.drop(columns=[_PHYS_COL], errors='ignore')
+
+    interp_dir = os.path.join(output_dir, 'Interpretability')
+    makedirs(interp_dir)
+
+    # Permutation importance (train + test)
+    compute_perm_imp(
+        model_name, x_tr, x_te, y_train, y_test,
+        model, interp_dir, scoring_metric='scaled_rmse',
+        random_state=random_state, create_plots=True,
+        log_target=log_target,
+    )
+
+    # ALE plots (train + test)
+    compute_ale_plots(
+        model_name, model,
+        x_tr, y_train, x_te, y_test,
+        interp_dir, log_target=log_target,
+    )
+
+    # SHAP plots (train + test, separate labels)
+    compute_shap_plots(
+        model_name, model, x_tr, interp_dir,
+        log_target=log_target, data_label='train',
+    )
+    compute_shap_plots(
+        model_name, model, x_te, interp_dir,
+        log_target=log_target, data_label='test',
+    )
+
+
 def compare_all_models(
         x_train: np.ndarray | pd.DataFrame,
         x_test: np.ndarray | pd.DataFrame,
@@ -1128,6 +1525,7 @@ def compare_all_models(
         create_basin_plots: bool = True,
         log_target: bool = False,
         tuning_model_dir: str | None = None,
+        create_interp_plots: bool = False,
 ) -> pd.DataFrame:
     """
     Compare all available models with full evaluation.
@@ -1184,7 +1582,7 @@ def compare_all_models(
 
     # Default models
     if model_names is None:
-        model_names = ['XGB', 'XGBRF', 'LGBM', 'RF', 'ETR', 'HGBR']
+        model_names = ['XGB', 'LGBM', 'RF', 'XGBRF', 'PIML_XGB', 'PIML_LGBM', 'PIML_XGBRF']
 
     logger.info('='*60)
     logger.info('Model Comparison')
@@ -1192,73 +1590,44 @@ def compare_all_models(
 
     # Train individual models
     for model_name in model_names:
-        logger.info(f'Training {model_name}...')
         model_subdir = os.path.join(model_dir, model_name)
 
-        if use_optuna:
-            td = os.path.join(tuning_model_dir, model_name) if tuning_model_dir else None
-            model, cv_metric_df = build_ml_model_optuna(
-                x_train, y_train, model_subdir, model_name,
-                random_state=random_state, fold_count=fold_count,
-                repeats=repeats, n_trials=n_trials,
-                n_dask_workers=n_dask_workers, use_dask=use_dask,
-                cv_groups=cv_groups, log_target=log_target,
-                tuning_dir=td,
-            )
-        else:
-            model_dict = get_model_dict(random_state, include_all_models=True)
-            model = model_dict[model_name]
-            model.fit(x_train, y_train)
-            cv_metric_df = pd.DataFrame()
+        # ── Fast path: reuse existing BC predictions if available ────
+        bc_parquet = os.path.join(model_subdir, f'Predictions_{model_name}_BC.parquet')
+        plain_parquet = os.path.join(model_subdir, f'Predictions_{model_name}.parquet')
+        cached_parquet = bc_parquet if os.path.isfile(bc_parquet) else (
+            plain_parquet if os.path.isfile(plain_parquet) else None)
 
-        trained_models[model_name] = model
+        if cached_parquet is not None:
+            logger.info(f'Loading cached predictions for {model_name} from {cached_parquet}')
+            pred_df = pd.read_parquet(cached_parquet)
 
-        # Extract CV validation metrics
-        cv_val_r2 = np.nan
-        cv_val_rmse = np.nan
-        cv_val_mae = np.nan
-        cv_train_r2 = np.nan
+            # Load CV metrics from disk if available
+            cv_metric_csv = os.path.join(model_subdir, f'CV_Metrics_{model_name}.csv')
+            cv_metric_df = (pd.read_csv(cv_metric_csv)
+                            if os.path.isfile(cv_metric_csv) else pd.DataFrame())
 
-        if not cv_metric_df.empty and 'Data' in cv_metric_df.columns:
-            val_row = cv_metric_df[cv_metric_df['Data'] == 'VALIDATION']
-            train_row = cv_metric_df[cv_metric_df['Data'] == 'TRAIN']
-            if not val_row.empty:
-                cv_val_r2 = val_row['R2'].values[0]
-                cv_val_rmse = val_row['RMSE (%)'].values[0]
-                cv_val_mae = val_row['MAE (%)'].values[0] if 'MAE (%)' in val_row.columns else np.nan
-            if not train_row.empty:
-                cv_train_r2 = train_row['R2'].values[0]
+            cv_val_r2 = cv_val_rmse = cv_val_mae = cv_train_r2 = np.nan
+            if not cv_metric_df.empty and 'Data' in cv_metric_df.columns:
+                val_row = cv_metric_df[cv_metric_df['Data'] == 'VALIDATION']
+                train_row = cv_metric_df[cv_metric_df['Data'] == 'TRAIN']
+                if not val_row.empty:
+                    cv_val_r2 = val_row['R2'].values[0]
+                    cv_val_rmse = val_row['RMSE (%)'].values[0]
+                    cv_val_mae = (val_row['MAE (%)'].values[0]
+                                  if 'MAE (%)' in val_row.columns else np.nan)
+                if not train_row.empty:
+                    cv_train_r2 = train_row['R2'].values[0]
 
-        # Generate full prediction results if we have the data
-        if has_full_data:
-            pred_df = get_prediction_results(
-                model, x_train, x_test,
-                y_train, y_test, x_scaler,
-                y_scaler, year_train,
-                year_test, basin_train,
-                basin_test, model_subdir,
-                model_name,
-                apply_bias_correction=apply_bias_correction,
-                year_col=year_col,
-                gw_basin_col=gw_basin_col,
-                easting_train=easting_train,
-                easting_test=easting_test,
-                northing_train=northing_train,
-                northing_test=northing_test,
-                log_target=log_target,
-            )
-
-            # Calculate detailed metrics
+            # Recalculate metrics + regenerate visualizations
             calc_train_test_metrics(
                 pred_df, cv_metric_df, model_subdir,
                 use_ama_ina=use_ama_ina,
                 gw_basin_col=gw_basin_col,
                 year_col=year_col,
                 model_name=model_name,
-                n_features=x_train.shape[1]
+                n_features=_real_n_features(x_train),
             )
-
-            # Per-model visualizations (immediately after training)
             if test_case:
                 generate_model_visualizations(
                     pred_df=pred_df,
@@ -1271,27 +1640,130 @@ def compare_all_models(
                     create_basin_plots=create_basin_plots,
                 )
 
-            # Use metrics from pred_df for comparison
             train_pred = pred_df[pred_df['DATA'] == 'TRAIN']
             test_pred = pred_df[pred_df['DATA'] == 'TEST']
-
             train_r2 = r2_score(train_pred['Actual_GW_mm'], train_pred['Pred_GW_mm'])
             test_r2 = r2_score(test_pred['Actual_GW_mm'], test_pred['Pred_GW_mm'])
             train_rmse = normalized_rmse(train_pred['Actual_GW_mm'].values, train_pred['Pred_GW_mm'].values)
             test_rmse = normalized_rmse(test_pred['Actual_GW_mm'].values, test_pred['Pred_GW_mm'].values)
             train_mae = normalized_mae(train_pred['Actual_GW_mm'].values, train_pred['Pred_GW_mm'].values)
             test_mae = normalized_mae(test_pred['Actual_GW_mm'].values, test_pred['Pred_GW_mm'].values)
-        else:
-            # Evaluate directly on raw data
-            y_pred_train = model.predict(x_train)
-            y_pred_test = model.predict(x_test)
 
-            train_r2 = r2_score(y_train, y_pred_train)
-            test_r2 = r2_score(y_test, y_pred_test)
-            train_rmse = normalized_rmse(y_train, y_pred_train)
-            test_rmse = normalized_rmse(y_test, y_pred_test)
-            train_mae = normalized_mae(y_train, y_pred_train)
-            test_mae = normalized_mae(y_test, y_pred_test)
+        else:
+            # ── Normal path: train model and generate predictions ────
+            logger.info(f'Training {model_name}...')
+
+            if use_optuna:
+                td = os.path.join(tuning_model_dir, model_name) if tuning_model_dir else None
+                model, cv_metric_df = build_ml_model_optuna(
+                    x_train, y_train, model_subdir, model_name,
+                    random_state=random_state, fold_count=fold_count,
+                    repeats=repeats, n_trials=n_trials,
+                    n_dask_workers=n_dask_workers, use_dask=use_dask,
+                    cv_groups=cv_groups, log_target=log_target,
+                    tuning_dir=td,
+                )
+            else:
+                feature_names = list(x_train.columns) if isinstance(x_train, pd.DataFrame) else None
+                if feature_names and _PHYS_COL in feature_names:
+                    feature_names = [f for f in feature_names if f != _PHYS_COL]
+                model_dict = get_model_dict(
+                    random_state, include_all_models=True,
+                    feature_names=feature_names,
+                )
+                model = model_dict[model_name]
+                model.fit(x_train, y_train)
+                cv_metric_df = pd.DataFrame()
+
+            trained_models[model_name] = model
+
+            # Extract CV validation metrics
+            cv_val_r2 = np.nan
+            cv_val_rmse = np.nan
+            cv_val_mae = np.nan
+            cv_train_r2 = np.nan
+
+            if not cv_metric_df.empty and 'Data' in cv_metric_df.columns:
+                val_row = cv_metric_df[cv_metric_df['Data'] == 'VALIDATION']
+                train_row = cv_metric_df[cv_metric_df['Data'] == 'TRAIN']
+                if not val_row.empty:
+                    cv_val_r2 = val_row['R2'].values[0]
+                    cv_val_rmse = val_row['RMSE (%)'].values[0]
+                    cv_val_mae = val_row['MAE (%)'].values[0] if 'MAE (%)' in val_row.columns else np.nan
+                if not train_row.empty:
+                    cv_train_r2 = train_row['R2'].values[0]
+
+            # Generate full prediction results if we have the data
+            if has_full_data:
+                pred_df = get_prediction_results(
+                    model, x_train, x_test,
+                    y_train, y_test, x_scaler,
+                    y_scaler, year_train,
+                    year_test, basin_train,
+                    basin_test, model_subdir,
+                    model_name,
+                    apply_bias_correction=apply_bias_correction,
+                    year_col=year_col,
+                    gw_basin_col=gw_basin_col,
+                    easting_train=easting_train,
+                    easting_test=easting_test,
+                    northing_train=northing_train,
+                    northing_test=northing_test,
+                    log_target=log_target,
+                )
+
+                # Calculate detailed metrics
+                calc_train_test_metrics(
+                    pred_df, cv_metric_df, model_subdir,
+                    use_ama_ina=use_ama_ina,
+                    gw_basin_col=gw_basin_col,
+                    year_col=year_col,
+                    model_name=model_name,
+                    n_features=_real_n_features(x_train)
+                )
+
+                # Per-model visualizations (immediately after training)
+                if test_case:
+                    generate_model_visualizations(
+                        pred_df=pred_df,
+                        output_dir=os.path.join(model_subdir, 'Visualizations'),
+                        model_name=model_name,
+                        test_case=test_case,
+                        test_year_limits=test_year_limits,
+                        raster_res=raster_res,
+                        use_ama_ina=use_ama_ina,
+                        create_basin_plots=create_basin_plots,
+                    )
+
+                # Interpretability plots (perm importance, ALE, SHAP)
+                if create_interp_plots:
+                    generate_interp_plots(
+                        model, model_name, x_train, x_test,
+                        y_train, y_test, model_subdir,
+                        random_state, log_target,
+                    )
+
+                # Use metrics from pred_df for comparison
+                train_pred = pred_df[pred_df['DATA'] == 'TRAIN']
+                test_pred = pred_df[pred_df['DATA'] == 'TEST']
+
+                train_r2 = r2_score(train_pred['Actual_GW_mm'], train_pred['Pred_GW_mm'])
+                test_r2 = r2_score(test_pred['Actual_GW_mm'], test_pred['Pred_GW_mm'])
+                train_rmse = normalized_rmse(train_pred['Actual_GW_mm'].values, train_pred['Pred_GW_mm'].values)
+                test_rmse = normalized_rmse(test_pred['Actual_GW_mm'].values, test_pred['Pred_GW_mm'].values)
+                train_mae = normalized_mae(train_pred['Actual_GW_mm'].values, train_pred['Pred_GW_mm'].values)
+                test_mae = normalized_mae(test_pred['Actual_GW_mm'].values, test_pred['Pred_GW_mm'].values)
+            else:
+                # Evaluate directly on raw data
+                y_pred_train = model.predict(x_train)
+                y_pred_test = model.predict(x_test)
+
+                train_r2 = r2_score(y_train, y_pred_train)
+                test_r2 = r2_score(y_test, y_pred_test)
+                train_rmse = normalized_rmse(y_train, y_pred_train)
+                test_rmse = normalized_rmse(y_test, y_pred_test)
+                train_mae = normalized_mae(y_train, y_pred_train)
+                test_mae = normalized_mae(y_test, y_pred_test)
 
         # Calculate overfitting indicators
         overfit_r2 = train_r2 - test_r2
@@ -2096,13 +2568,17 @@ def get_prediction_results(
         y_pred_train = y_scaler.inverse_transform(y_pred_train.reshape(-1, 1)).ravel()
         y_pred_test = y_scaler.inverse_transform(y_pred_test.reshape(-1, 1)).ravel()
     train_df = x_train.copy()
+    test_df = x_test.copy()
+    # Drop physics column from output DataFrames (internal to PIML wrappers)
+    for df in (train_df, test_df):
+        if _PHYS_COL in df.columns:
+            df.drop(columns=[_PHYS_COL], inplace=True)
     train_df[year_col] = year_train[year_col].to_numpy().ravel()
     train_df[gw_basin_col] = gw_basin_train[gw_basin_col].to_numpy().ravel()
     if easting_train is not None:
         train_df['easting_m'] = easting_train['easting_m'].to_numpy().ravel()
     if northing_train is not None:
         train_df['northing_m'] = northing_train['northing_m'].to_numpy().ravel()
-    test_df = x_test.copy()
     test_df[year_col] = year_test[year_col].to_numpy().ravel()
     test_df[gw_basin_col] = gw_basin_test[gw_basin_col].to_numpy().ravel()
     if easting_test is not None:
@@ -2121,7 +2597,8 @@ def get_prediction_results(
     pred_df.to_parquet(os.path.join(model_dir, f'Predictions_{model_name}.parquet'), index=False)
     if not apply_bias_correction:
         return pred_df
-    elif model_name not in ['LGBM', 'DRF', 'ETR', 'RF', 'XGB', 'XGBRF', 'HGBR']:
+    elif model_name not in ['LGBM', 'DRF', 'ETR', 'RF', 'XGB', 'XGBRF', 'HGBR',
+                            'PIML_XGB', 'PIML_LGBM', 'PIML_XGBRF']:
         logger.info(f'No bias correction for {model_name} model.')
         return pred_df
     else:
@@ -2132,7 +2609,7 @@ def get_prediction_results(
         test_df = test_df.drop(columns=[gw_basin_col])
         m, b = perform_bias_correction(
             train_df, test_df, model_name, output_dir,
-            n_features=x_train.shape[1]
+            n_features=_real_n_features(x_train)
         )
         pred_df.Pred_GW_mm = apply_linear_bc(pred_df.Pred_GW_mm.values, m, b)
         pred_df.Error_GW_mm = pred_df.Actual_GW_mm - pred_df.Pred_GW_mm

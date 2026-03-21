@@ -4,7 +4,8 @@ ML Pipeline Script for Arizona Groundwater Pumping Prediction.
 This script executes the remaining pipeline:
 1. Creates dummy annual predictor data from 1896-2099 for AZ and assigns each
    pixel an ADWR groundwater sub-basin label (``GW_Subbasin``).
-2. Evaluates tree-based ML models (1984-2024) on four splitting strategies:
+2. Evaluates standard and physics-informed tree-based ML models (1984-2024) on
+   four splitting strategies:
    a) Random 80/20 train/test split.
    a2) Pixel holdout — 20% of unique spatial locations held out across all years.
    b) Leave-one-out temporal holdout over multiple test-year ranges (T1-T6),
@@ -12,10 +13,13 @@ This script executes the remaining pipeline:
    c) Leave-one-out spatial holdout over every AMA/INA sub-basin (ADWR),
       reporting per-sub-basin and averaged metrics.
    All strategies use kFolds + Optuna (TPE) + Dask parallelisation.
-3. Uses the best model (XGBoost) to predict annual pumping rasters from
-   1896-2099 with maps and time series highlighting four eras:
-       Hindcast (1896-1983), Historical (1984-2024), Forecast (2025),
-       Projected (2026-2099).
+   Physics-informed models (PIML_XGB, PIML_LGBM, PIML_XGBRF) embed domain
+   knowledge via monotone constraints, interaction constraints, and a custom
+   irrigation-demand floor objective.
+3. Uses the best model (PIML_XGB — physics-informed XGBoost) to predict annual
+   pumping rasters from 1896-2099 with maps and time series highlighting four
+   eras: Hindcast (1896-1983), Historical (1984-2024), Forecast (2025),
+   Projected (2026-2099).
 """
 
 # Author: Dr. Sayantan Majumdar
@@ -101,7 +105,8 @@ N_DASK_WORKERS = 10
 N_DASK_WORKERS_DATA_PREP = 40 # more workers for data prep since it involves many independent raster operations
 USE_OPTUNA = True
 USE_DASK = True
-INCLUDE_ALL_MODELS = True
+INCLUDE_ALL_MODELS = False
+PHYSICS_INTERACTION_CONSTRAINTS = True
 
 USE_AMA_INA = True
 DROP_GW_BASINS = ('WILLCOX AMA', 'HUALAPAI VALLEY INA')
@@ -369,6 +374,80 @@ def create_az_data(
 # Step 2 — Evaluate tree-based ML models
 # =============================================================================
 
+# Module-level cache for NHM basin IE (loaded once, reused across evaluations)
+_nhm_basin_ie_cache: dict | None = None
+
+
+def _load_nhm_basin_ie_cached() -> dict:
+    """Load NHM basin irrigation efficiencies (cached after first call)."""
+    global _nhm_basin_ie_cache
+    if _nhm_basin_ie_cache is not None:
+        return _nhm_basin_ie_cache
+
+    nhm_ie_csv = os.path.join(INPUT_DIR, 'USGS WU', 'USGS_NHM_Withdrawals',
+                              'IR_HUC12_Eff_annual_2000_2020.csv')
+    huc12_geojson = os.path.join(INPUT_DIR, 'GEE_Data', 'AZ_HUC12.geojson')
+    nhm_ie_out = os.path.join(MODEL_DIR, 'Model_Evaluation', 'NHM_IE_Basins')
+    ref_raster_file = os.path.join(PRED_DATA_DIR, f'Predictor_{YEAR_LIST[0]}.tif')
+    makedirs(nhm_ie_out)
+
+    _nhm_basin_ie_cache = intercompops.load_nhm_basin_ie(
+        nhm_ie_csv=nhm_ie_csv,
+        huc12_geojson=huc12_geojson,
+        basin_shp=AZ_GW_BASIN,
+        basin_col='BASIN_NAME',
+        ref_raster=ref_raster_file,
+        output_dir=nhm_ie_out,
+    )
+    return _nhm_basin_ie_cache
+
+
+def _append_physics_floor(
+        x_train: pd.DataFrame,
+        x_test: pd.DataFrame,
+        basin_train: pd.DataFrame,
+        basin_test: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Compute irrigation demand floor and append as ``__y_phys_log__`` column.
+
+    The physics wrappers strip this column during fit()/predict() so it
+    travels transparently through sklearn's ``cross_validate``.
+
+    Returns:
+        Updated (x_train, x_test) with the physics column appended.
+    """
+    nhm_ie = _load_nhm_basin_ie_cached()
+    gw_basin_col = 'GW_Basin'
+
+    # Compute floor for train
+    y_floor_train = mlops.compute_irrigation_demand_floor(
+        x_train, basin_train[gw_basin_col], nhm_ie,
+    )
+    # Compute floor for test
+    y_floor_test = mlops.compute_irrigation_demand_floor(
+        x_test, basin_test[gw_basin_col], nhm_ie,
+    )
+
+    # Convert to log1p space (matching LOG_TARGET)
+    if LOG_TARGET:
+        y_phys_train = np.log1p(y_floor_train)
+        y_phys_test = np.log1p(y_floor_test)
+    else:
+        y_phys_train = y_floor_train
+        y_phys_test = y_floor_test
+
+    phys_col = mlops._PHYS_COL
+    x_train = x_train.copy()
+    x_test = x_test.copy()
+    x_train[phys_col] = y_phys_train
+    x_test[phys_col] = y_phys_test
+
+    n_active = np.sum(y_floor_train > 0)
+    logger.info(f'Physics floor: {n_active}/{len(y_floor_train)} training samples '
+                f'have non-zero irrigation demand constraint')
+    return x_train, x_test
+
+
 def _compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     """Compute standard regression metrics."""
     return {
@@ -454,6 +533,7 @@ def _evaluate_random_single(
         strategy_dir: str,
         tuning_model_dir: str | None = None,
         test_size: float = 0.2,
+        create_interp_plots: bool = False,
 ) -> tuple[pd.DataFrame, str]:
     """Run a single random evaluation with the given seed and test size.
 
@@ -488,6 +568,11 @@ def _evaluate_random_single(
      easting_train, easting_test,
      northing_train, northing_test) = ret_vals
 
+    # Append physics floor column for PIML models
+    x_train, x_test = _append_physics_floor(
+        x_train, x_test, basin_train, basin_test,
+    )
+
     comparison_dir = os.path.join(strategy_dir, 'Model_Comparison')
     return mlops.compare_all_models(
         x_train, x_test, y_train, y_test,
@@ -517,6 +602,7 @@ def _evaluate_random_single(
         create_basin_plots=True,
         log_target=LOG_TARGET,
         tuning_model_dir=tuning_model_dir,
+        create_interp_plots=create_interp_plots,
     )
 
 
@@ -550,10 +636,12 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
         for i, seed in enumerate(seeds):
             logger.info(f'--- Random test_size={ts:.0%} seed {i+1}/{n_seeds} (seed={seed}) ---')
             run_dir = os.path.join(base_dir, ts_label, f'seed_{seed}')
+            first_run = tuning_model_dir is None
             df, comp_dir = _evaluate_random_single(
                 az_df, seed, run_dir,
                 tuning_model_dir=tuning_model_dir,
                 test_size=ts,
+                create_interp_plots=first_run,
             )
             if tuning_model_dir is None:
                 tuning_model_dir = comp_dir  # capture from first run
@@ -592,6 +680,7 @@ def _evaluate_pixel_holdout_single(
         strategy_dir: str,
         tuning_model_dir: str | None = None,
         test_size: float = 0.2,
+        create_interp_plots: bool = False,
 ) -> tuple[pd.DataFrame, str]:
     """Run a single pixel holdout evaluation with the given seed and test size.
 
@@ -625,6 +714,11 @@ def _evaluate_pixel_holdout_single(
      basin_train, basin_test,
      easting_train, easting_test,
      northing_train, northing_test) = ret_vals
+
+    # Append physics floor column for PIML models
+    x_train, x_test = _append_physics_floor(
+        x_train, x_test, basin_train, basin_test,
+    )
 
     # Group CV by pixel so inner folds mirror the outer pixel-holdout strategy
     pixel_groups = (
@@ -662,6 +756,7 @@ def _evaluate_pixel_holdout_single(
         create_basin_plots=True,
         log_target=LOG_TARGET,
         tuning_model_dir=tuning_model_dir,
+        create_interp_plots=create_interp_plots,
     )
 
 
@@ -695,10 +790,12 @@ def evaluate_pixel_holdout(az_df: pd.DataFrame) -> dict:
         for i, seed in enumerate(seeds):
             logger.info(f'--- Pixel holdout test_size={ts:.0%} seed {i+1}/{n_seeds} (seed={seed}) ---')
             run_dir = os.path.join(base_dir, ts_label, f'seed_{seed}')
+            first_run = tuning_model_dir is None
             df, comp_dir = _evaluate_pixel_holdout_single(
                 az_df, seed, run_dir,
                 tuning_model_dir=tuning_model_dir,
                 test_size=ts,
+                create_interp_plots=first_run,
             )
             if tuning_model_dir is None:
                 tuning_model_dir = comp_dir
@@ -789,34 +886,56 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
             logger.warning(f'No test data for {holdout_name}, skipping.')
             continue
 
+        # Append physics floor column for PIML models
+        x_train, x_test = _append_physics_floor(
+            x_train, x_test, basin_train, basin_test,
+        )
+
         # Group CV by year so inner folds mirror the outer temporal-holdout strategy
         temporal_cv_groups = year_train.values.ravel()
 
         for model_name in ml_models:
-            logger.info(f'  Training {model_name} for {holdout_name}...')
             model_dir = os.path.join(holdout_dir, model_name)
-            res = _train_and_evaluate(
-                x_train, y_train, x_test, y_test,
-                model_name, model_dir,
-                cv_groups=temporal_cv_groups,
-            )
 
-            # Prediction results + visualisation
-            pred_df = mlops.get_prediction_results(
-                res['model'], x_train, x_test,
-                y_train, y_test, x_scaler, y_scaler,
-                year_train, year_test,
-                basin_train, basin_test,
-                model_dir, model_name,
-                apply_bias_correction=True,
-                easting_train=easting_train,
-                easting_test=easting_test,
-                northing_train=northing_train,
-                northing_test=northing_test,
-                log_target=LOG_TARGET,
-            )
+            # Fast path: reuse cached BC predictions if available
+            bc_pq = os.path.join(model_dir, f'Predictions_{model_name}_BC.parquet')
+            plain_pq = os.path.join(model_dir, f'Predictions_{model_name}.parquet')
+            cached_pq = bc_pq if os.path.isfile(bc_pq) else (
+                plain_pq if os.path.isfile(plain_pq) else None)
+
+            if cached_pq is not None:
+                logger.info(f'  Loading cached {model_name} for {holdout_name}')
+                pred_df = pd.read_parquet(cached_pq)
+            else:
+                logger.info(f'  Training {model_name} for {holdout_name}...')
+                res = _train_and_evaluate(
+                    x_train, y_train, x_test, y_test,
+                    model_name, model_dir,
+                    cv_groups=temporal_cv_groups,
+                )
+                pred_df = mlops.get_prediction_results(
+                    res['model'], x_train, x_test,
+                    y_train, y_test, x_scaler, y_scaler,
+                    year_train, year_test,
+                    basin_train, basin_test,
+                    model_dir, model_name,
+                    apply_bias_correction=True,
+                    easting_train=easting_train,
+                    easting_test=easting_test,
+                    northing_train=northing_train,
+                    northing_test=northing_test,
+                    log_target=LOG_TARGET,
+                )
+
+                # Interpretability plots (perm importance, ALE, SHAP)
+                mlops.generate_interp_plots(
+                    res['model'], model_name, x_train, x_test,
+                    y_train, y_test, model_dir,
+                    RANDOM_STATE, LOG_TARGET,
+                )
+
             mlops.calc_train_test_metrics(
-                pred_df, res['cv_df'], model_dir,
+                pred_df, pd.DataFrame(), model_dir,
                 use_ama_ina=USE_AMA_INA, model_name=model_name,
             )
             mlops.generate_model_visualizations(
@@ -992,40 +1111,61 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
 
         logger.info(f'  Train: {len(y_train)}, Test: {len(y_test)}')
 
+        # Append physics floor column for PIML models
+        x_train, x_test = _append_physics_floor(
+            x_train, x_test, basin_train, basin_test,
+        )
+
         # Group CV by sub-basin so inner folds mirror the outer spatial-holdout strategy
         spatial_cv_groups = basin_train.values.ravel()
 
         for model_name in ml_models:
-            logger.info(f'  Training {model_name} (holdout: {subbasin})...')
             model_dir = os.path.join(holdout_dir, model_name)
-            res = _train_and_evaluate(
-                x_train, y_train, x_test, y_test,
-                model_name, model_dir,
-                cv_groups=spatial_cv_groups,
-            )
 
-            # Prediction results
-            pred_df = mlops.get_prediction_results(
-                res['model'], x_train, x_test,
-                y_train, y_test, x_scaler, y_scaler,
-                year_train, year_test,
-                basin_train, basin_test,
-                model_dir, model_name,
-                gw_basin_col='GW_Subbasin',
-                apply_bias_correction=True,
-                easting_train=easting_train,
-                easting_test=easting_test,
-                northing_train=northing_train,
-                northing_test=northing_test,
-                log_target=LOG_TARGET,
-            )
+            # Fast path: reuse cached BC predictions if available
+            bc_pq = os.path.join(model_dir, f'Predictions_{model_name}_BC.parquet')
+            plain_pq = os.path.join(model_dir, f'Predictions_{model_name}.parquet')
+            cached_pq = bc_pq if os.path.isfile(bc_pq) else (
+                plain_pq if os.path.isfile(plain_pq) else None)
+
+            if cached_pq is not None:
+                logger.info(f'  Loading cached {model_name} (holdout: {subbasin})')
+                pred_df = pd.read_parquet(cached_pq)
+            else:
+                logger.info(f'  Training {model_name} (holdout: {subbasin})...')
+                res = _train_and_evaluate(
+                    x_train, y_train, x_test, y_test,
+                    model_name, model_dir,
+                    cv_groups=spatial_cv_groups,
+                )
+                pred_df = mlops.get_prediction_results(
+                    res['model'], x_train, x_test,
+                    y_train, y_test, x_scaler, y_scaler,
+                    year_train, year_test,
+                    basin_train, basin_test,
+                    model_dir, model_name,
+                    gw_basin_col='GW_Subbasin',
+                    apply_bias_correction=True,
+                    easting_train=easting_train,
+                    easting_test=easting_test,
+                    northing_train=northing_train,
+                    northing_test=northing_test,
+                    log_target=LOG_TARGET,
+                )
+
+                # Interpretability plots (perm importance, ALE, SHAP)
+                mlops.generate_interp_plots(
+                    res['model'], model_name, x_train, x_test,
+                    y_train, y_test, model_dir,
+                    RANDOM_STATE, LOG_TARGET,
+                )
+
             mlops.calc_train_test_metrics(
-                pred_df, res['cv_df'], model_dir,
+                pred_df, pd.DataFrame(), model_dir,
                 use_ama_ina=False,
                 gw_basin_col='GW_Subbasin',
                 model_name=model_name,
             )
-
             mlops.generate_model_visualizations(
                 pred_df=pred_df,
                 output_dir=os.path.join(model_dir, 'Visualizations'),
@@ -1142,18 +1282,19 @@ def _write_multi_unit_rasters(
 
 def predict_full_period(az_df: pd.DataFrame) -> tuple:
     """
-    Train XGBoost on the full 1984-2024 metered data (temporal split T1)
-    and predict groundwater pumping rasters for every year from 1896 to 2099.
+    Train PIML_XGB (physics-informed XGBoost) on the full 1984-2024 metered
+    data and predict groundwater pumping rasters for every year from 1896
+    to 2099.
 
     Returns:
-        tuple: (model, feature_cols, x_train, y_train) — the trained XGBoost model,
+        tuple: (model, feature_cols, x_train, y_train) — the trained model,
             feature column names, and training data for uncertainty quantification.
     """
     logger.info('='*60)
-    logger.info('Step 3: XGBoost full-period prediction (1896-2099)')
+    logger.info('Step 3: Physics-informed XGBoost full-period prediction (1896-2099)')
     logger.info('='*60)
 
-    model_name = 'XGB'
+    model_name = 'PIML_XGB'
     prediction_dir = os.path.join(MODEL_DIR, f'Full_Prediction_{model_name}')
     makedirs(prediction_dir)
 
@@ -1178,11 +1319,24 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         log_target=LOG_TARGET,
     )
     x_train, y_train = ret_vals[0], ret_vals[2]
+    basin_train = ret_vals[8]
 
-    logger.info(f'Training XGBoost on {len(x_train)} samples '
+    # Append physics floor for PIML model (no test split in production)
+    nhm_ie = _load_nhm_basin_ie_cached()
+    y_floor = mlops.compute_irrigation_demand_floor(
+        x_train, basin_train['GW_Basin'], nhm_ie,
+    )
+    phys_col = mlops._PHYS_COL
+    x_train_phys = x_train.copy()
+    x_train_phys[phys_col] = np.log1p(y_floor) if LOG_TARGET else y_floor
+    n_active = np.sum(y_floor > 0)
+    logger.info(f'Physics floor: {n_active}/{len(y_floor)} training samples '
+                f'have non-zero irrigation demand constraint')
+
+    logger.info(f'Training {model_name} on {len(x_train)} samples '
                 f'({YEAR_LIST[0]}-{YEAR_LIST[-1]}, all years)...')
     model, _ = mlops.build_ml_model_optuna(
-        x_train, y_train,
+        x_train_phys, y_train,
         os.path.join(prediction_dir, 'Model'),
         model_name, RANDOM_STATE,
         fold_count=FOLD_COUNT,
@@ -1193,7 +1347,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         log_target=LOG_TARGET,
     )
 
-    # ---- Model interpretability plots ----
+    # ---- Model interpretability plots (on clean features, no physics col) ----
     interp_dir = os.path.join(prediction_dir, 'Model_Interpretability')
 
     # Feature importance + permutation importance
@@ -1776,7 +1930,7 @@ def create_well_package_step() -> None:
     logger.info('Step 3e: Creating well package (per-well GeoPackage)')
     logger.info('=' * 60)
 
-    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_XGB')
+    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_PIML_XGB')
     pixel_area_m2 = MOSAIC_RASTER_RES ** 2
 
     # Reconstruct raster directory paths (same structure as predict_full_period)
@@ -1841,7 +1995,7 @@ def create_all_raster_maps() -> None:
     logger.info('Step 3g: Creating raster maps for all output categories')
     logger.info('=' * 60)
 
-    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_XGB')
+    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_PIML_XGB')
     maps_dir = os.path.join(prediction_dir, 'Raster_Maps')
 
     # ── Depth-based categories (use Depth_mm sub-directory) ──────────
@@ -2017,7 +2171,7 @@ def run_usgs_intercomparison() -> pd.DataFrame:
     logger.info('Step 4: USGS Intercomparison')
     logger.info('='*60)
 
-    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_XGB')
+    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_PIML_XGB')
     ml_pred_dir = os.path.join(prediction_dir, 'Predicted_Rasters/Depth_mm')
     irr_gw_dir = os.path.join(prediction_dir, 'Irrigation_GW_Rasters/Depth_mm')
     irr_sw_dir = os.path.join(prediction_dir, 'Irrigation_SW_Rasters/Depth_mm')
@@ -2054,7 +2208,7 @@ def run_cu_usgs_intercomparison() -> pd.DataFrame:
     logger.info('Step 4b: CU Intercomparison')
     logger.info('=' * 60)
 
-    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_XGB')
+    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_PIML_XGB')
     irr_cu_dir = os.path.join(prediction_dir, 'Irrigation_CU_Rasters/Depth_mm')
 
     nhm_cu_csv = os.path.join(INPUT_DIR, 'USGS WU', 'USGS_NHM_CUIrr', 'Irr_CU_HUC12_Tot_annual_2000_2020.csv')
@@ -2085,7 +2239,7 @@ def run_cap_srp_sw_validation() -> pd.DataFrame:
     logger.info('Step 4c: CAP/SRP Total SW Validation')
     logger.info('=' * 60)
 
-    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_XGB')
+    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_PIML_XGB')
     total_sw_dir = os.path.join(prediction_dir, 'Total_SW_Rasters/Depth_mm')
 
     cap_xlsx = os.path.join(VECTOR_DIR, 'CAP', 'CAP Delivery Data DRI Request.xlsx')
@@ -2115,7 +2269,7 @@ def run_peff_usgs_intercomparison() -> pd.DataFrame:
     logger.info('Step 4d: Effective Precipitation Intercomparison')
     logger.info('=' * 60)
 
-    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_XGB')
+    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_PIML_XGB')
     nhm_peff_csv = os.path.join(
         INPUT_DIR, 'USGS WU', 'USGS_NHM_CUIrr',
         'PPTeff_HUC12_Tot_annual_2000_2020.csv',
@@ -2150,7 +2304,7 @@ def run_ps_intercomparison() -> pd.DataFrame:
     logger.info('Step 4e: Non-Irrigation vs USGS Public Supply Intercomparison')
     logger.info('=' * 60)
 
-    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_XGB')
+    prediction_dir = os.path.join(MODEL_DIR, 'Full_Prediction_PIML_XGB')
     nonirr_dir = os.path.join(prediction_dir, 'Non_Irrigation_Rasters/Depth_mm')
     nonirr_gw_dir = os.path.join(prediction_dir, 'Non_Irrigation_GW_Rasters/Depth_mm')
     nonirr_sw_dir = os.path.join(prediction_dir, 'Non_Irrigation_SW_Rasters/Depth_mm')

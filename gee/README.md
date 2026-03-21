@@ -326,7 +326,7 @@ This approach still preserves per-image nonlinearity: ETo is computed from each 
 
 For each GCM, both RCP scenarios (rcp45, rcp85) are averaged — yielding a 2-member per-GCM mean — using the same flat-pipeline approach as the 40-member ensemble version.
 
-Since the downstream XGBoost model operates on **annual** predictor variables, all per-GCM exports are annual (monthly computation happens server-side in GEE and is summed to annual before export). This reduces total assets from 13,320 (monthly) to 1,110 (annual).
+Since the downstream ML model operates on **annual** predictor variables, all per-GCM exports are annual (monthly computation happens server-side in GEE and is summed to annual before export). This reduces total assets from 13,320 (monthly) to 1,110 (annual).
 
 #### 10. Per-GCM Annual ETo (`maca_gcm_annual_eto`)
 

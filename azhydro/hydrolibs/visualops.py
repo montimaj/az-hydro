@@ -78,7 +78,7 @@ def _add_ft_twinx(ax):
 def _add_m3_twinx(ax):
     """Add a m³ twinx to an AF volume axis. Call after all plotting."""
     ax_m3 = ax.twinx()
-    ax_m3.set_ylabel('(m³)', fontweight='bold')
+    ax_m3.set_ylabel(r'(m$^3$)', fontweight='bold')
     lo, hi = ax.get_ylim()
     ax_m3.set_ylim(lo * _AF_TO_M3, hi * _AF_TO_M3)
     return ax_m3
@@ -320,12 +320,12 @@ def create_time_series_plot_journal(
 
     # Unit conversion factors (from mm)
     unit_info = {
-        'mm': {'factor': 1.0, 'label': 'Groundwater Withdrawals (mm)'},
-        'ft': {'factor': 1 / 304.8, 'label': 'Groundwater Withdrawals (ft)'},
+        'mm': {'factor': 1.0, 'label': r'Groundwater Withdrawals (mm)'},
+        'ft': {'factor': 1 / 304.8, 'label': r'Groundwater Withdrawals (ft)'},
         'af': {'factor': area / (4047 * 304.8 * 1000),
-               'label': 'Groundwater Withdrawals (1000s acre-ft)'},
+               'label': r'Groundwater Withdrawals ($10^3$ acre-ft)'},
         'm3': {'factor': area * 1e-9,
-               'label': 'Groundwater Withdrawals (10\u2076 m\u00b3)'},
+               'label': r'Groundwater Withdrawals ($10^6$ m$^3$)'},
     }
 
     # Two twinx pairs: (left_unit, right_unit, aggregation)
@@ -446,7 +446,7 @@ def create_time_series_plot_journal(
                    'Test Period']
         order = [labels.index(lbl) for lbl in desired if lbl in labels]
         ax.legend([handles[i] for i in order], [labels[i] for i in order],
-                  loc='upper left', framealpha=0.9)
+                  loc='upper left', framealpha=0.7)
 
         # Grid
         ax.grid(True, alpha=0.3, linestyle='--')
@@ -473,14 +473,16 @@ def create_basin_time_series_plot(
         pred_col: str = 'Pred_GW_mm',
         gw_basin_col: str = 'GW_Basin',
         raster_res: float = 2000,
-        aggregation: str = 'sum',
         confidence: float = 0.95,
-        unit: str = 'af',
-        figsize: tuple[float, float] = (12, 6)
+        figsize: tuple[float, float] = (12, 6),
+        **_kwargs,
 ) -> None:
-    """
-    Create time series plot for a specific groundwater basin.
-    
+    """Create dual-twinx time series plots for a specific groundwater basin.
+
+    Produces two figures per basin:
+    - **Volume plot** (AF left / m³ right): annual **sum** across basin pixels.
+    - **Depth plot** (mm left / ft right): annual **mean** per pixel.
+
     Args:
         pred_df: DataFrame with predictions.
         output_dir: Output directory.
@@ -493,9 +495,7 @@ def create_basin_time_series_plot(
         pred_col: Name of predicted values column.
         gw_basin_col: Name of basin column.
         raster_res: Raster resolution in meters.
-        aggregation: Aggregation method.
         confidence: Confidence level.
-        unit: Unit for plotting ('mm', 'af', 'm3', 'ft').
         figsize: Figure size.
     """
     makedirs(output_dir)
@@ -511,91 +511,115 @@ def create_basin_time_series_plot(
     # Pixel area for unit conversions
     area = raster_res ** 2
 
-    # Unit conversion
-    unit_factors = {
-        'mm': (1.0, 'mm'),
-        'af': (area / (4047 * 304.8 * 1000), '1000s acre-ft'),
-        'm3': (area * 1e-9, '10⁶ m³'),
-        'ft': (1 / 304.8, 'ft')
+    unit_info = {
+        'mm': {'factor': 1.0, 'label': r'Groundwater Withdrawals (mm)'},
+        'ft': {'factor': 1 / 304.8, 'label': r'Groundwater Withdrawals (ft)'},
+        'af': {'factor': area / (4047 * 304.8 * 1000),
+               'label': r'Groundwater Withdrawals ($10^3$ acre-ft)'},
+        'm3': {'factor': area * 1e-9,
+               'label': r'Groundwater Withdrawals ($10^6$ m$^3$)'},
     }
 
-    factor, unit_label = unit_factors.get(unit, (1.0, 'mm'))
+    unit_pairs = [
+        ('af', 'm3', 'sum'),
+        ('mm', 'ft', 'mean'),
+    ]
 
-    basin_df[f'Actual_{unit}'] = basin_df[actual_col] * factor
-    basin_df[f'Pred_{unit}'] = basin_df[pred_col] * factor
-
-    # Aggregate by year
-    actual_agg = aggregate_yearly_data(
-        basin_df, year_col, f'Actual_{unit}', aggregation, confidence
-    )
-    pred_agg = aggregate_yearly_data(
-        basin_df, year_col, f'Pred_{unit}', aggregation, confidence
-    )
-
-    # Create figure
-    fig, ax = plt.subplots(figsize=figsize)
-
-    # Shade test periods
-    for start, end in test_year_limits:
-        ax.axvspan(start - 0.5, end + 0.5,
-                  alpha=0.2, color=COLORS['test_shade'],
-                  label='Test Period' if start == test_year_limits[0][0] else '')
-
-    # Plot confidence intervals
-    ax.fill_between(
-        actual_agg['year'],
-        actual_agg['lower_ci'],
-        actual_agg['upper_ci'],
-        alpha=0.3,
-        color=COLORS['actual']
-    )
-
-    ax.fill_between(
-        pred_agg['year'],
-        pred_agg['lower_ci'],
-        pred_agg['upper_ci'],
-        alpha=0.3,
-        color=COLORS['predicted']
-    )
-
-    # Plot lines
-    ax.plot(
-        actual_agg['year'],
-        actual_agg['value'],
-        color=COLORS['actual'],
-        marker='o',
-        markersize=6,
-        linewidth=2,
-        label='Observed'
-    )
-
-    ax.plot(
-        pred_agg['year'],
-        pred_agg['value'],
-        color=COLORS['predicted'],
-        marker='s',
-        markersize=6,
-        linewidth=2,
-        label='Predicted'
-    )
-
-    # Formatting
-    agg_label = 'Total' if aggregation == 'sum' else 'Mean'
-    ax.set_xlabel('Year', fontweight='bold')
-    ax.set_ylabel(f'{agg_label} Groundwater Withdrawals ({unit_label})', fontweight='bold')
-    ax.set_title(f'{basin_name}\n{model_name} - {test_case}', fontweight='bold')
-
-    ax.xaxis.set_major_formatter(ticker.StrMethodFormatter('{x:.0f}'))
-    ax.legend(loc='upper left', framealpha=0.9)
-    ax.grid(True, alpha=0.3, linestyle='--')
-
-    # Clean basin name for filename
     basin_clean = basin_name.replace(' ', '_').replace('/', '_')
 
-    plt.tight_layout()
-    fig.savefig(os.path.join(output_dir, f'TS_{model_name}_{test_case}_{basin_clean}_{unit}.png'),
-               dpi=600, bbox_inches='tight')
-    plt.close()
+    for left_unit, right_unit, agg in unit_pairs:
+        left_factor = unit_info[left_unit]['factor']
+        right_factor = unit_info[right_unit]['factor']
+        twin_ratio = right_factor / left_factor
+
+        agg_label = 'Total' if agg == 'sum' else 'Mean'
+
+        df_plot = basin_df.copy()
+        df_plot[f'Actual_{left_unit}'] = df_plot[actual_col] * left_factor
+        df_plot[f'Pred_{left_unit}'] = df_plot[pred_col] * left_factor
+
+        actual_agg = aggregate_yearly_data(
+            df_plot, year_col, f'Actual_{left_unit}', agg, confidence
+        )
+        pred_agg = aggregate_yearly_data(
+            df_plot, year_col, f'Pred_{left_unit}', agg, confidence
+        )
+
+        fig, ax = plt.subplots(figsize=figsize)
+
+        years = actual_agg['year'].values
+        min_year, max_year = years.min(), years.max()
+
+        # Shade test periods
+        for start, end in test_year_limits:
+            ax.axvspan(start - 0.5, end + 0.5,
+                       alpha=0.2, color=COLORS['test_shade'],
+                       label='Test Period' if start == test_year_limits[0][0] else '')
+
+        # Confidence intervals
+        ax.fill_between(actual_agg['year'], actual_agg['lower_ci'],
+                        actual_agg['upper_ci'], alpha=0.3, color=COLORS['actual'],
+                        label=f'{int(confidence*100)}% CI (Observed)')
+        ax.fill_between(pred_agg['year'], pred_agg['lower_ci'],
+                        pred_agg['upper_ci'], alpha=0.3, color=COLORS['predicted'],
+                        label=f'{int(confidence*100)}% CI (Predicted)')
+
+        # Lines
+        ax.plot(actual_agg['year'], actual_agg['value'],
+                color=COLORS['actual'], marker='o', markersize=6,
+                linewidth=2, label='Observed')
+        ax.plot(pred_agg['year'], pred_agg['value'],
+                color=COLORS['predicted'], marker='s', markersize=6,
+                linewidth=2, label='Predicted')
+
+        # Primary axis
+        left_label = f'{agg_label} {unit_info[left_unit]["label"]}'
+        ax.set_xlabel('Year', fontweight='bold')
+        ax.set_ylabel(left_label, fontweight='bold')
+        ax.set_title(f'{basin_name}\n{model_name} - {test_case}',
+                     fontweight='bold')
+
+        # Twinx
+        ax2 = ax.twinx()
+        right_label = f'{agg_label} {unit_info[right_unit]["label"]}'
+        ax2.set_ylabel(right_label, fontweight='bold')
+
+        def _sync_twin(ax_src, _ax_dst=ax2, _ratio=twin_ratio):
+            lo, hi = ax_src.get_ylim()
+            _ax_dst.set_ylim(lo * _ratio, hi * _ratio)
+        ax.callbacks.connect('ylim_changed', _sync_twin)
+        _sync_twin(ax)
+
+        # X-axis ticks
+        year_range = max_year - min_year
+        if year_range > 20:
+            tick_interval = 5
+        elif year_range > 10:
+            tick_interval = 3
+        else:
+            tick_interval = 2
+        ax.set_xticks(np.arange(min_year, max_year + 1, tick_interval))
+        ax.xaxis.set_major_formatter(ticker.StrMethodFormatter('{x:.0f}'))
+
+        # Legend
+        handles, labels = ax.get_legend_handles_labels()
+        desired = ['Observed', 'Predicted',
+                   f'{int(confidence*100)}% CI (Observed)',
+                   f'{int(confidence*100)}% CI (Predicted)',
+                   'Test Period']
+        order = [labels.index(lbl) for lbl in desired if lbl in labels]
+        ax.legend([handles[i] for i in order], [labels[i] for i in order],
+                  loc='upper left', framealpha=0.7)
+
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.set_xlim(min_year - 0.5, max_year + 0.5)
+
+        plt.tight_layout()
+        fig.savefig(os.path.join(
+            output_dir,
+            f'TS_{model_name}_{test_case}_{basin_clean}_{left_unit}_{right_unit}_{agg}.png'),
+            dpi=600, bbox_inches='tight')
+        plt.close()
 
 
 def create_all_basin_plots_parallel(
@@ -606,12 +630,11 @@ def create_all_basin_plots_parallel(
         test_year_limits: tuple[tuple[int, int], ...],
         gw_basin_col: str = 'GW_Basin',
         raster_res: float = 2000,
-        unit: str = 'af',
-        n_jobs: int = -1
+        n_jobs: int = -1,
+        **_kwargs,
 ) -> None:
-    """
-    Create time series plots for all basins in parallel.
-    
+    """Create dual-twinx time series plots for all basins in parallel.
+
     Args:
         pred_df: DataFrame with predictions.
         output_dir: Output directory.
@@ -620,7 +643,6 @@ def create_all_basin_plots_parallel(
         test_year_limits: Test period definitions.
         gw_basin_col: Name of basin column.
         raster_res: Raster resolution.
-        unit: Unit for plotting.
         n_jobs: Number of parallel jobs (-1 for all cores).
     """
     basins = pred_df[gw_basin_col].unique().tolist()
@@ -633,7 +655,7 @@ def create_all_basin_plots_parallel(
     Parallel(n_jobs=n_jobs)(delayed(create_basin_time_series_plot)(
         pred_df, basin_dir, model_name, test_case, basin,
         test_year_limits, gw_basin_col=gw_basin_col,
-        raster_res=raster_res, unit=unit
+        raster_res=raster_res,
     ) for basin in basins)
 
 
@@ -675,8 +697,8 @@ def create_model_comparison_time_series(
     area = raster_res ** 2
     unit_factors = {
         'mm': (1.0, 'mm'),
-        'af': (area / (4047 * 304.8 * 1000), '1000s acre-ft'),
-        'm3': (area * 1e-9, '10⁶ m³'),
+        'af': (area / (4047 * 304.8 * 1000), r'$10^3$ acre-ft'),
+        'm3': (area * 1e-9, r'$10^6$ m$^3$'),
         'ft': (1 / 304.8, 'ft')
     }
     factor, unit_label = unit_factors.get(unit, (1.0, 'mm'))
@@ -751,7 +773,7 @@ def create_model_comparison_time_series(
                 fontweight='bold', fontsize=14)
 
     ax.xaxis.set_major_formatter(ticker.StrMethodFormatter('{x:.0f}'))
-    ax.legend(loc='upper left', ncol=2, framealpha=0.9)
+    ax.legend(loc='upper left', ncol=2, framealpha=0.7)
     ax.grid(True, alpha=0.3, linestyle='--')
     ax.set_xlim(min_year - 0.5, max_year + 0.5)
 
@@ -825,7 +847,7 @@ def create_train_test_scatter(
         ax.set_xlabel('Predicted (mm)', fontweight='bold')
         ax.set_ylabel('Observed (mm)', fontweight='bold')
         ax.set_title(f'{data_type} Data (R² = {r2:.3f})', fontweight='bold')
-        ax.legend(loc='upper left', framealpha=0.9)
+        ax.legend(loc='upper left', framealpha=0.7)
         ax.grid(True, alpha=0.3)
         ax.set_aspect('equal', adjustable='box')
 
@@ -1606,7 +1628,7 @@ def analyze_et_by_land_use(
     ax.set_xlabel('Dominant Land Use', fontweight='bold')
     ax.set_ylabel('Depth (mm)', fontweight='bold')
     ax.set_title('ET, ETo & GW Pumping by Land Use', fontweight='bold')
-    ax.legend(title='Variable', framealpha=0.9)
+    ax.legend(title='Variable', framealpha=0.7)
     ax.grid(True, axis='y', alpha=0.3, ls='--')
     plt.tight_layout()
     fig.savefig(os.path.join(output_dir, 'ET_ETo_GW_by_LandUse.png'),
@@ -1627,7 +1649,7 @@ def analyze_et_by_land_use(
     ax.set_xlabel('Dominant Land Use', fontweight='bold')
     ax.set_ylabel('ET / ETo Ratio', fontweight='bold')
     ax.set_title('ET/ETo Ratio by Land Use', fontweight='bold')
-    ax.legend(framealpha=0.9)
+    ax.legend(framealpha=0.7)
     ax.grid(True, axis='y', alpha=0.3, ls='--')
     plt.tight_layout()
     fig.savefig(os.path.join(output_dir, 'ET_ETo_Ratio_by_LandUse.png'),
@@ -2092,7 +2114,7 @@ def create_full_period_time_series(
         for e in ERA_PERIODS
     ]
     ax1.legend(handles=ax1.get_legend_handles_labels()[0] + handles,
-               loc='upper left', framealpha=0.9)
+               loc='upper left', framealpha=0.7)
     ax2.set_xlim(start_year - 1, end_year + 1)
 
     _add_ft_twinx(ax1)
@@ -2320,7 +2342,7 @@ def create_basin_time_series(
         from matplotlib.lines import Line2D
         handles.append(Line2D([], [], color='gray', linestyle='--', marker='o',
                                markersize=3, label='Observed (ADWR Meter)'))
-    ax.legend(handles=handles, fontsize=8, ncol=2, loc='upper left', framealpha=0.9)
+    ax.legend(handles=handles, fontsize=8, ncol=2, loc='upper left', framealpha=0.7)
     ax.set_xlim(start_year - 1, end_year + 1)
     ax.grid(True, alpha=0.3, linestyle='--')
     _add_m3_twinx(ax)
@@ -2391,7 +2413,7 @@ def create_basin_time_series(
             from matplotlib.lines import Line2D
             handles.append(Line2D([], [], color=COLORS['actual'], marker='o',
                                   markersize=4, label='Observed (ADWR Meter)'))
-        ax1.legend(handles=handles, fontsize=8, loc='upper left', framealpha=0.9)
+        ax1.legend(handles=handles, fontsize=8, loc='upper left', framealpha=0.7)
         ax2.set_xlim(start_year - 1, end_year + 1)
         _add_ft_twinx(ax1)
         _add_m3_twinx(ax2)
@@ -2499,7 +2521,7 @@ def create_subbasin_time_series(
                            label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
             for e in ERA_PERIODS
         ])
-        ax.legend(handles=sb_handles, fontsize=7, loc='upper left', framealpha=0.9)
+        ax.legend(handles=sb_handles, fontsize=7, loc='upper left', framealpha=0.7)
         ax.set_xlim(start_year - 1, end_year + 1)
         ax.grid(True, alpha=0.3, linestyle='--')
         if idx >= (n_rows - 1) * n_cols:
@@ -2510,7 +2532,7 @@ def create_subbasin_time_series(
         af_lo, af_hi = ax.get_ylim()
         ax_m3.set_ylim(af_lo * _AF_TO_M3, af_hi * _AF_TO_M3)
         if (idx + 1) % n_cols == 0 or idx == n_parents - 1:
-            ax_m3.set_ylabel('(m³)', fontweight='bold', fontsize=10)
+            ax_m3.set_ylabel(r'(m$^3$)', fontweight='bold', fontsize=10)
 
     for k in range(n_parents, len(axes_flat)):
         axes_flat[k].set_visible(False)
@@ -2588,7 +2610,7 @@ def create_subbasin_time_series(
             from matplotlib.lines import Line2D
             handles.append(Line2D([], [], color=COLORS['actual'], marker='o',
                                   markersize=4, label='Observed (ADWR Meter)'))
-        ax1.legend(handles=handles, fontsize=8, loc='upper left', framealpha=0.9)
+        ax1.legend(handles=handles, fontsize=8, loc='upper left', framealpha=0.7)
         ax2.set_xlim(start_year - 1, end_year + 1)
         _add_ft_twinx(ax1)
         _add_m3_twinx(ax2)
@@ -2758,7 +2780,7 @@ def create_graphical_abstract(
                            label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
             for e in ERA_PERIODS
         ]
-        ax_ts.legend(handles=handles, loc='upper left', fontsize=9, framealpha=0.9)
+        ax_ts.legend(handles=handles, loc='upper left', fontsize=9, framealpha=0.7)
 
         _add_m3_twinx(ax_ts)
 
@@ -3716,7 +3738,7 @@ def plot_intercomp_time_series(
                 lo, hi = axes[0].get_ylim()
                 ax_ft.set_ylim(lo * mm_to_ft, hi * mm_to_ft)
 
-                axes[1].set_ylabel('Volume (m³)')
+                axes[1].set_ylabel(r'Volume (m$^3$)')
                 axes[1].set_xlabel('Year')
                 axes[1].grid(True, alpha=0.3, linestyle='--')
                 axes[1].legend(fontsize=9)

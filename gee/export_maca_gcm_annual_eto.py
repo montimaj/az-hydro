@@ -7,7 +7,7 @@ that GCM's climate signal.  Monthly ETo is computed internally using the same
 flat-pipeline approach and gridMET bias-correction ratios as the full 40-member
 ensemble (export_maca_monthly_eto.py), then summed to annual before export.
 
-Annual export is sufficient because the downstream XGBoost model operates on
+Annual export is sufficient because the downstream ML model operates on
 annual predictor variables.  Monthly resolution is only needed for intermediate
 computation (gridMET bias correction is per-month) and is handled server-side.
 
