@@ -885,26 +885,24 @@ def compute_shap_plots(
     shap_values = explainer.shap_values(x_sub)
 
     # 1. Beeswarm summary plot
-    plt.figure(figsize=(12, 8))
     shap.summary_plot(
         shap_values, x_display,
         max_display=max_display, show=False,
     )
+    plt.gcf().set_size_inches(12, 8)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Summary{suffix}.png'), dpi=600)
-    plt.clf()
-    plt.close()
+    plt.close('all')
 
     # 2. Bar plot (mean |SHAP|)
-    plt.figure(figsize=(12, 8))
     shap.summary_plot(
         shap_values, x_display,
         plot_type='bar', max_display=max_display, show=False,
     )
+    plt.gcf().set_size_inches(12, 8)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Bar{suffix}.png'), dpi=600)
-    plt.clf()
-    plt.close()
+    plt.close('all')
 
     # 3. Dependence plots for top N features
     dep_dir = os.path.join(output_dir, f'Dependence{suffix}')
@@ -915,26 +913,32 @@ def compute_shap_plots(
 
     for idx in top_indices:
         feat_name = display_cols[idx]
-        plt.figure(figsize=(10, 6))
         shap.dependence_plot(
             idx, shap_values, x_display,
             show=False,
         )
-        # Append units to axis labels
+        # Append units to x-axis and colorbar (y-axis is SHAP value, unitless)
+        fig = plt.gcf()
         ax = plt.gca()
         unit = _display_units.get(feat_name)
         if unit:
             xlabel = ax.get_xlabel()
             if unit not in xlabel:
                 ax.set_xlabel(f'{xlabel} ({unit})')
-            ylabel = ax.get_ylabel()
-            if ylabel and unit not in ylabel:
-                ax.set_ylabel(f'{ylabel} ({unit})')
+        # Colorbar label (interaction feature on the secondary axis)
+        for cb_ax in fig.get_axes():
+            if cb_ax is ax:
+                continue
+            cb_label = cb_ax.get_ylabel()
+            if cb_label:
+                cb_unit = _display_units.get(cb_label)
+                if cb_unit and cb_unit not in cb_label:
+                    cb_ax.set_ylabel(f'{cb_label} ({cb_unit})')
+        plt.gcf().set_size_inches(10, 6)
         plt.tight_layout()
         safe_name = feat_name.replace('/', '_').replace(' ', '_')
         plt.savefig(os.path.join(dep_dir, f'{model_name}_SHAP_Dep_{safe_name}.png'), dpi=600)
-        plt.clf()
-        plt.close()
+        plt.close('all')
 
     logger.info(f'  {n_dependence} dependence plots saved to {dep_dir}')
 
@@ -948,12 +952,11 @@ def compute_shap_plots(
     pred_vals = shap_values.sum(axis=1) + explainer.expected_value
     median_idx = np.argmin(np.abs(pred_vals - np.median(pred_vals)))
 
-    plt.figure(figsize=(12, 8))
     shap.waterfall_plot(explanation[median_idx], max_display=max_display, show=False)
+    plt.gcf().set_size_inches(12, 8)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Waterfall{suffix}.png'), dpi=600)
-    plt.clf()
-    plt.close()
+    plt.close('all')
 
     logger.info(f'SHAP plots saved to {output_dir}')
 
