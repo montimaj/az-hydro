@@ -1152,31 +1152,35 @@ def _nhm_ie_ratio_path(
         'mean_ie': mean_ie.values,
     })
 
-    huc_merged = huc_reproj.merge(mean_ie_df, on='huc12', how='left')
-    # NaN stays NaN (no data)
-
-    # Rasterize
-    shapes = [
-        (geom, val) for geom, val in
-        zip(huc_merged.geometry, huc_merged['mean_ie'])
-        if np.isfinite(val) and val > 0
-    ]
-    if shapes:
-        nhm_raster = rasterize(
-            shapes, out_shape=ref_shape, transform=ref_transform,
-            fill=np.nan, dtype='float64',
-            merge_alg=rio.enums.MergeAlg.replace,
-        )
-    else:
-        nhm_raster = np.full(ref_shape, np.nan, dtype=np.float64)
-
     out_tif = os.path.join(output_dir, 'NHM_mean_annual_IE.tif')
-    with rio.open(ref_raster) as ref_src:
-        profile = ref_src.profile.copy()
-    profile.update(dtype='float64', nodata=np.nan, count=1)
-    with rio.open(out_tif, 'w', **profile) as dst:
-        dst.write(nhm_raster, 1)
-    logger.info(f'  Wrote NHM IE raster: {out_tif}')
+
+    if os.path.isfile(out_tif):
+        logger.info(f'  Reusing existing NHM IE raster: {out_tif}')
+    else:
+        huc_merged = huc_reproj.merge(mean_ie_df, on='huc12', how='left')
+        # NaN stays NaN (no data)
+
+        # Rasterize
+        shapes = [
+            (geom, val) for geom, val in
+            zip(huc_merged.geometry, huc_merged['mean_ie'])
+            if np.isfinite(val) and val > 0
+        ]
+        if shapes:
+            nhm_raster = rasterize(
+                shapes, out_shape=ref_shape, transform=ref_transform,
+                fill=np.nan, dtype='float64',
+                merge_alg=rio.enums.MergeAlg.replace,
+            )
+        else:
+            nhm_raster = np.full(ref_shape, np.nan, dtype=np.float64)
+
+        with rio.open(ref_raster) as ref_src:
+            profile = ref_src.profile.copy()
+        profile.update(dtype='float64', nodata=np.nan, count=1)
+        with rio.open(out_tif, 'w', **profile) as dst:
+            dst.write(nhm_raster, 1)
+        logger.info(f'  Wrote NHM IE raster: {out_tif}')
 
     # Basin-mean IE
     basin_means = _raster_basin_means(out_tif, basin_reproj, basin_col)

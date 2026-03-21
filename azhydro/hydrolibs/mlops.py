@@ -1876,8 +1876,12 @@ def compare_all_models(
                 test_mae = normalized_mae(test_pred['Actual_GW_mm'].values, test_pred['Pred_GW_mm'].values)
             else:
                 # Evaluate directly on raw data
-                x_tr_pred = x_train.drop(columns=[_PHYS_COL], errors='ignore') if isinstance(x_train, pd.DataFrame) else x_train
-                x_te_pred = x_test.drop(columns=[_PHYS_COL], errors='ignore') if isinstance(x_test, pd.DataFrame) else x_test
+                if model_name not in _PIML_MODELS and isinstance(x_train, pd.DataFrame) and _PHYS_COL in x_train.columns:
+                    x_tr_pred = x_train.drop(columns=[_PHYS_COL])
+                    x_te_pred = x_test.drop(columns=[_PHYS_COL])
+                else:
+                    x_tr_pred = x_train
+                    x_te_pred = x_test
                 y_pred_train = model.predict(x_tr_pred)
                 y_pred_test = model.predict(x_te_pred)
 
@@ -2674,13 +2678,17 @@ def get_prediction_results(
         pd.DataFrame: Modified prediction data frame.
     """
 
-    # Strip physics column before prediction — PIML wrappers handle this
-    # internally but standard models were trained without it
-    x_tr_clean = x_train.drop(columns=[_PHYS_COL], errors='ignore') if isinstance(x_train, pd.DataFrame) else x_train
-    x_te_clean = x_test.drop(columns=[_PHYS_COL], errors='ignore') if isinstance(x_test, pd.DataFrame) else x_test
+    # PIML wrappers strip _PHYS_COL internally during predict();
+    # standard models were trained without it, so strip before predict.
+    if model_name not in _PIML_MODELS and isinstance(x_train, pd.DataFrame) and _PHYS_COL in x_train.columns:
+        x_tr_pred = x_train.drop(columns=[_PHYS_COL])
+        x_te_pred = x_test.drop(columns=[_PHYS_COL])
+    else:
+        x_tr_pred = x_train
+        x_te_pred = x_test
 
-    y_pred_train = model.predict(x_tr_clean)
-    y_pred_test = model.predict(x_te_clean)
+    y_pred_train = model.predict(x_tr_pred)
+    y_pred_test = model.predict(x_te_pred)
     if log_target:
         y_pred_train = np.expm1(y_pred_train)
         y_pred_test = np.expm1(y_pred_test)
@@ -2688,15 +2696,19 @@ def get_prediction_results(
         y_test = np.expm1(y_test)
     y_pred_train = np.abs(y_pred_train)
     y_pred_test = np.abs(y_pred_test)
+
+    # Output DataFrames always exclude the physics column
+    x_tr_out = x_train.drop(columns=[_PHYS_COL], errors='ignore') if isinstance(x_train, pd.DataFrame) else x_train
+    x_te_out = x_test.drop(columns=[_PHYS_COL], errors='ignore') if isinstance(x_test, pd.DataFrame) else x_test
     if x_scaler and y_scaler:
-        x_tr_clean = pd.DataFrame(x_scaler.inverse_transform(x_tr_clean), columns=x_tr_clean.columns)
-        x_te_clean = pd.DataFrame(x_scaler.inverse_transform(x_te_clean), columns=x_te_clean.columns)
+        x_tr_out = pd.DataFrame(x_scaler.inverse_transform(x_tr_out), columns=x_tr_out.columns)
+        x_te_out = pd.DataFrame(x_scaler.inverse_transform(x_te_out), columns=x_te_out.columns)
         y_train = y_scaler.inverse_transform(y_train.reshape(-1, 1)).ravel()
         y_test = y_scaler.inverse_transform(y_test.reshape(-1, 1)).ravel()
         y_pred_train = y_scaler.inverse_transform(y_pred_train.reshape(-1, 1)).ravel()
         y_pred_test = y_scaler.inverse_transform(y_pred_test.reshape(-1, 1)).ravel()
-    train_df = x_tr_clean.copy() if isinstance(x_tr_clean, pd.DataFrame) else pd.DataFrame(x_tr_clean)
-    test_df = x_te_clean.copy() if isinstance(x_te_clean, pd.DataFrame) else pd.DataFrame(x_te_clean)
+    train_df = x_tr_out.copy() if isinstance(x_tr_out, pd.DataFrame) else pd.DataFrame(x_tr_out)
+    test_df = x_te_out.copy() if isinstance(x_te_out, pd.DataFrame) else pd.DataFrame(x_te_out)
     train_df[year_col] = year_train[year_col].to_numpy().ravel()
     train_df[gw_basin_col] = gw_basin_train[gw_basin_col].to_numpy().ravel()
     if easting_train is not None:
