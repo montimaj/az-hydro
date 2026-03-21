@@ -717,8 +717,8 @@ def compute_perm_imp(
             imp_dict['F_IMP'] = np.round(f_imp, 5)
             imp_df = pd.DataFrame(data=imp_dict).sort_values(by='F_IMP', ascending=False)
             imp_df['Features'] = imp_df['Features'].replace(feature_dict)
-            plt.rcParams.update({'font.size': 30})
-            plt.figure(figsize=(30, 15))
+            plt.rcParams.update({'font.size': 20})
+            plt.figure(figsize=(14, max(8, len(imp_df) * 0.7)))
             sns.barplot(
                 data=imp_df,
                 y='Features',
@@ -863,7 +863,12 @@ def compute_shap_plots(
     import shap
 
     makedirs(output_dir)
-    feature_dict = get_feature_dict()
+    feature_dict, feature_units = get_feature_dict(get_units=True)
+    # Build display_name → unit mapping for axis labelling
+    _display_units = {}
+    for raw_name, unit in feature_units.items():
+        display_name = feature_dict.get(raw_name, raw_name)
+        _display_units[display_name] = unit
     suffix = f'_{data_label}' if data_label else ''
 
     # Subsample if necessary
@@ -915,6 +920,16 @@ def compute_shap_plots(
             idx, shap_values, x_display,
             show=False,
         )
+        # Append units to axis labels
+        ax = plt.gca()
+        unit = _display_units.get(feat_name)
+        if unit:
+            xlabel = ax.get_xlabel()
+            if unit not in xlabel:
+                ax.set_xlabel(f'{xlabel} ({unit})')
+            ylabel = ax.get_ylabel()
+            if ylabel and unit not in ylabel:
+                ax.set_ylabel(f'{ylabel} ({unit})')
         plt.tight_layout()
         safe_name = feat_name.replace('/', '_').replace(' ', '_')
         plt.savefig(os.path.join(dep_dir, f'{model_name}_SHAP_Dep_{safe_name}.png'), dpi=600)
