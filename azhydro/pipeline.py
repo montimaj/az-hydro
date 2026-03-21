@@ -356,16 +356,16 @@ def create_az_data(
     # EDA
     if not skip_eda:
         vizops.explore_az_data(az_df, os.path.join(MODEL_DIR, 'EDA'))
+        
+        # ET vs ETo analysis by land use
+        vizops.analyze_et_by_land_use(az_df, os.path.join(MODEL_DIR, 'EDA'))
+
+        # Pumping distribution analysis (metered years only)
+        vizops.analyze_pumping_distribution(
+            az_df, os.path.join(MODEL_DIR, 'EDA'), YEAR_LIST, MAX_GW,
+        )
     else:
         logger.info('Skipping EDA plots (--skip-eda)')
-
-    # ET vs ETo analysis by land use
-    vizops.analyze_et_by_land_use(az_df, os.path.join(MODEL_DIR, 'EDA'))
-
-    # Pumping distribution analysis (metered years only)
-    vizops.analyze_pumping_distribution(
-        az_df, os.path.join(MODEL_DIR, 'EDA'), YEAR_LIST, MAX_GW,
-    )
 
     return az_df
 
