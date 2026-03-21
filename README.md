@@ -1,4 +1,4 @@
-# AZ-Hydro: Two Centuries of Arizona Water Use — Historical and projected groundwater/surface-water withdrawals and irrigation consumptive use for Arizona, 1896–2099
+# AZ-Hydro: Two Centuries of Arizona Water Use — Historical and projected groundwater/surface-water withdrawals and irrigation consumptive use, 1896–2099
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Google Earth Engine](https://img.shields.io/badge/Google%20Earth%20Engine-4285F4?logo=google-earth&logoColor=white)](https://earthengine.google.com/)
