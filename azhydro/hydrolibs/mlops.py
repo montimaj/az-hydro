@@ -1174,7 +1174,11 @@ def build_ml_model_optuna(
         if model_name in _PIML_MODELS and 'physics_lambda' in fit_params:
             model.physics_lambda = fit_params.pop('physics_lambda')
         model.set_params(**fit_params)
-        model.fit(x_train, y_train)
+        # PIML wrappers strip _PHYS_COL internally; standard models need it removed
+        x_fit = x_train
+        if model_name not in _PIML_MODELS and isinstance(x_train, pd.DataFrame) and _PHYS_COL in x_train.columns:
+            x_fit = x_train.drop(columns=[_PHYS_COL])
+        model.fit(x_fit, y_train)
 
         model_file = os.path.join(model_dir, model_name)
         with open(model_file, 'wb') as f:
@@ -1327,7 +1331,11 @@ def build_ml_model_optuna(
     if model_name in _PIML_MODELS and 'physics_lambda' in fit_params:
         model.physics_lambda = fit_params.pop('physics_lambda')
     model.set_params(**fit_params)
-    model.fit(x_train, y_train)
+    # PIML wrappers strip _PHYS_COL internally; standard models need it removed
+    x_fit = x_train
+    if model_name not in _PIML_MODELS and isinstance(x_train, pd.DataFrame) and _PHYS_COL in x_train.columns:
+        x_fit = x_train.drop(columns=[_PHYS_COL])
+    model.fit(x_fit, y_train)
 
     model_file = os.path.join(model_dir, model_name)
     with open(model_file, 'wb') as f:
@@ -1390,10 +1398,15 @@ def objective_with_cv_enhanced(
     elif hasattr(model, 'thread_count'):
         model.set_params(thread_count=1)
 
+    # PIML wrappers strip _PHYS_COL internally; standard models need it removed
+    x_cv = x_train
+    if model_name not in _PIML_MODELS and isinstance(x_train, pd.DataFrame) and _PHYS_COL in x_train.columns:
+        x_cv = x_train.drop(columns=[_PHYS_COL])
+
     # Cross-validation with early stopping for pruning
     cv_results = cross_validate(
         estimator=model,
-        X=x_train,
+        X=x_cv,
         y=y_train,
         cv=cv,
         groups=cv_groups,
@@ -1441,6 +1454,79 @@ def objective_with_cv_enhanced(
     return trial_obj
 
 
+def _plot_physics_floor_diagnostic(
+        model: Any,
+        model_name: str,
+        x_train: pd.DataFrame,
+        y_train: np.ndarray,
+        output_dir: str,
+        log_target: bool = False,
+) -> None:
+    """Scatter predicted vs physics floor, colored by constraint activity.
+
+    Only meaningful for PIML models where ``_PHYS_COL`` is present in
+    *x_train*.  Silently returns for standard models.
+    """
+    if _PHYS_COL not in x_train.columns:
+        return
+
+    y_floor_log = x_train[_PHYS_COL].values
+    x_clean = x_train.drop(columns=[_PHYS_COL])
+    y_pred_log = model.predict(x_clean)
+
+    # Convert to original scale for plotting
+    if log_target:
+        y_floor = np.expm1(y_floor_log)
+        y_pred = np.abs(np.expm1(y_pred_log))
+        y_obs = np.expm1(y_train)
+    else:
+        y_floor = y_floor_log
+        y_pred = np.abs(y_pred_log)
+        y_obs = y_train
+
+    active = y_pred <= y_floor
+    n_active = int(active.sum())
+    n_total = len(active)
+
+    fig, axes = plt.subplots(1, 2, figsize=(24, 10))
+
+    # Panel 1: predicted vs floor
+    ax = axes[0]
+    ax.scatter(y_floor[~active], y_pred[~active], alpha=0.3, s=8,
+               color='steelblue', label=f'Above floor ({n_total - n_active:,})')
+    ax.scatter(y_floor[active], y_pred[active], alpha=0.5, s=12,
+               color='firebrick', label=f'At/below floor ({n_active:,})')
+    fmax = max(np.nanmax(y_floor), np.nanmax(y_pred))
+    ax.plot([0, fmax], [0, fmax], 'k--', alpha=0.5, label='1:1 line')
+    ax.set_xlabel('Physics Floor — (ET−Peff)×irr×gw/IE  [mm]')
+    ax.set_ylabel('Predicted GW Pumping [mm]')
+    ax.set_title(f'{model_name}: Predicted vs Irrigation Demand Floor')
+    ax.legend(fontsize=12)
+
+    # Panel 2: residual (pred - observed) split by constraint activity
+    ax = axes[1]
+    resid = y_pred - y_obs
+    resid_active = resid[active]
+    resid_inactive = resid[~active]
+    bins = np.linspace(np.nanpercentile(resid, 1), np.nanpercentile(resid, 99), 60)
+    ax.hist(resid_inactive, bins=bins, alpha=0.6, color='steelblue',
+            label=f'Floor inactive ({n_total - n_active:,})')
+    ax.hist(resid_active, bins=bins, alpha=0.6, color='firebrick',
+            label=f'Floor active ({n_active:,})')
+    ax.axvline(0, color='k', linestyle='--', alpha=0.5)
+    ax.set_xlabel('Residual (Predicted − Observed) [mm]')
+    ax.set_ylabel('Count')
+    ax.set_title(f'{model_name}: Residual Distribution by Floor Activity')
+    ax.legend(fontsize=12)
+
+    plt.tight_layout()
+    out_path = os.path.join(output_dir, f'{model_name}_Physics_Floor_Diagnostic.png')
+    plt.savefig(out_path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+    logger.info(f'Physics floor diagnostic: {n_active}/{n_total} '
+                f'({100*n_active/n_total:.1f}%) training samples at/below floor')
+
+
 def generate_interp_plots(
         model: Any,
         model_name: str,
@@ -1452,17 +1538,24 @@ def generate_interp_plots(
         random_state: int,
         log_target: bool = False,
 ) -> None:
-    """Generate permutation importance, ALE, and SHAP plots for a trained model.
+    """Generate permutation importance, ALE, SHAP, and floor diagnostic plots.
 
     Strips the physics column (if present) before passing data to the
-    interpretability functions.
+    interpretability functions.  For PIML models, also generates a physics
+    floor diagnostic plot showing predicted vs irrigation demand floor.
     """
+    interp_dir = os.path.join(output_dir, 'Interpretability')
+    makedirs(interp_dir)
+
+    # Physics floor diagnostic (before stripping _PHYS_COL)
+    _plot_physics_floor_diagnostic(
+        model, model_name, x_train, y_train,
+        interp_dir, log_target=log_target,
+    )
+
     # Strip physics column — interp functions expect real features only
     x_tr = x_train.drop(columns=[_PHYS_COL], errors='ignore')
     x_te = x_test.drop(columns=[_PHYS_COL], errors='ignore')
-
-    interp_dir = os.path.join(output_dir, 'Interpretability')
-    makedirs(interp_dir)
 
     # Permutation importance (train + test)
     compute_perm_imp(
@@ -1640,6 +1733,30 @@ def compare_all_models(
                     create_basin_plots=create_basin_plots,
                 )
 
+            # Run interpretability if dir is empty/missing (cached predictions
+            # but no prior interp run).  Load the saved model from disk.
+            if create_interp_plots:
+                interp_dir = os.path.join(model_subdir, 'Interpretability')
+                interp_exists = (
+                    os.path.isdir(interp_dir)
+                    and len(os.listdir(interp_dir)) > 0
+                )
+                if not interp_exists:
+                    model_file = os.path.join(model_subdir, model_name)
+                    if os.path.isfile(model_file):
+                        logger.info(f'Interpretability missing for cached {model_name} — '
+                                    f'loading model and generating plots')
+                        with open(model_file, 'rb') as f:
+                            cached_model = pickle.load(f)
+                        generate_interp_plots(
+                            cached_model, model_name, x_train, x_test,
+                            y_train, y_test, model_subdir,
+                            random_state, log_target,
+                        )
+                    else:
+                        logger.warning(f'Cannot generate interpretability for {model_name}: '
+                                       f'no saved model at {model_file}')
+
             train_pred = pred_df[pred_df['DATA'] == 'TRAIN']
             test_pred = pred_df[pred_df['DATA'] == 'TEST']
             train_r2 = r2_score(train_pred['Actual_GW_mm'], train_pred['Pred_GW_mm'])
@@ -1672,7 +1789,11 @@ def compare_all_models(
                     feature_names=feature_names,
                 )
                 model = model_dict[model_name]
-                model.fit(x_train, y_train)
+                # PIML wrappers strip _PHYS_COL internally; standard models need it removed
+                x_fit = x_train
+                if model_name not in _PIML_MODELS and isinstance(x_train, pd.DataFrame) and _PHYS_COL in x_train.columns:
+                    x_fit = x_train.drop(columns=[_PHYS_COL])
+                model.fit(x_fit, y_train)
                 cv_metric_df = pd.DataFrame()
 
             trained_models[model_name] = model
@@ -1755,8 +1876,10 @@ def compare_all_models(
                 test_mae = normalized_mae(test_pred['Actual_GW_mm'].values, test_pred['Pred_GW_mm'].values)
             else:
                 # Evaluate directly on raw data
-                y_pred_train = model.predict(x_train)
-                y_pred_test = model.predict(x_test)
+                x_tr_pred = x_train.drop(columns=[_PHYS_COL], errors='ignore') if isinstance(x_train, pd.DataFrame) else x_train
+                x_te_pred = x_test.drop(columns=[_PHYS_COL], errors='ignore') if isinstance(x_test, pd.DataFrame) else x_test
+                y_pred_train = model.predict(x_tr_pred)
+                y_pred_test = model.predict(x_te_pred)
 
                 train_r2 = r2_score(y_train, y_pred_train)
                 test_r2 = r2_score(y_test, y_pred_test)
@@ -2551,8 +2674,13 @@ def get_prediction_results(
         pd.DataFrame: Modified prediction data frame.
     """
 
-    y_pred_train = model.predict(x_train)
-    y_pred_test = model.predict(x_test)
+    # Strip physics column before prediction — PIML wrappers handle this
+    # internally but standard models were trained without it
+    x_tr_clean = x_train.drop(columns=[_PHYS_COL], errors='ignore') if isinstance(x_train, pd.DataFrame) else x_train
+    x_te_clean = x_test.drop(columns=[_PHYS_COL], errors='ignore') if isinstance(x_test, pd.DataFrame) else x_test
+
+    y_pred_train = model.predict(x_tr_clean)
+    y_pred_test = model.predict(x_te_clean)
     if log_target:
         y_pred_train = np.expm1(y_pred_train)
         y_pred_test = np.expm1(y_pred_test)
@@ -2561,18 +2689,14 @@ def get_prediction_results(
     y_pred_train = np.abs(y_pred_train)
     y_pred_test = np.abs(y_pred_test)
     if x_scaler and y_scaler:
-        x_train = pd.DataFrame(x_scaler.inverse_transform(x_train), columns=x_train.columns)
-        x_test = pd.DataFrame(x_scaler.inverse_transform(x_test), columns=x_test.columns)
+        x_tr_clean = pd.DataFrame(x_scaler.inverse_transform(x_tr_clean), columns=x_tr_clean.columns)
+        x_te_clean = pd.DataFrame(x_scaler.inverse_transform(x_te_clean), columns=x_te_clean.columns)
         y_train = y_scaler.inverse_transform(y_train.reshape(-1, 1)).ravel()
         y_test = y_scaler.inverse_transform(y_test.reshape(-1, 1)).ravel()
         y_pred_train = y_scaler.inverse_transform(y_pred_train.reshape(-1, 1)).ravel()
         y_pred_test = y_scaler.inverse_transform(y_pred_test.reshape(-1, 1)).ravel()
-    train_df = x_train.copy()
-    test_df = x_test.copy()
-    # Drop physics column from output DataFrames (internal to PIML wrappers)
-    for df in (train_df, test_df):
-        if _PHYS_COL in df.columns:
-            df.drop(columns=[_PHYS_COL], inplace=True)
+    train_df = x_tr_clean.copy() if isinstance(x_tr_clean, pd.DataFrame) else pd.DataFrame(x_tr_clean)
+    test_df = x_te_clean.copy() if isinstance(x_te_clean, pd.DataFrame) else pd.DataFrame(x_te_clean)
     train_df[year_col] = year_train[year_col].to_numpy().ravel()
     train_df[gw_basin_col] = gw_basin_train[gw_basin_col].to_numpy().ravel()
     if easting_train is not None:
