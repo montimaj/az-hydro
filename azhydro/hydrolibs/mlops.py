@@ -37,6 +37,7 @@ from sklearn.inspection import permutation_importance
 from sklearn.linear_model import Lasso, LinearRegression, Ridge
 from sklearn.metrics import make_scorer, mean_absolute_error, r2_score, root_mean_squared_error
 from sklearn.model_selection import (
+    GroupKFold,
     RepeatedKFold,
     RepeatedStratifiedKFold,
     cross_validate,
@@ -256,6 +257,27 @@ def _abs_normalized_mbe(y: np.array, y_pred: np.array) -> float:
     return normalized_mbe(y, np.abs(y_pred))
 
 
+# --- Log-target scoring: expm1 both y and y_pred before computing ----------
+def _log_r2_score(y: np.array, y_pred: np.array) -> float:
+    return r2_score(np.expm1(y), np.abs(np.expm1(y_pred)))
+
+
+def _log_adjusted_r2(y: np.array, y_pred: np.array, p: int) -> float:
+    return adjusted_r2(np.expm1(y), np.abs(np.expm1(y_pred)), p)
+
+
+def _log_normalized_rmse(y: np.array, y_pred: np.array) -> float:
+    return normalized_rmse(np.expm1(y), np.abs(np.expm1(y_pred)))
+
+
+def _log_normalized_mae(y: np.array, y_pred: np.array) -> float:
+    return normalized_mae(np.expm1(y), np.abs(np.expm1(y_pred)))
+
+
+def _log_normalized_mbe(y: np.array, y_pred: np.array) -> float:
+    return normalized_mbe(np.expm1(y), np.abs(np.expm1(y_pred)))
+
+
 def get_feature_dict(get_units: bool = False) -> dict[str, str] | tuple[dict[str, str], dict[str, str]]:
     """
     Get feature name dictionary for better visualization.
@@ -315,6 +337,19 @@ def get_feature_dict(get_units: bool = False) -> dict[str, str] | tuple[dict[str
     return feature_dict if not get_units else (feature_dict, feature_dict_units)
 
 
+class _OrigScaleModelWrapper:
+    """Thin wrapper that applies expm1 to predictions of a log1p-trained model."""
+
+    def __init__(self, model):
+        self._model = model
+
+    def predict(self, X):
+        return np.abs(np.expm1(self._model.predict(X)))
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)
+
+
 def compute_perm_imp(
         model_name: str,
         x_train: pd.DataFrame,
@@ -325,7 +360,8 @@ def compute_perm_imp(
         output_dir: str,
         scoring_metric: str,
         random_state: int,
-        create_plots: bool = False
+        create_plots: bool = False,
+        log_target: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame] | None:
     """
     Compute permutation importances.
@@ -348,6 +384,10 @@ def compute_perm_imp(
     """
     if model_name in ['RF', 'ETR', 'LGBM', 'XGB', 'XGBRF', 'HGBR']:
         logger.info('Computing permutation importance...')
+        if log_target:
+            model = _OrigScaleModelWrapper(model)
+            y_train = np.expm1(y_train)
+            y_test = np.expm1(y_test)
         scoring_metrics = {
             'r2': 'r2',
             'scaled_rmse': make_scorer(normalized_rmse, greater_is_better=False),
@@ -414,7 +454,8 @@ def compute_ale_plots(
         y_train: np.ndarray,
         x_test: pd.DataFrame,
         y_test: np.ndarray,
-        output_dir: str
+        output_dir: str,
+        log_target: bool = False,
 ) -> None:
     """
     Create accumulated local effects (ALE) plots.
@@ -434,6 +475,10 @@ def compute_ale_plots(
     """
 
     makedirs(output_dir)
+    if log_target:
+        model = _OrigScaleModelWrapper(model)
+        y_train = np.expm1(y_train)
+        y_test = np.expm1(y_test)
     feature_dict, feature_dict_units = get_feature_dict(get_units=True)
     feature_names = x_train.columns.tolist()
     data_dict = {
@@ -499,6 +544,7 @@ def compute_shap_plots(
         max_display: int = 20,
         n_dependence: int = 10,
         subsample: int = 5000,
+        log_target: bool = False,
 ) -> None:
     """
     Create SHAP beeswarm, bar, dependence, and waterfall plots.
@@ -735,6 +781,8 @@ def build_ml_model_optuna(
         n_dask_workers: int = 4,
         use_dask: bool = True,
         pruning: bool = True,
+        cv_groups: np.ndarray | pd.Series | None = None,
+        log_target: bool = False,
         **kwargs: Any
 ) -> tuple[Any, pd.DataFrame]:
     """
@@ -755,6 +803,10 @@ def build_ml_model_optuna(
         n_dask_workers (int): Number of Dask workers. Default is 4.
         use_dask (bool): Set True to use Dask parallelization. Default is True.
         pruning (bool): Set True to enable Optuna pruning. Default is True.
+        cv_groups (np.ndarray, pd.Series, or None): Group labels for GroupKFold CV.
+            When provided, uses GroupKFold instead of RepeatedKFold so that the
+            inner CV matches the outer evaluation strategy (e.g. pixel, temporal,
+            or spatial holdout). Default is None (random RepeatedKFold).
         kwargs: Additional arguments.
 
     Returns:
@@ -763,18 +815,41 @@ def build_ml_model_optuna(
     makedirs(make_proper_dir_name(model_dir))
 
     if not load_model:
-        scoring_metrics = {
-            'r2': make_scorer(_abs_r2_score),
-            'adjusted_r2': make_scorer(_abs_adjusted_r2, p=x_train.shape[1], greater_is_better=True),
-            'normalized_rmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
-            'normalized_mae': make_scorer(_abs_normalized_mae, greater_is_better=False),
-            'normalized_mbe': make_scorer(_abs_normalized_mbe, greater_is_better=False)
-        }
-        cv = RepeatedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
-        if stratified_kfold:
+        if log_target:
+            scoring_metrics = {
+                # R² is scale-invariant for the model's operating space;
+                # use log-space R² to avoid Jensen's inequality bias from expm1.
+                'r2': make_scorer(_abs_r2_score),
+                'adjusted_r2': make_scorer(_abs_adjusted_r2, p=x_train.shape[1], greater_is_better=True),
+                # Log-space NRMSE — used as Optuna objective so that
+                # hyperparameter search optimises in the same space as the
+                # tree model's internal MSE loss.
+                'log_nrmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
+                # RMSE/MAE/MBE have physical units → report in original (mm) scale.
+                'normalized_rmse': make_scorer(_log_normalized_rmse, greater_is_better=False),
+                'normalized_mae': make_scorer(_log_normalized_mae, greater_is_better=False),
+                'normalized_mbe': make_scorer(_log_normalized_mbe, greater_is_better=False)
+            }
+        else:
+            scoring_metrics = {
+                'r2': make_scorer(_abs_r2_score),
+                'adjusted_r2': make_scorer(_abs_adjusted_r2, p=x_train.shape[1], greater_is_better=True),
+                'normalized_rmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
+                'normalized_mae': make_scorer(_abs_normalized_mae, greater_is_better=False),
+                'normalized_mbe': make_scorer(_abs_normalized_mbe, greater_is_better=False)
+            }
+        if cv_groups is not None:
+            n_unique_groups = len(np.unique(cv_groups))
+            effective_folds = min(fold_count, n_unique_groups)
+            cv = GroupKFold(n_splits=effective_folds)
+            logger.info(f'Using GroupKFold with {effective_folds} splits '
+                        f'({n_unique_groups} unique groups)')
+        elif stratified_kfold:
             stratify_labels = kwargs['stratify_labels'].to_numpy().ravel()
             cv = RepeatedStratifiedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
             cv = cv.split(x_train, stratify_labels)
+        else:
+            cv = RepeatedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         optuna_storage = os.path.join(model_dir, f'optuna_study_{model_name}.db')
@@ -809,7 +884,7 @@ def build_ml_model_optuna(
             sampler=sampler,
             pruner=pruner
         )
-        study.set_metric_names(['NRMSE_with_Overfitting_Penalty'])
+        study.set_metric_names(['Log_NRMSE_with_Overfitting_Penalty'])
 
         completed = len([t for t in study.trials
                          if t.state == optuna.trial.TrialState.COMPLETE])
@@ -819,7 +894,7 @@ def build_ml_model_optuna(
         # Scikit-learn tree ensembles (RF, ETR, GBR, ADA, BAG) are much
         # slower per trial than histogram-based models, so cap at 5 trials.
         # RIDGE/LASSO are simple models and don't need capping.
-        _FAST_MODELS = {'XGB', 'XGBRF', 'LGBM', 'CAT', 'HGBR'}
+        _FAST_MODELS = {'XGB', 'XGBRF', 'LGBM', 'CAT', 'HGBR', 'ETR'}
         _SIMPLE_MODELS = {'LR', 'RIDGE', 'LASSO'}
         if model_name == 'LR':
             effective_n_trials = 1
@@ -842,7 +917,8 @@ def build_ml_model_optuna(
                     lambda trial: objective_with_cv_enhanced(
                         trial, x_train, y_train,
                         model_name, cv, scoring_metrics,
-                        alpha, random_state, pruning
+                        alpha, random_state, pruning,
+                        cv_groups=cv_groups,
                     ),
                     n_trials=remaining,
                     n_jobs=1,
@@ -895,11 +971,12 @@ def objective_with_cv_enhanced(
         scoring_metrics: dict[str, Any],
         alpha: float = 0.1,
         random_state: int = 42,
-        pruning: bool = True
+        pruning: bool = True,
+        cv_groups: np.ndarray | pd.Series | None = None,
 ) -> float:
     """
     Enhanced objective function for Optuna with pruning support.
-    
+
     Args:
         trial (Any): Optuna trial object.
         x_train (np.ndarray or pd.DataFrame): Training features.
@@ -910,9 +987,10 @@ def objective_with_cv_enhanced(
         alpha (float): Weighting factor for overfitting penalty.
         random_state (int): Random state.
         pruning (bool): Whether to enable pruning.
+        cv_groups (np.ndarray, pd.Series, or None): Group labels for GroupKFold.
 
     Returns:
-        float: Objective value (lower is better).
+        float: Objective value (lower is better — log-space NRMSE with penalties).
     """
     # Get hyperparameters for the model
     params = get_optuna_params_for_model(trial, model_name)
@@ -933,15 +1011,18 @@ def objective_with_cv_enhanced(
         X=x_train,
         y=y_train,
         cv=cv,
+        groups=cv_groups,
         n_jobs=-1,
         scoring=scoring_metrics,
         return_train_score=True
     )
 
-    # Calculate metrics
-    test_mean_rmse = -cv_results['test_normalized_rmse'].mean()
-    test_std_rmse = abs(cv_results['test_normalized_rmse'].std())
-    train_mean_rmse = -cv_results['train_normalized_rmse'].mean()
+    # Use log-space NRMSE as objective when available (log_target),
+    # otherwise fall back to original-scale NRMSE.
+    nrmse_key = 'log_nrmse' if 'test_log_nrmse' in cv_results else 'normalized_rmse'
+    test_mean_nrmse = -cv_results[f'test_{nrmse_key}'].mean()
+    test_std_nrmse = abs(cv_results[f'test_{nrmse_key}'].std())
+    train_mean_nrmse = -cv_results[f'train_{nrmse_key}'].mean()
 
     # Store user attributes
     for data in ['train', 'test']:
@@ -957,15 +1038,18 @@ def objective_with_cv_enhanced(
         trial.set_user_attr(neg_mae_key, -cv_results[neg_mae_key].mean())
         trial.set_user_attr(mbe_key, -cv_results[mbe_key].mean())
 
-    # Calculate objective with overfitting penalty
+    # Calculate objective: minimize NRMSE with overfitting ratio and variance penalties.
+    # The ratio test/train measures proportional overfitting — a 20× gap is penalised
+    # much harder than a 2× gap, unlike the absolute difference which treats them similarly.
     beta = 0.5 * alpha
-    trial_obj = test_mean_rmse + alpha * abs(train_mean_rmse - test_mean_rmse) + beta * test_std_rmse
+    overfit_ratio = test_mean_nrmse / max(train_mean_nrmse, 1e-6)
+    trial_obj = test_mean_nrmse * (1 + alpha * max(overfit_ratio - 1, 0)) + beta * test_std_nrmse
 
     # Report per-fold metrics at incremental steps for pruning
     if pruning:
-        fold_rmses = -cv_results['test_normalized_rmse']
-        for step, fold_rmse in enumerate(fold_rmses):
-            trial.report(fold_rmse, step)
+        fold_nrmses = -cv_results[f'test_{nrmse_key}']
+        for step, fold_nrmse in enumerate(fold_nrmses):
+            trial.report(fold_nrmse, step)
             if trial.should_prune():
                 raise optuna.TrialPruned()
 
@@ -995,11 +1079,21 @@ def compare_all_models(
         year_col: str = 'Year',
         gw_basin_col: str = 'GW_Basin',
         use_ama_ina: bool = True,
-        apply_bias_correction: int = 0
+        apply_bias_correction: bool = False,
+        cv_groups: np.ndarray | pd.Series | None = None,
+        easting_train: pd.DataFrame | None = None,
+        easting_test: pd.DataFrame | None = None,
+        northing_train: pd.DataFrame | None = None,
+        northing_test: pd.DataFrame | None = None,
+        test_case: str = '',
+        test_year_limits: tuple[tuple[int, int], ...] = (),
+        raster_res: float = 2000,
+        create_basin_plots: bool = True,
+        log_target: bool = False,
 ) -> pd.DataFrame:
     """
     Compare all available models with full evaluation.
-    
+
     Args:
         x_train: Training features.
         x_test: Test features.
@@ -1023,8 +1117,16 @@ def compare_all_models(
         year_col: Name of year column.
         gw_basin_col: Name of basin column.
         use_ama_ina: Whether to filter for AMA/INA basins in metrics.
-        apply_bias_correction: Bias correction type (0=none, 1=global, 2=basin-wise).
-        
+        apply_bias_correction: Whether to apply global linear bias correction.
+        cv_groups: Group labels for GroupKFold CV. When provided, inner CV
+            uses GroupKFold to match the outer evaluation strategy.
+        test_case: Test case identifier for visualizations (e.g. 'Random',
+            'Pixel_Holdout'). When non-empty, per-model visualizations are
+            generated immediately after each model is trained.
+        test_year_limits: Test period definitions for visualization shading.
+        raster_res: Raster resolution in meters for visualization.
+        create_basin_plots: Whether to create individual basin plots.
+
     Returns:
         DataFrame with comparison results.
     """
@@ -1056,7 +1158,8 @@ def compare_all_models(
                 x_train, y_train, model_subdir, model_name,
                 random_state=random_state, fold_count=fold_count,
                 repeats=repeats, n_trials=n_trials,
-                n_dask_workers=n_dask_workers, use_dask=use_dask
+                n_dask_workers=n_dask_workers, use_dask=use_dask,
+                cv_groups=cv_groups, log_target=log_target,
             )
         else:
             model_dict = get_model_dict(random_state, include_all_models=True)
@@ -1093,7 +1196,12 @@ def compare_all_models(
                 model_name,
                 apply_bias_correction=apply_bias_correction,
                 year_col=year_col,
-                gw_basin_col=gw_basin_col
+                gw_basin_col=gw_basin_col,
+                easting_train=easting_train,
+                easting_test=easting_test,
+                northing_train=northing_train,
+                northing_test=northing_test,
+                log_target=log_target,
             )
 
             # Calculate detailed metrics
@@ -1105,6 +1213,19 @@ def compare_all_models(
                 model_name=model_name,
                 n_features=x_train.shape[1]
             )
+
+            # Per-model visualizations (immediately after training)
+            if test_case:
+                generate_model_visualizations(
+                    pred_df=pred_df,
+                    output_dir=os.path.join(model_subdir, 'Visualizations'),
+                    model_name=model_name,
+                    test_case=test_case,
+                    test_year_limits=test_year_limits,
+                    raster_res=raster_res,
+                    use_ama_ina=use_ama_ina,
+                    create_basin_plots=create_basin_plots,
+                )
 
             # Use metrics from pred_df for comparison
             train_pred = pred_df[pred_df['DATA'] == 'TRAIN']
@@ -1722,6 +1843,51 @@ def get_grid_search_stats(
     return metric_df
 
 
+def fit_linear_bc(
+        y_pred: np.ndarray,
+        y_actual: np.ndarray,
+) -> tuple[float, float]:
+    """Fit a linear bias correction: y_actual ≈ m * y_pred + b.
+
+    Args:
+        y_pred: Predicted values (original scale).
+        y_actual: Actual/observed values (original scale).
+
+    Returns:
+        tuple[float, float]: (slope, intercept). Returns (1.0, 0.0) if
+            prediction variance is zero.
+    """
+    pv = np.var(y_pred)
+    if pv == 0:
+        logger.warning(
+            'Zero prediction variance in bias correction — '
+            'all predictions are constant; returning identity.'
+        )
+        return 1.0, 0.0
+    m = np.cov(y_pred, y_actual)[0, 1] / pv
+    b = float(np.mean(y_actual) - m * np.mean(y_pred))
+    logger.info(f'Linear BC: slope={m:.4f}, intercept={b:.4f}')
+    return float(m), b
+
+
+def apply_linear_bc(
+        predictions: np.ndarray,
+        m: float,
+        b: float,
+) -> np.ndarray:
+    """Apply linear bias correction: corrected = |m * predictions + b|.
+
+    Args:
+        predictions: Raw predictions.
+        m: Slope from fit_linear_bc.
+        b: Intercept from fit_linear_bc.
+
+    Returns:
+        np.ndarray: Bias-corrected (non-negative) predictions.
+    """
+    return np.abs(m * predictions + b)
+
+
 def perform_bias_correction(
         train_df: pd.DataFrame,
         test_df: pd.DataFrame,
@@ -1729,9 +1895,12 @@ def perform_bias_correction(
         output_dir: str,
         error_gw_col: str = 'Error_GW_mm',
         n_features: int | None = None,
-) -> tuple[float, float] | tuple[np.array, np.array]:
+) -> tuple[float, float]:
     """
-    Apply bias correction to the model predictions.
+    Apply linear bias correction to the model predictions.
+
+    Fits a linear regression (y_actual = m * y_pred + b) on training data
+    and returns the slope and intercept for correction.
 
     Args:
         train_df (pd.DataFrame): Training dataframe containing the model predictions and actual values.
@@ -1739,28 +1908,18 @@ def perform_bias_correction(
         model_name (str): Name of the ML model.
         output_dir (str): Output directory to save the files.
         error_gw_col (str): Name of the column containing the error in groundwater predictions.
+        n_features (int or None): Number of model features for adjusted R².
 
     Returns:
-        Tuple of floats representing the slope and bias of the regression line if linear regression-based
-        bias correction is better than that of ML. Else, the predicted training and test residuals.
+        tuple[float, float]: Slope and intercept of the linear bias correction.
     """
 
     train_data_ecdf = train_df.copy(deep=True).drop(columns=[error_gw_col])
     test_data_ecdf = test_df.copy(deep=True).drop(columns=[error_gw_col])
-    pred_var = np.var(train_data_ecdf.Pred_GW_mm)
-    if pred_var == 0:
-        logger.warning(
-            'Zero prediction variance in bias correction — '
-            'all predictions are constant; skipping regression correction.'
-        )
-        m_roe = 1.0
-        b_roe = 0.0
-    else:
-        m_roe = np.cov(
-            train_data_ecdf.Pred_GW_mm, train_data_ecdf.Actual_GW_mm
-        )[0, 1] / pred_var
-        b_roe = np.mean(train_data_ecdf.Actual_GW_mm) - m_roe * np.mean(train_data_ecdf.Pred_GW_mm)
-    train_data_ecdf['BC_GW_mm'] = np.abs(m_roe * train_data_ecdf.Pred_GW_mm + b_roe)
+    m_roe, b_roe = fit_linear_bc(
+        train_data_ecdf.Pred_GW_mm.values, train_data_ecdf.Actual_GW_mm.values
+    )
+    train_data_ecdf['BC_GW_mm'] = apply_linear_bc(train_data_ecdf.Pred_GW_mm.values, m_roe, b_roe)
     train_r2_ecdf = r2_score(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm)
     _p = n_features if n_features is not None else train_data_ecdf.shape[1]
     train_adj_r2_ecdf = adjusted_r2(train_data_ecdf.Actual_GW_mm, train_data_ecdf.BC_GW_mm, _p)
@@ -1779,16 +1938,16 @@ def perform_bias_correction(
     plt.legend(labels=[f'BC{model_name}', model_name, 'Metered'], loc='lower right')
     plt.ylim(0, 1.1)
     plt.ylabel('ECDF')
-    plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
+    plt.xlabel('Annual Withdrawals (mm)')
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'ECDF_Train.png'), dpi=600)
     plt.clf()
-    test_data_ecdf['BC_GW_mm'] = np.abs(m_roe * test_data_ecdf.Pred_GW_mm + b_roe)
+    test_data_ecdf['BC_GW_mm'] = apply_linear_bc(test_data_ecdf.Pred_GW_mm.values, m_roe, b_roe)
     plot_ecdf_test_df = test_data_ecdf.filter(like="_GW", axis="columns")
     sns.ecdfplot(data=plot_ecdf_test_df, hue_order=hue_order)
     plt.legend(labels=[f'BC{model_name}', model_name, 'Metered'], loc='lower right')
     plt.ylabel('ECDF')
-    plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
+    plt.xlabel('Annual Withdrawals (mm)')
     plt.ylim(0, 1.1)
     plt.savefig(os.path.join(output_dir, 'ECDF_Test.png'), dpi=600)
     plt.close()
@@ -1824,82 +1983,7 @@ def perform_bias_correction(
         }
     ).round(2)
     metrics_df_test_linear.to_csv(os.path.join(output_dir, 'Test_Metrics_Linear.csv'), index=False)
-    model_dict = get_model_dict(random_state=42, use_dask=False, include_all_models=True)
-    model = model_dict[model_name]
-    drop_cols = ['Year', 'DATA', 'Actual_GW_mm', 'Pred_GW_mm'] + [error_gw_col]
-    train_data_ecdf_ml = train_df.copy(deep=True).drop(columns=[error_gw_col])
-    test_data_ecdf_ml = test_df.copy(deep=True).drop(columns=[error_gw_col])
-    x_train_data = train_df.drop(columns=drop_cols)
-    x_test_data = test_df.drop(columns=drop_cols)
-    y_train_data = train_df[error_gw_col].to_numpy().ravel()
-    model.fit(x_train_data, y_train_data)
-    residuals_pred_train = model.predict(x_train_data)
-    residuals_pred_test = model.predict(x_test_data)
-    train_data_ecdf_ml['BC_GW_mm'] = np.abs(train_data_ecdf_ml.Pred_GW_mm + residuals_pred_train)
-    test_data_ecdf_ml['BC_GW_mm'] = np.abs(test_data_ecdf_ml.Pred_GW_mm + residuals_pred_test)
-    train_r2_ml = r2_score(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
-    train_adj_r2_ml = adjusted_r2(
-        train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm, x_train_data.shape[1]
-    )
-    train_rmse_ml = normalized_rmse(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
-    train_mae_ml = normalized_mae(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
-    train_mbe_ml = normalized_mbe(train_data_ecdf_ml.Actual_GW_mm, train_data_ecdf_ml.BC_GW_mm)
-    test_r2_ml = r2_score(test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm)
-    test_adj_r2_ml = adjusted_r2(
-        test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm, x_train_data.shape[1]
-    )
-    test_rmse_ml = normalized_rmse(test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm)
-    test_mae_ml = normalized_mae(test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm)
-    test_mbe_ml = normalized_mbe(test_data_ecdf_ml.Actual_GW_mm, test_data_ecdf_ml.BC_GW_mm)
-
-    plt.rcParams.update({'font.size': 16})
-    plot_ecdf_train_df_ml = train_data_ecdf_ml.filter(like="_GW", axis="columns")
-    sns.ecdfplot(data=plot_ecdf_train_df_ml, hue_order=hue_order)
-    plt.legend(labels=[f'BC{model_name}', model_name, 'Metered'], loc='lower right')
-    plt.ylim(0, 1.1)
-    plt.ylabel('ECDF')
-    plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'ECDF_Train_ML.png'), dpi=600)
-    plt.clf()
-    plot_ecdf_test_df_ml = test_data_ecdf_ml.filter(like="_GW", axis="columns")
-    sns.ecdfplot(data=plot_ecdf_test_df_ml, hue_order=hue_order)
-    plt.legend(labels=[f'BC{model_name}', model_name, 'Metered'], loc='lower right')
-    plt.ylabel('ECDF')
-    plt.xlabel('Annual Agricultural Groundwater Pumping (mm)')
-    plt.ylim(0, 1.1)
-    plt.savefig(os.path.join(output_dir, 'ECDF_Test_ML.png'), dpi=600)
-    plt.clf()
-
-    metric_df_train_ml = pd.DataFrame(
-        data={
-            'Model': [model_name, f'BC{model_name}'],
-            'Train R2': [train_r2, train_r2_ml],
-            'Train Adjusted R2': [train_adj_r2, train_adj_r2_ml],
-            'Train RMSE (%)': [train_rmse, train_rmse_ml],
-            'Train MAE (%)': [train_mae, train_mae_ml],
-            'Train MBE (%)': [train_mbe, train_mbe_ml],
-        }
-    ).round(2)
-    metric_df_train_ml.to_csv(os.path.join(output_dir, 'Train_Metrics_ML.csv'), index=False)
-    metric_df_test_ml = pd.DataFrame(
-        data={
-            'Model': [model_name, f'BC{model_name}'],
-            'Test R2': [test_r2, test_r2_ml],
-            'Test Adjusted R2': [test_adj_r2, test_adj_r2_ml],
-            'Test RMSE (%)': [test_rmse, test_rmse_ml],
-            'Test MAE (%)': [test_mae, test_mae_ml],
-            'Test MBE (%)': [test_mbe, test_mbe_ml],
-        }
-    ).round(2)
-    metric_df_test_ml.to_csv(os.path.join(output_dir, 'Test_Metrics_ML.csv'), index=False)
-    # Select bias correction method based on TRAIN RMSE to avoid test-set snooping
-    if train_rmse <= train_rmse_ecdf and train_rmse <= train_rmse_ml:
-        return 1, 0
-    if train_rmse_ecdf < train_rmse_ml:
-        return m_roe, b_roe
-    else:
-        return residuals_pred_train, residuals_pred_test
+    return m_roe, b_roe
 
 
 def get_prediction_results(
@@ -1918,7 +2002,12 @@ def get_prediction_results(
         model_name: str = 'LGBM',
         year_col: str = 'Year',
         gw_basin_col: str = 'GW_Basin',
-        apply_bias_correction: int = 0
+        apply_bias_correction: bool = False,
+        easting_train: pd.DataFrame | None = None,
+        easting_test: pd.DataFrame | None = None,
+        northing_train: pd.DataFrame | None = None,
+        northing_test: pd.DataFrame | None = None,
+        log_target: bool = False,
 ) -> pd.DataFrame:
     """Get model prediction results.
 
@@ -1938,15 +2027,23 @@ def get_prediction_results(
         model_name (str): Model name. Default is 'LGBM'.
         year_col (str): Name of the year column.
         gw_basin_col (str): Name of the GW basin column.
-        apply_bias_correction (int): Type of bias correction to apply. 0 for no bias correction, 1 for global
-        training data-based correction, 2 for basin-wise correction.
+        apply_bias_correction (bool): Whether to apply global linear bias correction.
+        log_target (bool): If True, inverse-transform (expm1) predictions and y values back to
+            original scale before computing metrics.
 
     Returns:
         pd.DataFrame: Modified prediction data frame.
     """
 
-    y_pred_train = np.abs(model.predict(x_train))
-    y_pred_test = np.abs(model.predict(x_test))
+    y_pred_train = model.predict(x_train)
+    y_pred_test = model.predict(x_test)
+    if log_target:
+        y_pred_train = np.expm1(y_pred_train)
+        y_pred_test = np.expm1(y_pred_test)
+        y_train = np.expm1(y_train)
+        y_test = np.expm1(y_test)
+    y_pred_train = np.abs(y_pred_train)
+    y_pred_test = np.abs(y_pred_test)
     if x_scaler and y_scaler:
         x_train = pd.DataFrame(x_scaler.inverse_transform(x_train), columns=x_train.columns)
         x_test = pd.DataFrame(x_scaler.inverse_transform(x_test), columns=x_test.columns)
@@ -1957,9 +2054,17 @@ def get_prediction_results(
     train_df = x_train.copy()
     train_df[year_col] = year_train[year_col].to_numpy().ravel()
     train_df[gw_basin_col] = gw_basin_train[gw_basin_col].to_numpy().ravel()
+    if easting_train is not None:
+        train_df['easting_m'] = easting_train['easting_m'].to_numpy().ravel()
+    if northing_train is not None:
+        train_df['northing_m'] = northing_train['northing_m'].to_numpy().ravel()
     test_df = x_test.copy()
     test_df[year_col] = year_test[year_col].to_numpy().ravel()
     test_df[gw_basin_col] = gw_basin_test[gw_basin_col].to_numpy().ravel()
+    if easting_test is not None:
+        test_df['easting_m'] = easting_test['easting_m'].to_numpy().ravel()
+    if northing_test is not None:
+        test_df['northing_m'] = northing_test['northing_m'].to_numpy().ravel()
     train_df['DATA'] = ['TRAIN'] * train_df.shape[0]
     train_df['Pred_GW_mm'] = y_pred_train
     train_df['Actual_GW_mm'] = y_train
@@ -1970,59 +2075,23 @@ def get_prediction_results(
     test_df['Error_GW_mm'] = test_df['Actual_GW_mm'] - test_df['Pred_GW_mm']
     pred_df = pd.concat([train_df, test_df])
     pred_df.to_parquet(os.path.join(model_dir, f'Predictions_{model_name}.parquet'), index=False)
-    if apply_bias_correction == 0:
+    if not apply_bias_correction:
         return pred_df
     elif model_name not in ['LGBM', 'DRF', 'ETR', 'RF', 'XGB', 'XGBRF', 'HGBR']:
         logger.info(f'No bias correction for {model_name} model.')
         return pred_df
-    elif apply_bias_correction == 1:
-        logger.info('Applying global bias correction...')
+    else:
+        logger.info('Applying global linear bias correction...')
         output_dir = os.path.join(model_dir, f'Global_Bias_Correction_{model_name}')
         makedirs(make_proper_dir_name(output_dir))
         train_df = train_df.drop(columns=[gw_basin_col])
         test_df = test_df.drop(columns=[gw_basin_col])
-        val1, val2 = perform_bias_correction(
+        m, b = perform_bias_correction(
             train_df, test_df, model_name, output_dir,
             n_features=x_train.shape[1]
         )
-        if isinstance(val1, float):
-            pred_df.Pred_GW_mm = np.abs(val1 * pred_df.Pred_GW_mm + val2)
-        else:
-            pred_df.loc[pred_df.DATA == 'TRAIN', 'Pred_GW_mm'] += val1
-            pred_df.loc[pred_df.DATA == 'TEST', 'Pred_GW_mm'] += val2
+        pred_df.Pred_GW_mm = apply_linear_bc(pred_df.Pred_GW_mm.values, m, b)
         pred_df.Error_GW_mm = pred_df.Actual_GW_mm - pred_df.Pred_GW_mm
-    else:
-        logger.info('Applying basin-wise bias correction...')
-        gw_pred_parts = []
-        output_dir = os.path.join(model_dir, f'Basin_Bias_Correction_{model_name}')
-        makedirs(output_dir)
-        for gw_basin in pred_df[gw_basin_col].unique():
-            bias_dir = os.path.join(output_dir, gw_basin)
-            makedirs(bias_dir)
-            basin_df = pred_df[pred_df[gw_basin_col] == gw_basin].copy(deep=True)
-            basin_df_train = basin_df[basin_df.DATA == 'TRAIN'].copy(deep=True).dropna()
-            basin_df_test = basin_df[basin_df.DATA == 'TEST'].copy(deep=True).dropna()
-            if basin_df_train.shape[0] == 0 or basin_df_test.shape[0] == 0:
-                logger.info(f'No data for {gw_basin} in train/test data. Skipping bias correction.')
-                val1 = 1
-                val2 = 0
-            else:
-                val1, val2 = perform_bias_correction(
-                    basin_df_train.drop(columns=[gw_basin_col]),
-                    basin_df_test.drop(columns=[gw_basin_col]),
-                    model_name,
-                    bias_dir,
-                    n_features=x_train.shape[1]
-                )
-            if isinstance(val1, float):
-                basin_df.Pred_GW_mm = np.abs(val1 * basin_df.Pred_GW_mm + val2)
-            else:
-                basin_df.loc[basin_df.DATA == 'TRAIN', 'Pred_GW_mm'] += val1
-                basin_df.loc[basin_df.DATA == 'TEST', 'Pred_GW_mm'] += val2
-            basin_df['Pred_GW_mm'] = np.abs(basin_df['Pred_GW_mm'])
-            basin_df.Error_GW_mm = basin_df.Actual_GW_mm - basin_df.Pred_GW_mm
-            gw_pred_parts.append(basin_df)
-        pred_df = pd.concat(gw_pred_parts, ignore_index=True)
     pred_df.to_parquet(os.path.join(model_dir, f'Predictions_{model_name}_BC.parquet'), index=False)
     return pred_df
 

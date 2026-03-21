@@ -28,7 +28,6 @@ import os
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from sklearn.base import clone
 from sklearn.metrics import r2_score
 
 import hydrolibs.dataops as dataops
@@ -74,7 +73,8 @@ GCLOUD_BUCKET = 'azhydro'
 TILE_SIZE = 80000
 FILL_ATTR = 'AF Pumped'
 AF_MAX_THRESHOLD = 5000.  # max per-well AF; ~3,000 gpm sustained year-round
-MAX_GW = None
+MAX_GW = 3000  # max per-pixel GW pumping depth (mm); pixels above this are excluded
+LOG_TARGET = True  # log1p-transform target; metrics reported on original scale via expm1
 
 # AMA_CODE → parent AMA/INA name mapping
 AMA_CODE_MAP = {
@@ -111,6 +111,8 @@ DROP_ATTRS = (
     'SW',
     'GW_Basin_Type',
     'annual_peff_pcml_mm',
+    'northing_m',
+    'easting_m',
 )
 
 # Temporal holdout configurations (from azhydro.py)
@@ -224,8 +226,7 @@ def prepare_data(
         value_field=FILL_ATTR,
         xres=MOSAIC_RASTER_RES,
         yres=MOSAIC_RASTER_RES,
-        already_created=skip_gw_rasters,
-        max_gw=MAX_GW,
+        already_created=skip_gw_rasters
     )
     gwops.create_gw_depth_rasters(
         output_gw_volume_dir,
@@ -350,6 +351,15 @@ def create_az_data(
         vizops.explore_az_data(az_df, os.path.join(MODEL_DIR, 'EDA'))
     else:
         logger.info('Skipping EDA plots (--skip-eda)')
+
+    # ET vs ETo analysis by land use
+    vizops.analyze_et_by_land_use(az_df, os.path.join(MODEL_DIR, 'EDA'))
+
+    # Pumping distribution analysis (metered years only)
+    vizops.analyze_pumping_distribution(
+        az_df, os.path.join(MODEL_DIR, 'EDA'), YEAR_LIST, MAX_GW,
+    )
+
     return az_df
 
 
@@ -367,10 +377,22 @@ def _compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     }
 
 
+def _metrics_from_pred_df(pred_df: pd.DataFrame) -> tuple[dict, dict]:
+    """Compute train/test metrics from a (bias-corrected) prediction DataFrame."""
+    train_part = pred_df[pred_df['DATA'] == 'TRAIN']
+    test_part = pred_df[pred_df['DATA'] == 'TEST']
+    train_m = _compute_metrics(train_part['Actual_GW_mm'].values,
+                               train_part['Pred_GW_mm'].values)
+    test_m = _compute_metrics(test_part['Actual_GW_mm'].values,
+                              test_part['Pred_GW_mm'].values)
+    return train_m, test_m
+
+
 def _train_and_evaluate(
         x_train: pd.DataFrame, y_train: np.ndarray,
         x_test: pd.DataFrame, y_test: np.ndarray,
         model_name: str, output_dir: str,
+        cv_groups: np.ndarray | pd.Series | None = None,
 ) -> dict:
     """Train a single model with Optuna+Dask and return train/test metrics."""
     model, cv_df = mlops.build_ml_model_optuna(
@@ -381,11 +403,40 @@ def _train_and_evaluate(
         n_trials=N_TRIALS,
         n_dask_workers=N_DASK_WORKERS,
         use_dask=USE_DASK,
+        cv_groups=cv_groups,
+        log_target=LOG_TARGET,
     )
-    y_pred_train = np.abs(model.predict(x_train))
-    y_pred_test = np.abs(model.predict(x_test))
-    train_metrics = _compute_metrics(y_train, y_pred_train)
-    test_metrics = _compute_metrics(y_test, y_pred_test)
+    y_pred_train = model.predict(x_train)
+    y_pred_test = model.predict(x_test)
+    if LOG_TARGET:
+        y_pred_train = np.expm1(y_pred_train)
+        y_pred_test = np.expm1(y_pred_test)
+        y_train_orig = np.expm1(y_train)
+        y_test_orig = np.expm1(y_test)
+    else:
+        y_train_orig = y_train
+        y_test_orig = y_test
+    y_pred_train = np.abs(y_pred_train)
+    y_pred_test = np.abs(y_pred_test)
+    train_metrics = _compute_metrics(y_train_orig, y_pred_train)
+    test_metrics = _compute_metrics(y_test_orig, y_pred_test)
+
+    # Extract CV validation metrics
+    cv_val_r2 = cv_val_rmse = float('nan')
+    if not cv_df.empty and 'Data' in cv_df.columns:
+        val_row = cv_df[cv_df['Data'] == 'VALIDATION']
+        if not val_row.empty:
+            cv_val_r2 = val_row['R2'].values[0]
+            cv_val_rmse = val_row['RMSE (%)'].values[0]
+
+    logger.info(f'    Train R2: {train_metrics["R2"]:.4f}, '
+                f'Val R2: {cv_val_r2:.4f}, '
+                f'Test R2: {test_metrics["R2"]:.4f}')
+    logger.info(f'    Train RMSE: {train_metrics["RMSE_pct"]:.2f}%, '
+                f'Val RMSE: {cv_val_rmse:.2f}%, '
+                f'Test RMSE: {test_metrics["RMSE_pct"]:.2f}%')
+    logger.info(f'    Overfit (R2 gap): {train_metrics["R2"] - test_metrics["R2"]:.4f}')
+
     return {
         'model': model,
         'cv_df': cv_df,
@@ -414,7 +465,6 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
         include_all_models=INCLUDE_ALL_MODELS,
     )
     strategy_dir = os.path.join(MODEL_DIR, 'Model_Evaluation/Random')
-    test_year_limits = ((min(YEAR_LIST), max(YEAR_LIST)),)
 
     data_dir = os.path.join(strategy_dir, 'data')
     ret_vals = dataops.create_train_test_data(
@@ -423,15 +473,20 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
         random_state=RANDOM_STATE,
         scaling=False, already_created=False,
         year_list=YEAR_LIST, split_strategy=4,
-        test_year=True, outlier_op=None,
+        test_year=True,
+        outlier_op=3 if MAX_GW is not None else None,
+        max_gw_pumping=MAX_GW if MAX_GW is not None else np.inf,
         test_gw_basins=(),
         use_ama_ina=USE_AMA_INA,
         drop_gw_basins=DROP_GW_BASINS,
+        log_target=LOG_TARGET,
     )
     (x_train, x_test, y_train, y_test,
      x_scaler, y_scaler,
      year_train, year_test,
-     basin_train, basin_test) = ret_vals
+     basin_train, basin_test,
+     easting_train, easting_test,
+     northing_train, northing_test) = ret_vals
 
     comparison_dir = os.path.join(strategy_dir, 'Model_Comparison')
     comparison_df = mlops.compare_all_models(
@@ -452,27 +507,17 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
         x_scaler=x_scaler,
         y_scaler=y_scaler,
         use_ama_ina=USE_AMA_INA,
-        apply_bias_correction=2,
+        apply_bias_correction=True,
+        easting_train=easting_train,
+        easting_test=easting_test,
+        northing_train=northing_train,
+        northing_test=northing_test,
+        test_case='Random',
+        raster_res=MOSAIC_RASTER_RES,
+        create_basin_plots=True,
+        log_target=LOG_TARGET,
     )
     logger.info(f'\nRandom model comparison:\n{comparison_df.to_string(index=False)}')
-
-    # Per-model visualisations
-    for model_name in ml_models:
-        bc_pq = os.path.join(comparison_dir, model_name, f'Predictions_{model_name}_BC.parquet')
-        raw_pq = os.path.join(comparison_dir, model_name, f'Predictions_{model_name}.parquet')
-        pq = bc_pq if os.path.exists(bc_pq) else raw_pq
-        if os.path.exists(pq):
-            pred_df = pd.read_parquet(pq)
-            mlops.generate_model_visualizations(
-                pred_df=pred_df,
-                output_dir=os.path.join(comparison_dir, model_name, 'Visualizations'),
-                model_name=model_name,
-                test_case='Random',
-                test_year_limits=test_year_limits,
-                raster_res=MOSAIC_RASTER_RES,
-                use_ama_ina=USE_AMA_INA,
-                create_basin_plots=True,
-            )
 
     return {'comparison_df': comparison_df, 'strategy': 'Random'}
 
@@ -500,7 +545,6 @@ def evaluate_pixel_holdout(az_df: pd.DataFrame) -> dict:
         include_all_models=INCLUDE_ALL_MODELS,
     )
     strategy_dir = os.path.join(MODEL_DIR, 'Model_Evaluation/Pixel_Holdout')
-    test_year_limits = ((min(YEAR_LIST), max(YEAR_LIST)),)
 
     data_dir = os.path.join(strategy_dir, 'data')
     ret_vals = dataops.create_train_test_data(
@@ -509,15 +553,26 @@ def evaluate_pixel_holdout(az_df: pd.DataFrame) -> dict:
         random_state=RANDOM_STATE,
         scaling=False, already_created=False,
         year_list=YEAR_LIST, split_strategy=5,
-        test_year=True, outlier_op=None,
+        test_year=True,
+        outlier_op=3 if MAX_GW is not None else None,
+        max_gw_pumping=MAX_GW if MAX_GW is not None else np.inf,
         test_gw_basins=(),
         use_ama_ina=USE_AMA_INA,
         drop_gw_basins=DROP_GW_BASINS,
+        log_target=LOG_TARGET,
     )
     (x_train, x_test, y_train, y_test,
      x_scaler, y_scaler,
      year_train, year_test,
-     basin_train, basin_test) = ret_vals
+     basin_train, basin_test,
+     easting_train, easting_test,
+     northing_train, northing_test) = ret_vals
+
+    # Group CV by pixel so inner folds mirror the outer pixel-holdout strategy
+    pixel_groups = (
+        easting_train['easting_m'].astype(str) + '_'
+        + northing_train['northing_m'].astype(str)
+    ).values
 
     comparison_dir = os.path.join(strategy_dir, 'Model_Comparison')
     comparison_df = mlops.compare_all_models(
@@ -538,27 +593,18 @@ def evaluate_pixel_holdout(az_df: pd.DataFrame) -> dict:
         x_scaler=x_scaler,
         y_scaler=y_scaler,
         use_ama_ina=USE_AMA_INA,
-        apply_bias_correction=2,
+        apply_bias_correction=True,
+        cv_groups=pixel_groups,
+        easting_train=easting_train,
+        easting_test=easting_test,
+        northing_train=northing_train,
+        northing_test=northing_test,
+        test_case='Pixel_Holdout',
+        raster_res=MOSAIC_RASTER_RES,
+        create_basin_plots=True,
+        log_target=LOG_TARGET,
     )
     logger.info(f'\nPixel holdout model comparison:\n{comparison_df.to_string(index=False)}')
-
-    # Per-model visualisations
-    for model_name in ml_models:
-        bc_pq = os.path.join(comparison_dir, model_name, f'Predictions_{model_name}_BC.parquet')
-        raw_pq = os.path.join(comparison_dir, model_name, f'Predictions_{model_name}.parquet')
-        pq = bc_pq if os.path.exists(bc_pq) else raw_pq
-        if os.path.exists(pq):
-            pred_df = pd.read_parquet(pq)
-            mlops.generate_model_visualizations(
-                pred_df=pred_df,
-                output_dir=os.path.join(comparison_dir, model_name, 'Visualizations'),
-                model_name=model_name,
-                test_case='Pixel_Holdout',
-                test_year_limits=test_year_limits,
-                raster_res=MOSAIC_RASTER_RES,
-                use_ama_ina=USE_AMA_INA,
-                create_basin_plots=True,
-            )
 
     return {'comparison_df': comparison_df, 'strategy': 'Pixel_Holdout'}
 
@@ -604,19 +650,27 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
             random_state=RANDOM_STATE,
             scaling=False, already_created=False,
             year_list=YEAR_LIST, split_strategy=1,
-            test_year=test_years, outlier_op=None,
+            test_year=test_years,
+            outlier_op=3 if MAX_GW is not None else None,
+            max_gw_pumping=MAX_GW if MAX_GW is not None else np.inf,
             test_gw_basins=(),
             use_ama_ina=USE_AMA_INA,
             drop_gw_basins=DROP_GW_BASINS,
+            log_target=LOG_TARGET,
         )
         (x_train, x_test, y_train, y_test,
          x_scaler, y_scaler,
          year_train, year_test,
-         basin_train, basin_test) = ret_vals
+         basin_train, basin_test,
+         easting_train, easting_test,
+         northing_train, northing_test) = ret_vals
 
         if len(y_test) == 0:
             logger.warning(f'No test data for {holdout_name}, skipping.')
             continue
+
+        # Group CV by year so inner folds mirror the outer temporal-holdout strategy
+        temporal_cv_groups = year_train.values.ravel()
 
         for model_name in ml_models:
             logger.info(f'  Training {model_name} for {holdout_name}...')
@@ -624,6 +678,7 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
             res = _train_and_evaluate(
                 x_train, y_train, x_test, y_test,
                 model_name, model_dir,
+                cv_groups=temporal_cv_groups,
             )
 
             # Prediction results + visualisation
@@ -633,7 +688,12 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
                 year_train, year_test,
                 basin_train, basin_test,
                 model_dir, model_name,
-                apply_bias_correction=2,
+                apply_bias_correction=True,
+                easting_train=easting_train,
+                easting_test=easting_test,
+                northing_train=northing_train,
+                northing_test=northing_test,
+                log_target=LOG_TARGET,
             )
             mlops.calc_train_test_metrics(
                 pred_df, res['cv_df'], model_dir,
@@ -650,16 +710,21 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
                 create_basin_plots=False,
             )
 
+            bc_train, bc_test = _metrics_from_pred_df(pred_df)
+            logger.info(f'    [BC] Train R2: {bc_train["R2"]:.4f}, '
+                        f'Test R2: {bc_test["R2"]:.4f}, '
+                        f'Test RMSE: {bc_test["RMSE_pct"]:.2f}%')
+
             per_holdout_rows.append({
                 'Holdout': holdout_name,
                 'Model': model_name,
-                'Train_R2': res['train']['R2'],
-                'Test_R2': res['test']['R2'],
-                'Train_RMSE': res['train']['RMSE_pct'],
-                'Test_RMSE': res['test']['RMSE_pct'],
-                'Test_MAE': res['test']['MAE_pct'],
-                'Test_MBE': res['test']['MBE_pct'],
-                'Overfit_R2': res['train']['R2'] - res['test']['R2'],
+                'Train_R2': bc_train['R2'],
+                'Test_R2': bc_test['R2'],
+                'Train_RMSE': bc_train['RMSE_pct'],
+                'Test_RMSE': bc_test['RMSE_pct'],
+                'Test_MAE': bc_test['MAE_pct'],
+                'Test_MBE': bc_test['MBE_pct'],
+                'Overfit_R2': bc_train['R2'] - bc_test['R2'],
             })
 
     # Build results DataFrames
@@ -781,16 +846,21 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
             random_state=RANDOM_STATE,
             scaling=False, already_created=False,
             year_list=YEAR_LIST, split_strategy=3,
-            test_year=(), outlier_op=None,
+            test_year=(),
+            outlier_op=3 if MAX_GW is not None else None,
+            max_gw_pumping=MAX_GW if MAX_GW is not None else np.inf,
             test_gw_basins=(subbasin,),
             gw_basin_col='GW_Subbasin',
             use_ama_ina=False,  # filtering is handled by subbasin list
             drop_gw_basins=(),
+            log_target=LOG_TARGET,
         )
         (x_train, x_test, y_train, y_test,
          x_scaler, y_scaler,
          year_train, year_test,
-         basin_train, basin_test) = ret_vals
+         basin_train, basin_test,
+         easting_train, easting_test,
+         northing_train, northing_test) = ret_vals
 
         if len(y_test) == 0:
             logger.warning(f'No test data for sub-basin {subbasin}, skipping.')
@@ -798,12 +868,16 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
 
         logger.info(f'  Train: {len(y_train)}, Test: {len(y_test)}')
 
+        # Group CV by sub-basin so inner folds mirror the outer spatial-holdout strategy
+        spatial_cv_groups = basin_train.values.ravel()
+
         for model_name in ml_models:
             logger.info(f'  Training {model_name} (holdout: {subbasin})...')
             model_dir = os.path.join(holdout_dir, model_name)
             res = _train_and_evaluate(
                 x_train, y_train, x_test, y_test,
                 model_name, model_dir,
+                cv_groups=spatial_cv_groups,
             )
 
             # Prediction results
@@ -814,7 +888,12 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
                 basin_train, basin_test,
                 model_dir, model_name,
                 gw_basin_col='GW_Subbasin',
-                apply_bias_correction=1,  # global bias correction for spatial
+                apply_bias_correction=True,
+                easting_train=easting_train,
+                easting_test=easting_test,
+                northing_train=northing_train,
+                northing_test=northing_test,
+                log_target=LOG_TARGET,
             )
             mlops.calc_train_test_metrics(
                 pred_df, res['cv_df'], model_dir,
@@ -823,17 +902,33 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
                 model_name=model_name,
             )
 
+            mlops.generate_model_visualizations(
+                pred_df=pred_df,
+                output_dir=os.path.join(model_dir, 'Visualizations'),
+                model_name=model_name,
+                test_case=f'Spatial_LOO_{subbasin_safe}',
+                test_year_limits=(),
+                gw_basin_col='GW_Subbasin',
+                use_ama_ina=False,
+                create_basin_plots=False,
+            )
+
+            bc_train, bc_test = _metrics_from_pred_df(pred_df)
+            logger.info(f'    [BC] Train R2: {bc_train["R2"]:.4f}, '
+                        f'Test R2: {bc_test["R2"]:.4f}, '
+                        f'Test RMSE: {bc_test["RMSE_pct"]:.2f}%')
+
             per_subbasin_rows.append({
                 'Subbasin': subbasin,
                 'Model': model_name,
                 'N_test': len(y_test),
-                'Train_R2': res['train']['R2'],
-                'Test_R2': res['test']['R2'],
-                'Train_RMSE': res['train']['RMSE_pct'],
-                'Test_RMSE': res['test']['RMSE_pct'],
-                'Test_MAE': res['test']['MAE_pct'],
-                'Test_MBE': res['test']['MBE_pct'],
-                'Overfit_R2': res['train']['R2'] - res['test']['R2'],
+                'Train_R2': bc_train['R2'],
+                'Test_R2': bc_test['R2'],
+                'Train_RMSE': bc_train['RMSE_pct'],
+                'Test_RMSE': bc_test['RMSE_pct'],
+                'Test_MAE': bc_test['MAE_pct'],
+                'Test_MBE': bc_test['MBE_pct'],
+                'Overfit_R2': bc_train['R2'] - bc_test['R2'],
             })
 
     # Build results DataFrames
@@ -947,10 +1042,12 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         year_list=YEAR_LIST,
         split_strategy=1,
         test_year=(),
-        outlier_op=None,
+        outlier_op=3 if MAX_GW is not None else None,
+        max_gw_pumping=MAX_GW if MAX_GW is not None else np.inf,
         test_gw_basins=(),
         use_ama_ina=USE_AMA_INA,
         drop_gw_basins=DROP_GW_BASINS,
+        log_target=LOG_TARGET,
     )
     x_train, y_train = ret_vals[0], ret_vals[2]
 
@@ -965,6 +1062,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         n_trials=N_TRIALS,
         n_dask_workers=N_DASK_WORKERS,
         use_dask=USE_DASK,
+        log_target=LOG_TARGET,
     )
 
     # ---- Model interpretability plots ----
@@ -975,18 +1073,20 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         model_name, x_train, x_train, y_train, y_train,
         model, interp_dir, scoring_metric='scaled_rmse',
         random_state=RANDOM_STATE, create_plots=True,
+        log_target=LOG_TARGET,
     )
 
     # ALE plots
     mlops.compute_ale_plots(
         model_name, model,
         x_train, y_train, x_train, y_train,
-        interp_dir,
+        interp_dir, log_target=LOG_TARGET,
     )
 
-    # SHAP plots
+    # SHAP plots (TreeExplainer; SHAP values remain in log1p space)
     mlops.compute_shap_plots(
         model_name, model, x_train, interp_dir,
+        log_target=LOG_TARGET,
     )
 
     # ---- 3b. Predict pumping for each year 1896-2099 ----
@@ -1000,8 +1100,9 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     # Modern pump infrastructure sets a physical upper bound on per-pixel
     # withdrawal rates.  Predictions exceeding the training-era maximum
     # are flagged as physically implausible extrapolations.
-    train_pixel_max_mm = float(np.abs(y_train).max())
-    train_pixel_p99_mm = float(np.percentile(np.abs(y_train), 99))
+    y_train_orig = np.expm1(y_train) if LOG_TARGET else y_train
+    train_pixel_max_mm = float(np.abs(y_train_orig).max())
+    train_pixel_p99_mm = float(np.percentile(np.abs(y_train_orig), 99))
     logger.info(
         'Training-era per-pixel pumping ceiling: max=%.2f mm, '
         'P99=%.2f mm',
@@ -1009,60 +1110,35 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     )
     exceedance_summary = []  # collect per-year exceedance stats
 
-    # ---- Global bias correction from training residuals ----
-    # A single correction is learned from ALL AMA/INA training data so
-    # it generalises to non-AMA/INA basins during full-period prediction.
-    # Compare raw (no correction), linear (pred_corrected = |m*pred + b|),
-    # and ML (secondary XGBoost: features → residuals).  The method with
-    # the lowest training RMSE is kept.
+    # ---- Global linear bias correction from training residuals ----
+    # A single linear correction (pred_corrected = |m*pred + b|) is learned
+    # from ALL AMA/INA training data so it generalises to non-AMA/INA basins
+    # during full-period prediction.
+    # Bias correction operates in original (mm) scale.
     train_preds = np.abs(model.predict(x_train))
-    train_residuals = y_train - train_preds
+    if LOG_TARGET:
+        train_preds = np.abs(np.expm1(train_preds))
 
     bc_dir = os.path.join(prediction_dir, 'Bias_Correction')
     makedirs(bc_dir)
 
-    raw_rmse = float(np.sqrt(np.mean((y_train - train_preds) ** 2)))
+    bc_m, bc_b = mlops.fit_linear_bc(train_preds, y_train_orig)
 
-    # Linear correction: actual ≈ m * pred + b
-    pv = np.var(train_preds)
-    if pv > 0:
-        m = np.cov(train_preds, y_train)[0, 1] / pv
-        b = np.mean(y_train) - m * np.mean(train_preds)
-    else:
-        m, b = 1.0, 0.0
-    linear_corrected = np.abs(m * train_preds + b)
-    linear_rmse = float(np.sqrt(np.mean((y_train - linear_corrected) ** 2)))
-
-    # ML correction: secondary model predicts residuals from features
-    bc_model_dict = mlops.get_model_dict(random_state=RANDOM_STATE, use_dask=False,
-                                         include_all_models=True)
-    bc_base_model = bc_model_dict[model_name]
-    bc_ml = clone(bc_base_model)
-    bc_ml.fit(x_train, train_residuals)
-    ml_corrected = np.abs(train_preds + bc_ml.predict(x_train))
-    ml_rmse = float(np.sqrt(np.mean((y_train - ml_corrected) ** 2)))
-
-    if raw_rmse <= linear_rmse and raw_rmse <= ml_rmse:
-        bc_model = ('none',)
-        bc_chosen = 'None'
-    elif linear_rmse <= ml_rmse:
-        bc_model = ('linear', m, b)
-        bc_chosen = 'Linear'
-    else:
-        bc_model = ('ml', bc_ml)
-        bc_chosen = 'ML'
+    raw_rmse = float(np.sqrt(np.mean((y_train_orig - train_preds) ** 2)))
+    linear_corrected = mlops.apply_linear_bc(train_preds, bc_m, bc_b)
+    linear_rmse = float(np.sqrt(np.mean((y_train_orig - linear_corrected) ** 2)))
 
     bc_summary = pd.DataFrame([{
-        'Method': bc_chosen,
+        'Slope': round(bc_m, 4),
+        'Intercept': round(bc_b, 4),
         'N_Samples': len(train_preds),
         'Raw_RMSE': round(raw_rmse, 4),
         'Linear_RMSE': round(linear_rmse, 4),
-        'ML_RMSE': round(ml_rmse, 4),
     }])
     bc_summary.to_csv(os.path.join(bc_dir, 'Global_BC_Summary.csv'), index=False)
     logger.info(
-        'Global bias correction: method=%s  (Raw RMSE=%.4f, Linear=%.4f, ML=%.4f, N=%d)',
-        bc_chosen, raw_rmse, linear_rmse, ml_rmse, len(train_preds),
+        'Raw RMSE=%.4f, Linear RMSE=%.4f, N=%d',
+        raw_rmse, linear_rmse, len(train_preds),
     )
 
     feature_cols = list(x_train.columns)
@@ -1242,14 +1318,13 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                 )
                 break
 
-        predictions = np.abs(model.predict(pred_features))
+        predictions = model.predict(pred_features)
+        if LOG_TARGET:
+            predictions = np.expm1(predictions)
+        predictions = np.abs(predictions)
 
-        # Apply global bias correction ('none' → passthrough unchanged)
-        if bc_model[0] == 'linear':
-            m_bc, b_bc = bc_model[1], bc_model[2]
-            predictions = np.abs(m_bc * predictions + b_bc)
-        elif bc_model[0] == 'ml':
-            predictions = np.abs(predictions + bc_model[1].predict(pred_features))
+        # Apply global linear bias correction
+        predictions = mlops.apply_linear_bc(predictions, bc_m, bc_b)
 
         # Per-pixel prediction range check against training-era ceiling
         n_pixels = len(predictions)
@@ -1522,9 +1597,10 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             f'  {era_name} ({y1}-{y2}): {len(era_df)} samples'
         )
 
-        # SHAP plots
+        # SHAP plots (TreeExplainer; SHAP values remain in log1p space)
         mlops.compute_shap_plots(
             model_name, model, era_df, era_dir,
+            log_target=LOG_TARGET,
         )
 
         # ALE plots (use era features for both train/test since we only
@@ -1533,7 +1609,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         mlops.compute_ale_plots(
             model_name, model,
             era_df, y_dummy, era_df, y_dummy,
-            era_dir,
+            era_dir, log_target=LOG_TARGET,
         )
 
         # Permutation importance (uses model predictions as pseudo-targets
@@ -1542,6 +1618,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             model_name, era_df, era_df, y_dummy, y_dummy,
             model, era_dir, scoring_metric='scaled_rmse',
             random_state=RANDOM_STATE, create_plots=True,
+            log_target=LOG_TARGET,
         )
 
     # ---- 3f. Graphical abstract / Figure 1 ----

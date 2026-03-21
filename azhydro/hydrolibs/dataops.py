@@ -1113,6 +1113,19 @@ def create_az_data_parquet(
             logger.debug('GW_Subbasin unique values: %s',
                         sorted(data_df.GW_Subbasin.unique()))
 
+        # Cap ET at Kc_max × ETo — ET can exceed ETo (high-Kc crops,
+        # urban oasis effect, riparian/open water) but not without bound.
+        kc_max = 2.0
+        et_col, eto_col = 'annual_et_ensemble_mm', 'annual_eto_mm'
+        if et_col in data_df.columns and eto_col in data_df.columns:
+            et_cap = kc_max * data_df[eto_col]
+            exceed_mask = data_df[et_col] > et_cap
+            n_capped = exceed_mask.sum()
+            if n_capped > 0:
+                data_df.loc[exceed_mask, et_col] = et_cap[exceed_mask]
+                logger.info(f'Capped {n_capped:,} pixels where ET > {kc_max}×ETo '
+                            f'({100 * n_capped / len(data_df):.2f}% of rows)')
+
         data_df.to_parquet(data_parquet, index=False)
     else:
         data_df = pd.read_parquet(data_parquet)
@@ -1179,7 +1192,8 @@ def split_data_train_test(
     elif split_strategy == 5:
         x_train, x_test, y_train, y_test = split_pixel_holdout(
             input_df, pred_attr=pred_attr, test_size=test_size,
-            shuffle=shuffle, random_state=random_state
+            gw_basin_col=gw_basin_col, shuffle=shuffle,
+            random_state=random_state
         )
     else:
         x_train, x_test, y_train, y_test = train_test_split(
@@ -1322,15 +1336,17 @@ def split_pixel_holdout(
         test_size: float = 0.2,
         easting_col: str = 'easting_m',
         northing_col: str = 'northing_m',
+        gw_basin_col: str = 'GW_Basin',
         shuffle: bool = True,
         random_state: int = 0
 ) -> tuple[pd.DataFrame, ...]:
     """Split data by holding out entire pixels (spatial locations) across all years.
 
     Unique pixels are identified by their (easting, northing) coordinates.
-    A random fraction of pixels is assigned to the test set; all years for
-    those pixels become test rows, and all years for the remaining pixels
-    become training rows.
+    Pixels are stratified by ``gw_basin_col`` so that each basin contributes
+    approximately ``test_size`` of its pixels to the test set, ensuring
+    proportional geographic representation.  All years for a held-out pixel
+    become test rows.
 
     Args:
         input_df (pd.DataFrame): Input pandas DataFrame with pixel-year rows.
@@ -1338,16 +1354,32 @@ def split_pixel_holdout(
         test_size (float): Fraction of unique pixels to hold out for testing.
         easting_col (str): Name of the easting coordinate column.
         northing_col (str): Name of the northing coordinate column.
+        gw_basin_col (str): Column used for basin-stratified sampling.
         shuffle (bool): Set False to stop data shuffling.
         random_state (int): Random state for reproducibility.
 
     Returns:
         tuple[pd.DataFrame, ...]: A tuple of X_train, X_test, y_train, y_test data frames.
     """
-    # Identify unique pixel locations
-    pixel_coords = input_df[[easting_col, northing_col]].drop_duplicates()
-    n_test = max(1, int(len(pixel_coords) * test_size))
-    test_pixels = pixel_coords.sample(n=n_test, random_state=random_state)
+    # Identify unique pixel locations with their basin label.
+    # A pixel may appear in multiple years — take the first basin label.
+    pixel_coords = (
+        input_df[[easting_col, northing_col, gw_basin_col]]
+        .drop_duplicates(subset=[easting_col, northing_col])
+    )
+
+    # Basin-stratified sampling: sample test_size fraction per basin
+    rng = np.random.RandomState(random_state)
+    test_indices = []
+    for basin, grp in pixel_coords.groupby(gw_basin_col):
+        n = max(1, int(len(grp) * test_size))
+        test_indices.append(
+            grp.sample(n=n, random_state=rng).index
+        )
+    test_pixel_idx = np.concatenate(test_indices)
+    test_pixels = pixel_coords.loc[test_pixel_idx, [easting_col, northing_col]]
+    n_test = len(test_pixels)
+    n_total = len(pixel_coords)
 
     # Vectorized merge to flag test rows (preserve original index for alignment)
     test_pixels = test_pixels.assign(_pixel_test=True)
@@ -1366,10 +1398,10 @@ def split_pixel_holdout(
         x_test_df, y_test_df = sk.shuffle(x_test_df, y_test_df, random_state=random_state)
 
     logger.info(
-        'Pixel holdout: %d unique pixels → %d train, %d test (%.1f%%); '
-        '%d train rows, %d test rows',
-        len(pixel_coords), len(pixel_coords) - n_test, n_test,
-        100.0 * n_test / len(pixel_coords),
+        'Pixel holdout (basin-stratified): %d unique pixels → %d train, '
+        '%d test (%.1f%%); %d train rows, %d test rows',
+        n_total, n_total - n_test, n_test,
+        100.0 * n_test / n_total,
         len(x_train_df), len(x_test_df),
     )
     return x_train_df, x_test_df, y_train_df, y_test_df
@@ -1495,6 +1527,7 @@ def create_train_test_data(
         shuffle: bool = True,
         use_ama_ina: bool = False,
         drop_gw_basins: tuple[str, ...] = ('JOSEPH CITY INA', 'WILLCOX AMA', 'HUALAPAI VALLEY INA'),
+        log_target: bool = False,
 ) -> tuple:
     """Create train and test data.
 
@@ -1533,6 +1566,8 @@ def create_train_test_data(
         use_ama_ina (bool): Set True to use AMA-INA basins.
         drop_gw_basins (tuple (str, ...)): Tuple of GW basins to drop from the data set. Default basins are:
         ('JOSEPH CITY INA', 'WILLCOX AMA', 'HUALAPAI VALLEY INA'). These basins have very less data.
+        log_target (bool): If True, apply np.log1p transform to the target variable.
+            All error metrics should be computed on the original scale using np.expm1 inverse.
 
     Returns:
         tuple: A tuple containing X_train, X_test as pandas data frames, y_train, y_test as numpy arrays.
@@ -1549,6 +1584,10 @@ def create_train_test_data(
     year_test_file = os.path.join(output_dir, 'Year_test.parquet')
     gw_basin_train_file = os.path.join(output_dir, 'GW_Basin_train.parquet')
     gw_basin_test_file = os.path.join(output_dir, 'GW_Basin_test.parquet')
+    easting_train_file = os.path.join(output_dir, 'Easting_train.parquet')
+    easting_test_file = os.path.join(output_dir, 'Easting_test.parquet')
+    northing_train_file = os.path.join(output_dir, 'Northing_train.parquet')
+    northing_test_file = os.path.join(output_dir, 'Northing_test.parquet')
     x_scaler_file, x_scaler, y_scaler_file, y_scaler = [None] * 4
     if scaling:
         x_scaler_file = os.path.join(output_dir, 'x_scaler')
@@ -1578,10 +1617,11 @@ def create_train_test_data(
                 outlier_op, min_gw_pumping,
                 max_gw_pumping
             )
-        if year_col in drop_attr:
-            drop_attr.remove(year_col)
-        if gw_basin_col in drop_attr:
-            drop_attr.remove(gw_basin_col)
+        easting_col, northing_col = 'easting_m', 'northing_m'
+        drop_coords = easting_col in drop_attr or northing_col in drop_attr
+        for col in (year_col, gw_basin_col, easting_col, northing_col):
+            if col in drop_attr:
+                drop_attr.remove(col)
         drop_attr = list(set(drop_attr).intersection(input_df.columns.tolist()))
         input_df = input_df.drop(columns=drop_attr)
         input_df.to_parquet(os.path.join(output_dir, 'Cleaned_AZ_GW_Data.parquet'), index=False)
@@ -1597,8 +1637,15 @@ def create_train_test_data(
         year_test = x_test[year_col].copy().to_frame()
         gw_basin_train = x_train[gw_basin_col].copy().to_frame()
         gw_basin_test = x_test[gw_basin_col].copy().to_frame()
-        x_train = x_train.drop(columns=[year_col, gw_basin_col, pred_attr])
-        x_test = x_test.drop(columns=[year_col, gw_basin_col, pred_attr])
+        easting_train = x_train[easting_col].copy().to_frame()
+        easting_test = x_test[easting_col].copy().to_frame()
+        northing_train = x_train[northing_col].copy().to_frame()
+        northing_test = x_test[northing_col].copy().to_frame()
+        drop_from_x = [year_col, gw_basin_col, pred_attr]
+        if drop_coords:
+            drop_from_x.extend([easting_col, northing_col])
+        x_train = x_train.drop(columns=drop_from_x)
+        x_test = x_test.drop(columns=drop_from_x)
         x_train = reindex_df(x_train, column_names=None)
         x_test = reindex_df(x_test, column_names=None)
         if scaling:
@@ -1607,6 +1654,10 @@ def create_train_test_data(
             x_test = pd.DataFrame(x_scaler.transform(x_test), columns=x_test.columns)
             y_train = pd.DataFrame(y_scaler.fit_transform(y_train), columns=y_train.columns)
             y_test = pd.DataFrame(y_scaler.transform(y_test), columns=y_test.columns)
+        if log_target:
+            y_train = pd.DataFrame(np.log1p(y_train.values), columns=y_train.columns)
+            y_test = pd.DataFrame(np.log1p(y_test.values), columns=y_test.columns)
+            logger.info('Applied log1p transform to target variable')
         x_train.to_parquet(x_train_file, index=False)
         x_test.to_parquet(x_test_file, index=False)
         y_train.to_parquet(y_train_file, index=False)
@@ -1615,6 +1666,10 @@ def create_train_test_data(
         year_test.to_parquet(year_test_file, index=False)
         gw_basin_train.to_parquet(gw_basin_train_file, index=False)
         gw_basin_test.to_parquet(gw_basin_test_file, index=False)
+        easting_train.to_parquet(easting_train_file, index=False)
+        easting_test.to_parquet(easting_test_file, index=False)
+        northing_train.to_parquet(northing_train_file, index=False)
+        northing_test.to_parquet(northing_test_file, index=False)
         if scaling:
             with open(x_scaler_file, 'wb') as f:
                 pickle.dump(x_scaler, f)
@@ -1629,6 +1684,10 @@ def create_train_test_data(
         year_test = pd.read_parquet(year_test_file)
         gw_basin_train = pd.read_parquet(gw_basin_train_file)
         gw_basin_test = pd.read_parquet(gw_basin_test_file)
+        easting_train = pd.read_parquet(easting_train_file)
+        easting_test = pd.read_parquet(easting_test_file)
+        northing_train = pd.read_parquet(northing_train_file)
+        northing_test = pd.read_parquet(northing_test_file)
         if scaling:
             with open(x_scaler_file, 'rb') as f:
                 x_scaler = pickle.load(f)
@@ -1636,7 +1695,8 @@ def create_train_test_data(
                 y_scaler = pickle.load(f)
     ret_vals = (
         x_train, x_test, y_train.to_numpy().ravel(), y_test.to_numpy().ravel(),
-        x_scaler, y_scaler, year_train, year_test, gw_basin_train, gw_basin_test
+        x_scaler, y_scaler, year_train, year_test, gw_basin_train, gw_basin_test,
+        easting_train, easting_test, northing_train, northing_test,
     )
 
     return ret_vals

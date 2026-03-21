@@ -393,7 +393,7 @@ def create_land_use_data(
 
     Args:
         input_df (pd.DataFrame): Dataframe used to store the Gaussian-filtered LULC arrays, where
-                                 1 = Agriculture, 2 = Surface Water, and 3 = Urban.
+                                 1 = Agriculture, 2 = Urban, and 3 = Surface Water.
         cdl_arr (np.array): CDL array.
         smoothing (int): Smoothing window size for the Gaussian filter.
 
@@ -401,7 +401,7 @@ def create_land_use_data(
         pd.DataFrame: input_df updated with the Gaussian-filtered reclassified CDL arrays.
     """
 
-    cdl_labels = ('AGRI', 'SW', 'URBAN')
+    cdl_labels = ('AGRI', 'URBAN', 'SW')  # matches GEE recode: 1=AGRI, 2=URBAN, 3=SW
     cdl_arr = cdl_arr.astype(np.float32)
     for idx, cdl_label in enumerate(cdl_labels):
         lu_arr = np.full_like(cdl_arr, fill_value=0.)

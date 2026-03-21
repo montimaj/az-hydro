@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \":*)",
+      "Bash(find /Users/Sayantan.Majumdar@dri.edu/VSCode/az-hydro/Data/Outputs/ML_Model_All_Wells_2000m/Model_Evaluation/Pixel_Holdout -name *.parquet -o -name *.csv)",
+      "Bash(find /Users/Sayantan.Majumdar@dri.edu/VSCode/az-hydro/Data -maxdepth 3 -name AZ_Data* -o -name Train_Data* -o -name Test_Data*)"
+    ]
+  }
+}

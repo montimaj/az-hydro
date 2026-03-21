@@ -483,12 +483,16 @@ def get_xy_grids_from_raster(
 
     raster_file = rio.open(input_raster_file)
     transform_ = raster_file.transform
-    xres, yres = transform_[1], transform_[5]
+    # Affine indices: [0]=a (xres), [1]=b (rot), [2]=c (x origin),
+    #                 [3]=d (rot),  [4]=e (yres), [5]=f (y origin)
+    xres = transform_[0]
+    yres = transform_[4]
     cols, rows = raster_file.width, raster_file.height
-    lon_min, lat_max = transform_[0], transform_[3]
-    lon_max, lat_min = lon_min + (cols * xres), lat_max + (rows * yres)
-    lon_vals = np.linspace(lon_min, lon_max, cols)
-    lat_vals = np.linspace(lat_min, lat_max, rows)
+    x_origin = transform_[2]
+    y_origin = transform_[5]
+    # Pixel center coordinates
+    lon_vals = x_origin + (np.arange(cols) + 0.5) * xres
+    lat_vals = y_origin + (np.arange(rows) + 0.5) * yres
     lon_grid, lat_grid = np.meshgrid(lon_vals, lat_vals)
     return lon_grid, lat_grid
 

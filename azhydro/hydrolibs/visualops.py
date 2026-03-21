@@ -271,8 +271,12 @@ def create_time_series_plot_journal(
         split_strategy: int = 1
 ) -> None:
     """
-    Create journal-quality time series plot with training/test period highlighting.
-    
+    Create journal-quality time series plots with dual-axis unit pairs.
+
+    Produces two twinx figures:
+    - **Volume plot** (AF left / m³ right): annual **sum** across all pixels.
+    - **Depth plot** (mm left / ft right): annual **mean** per pixel.
+
     Args:
         pred_df: DataFrame with predictions containing year, actual, and predicted columns.
         output_dir: Output directory for saving plots.
@@ -285,17 +289,16 @@ def create_time_series_plot_journal(
         gw_basin_col: Name of basin column.
         raster_res: Raster resolution in meters.
         use_ama_ina: Whether to filter for AMA/INA basins only.
-        aggregation: Aggregation method ('sum' or 'mean').
+        aggregation: Ignored (kept for backward compatibility). Volume units
+            always use sum; depth units always use mean.
         confidence: Confidence level for CI (default 0.95).
-        units: List of units to plot ['mm', 'af', 'm3'].
+        units: Ignored (kept for backward compatibility). Both unit pairs are
+            always generated.
         figsize: Figure size.
         split_strategy: Split strategy (1=temporal, 2=random stratified, 3=spatial).
     """
     makedirs(output_dir)
     apply_journal_style()
-
-    if units is None:
-        units = ['mm', 'af', 'm3', 'ft']
 
     # Filter for AMA/INA if requested
     if use_ama_ina:
@@ -315,57 +318,46 @@ def create_time_series_plot_journal(
     # Pixel area for unit conversions
     area = raster_res ** 2
 
-    # Unit conversion factors and labels
+    # Unit conversion factors (from mm)
     unit_info = {
-        'mm': {
-            'factor': 1.0,
-            'label': 'Groundwater Withdrawals (mm)',
-            'agg_label': 'Total Groundwater Withdrawals (mm)' if aggregation == 'sum'
-                        else 'Mean Groundwater Withdrawals (mm)'
-        },
-        'af': {
-            'factor': area / (4047 * 304.8 * 1000),  # mm to 1000s acre-ft
-            'label': 'Groundwater Withdrawals (1000s acre-ft)',
-            'agg_label': 'Total Groundwater Withdrawals (1000s acre-ft)' if aggregation == 'sum'
-                        else 'Mean Groundwater Withdrawals (1000s acre-ft)'
-        },
-        'm3': {
-            'factor': area * 1e-9,  # mm to 1e6 m³
-            'label': 'Groundwater Withdrawals (10⁶ m³)',
-            'agg_label': 'Total Groundwater Withdrawals (10⁶ m³)' if aggregation == 'sum'
-                        else 'Mean Groundwater Withdrawals (10⁶ m³)'
-        },
-        'ft': {
-            'factor': 1 / 304.8,  # mm to ft
-            'label': 'Groundwater Withdrawals (ft)',
-            'agg_label': 'Total Groundwater Withdrawals (ft)' if aggregation == 'sum'
-                        else 'Mean Groundwater Withdrawals (ft)'
-        }
+        'mm': {'factor': 1.0, 'label': 'Groundwater Withdrawals (mm)'},
+        'ft': {'factor': 1 / 304.8, 'label': 'Groundwater Withdrawals (ft)'},
+        'af': {'factor': area / (4047 * 304.8 * 1000),
+               'label': 'Groundwater Withdrawals (1000s acre-ft)'},
+        'm3': {'factor': area * 1e-9,
+               'label': 'Groundwater Withdrawals (10\u2076 m\u00b3)'},
     }
 
-    for unit in units:
-        if unit not in unit_info:
-            continue
+    # Two twinx pairs: (left_unit, right_unit, aggregation)
+    unit_pairs = [
+        ('af', 'm3', 'sum'),
+        ('mm', 'ft', 'mean'),
+    ]
 
-        factor = unit_info[unit]['factor']
-        ylabel = unit_info[unit]['agg_label']
+    for left_unit, right_unit, agg in unit_pairs:
+        left_factor = unit_info[left_unit]['factor']
+        right_factor = unit_info[right_unit]['factor']
+        # Ratio to convert left-axis values to right-axis values
+        twin_ratio = right_factor / left_factor
 
-        # Convert units
+        agg_label = 'Total' if agg == 'sum' else 'Mean'
+
+        # Convert to primary (left) unit
         df_plot = pred_df.copy()
-        df_plot[f'Actual_{unit}'] = df_plot[actual_col] * factor
-        df_plot[f'Pred_{unit}'] = df_plot[pred_col] * factor
+        df_plot[f'Actual_{left_unit}'] = df_plot[actual_col] * left_factor
+        df_plot[f'Pred_{left_unit}'] = df_plot[pred_col] * left_factor
 
-        # Aggregate by year (basin block bootstrap for AZ-wide sums)
+        # Aggregate by year
         actual_agg = aggregate_yearly_data(
-            df_plot, year_col, f'Actual_{unit}', aggregation, confidence,
+            df_plot, year_col, f'Actual_{left_unit}', agg, confidence,
             basin_col=gw_basin_col
         )
         pred_agg = aggregate_yearly_data(
-            df_plot, year_col, f'Pred_{unit}', aggregation, confidence,
+            df_plot, year_col, f'Pred_{left_unit}', agg, confidence,
             basin_col=gw_basin_col
         )
 
-        # Create figure
+        # Create figure with twinx
         fig, ax = plt.subplots(figsize=figsize)
 
         years = actual_agg['year'].values
@@ -374,8 +366,8 @@ def create_time_series_plot_journal(
         # Shade test periods
         for start, end in test_year_limits:
             ax.axvspan(start - 0.5, end + 0.5,
-                      alpha=0.2, color=COLORS['test_shade'],
-                      label='Test Period' if start == test_year_limits[0][0] else '')
+                       alpha=0.2, color=COLORS['test_shade'],
+                       label='Test Period' if start == test_year_limits[0][0] else '')
 
         # Plot confidence intervals as shaded regions
         ax.fill_between(
@@ -386,7 +378,6 @@ def create_time_series_plot_journal(
             color=COLORS['actual'],
             label=f'{int(confidence*100)}% CI (Observed)'
         )
-
         ax.fill_between(
             pred_agg['year'],
             pred_agg['lower_ci'],
@@ -406,7 +397,6 @@ def create_time_series_plot_journal(
             linewidth=2,
             label='Observed'
         )
-
         ax.plot(
             pred_agg['year'],
             pred_agg['value'],
@@ -417,11 +407,24 @@ def create_time_series_plot_journal(
             label='Predicted'
         )
 
-        # Formatting
+        # Primary axis formatting
+        left_label = f'{agg_label} {unit_info[left_unit]["label"]}'
         ax.set_xlabel('Year', fontweight='bold')
-        ax.set_ylabel(ylabel, fontweight='bold')
+        ax.set_ylabel(left_label, fontweight='bold')
         ax.set_title(f'{model_name} - {test_case}: Groundwater Withdrawals Time Series',
-                    fontweight='bold', fontsize=14)
+                     fontweight='bold', fontsize=14)
+
+        # Secondary (twinx) axis — same data, converted scale
+        ax2 = ax.twinx()
+        right_label = f'{agg_label} {unit_info[right_unit]["label"]}'
+        ax2.set_ylabel(right_label, fontweight='bold')
+
+        # Synchronise right-axis limits with left-axis via the conversion ratio
+        def _sync_twin(ax_src, _ax_dst=ax2, _ratio=twin_ratio):
+            lo, hi = ax_src.get_ylim()
+            _ax_dst.set_ylim(lo * _ratio, hi * _ratio)
+        ax.callbacks.connect('ylim_changed', _sync_twin)
+        _sync_twin(ax)  # initial sync
 
         # Set x-axis ticks
         year_range = max_year - min_year
@@ -435,16 +438,15 @@ def create_time_series_plot_journal(
         ax.set_xticks(np.arange(min_year, max_year + 1, tick_interval))
         ax.xaxis.set_major_formatter(ticker.StrMethodFormatter('{x:.0f}'))
 
-        # Legend
+        # Legend (from primary axis only)
         handles, labels = ax.get_legend_handles_labels()
-        # Reorder legend
-        order = [labels.index('Observed'), labels.index('Predicted'),
-                 labels.index(f'{int(confidence*100)}% CI (Observed)'),
-                 labels.index(f'{int(confidence*100)}% CI (Predicted)'),
-                 labels.index('Test Period') if 'Test Period' in labels else -1]
-        order = [o for o in order if o >= 0]
+        desired = ['Observed', 'Predicted',
+                   f'{int(confidence*100)}% CI (Observed)',
+                   f'{int(confidence*100)}% CI (Predicted)',
+                   'Test Period']
+        order = [labels.index(lbl) for lbl in desired if lbl in labels]
         ax.legend([handles[i] for i in order], [labels[i] for i in order],
-                 loc='upper left', framealpha=0.9)
+                  loc='upper left', framealpha=0.9)
 
         # Grid
         ax.grid(True, alpha=0.3, linestyle='--')
@@ -452,8 +454,10 @@ def create_time_series_plot_journal(
 
         # Save figure
         plt.tight_layout()
-        fig.savefig(os.path.join(output_dir, f'TS_{model_name}_{test_case}_{unit}_{aggregation}.png'),
-                   dpi=600, bbox_inches='tight')
+        fig.savefig(
+            os.path.join(output_dir,
+                         f'TS_{model_name}_{test_case}_{left_unit}_{right_unit}_{agg}.png'),
+            dpi=600, bbox_inches='tight')
         plt.close()
 
 
@@ -794,8 +798,8 @@ def create_train_test_scatter(
             continue
 
         ax.scatter(
-            df[actual_col],
             df[pred_col],
+            df[actual_col],
             alpha=0.5,
             s=20,
             c=color,
@@ -809,7 +813,7 @@ def create_train_test_scatter(
         ax.plot([min_val, max_val], [min_val, max_val], 'k--', linewidth=1.5, label='1:1 Line')
 
         # Regression line
-        z = np.polyfit(df[actual_col], df[pred_col], 1)
+        z = np.polyfit(df[pred_col], df[actual_col], 1)
         p = np.poly1d(z)
         x_line = np.linspace(min_val, max_val, 100)
         ax.plot(x_line, p(x_line), color='red', linewidth=1.5, label=f'Fit: y={z[0]:.2f}x+{z[1]:.2f}')
@@ -818,8 +822,8 @@ def create_train_test_scatter(
         from sklearn.metrics import r2_score
         r2 = r2_score(df[actual_col], df[pred_col])
 
-        ax.set_xlabel('Observed (mm)', fontweight='bold')
-        ax.set_ylabel('Predicted (mm)', fontweight='bold')
+        ax.set_xlabel('Predicted (mm)', fontweight='bold')
+        ax.set_ylabel('Observed (mm)', fontweight='bold')
         ax.set_title(f'{data_type} Data (R² = {r2:.3f})', fontweight='bold')
         ax.legend(loc='upper left', framealpha=0.9)
         ax.grid(True, alpha=0.3)
@@ -1304,6 +1308,41 @@ def explore_az_data(
             _plt.savefig(os.path.join(output_dir, f'{safe}_timeseries_by_basin_type.png'))
             _plt.close()
 
+            # ── 2b. Boxplot by Year with era shading ────────────────────
+            fig, ax = _plt.subplots(figsize=(14, 6))
+            years_present = sorted(col_df[year_col].unique())
+            year_to_idx = {y: i for i, y in enumerate(years_present)}
+            _sns.boxplot(
+                data=col_df, x=year_col, y=col,
+                order=years_present, ax=ax, fliersize=1,
+                color='#AED6F1',
+            )
+            if not skip_era:
+                for era, (s, e) in eda_periods.items():
+                    idx_s = year_to_idx.get(s)
+                    idx_e = year_to_idx.get(e)
+                    if idx_s is not None and idx_e is not None:
+                        ax.axvspan(idx_s - 0.5, idx_e + 0.5,
+                                   color=ERA_COLORS[era], alpha=0.10)
+                handles = [
+                    _mpatches.Patch(color=ERA_COLORS[e],
+                                    label=f'{e} ({eda_periods[e][0]}–{eda_periods[e][1]})')
+                    for e in era_order
+                ]
+                ax.legend(handles=handles, loc='best', fontsize=9)
+            ax.set_xlabel('Year')
+            ax.set_ylabel(label)
+            ax.set_title(f'{label} — Distribution by Year')
+            # Thin out x-tick labels when many years are present
+            if len(years_present) > 30:
+                for i, lbl in enumerate(ax.get_xticklabels()):
+                    if i % 5 != 0:
+                        lbl.set_visible(False)
+            ax.tick_params(axis='x', rotation=45)
+            _plt.tight_layout()
+            _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_year.png'))
+            _plt.close()
+
         # ── Histogram + KDE (clipped to P1–P99) ──────────────────────────
         clip_lower = col_df[col].quantile(0.01)
         clip_upper = col_df[col].quantile(0.99)
@@ -1478,6 +1517,260 @@ def explore_az_data(
         delayed(_plot_column)(col) for col in numeric_cols
     )
     logger.info(f'Exploratory plots saved to {output_dir}')
+
+
+def analyze_et_by_land_use(
+        az_df: pd.DataFrame,
+        output_dir: str,
+        et_col: str = 'annual_et_ensemble_mm',
+        eto_col: str = 'annual_eto_mm',
+        gw_col: str = 'gw_pumping_mm',
+        kc_max: float = 2.0,
+) -> None:
+    """
+    Boxplot comparison of ET, ETo, and GW pumping grouped by dominant land use.
+
+    Pixels are classified by the land-use density columns (AGRI, URBAN, SW)
+    into the category with the highest density, or 'Other' when all three are
+    zero.  Three figures are saved:
+
+    1. Side-by-side ET vs ETo boxplots by land-use category.
+    2. ET/ETo ratio boxplot by land-use category with Kc_max reference line.
+    3. Groundwater pumping depth boxplot by land-use category (positive
+       pumping only).
+
+    Args:
+        az_df: Full Arizona predictor DataFrame.
+        output_dir: Directory to save plots.
+        et_col: Actual ET column name.
+        eto_col: Reference ET column name.
+        gw_col: Groundwater pumping column name.
+        kc_max: Maximum Kc threshold shown as reference line.
+    """
+    if et_col not in az_df.columns or eto_col not in az_df.columns:
+        logger.warning(f'{et_col} or {eto_col} not in DataFrame — skipping ET land-use analysis.')
+        return
+
+    makedirs(output_dir)
+    apply_journal_style()
+
+    df = az_df[[et_col, eto_col]].copy()
+    lu_cols = ['AGRI', 'URBAN', 'SW']
+    available = [c for c in lu_cols if c in az_df.columns]
+    if not available:
+        logger.warning('No land-use density columns found — skipping ET land-use analysis.')
+        return
+
+    for c in available:
+        df[c] = az_df[c]
+
+    # Classify each pixel by dominant land use (highest density) or 'Other'
+    lu_df = df[available]
+    max_density = lu_df.max(axis=1)
+    dominant = lu_df.idxmax(axis=1)
+    df['Land_Use'] = np.where(max_density > 0, dominant, 'Other')
+
+    # Drop rows with missing ET/ETo
+    df = df.dropna(subset=[et_col, eto_col])
+    df = df[df[eto_col] > 0]  # avoid division by zero for ratio
+
+    lu_order = [c for c in ['AGRI', 'URBAN', 'SW', 'Other'] if c in df['Land_Use'].values]
+    lu_palette = {'AGRI': '#2ecc71', 'URBAN': '#e74c3c', 'SW': '#3498db', 'Other': '#95a5a6'}
+
+    # ── 1. ET, ETo, and GW pumping boxplots by land use ─────────────────
+    value_vars = [et_col, eto_col]
+    var_labels = {et_col: 'Actual ET', eto_col: 'Reference ETo'}
+    var_palette = {'Actual ET': '#e67e22', 'Reference ETo': '#2980b9'}
+    if gw_col in az_df.columns:
+        df[gw_col] = az_df.loc[df.index, gw_col]
+        # Only include positive pumping; set rest to NaN so they drop from melt
+        df.loc[df[gw_col] <= 0, gw_col] = np.nan
+        value_vars.append(gw_col)
+        var_labels[gw_col] = 'GW Pumping'
+        var_palette['GW Pumping'] = '#2ecc71'
+
+    melted = df.melt(
+        id_vars=['Land_Use'],
+        value_vars=value_vars,
+        var_name='Variable',
+        value_name='mm',
+    ).dropna(subset=['mm'])
+    melted['Variable'] = melted['Variable'].map(var_labels)
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    sns.boxplot(
+        data=melted, x='Land_Use', y='mm', hue='Variable',
+        order=lu_order, ax=ax, fliersize=1,
+        palette=var_palette,
+    )
+    ax.set_xlabel('Dominant Land Use', fontweight='bold')
+    ax.set_ylabel('Depth (mm)', fontweight='bold')
+    ax.set_title('ET, ETo & GW Pumping by Land Use', fontweight='bold')
+    ax.legend(title='Variable', framealpha=0.9)
+    ax.grid(True, axis='y', alpha=0.3, ls='--')
+    plt.tight_layout()
+    fig.savefig(os.path.join(output_dir, 'ET_ETo_GW_by_LandUse.png'),
+                dpi=600, bbox_inches='tight')
+    plt.close()
+
+    # ── 2. ET/ETo ratio boxplot by land use ──────────────────────────────
+    df['ET_ETo_ratio'] = df[et_col] / df[eto_col]
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.boxplot(
+        data=df, x='Land_Use', y='ET_ETo_ratio',
+        order=lu_order, ax=ax, fliersize=1,
+        palette=lu_palette,
+    )
+    ax.axhline(1.0, ls='--', color='black', lw=1.2, label='Kc = 1.0 (ET = ETo)')
+    ax.axhline(kc_max, ls='--', color='red', lw=1.2, label=f'Kc_max = {kc_max}')
+    ax.set_xlabel('Dominant Land Use', fontweight='bold')
+    ax.set_ylabel('ET / ETo Ratio', fontweight='bold')
+    ax.set_title('ET/ETo Ratio by Land Use', fontweight='bold')
+    ax.legend(framealpha=0.9)
+    ax.grid(True, axis='y', alpha=0.3, ls='--')
+    plt.tight_layout()
+    fig.savefig(os.path.join(output_dir, 'ET_ETo_Ratio_by_LandUse.png'),
+                dpi=600, bbox_inches='tight')
+    plt.close()
+
+    # Log exceedance stats by land use
+    logger.info('\n--- ET > ETo exceedance by land use ---')
+    for lu in lu_order:
+        sub = df[df['Land_Use'] == lu]
+        n_exceed = (sub[et_col] > sub[eto_col]).sum()
+        n_exceed_kc = (sub['ET_ETo_ratio'] > kc_max).sum()
+        logger.info(f'  {lu:6s}: {len(sub):>8,} pixels, '
+                    f'{n_exceed:>7,} ET>ETo ({100 * n_exceed / len(sub):.1f}%), '
+                    f'{n_exceed_kc:>7,} ET>{kc_max}×ETo ({100 * n_exceed_kc / len(sub):.1f}%)')
+
+    logger.info(f'ET vs ETo land-use plots saved to {output_dir}')
+
+
+def analyze_pumping_distribution(
+        az_df: pd.DataFrame,
+        output_dir: str,
+        year_list: list[int],
+        max_gw: float | None = None,
+        pred_attr: str = 'gw_pumping_mm',
+        year_col: str = 'Year',
+        gw_basin_col: str = 'GW_Basin',
+        thresholds: list[int] | None = None,
+) -> None:
+    """
+    Analyze groundwater pumping depth distribution.
+
+    Logs summary statistics (percentiles, threshold counts) and generates an
+    empirical CDF plot with separate curves for each threshold and no threshold.
+
+    Args:
+        az_df: Full Arizona predictor DataFrame.
+        output_dir: Directory to save plots.
+        year_list: Metered years to include (e.g. 1984-2024).
+        max_gw: Optional MAX_GW threshold (mm). Shown as vertical line.
+        pred_attr: Target column name.
+        year_col: Year column name.
+        gw_basin_col: Basin column name.
+        thresholds: Depth thresholds (mm) for pixel-count analysis.
+    """
+    makedirs(output_dir)
+    apply_journal_style()
+
+    if thresholds is None:
+        thresholds = [1000, 2000, 3000, 4000, 5000]
+
+    # Filter to metered years, positive pumping, AMA/INA basins
+    ama_ina = get_ama_ina_basin_names()
+    metered = az_df[
+        az_df[year_col].isin(year_list) &
+        az_df[gw_basin_col].isin(ama_ina)
+    ].copy()
+    pos = metered[metered[pred_attr] > 0][pred_attr].dropna()
+
+    if pos.empty:
+        logger.warning('No positive pumping values found — skipping distribution analysis.')
+        return
+
+    # ── Log summary statistics ───────────────────────────────────────────
+    pcts = [90, 95, 99, 99.5, 99.9, 100]
+    pct_vals = np.percentile(pos, pcts)
+    logger.info(f'\n--- Pumping depth distribution ({pred_attr}, metered years) ---')
+    logger.info(f'  Count: {len(pos):,}  Mean: {pos.mean():.1f} mm  Std: {pos.std():.1f} mm')
+    for p, v in zip(pcts, pct_vals):
+        logger.info(f'  P{p:>5.1f}: {v:,.1f} mm')
+
+    # ── Statistical outlier thresholds ───────────────────────────────────
+    q1, q3 = np.percentile(pos, [25, 75])
+    iqr = q3 - q1
+    tukey_mild = q3 + 1.5 * iqr      # Tukey's inner fence
+    tukey_extreme = q3 + 3.0 * iqr    # Tukey's outer fence
+    p99 = np.percentile(pos, 99)
+    p995 = np.percentile(pos, 99.5)
+
+    logger.info(f'\n  Statistical outlier benchmarks:')
+    logger.info(f'    Q1: {q1:,.1f} mm  Q3: {q3:,.1f} mm  IQR: {iqr:,.1f} mm')
+    logger.info(f'    Tukey mild   (Q3 + 1.5×IQR): {tukey_mild:,.1f} mm')
+    logger.info(f'    Tukey extreme (Q3 + 3×IQR):  {tukey_extreme:,.1f} mm')
+    logger.info(f'    P99:  {p99:,.1f} mm')
+    logger.info(f'    P99.5: {p995:,.1f} mm')
+    if max_gw is not None:
+        logger.info(f'    MAX_GW (configured): {max_gw:,.1f} mm')
+        # Determine where MAX_GW falls relative to benchmarks
+        pct_rank = 100.0 * (pos <= max_gw).mean()
+        logger.info(f'    MAX_GW percentile rank: P{pct_rank:.2f}')
+
+    logger.info(f'\n  Pixels above threshold (of {len(pos):,} positive):')
+    for t in thresholds:
+        n = (pos > t).sum()
+        logger.info(f'    > {t:,} mm: {n:,} ({100 * n / len(pos):.3f}%)')
+
+    if max_gw is not None:
+        n_drop = (pos > max_gw).sum()
+        logger.info(f'  MAX_GW = {max_gw:.0f} mm would remove {n_drop:,} pixels '
+                    f'({100 * n_drop / len(pos):.3f}%)')
+
+    # ── Empirical CDFs — one per threshold + no threshold ──────────────
+    cdf_scenarios = [('No threshold', None)] + [
+        (f'≤ {t:,} mm', t) for t in thresholds
+    ]
+    cmap = plt.cm.get_cmap('viridis', len(cdf_scenarios))
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    for idx, (label, cutoff) in enumerate(cdf_scenarios):
+        subset = pos if cutoff is None else pos[pos <= cutoff]
+        if subset.empty:
+            continue
+        sorted_vals = np.sort(subset.values)
+        ecdf = np.arange(1, len(sorted_vals) + 1) / len(sorted_vals)
+        ax.plot(sorted_vals, ecdf, lw=2, color=cmap(idx),
+                label=f'{label} (n={len(subset):,})')
+
+    # Statistical benchmark lines
+    ax.axvline(p99, ls=':', color='purple', lw=1.3,
+               label=f'P99 = {p99:,.0f} mm')
+    ax.axvline(tukey_mild, ls=':', color='orange', lw=1.3,
+               label=f'Tukey mild (Q3+1.5×IQR) = {tukey_mild:,.0f} mm')
+    ax.axvline(tukey_extreme, ls=':', color='darkorange', lw=1.3,
+               label=f'Tukey extreme (Q3+3×IQR) = {tukey_extreme:,.0f} mm')
+    if max_gw is not None:
+        pct_rank = 100.0 * (pos <= max_gw).mean()
+        n_removed = (pos > max_gw).sum()
+        ax.axvline(max_gw, ls='--', color='red', lw=1.5,
+                   label=f'Upper bound = {max_gw:,.0f} mm '
+                         f'(P{pct_rank:.1f}, removes {n_removed:,} pixels)')
+
+    ax.set_xlabel('Groundwater Pumping Depth (mm)', fontweight='bold')
+    ax.set_ylabel('Cumulative Probability', fontweight='bold')
+    ax.set_title('Empirical CDF of Pumping Depth (Metered Years, AMA/INA)',
+                 fontweight='bold')
+    ax.legend(framealpha=0.9, fontsize=8, loc='lower right')
+    ax.grid(True, alpha=0.3, ls='--')
+    plt.tight_layout()
+    fig.savefig(os.path.join(output_dir, 'Pumping_ECDF.png'),
+                dpi=600, bbox_inches='tight')
+    plt.close()
+
+    logger.info(f'Pumping distribution plots saved to {output_dir}')
 
 
 # ─── ML Pipeline Visualization Helpers ───────────────────────────────────────

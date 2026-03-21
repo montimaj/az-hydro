@@ -317,9 +317,10 @@ All paths and modelling parameters are defined once at the top of
 | `START_YEAR` | `1896` | First prediction year. |
 | `END_YEAR` | `2099` | Last prediction year. |
 | `YEAR_LIST` | `1984–2024` | Years with metered pumping data (ADWR). |
-| `MAX_GW` | `None` | Maximum allowed pumping depth (mm); defaults to 10,000 mm (~32,400 AF per pixel) when `None`. |
+| `MAX_GW` | `3000.` | Maximum allowed pumping depth (mm). Justified by Tukey's extreme fence (Q3 + 3×IQR), ≈P99, and prior Arizona literature. Set to `None` to disable (falls back to 10,000 mm). |
 | `AF_MAX_THRESHOLD` | `5000` | Maximum per-well `AF Pumped`; rows exceeding this are dropped from CSVs. |
 | `RANDOM_STATE` | `42` | Seed for reproducibility. |
+| `LOG_TARGET` | `True` | Apply `log1p` / `expm1` target transform. See [Target transform](#target-transform). |
 | `N_TRIALS` | `100` | Optuna hyperparameter-tuning trials. |
 | `FOLD_COUNT` | `5` | k-fold cross-validation folds. |
 | `N_DASK_WORKERS` | `10` | Dask parallel workers. |
@@ -346,8 +347,9 @@ Downloads, mosaics, and aligns all input datasets to a common 2 km grid.
    consistent CRS (`gwops.reproject_vectors()`), and GW volume →
    depth → cropped rasters are created (`gwops.create_gw_volume_rasters()`,
    `create_gw_depth_rasters()`, `crop_gw_rasters()`).  A pixel-level raster
-   cap (default **10,000 mm** ≈ 32,400 AF at 4 km² when `MAX_GW=None`)
-   catches any remaining `gdal_rasterize` artifacts.
+   cap (default **3,000 mm** when `MAX_GW=3000.`; falls back to
+   10,000 mm when `MAX_GW=None`) catches any remaining `gdal_rasterize`
+   artifacts and statistically implausible extremes.
 3. **Streamflow & canal density** — `streamflowops.create_canal_density_raster()`
    and `streamflowops.create_streamflow_rasters()` build predictor layers
    from USGS/USBR gauge data and GRAIN canal geometry ([Suresh et al., 2026](https://doi.org/10.5194/essd-18-1855-2026)).
@@ -376,8 +378,24 @@ one pixel in one year; columns include all GEE predictors, ancillary
 layers, basin/sub-basin labels, and (for metered years) observed pumping.
 
 ADWR sub-basin OBJECTID codes are mapped to human-readable names using the
-ADWR shapefile.  Exploratory data analysis (EDA) plots are generated via
+ADWR shapefile.  Before writing the Parquet file, `create_az_data_parquet()`
+caps actual ET at **Kc_max × ETo** (Kc_max = 2.0) to remove physically
+implausible values where ET exceeds reference ET.  ET can legitimately
+exceed ETo for high-Kc crops (e.g. alfalfa), urban oasis/advection effects,
+and open-water/riparian pixels, so a uniform 2× multiplier is applied rather
+than a strict 1:1 cap.  The 2× threshold accommodates urban and surface-water
+areas while still catching implausible extremes; empirical analysis shows
+ET > ETo exceedance outside AGRI/URBAN/SW land uses is negligible.
+
+Exploratory data analysis (EDA) plots are generated via
 `vizops.explore_az_data()` and saved to `{MODEL_DIR}EDA/`.
+
+A targeted pumping distribution analysis follows via
+`vizops.analyze_pumping_distribution()`.  This logs percentile summaries,
+Tukey's fence outlier benchmarks (Q3 + 1.5×IQR mild, Q3 + 3×IQR extreme),
+and the percentile rank of `MAX_GW`, then saves an empirical CDF plot with
+separate curves for each depth threshold (≤1 000, ≤2 000, … ≤5 000 mm) and
+no threshold, overlaid with the Tukey fence and `MAX_GW` lines.
 
 **Returns:** `az_df` — the full predictor DataFrame used by all subsequent
 steps.
@@ -389,13 +407,87 @@ trains all available models — baseline linear regressors (Linear Regression,
 Ridge, Lasso) and ensemble tree models (XGBoost, LightGBM, Random Forest,
 Extra Trees, Histogram Gradient Boosting, CatBoost, Gradient Boosting,
 AdaBoost) — using Optuna + Dask hyperparameter optimisation (100 TPE trials
-for fast histogram-based models, 10 for traditional sklearn ensembles,
-5-fold CV; 1 trial for parameter-free baselines) and reports R², normalised
-RMSE (% of mean), normalised MAE (% of mean), and normalised MBE (%).
-All three normalised metrics use the mean of observed values as the
-denominator, giving a physically interpretable percentage error relative
-to the average pumping magnitude.  The linear baselines
-provide a reference for quantifying the value added by nonlinear models.
+for fast models — XGB, XGBRF, LGBM, CatBoost, HGBR, and ETR — 10 for
+traditional sklearn ensembles, 5-fold CV; 1 trial for parameter-free
+baselines) and reports R², normalised RMSE (% of mean), normalised MAE
+(% of mean), and normalised MBE (%).  All three normalised metrics use
+the mean of observed values as the denominator, giving a physically
+interpretable percentage error relative to the average pumping magnitude.
+The linear baselines provide a reference for quantifying the value added
+by nonlinear models.
+
+#### Target transform
+
+When `LOG_TARGET=True`, the pipeline applies a `log1p(y)` transform to
+the target variable before training and `expm1(ŷ)` to predictions
+afterward.  This stabilises the right-skewed pumping distribution and
+improves tree-model performance on low-pumping pixels.  Because tree
+leaf predictions become means of log-transformed values, the inverse
+(`expm1`) yields the geometric mean, which is systematically lower than
+the arithmetic mean (Jensen's inequality).  Global linear bias correction
+(§3b) compensates for this shift.
+
+#### CV scoring under log-space training
+
+When the model trains in log space, R² is computed **in log space**
+during CV scoring because R² is scale-invariant within the model's
+operating space but *not* invariant under nonlinear transforms like
+`expm1`.  Applying `expm1` before R² would deflate scores via Jensen's
+inequality.  RMSE, MAE, and MBE, which have physical units (mm), are
+still inverse-transformed to original scale so that CV error metrics
+remain interpretable as percentage-of-mean pumping.
+
+#### Optuna objective function
+
+The Optuna TPE sampler minimises a composite objective that balances
+predictive accuracy, overfitting control, and fold stability:
+
+```
+objective = test_NRMSE × (1 + α × max(test_NRMSE / train_NRMSE − 1, 0)) + β × std(test_NRMSE)
+```
+
+where α = 0.1 and β = 0.05.
+
+- **Primary term** (`test_NRMSE`): Mean normalised RMSE across CV folds.
+  When `LOG_TARGET=True`, this is computed in **log space** (`log_nrmse`)
+  so that the hyperparameter search optimises in the same space as the
+  tree model's internal MSE loss, giving equal weight to low- and
+  high-pumping pixels.  When `LOG_TARGET=False`, original-scale NRMSE is
+  used.
+- **Overfitting ratio penalty** (`α`): Penalises trials where
+  `test_NRMSE ≫ train_NRMSE` using the *ratio* rather than the absolute
+  difference.  A 20× train/test gap is penalised much more heavily than
+  a 2× gap.  The `max(…, 0)` ensures no penalty when test ≤ train.
+- **Fold variance penalty** (`β`): Penalises inconsistent performance
+  across CV folds, favouring hyperparameters that generalise uniformly
+  across data subsets.
+
+#### Linear bias correction (evaluation)
+
+All four evaluation strategies apply a **global linear bias correction**
+after prediction.  The correction is fit on training data using OLS:
+`y_corrected = |m × y_pred + b|`, where `m` and `b` minimise the
+squared residuals.  Because the identity transform (`m=1, b=0`) is in
+the OLS solution space, the correction can only improve or match raw
+predictions on the training set.  The absolute value ensures physical
+non-negativity.
+
+**Strategy-consistent inner CV:** The inner cross-validation used during
+Optuna hyperparameter tuning mirrors the outer evaluation strategy to
+prevent optimistic CV scores from data leakage:
+
+| Strategy | Inner CV | Group labels |
+|---|---|---|
+| Random (2a) | `RepeatedKFold` | — (standard random splits) |
+| Pixel holdout (2a2) | `GroupKFold` | Pixel coordinates (easting/northing) |
+| Temporal LOO (2b) | `GroupKFold` | Year |
+| Spatial LOO (2c) | `GroupKFold` | Sub-basin name |
+
+For group-based strategies, `GroupKFold` ensures that all samples sharing
+the same group label (pixel, year, or sub-basin) stay together in the same
+fold, so the inner validation folds never leak spatial or temporal
+information that the outer holdout was designed to test.  The number of
+folds is capped at `min(FOLD_COUNT, n_unique_groups)`.
 
 #### Step 2a — Random 80/20 split (`evaluate_random()`)
 
@@ -408,14 +500,16 @@ prediction plots, scatter diagrams, and residual maps via
 
 #### Step 2a2 — Pixel holdout (`evaluate_pixel_holdout()`)
 
-A pixel-level spatial holdout where 20 % of unique spatial locations
-(identified by their easting/northing coordinates) are held out across
-**all years**.  Unlike the random split (where the same pixel may appear
-in both train and test for different years), this strategy ensures the
-model is evaluated on entirely unseen locations.  It provides a
-finer-grained spatial generalization test than the basin-level spatial
-LOO (Step 2c), revealing how well the model interpolates to new pixels
-within known basins.
+A basin-stratified pixel-level spatial holdout where 20 % of unique
+spatial locations (identified by their easting/northing coordinates) are
+held out across **all years**.  Pixels are stratified by `GW_Basin` so
+that each basin contributes approximately 20 % of its pixels to the test
+set, ensuring proportional geographic representation.  Unlike the random
+split (where the same pixel may appear in both train and test for
+different years), this strategy ensures the model is evaluated on
+entirely unseen locations.  It provides a finer-grained spatial
+generalization test than the basin-level spatial LOO (Step 2c), revealing
+how well the model interpolates to new pixels within known basins.
 
 **Outputs:** `{MODEL_DIR}Model_Evaluation/Pixel_Holdout/`
 
@@ -444,7 +538,10 @@ all six splits.  Heatmaps and bar plots (`vizops.plot_loo_heatmap()`,
 Iterates over every ADWR sub-basin within AMA/INA management areas.  For
 each sub-basin the model trains on the rest of Arizona and is tested on the
 held-out region.  Only sub-basins with metered data in the 1984–2024 period
-are included.  Bias correction is applied at level 1 (global).
+are included.  After each sub-basin evaluation, linear bias correction is
+applied and model visualizations (scatter, residual, and spatial plots) are
+generated.  Post-bias-correction metrics are logged and used for the
+summary rows.
 
 **Outputs:** `{MODEL_DIR}Model_Evaluation/Spatial_LOO/`
 
@@ -533,18 +630,18 @@ is unlikely to change substantially over the projection horizon.  Per-year
 exceedance statistics are accumulated and written to
 `Prediction_Exceedance_Summary.csv` with era-level summaries.
 
-Before the loop, a **global bias correction** is learned from all AMA/INA
-training data.  Three strategies are compared — raw (no correction), linear
-(`|m × pred + b|`), and ML (secondary XGBoost trained on
-features → residuals) — and the one with the lowest training RMSE is kept.
-Because a single correction is learned from all basins, it generalises to
-non-AMA/INA basins during prediction.  A summary is saved to
-`Bias_Correction/Global_BC_Summary.csv`.
+Before the loop, a **global linear bias correction** is learned from all
+AMA/INA training data using `fit_linear_bc()`: `y_corrected = |m × y_pred + b|`,
+where `m` and `b` are fit via OLS on training predictions vs observed values.
+Because the identity (`m=1, b=0`) is in the OLS solution space, the
+correction can only improve or match raw predictions.  A single correction
+is learned from all basins, so it generalises to non-AMA/INA basins during
+prediction.
 
 For each year the pipeline:
 
 1. **Predicts** total pumping (mm) across all valid pixels.
-1. **Applies global bias correction** using the strategy chosen above.
+1. **Applies global linear bias correction** via `apply_linear_bc()`.
 2. **Checks prediction exceedance** against the training-era per-pixel
    maximum and P99 pumping depth.  Pixels exceeding these thresholds are
    counted per year.
@@ -1284,10 +1381,15 @@ Key functions:
   TPE-based hyperparameter search parallelised across Dask workers.
 - **`compare_all_models()`** — Trains all models on a common split and
   ranks them by test R².
-- **`get_prediction_results()`** — Makes predictions and applies multi-level
-  bias correction.
-- **`perform_bias_correction()`** — Applies global bias correction using
-  linear scaling.
+- **`fit_linear_bc()`** — Fits a linear bias correction (`y = m × pred + b`)
+  via OLS on training predictions vs observed values.  Returns slope and
+  intercept.
+- **`apply_linear_bc()`** — Applies a pre-fitted linear bias correction:
+  `|m × predictions + b|`.
+- **`get_prediction_results()`** — Makes predictions and optionally applies
+  linear bias correction (boolean `apply_bias_correction` flag).
+- **`perform_bias_correction()`** — Fits and applies global linear bias
+  correction using `fit_linear_bc()` / `apply_linear_bc()`.
 - **`calc_train_test_metrics()`** — Computes R², normalised RMSE (% of mean),
   normalised MAE (% of mean), and normalised MBE (% of mean).
 - **`compute_perm_imp()`**, **`compute_ale_plots()`**,
@@ -1305,8 +1407,12 @@ Key functions:
 Produces journal-quality figures for every stage of the pipeline.
 
 Key functions:
-- **`explore_az_data()`** — Exploratory data analysis (histograms,
-  correlation matrices, feature distributions by era).
+- **`explore_az_data()`** — Exploratory data analysis (histograms + KDE,
+  boxplots by era/basin type/GW basin, violin plots, time series, and
+  boxplots by year for all numeric columns).
+- **`analyze_pumping_distribution()`** — Pumping depth distribution analysis
+  with summary statistics, Tukey's fence outlier benchmarks, and empirical
+  CDF plot (separate curves per depth threshold vs. no threshold).
 - **`create_full_period_time_series()`** — Annual pumping line plot (1896–
   2099) with era shading and optional observed-data overlay.
 - **`create_era_summary_maps()`** — Spatial maps of mean depth for each era
@@ -1619,6 +1725,7 @@ Data/Outputs/
     ├── EDA/                                 # Exploratory data analysis plots
     ├── Model_Evaluation/
     │   ├── Random/                          # Step 2a results
+    │   ├── Pixel_Holdout/                   # Step 2a2 results
     │   ├── Temporal_LOO/                    # Step 2b results (T1–T6)
     │   ├── Spatial_LOO/                     # Step 2c results (per sub-basin)
     │   ├── Cross_Strategy_Summary.csv       # All models × all strategies
