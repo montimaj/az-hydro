@@ -1521,7 +1521,7 @@ def _plot_physics_floor_diagnostic(
 
     plt.tight_layout()
     out_path = os.path.join(output_dir, f'{model_name}_Physics_Floor_Diagnostic.png')
-    plt.savefig(out_path, dpi=200, bbox_inches='tight')
+    plt.savefig(out_path, dpi=600, bbox_inches='tight')
     plt.close(fig)
     logger.info(f'Physics floor diagnostic: {n_active}/{n_total} '
                 f'({100*n_active/n_total:.1f}%) training samples at/below floor')
