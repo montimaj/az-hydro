@@ -652,6 +652,10 @@ class _OrigScaleModelWrapper:
         return np.abs(np.expm1(self._model.predict(X)))
 
     def __getattr__(self, name):
+        # Guard against infinite recursion during unpickling: _model may not
+        # exist yet when __getattr__ is called before __init__ completes.
+        if name == '_model':
+            raise AttributeError(name)
         return getattr(self._model, name)
 
 
@@ -1464,10 +1468,11 @@ def _plot_physics_floor_diagnostic(
 ) -> None:
     """Scatter predicted vs physics floor, colored by constraint activity.
 
-    Only meaningful for PIML models where ``_PHYS_COL`` is present in
-    *x_train*.  Silently returns for standard models.
+    Only generated for PIML models.  Silently returns for standard models.
     """
-    if _PHYS_COL not in x_train.columns:
+    if model_name not in _PIML_MODELS:
+        return
+    if not isinstance(x_train, pd.DataFrame) or _PHYS_COL not in x_train.columns:
         return
 
     y_floor_log = x_train[_PHYS_COL].values
