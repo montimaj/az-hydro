@@ -320,6 +320,8 @@ All paths and modelling parameters are defined once at the top of
 | `MAX_GW` | `3000.` | Maximum allowed pumping depth (mm). Justified by Tukey's extreme fence (Q3 + 3×IQR), ≈P99, and prior Arizona literature. Set to `None` to disable (falls back to 10,000 mm). |
 | `AF_MAX_THRESHOLD` | `5000` | Maximum per-well `AF Pumped`; rows exceeding this are dropped from CSVs. |
 | `RANDOM_STATE` | `42` | Seed for reproducibility. |
+| `N_EVAL_SEEDS` | `5` | Random seeds per test size for random/pixel holdout evaluation. |
+| `EVAL_TEST_SIZES` | `(0.10, 0.15, 0.20, 0.25, 0.30)` | Test fractions to sweep in the evaluation grid. |
 | `LOG_TARGET` | `True` | Apply `log1p` / `expm1` target transform. See [Target transform](#target-transform). |
 | `N_TRIALS` | `100` | Optuna hyperparameter-tuning trials. |
 | `FOLD_COUNT` | `5` | k-fold cross-validation folds. |
@@ -491,25 +493,33 @@ folds is capped at `min(FOLD_COUNT, n_unique_groups)`.
 
 #### Step 2a — Random 80/20 split (`evaluate_random()`)
 
-A single randomised 80 %/20 % train/test split across all metered pixels
-and years.  Trains and evaluates every model type, generating per-model
-prediction plots, scatter diagrams, and residual maps via
-`mlops.compare_all_models()` and `mlops.generate_model_visualizations()`.
+A grid evaluation over `EVAL_TEST_SIZES` (default 10 %–30 %) ×
+`N_EVAL_SEEDS` (default 5) random seeds.  Each combination re-splits
+the data with a different test fraction and seed, retrains with the
+tuned hyperparameters, and evaluates.  Optuna tuning runs only on the
+first combination (test_size=10 %, seed=42); all subsequent runs reuse
+those hyperparameters.  Results are organised under
+`ts{NN}/seed_{S}/` subdirectories, and `Model_Comparison_Averaged.csv`
+reports mean ± std grouped by model and test size.
 
 **Outputs:** `{MODEL_DIR}Model_Evaluation/Random/`
 
 #### Step 2a2 — Pixel holdout (`evaluate_pixel_holdout()`)
 
-A basin-stratified pixel-level spatial holdout where 20 % of unique
-spatial locations (identified by their easting/northing coordinates) are
-held out across **all years**.  Pixels are stratified by `GW_Basin` so
-that each basin contributes approximately 20 % of its pixels to the test
-set, ensuring proportional geographic representation.  Unlike the random
-split (where the same pixel may appear in both train and test for
-different years), this strategy ensures the model is evaluated on
-entirely unseen locations.  It provides a finer-grained spatial
-generalization test than the basin-level spatial LOO (Step 2c), revealing
-how well the model interpolates to new pixels within known basins.
+A basin-stratified pixel-level spatial holdout where a fraction of
+unique spatial locations (identified by their easting/northing
+coordinates) are held out across **all years**.  Pixels are stratified
+by `GW_Basin` so that each basin contributes proportionally to the test
+set.  Unlike the random split (where the same pixel may appear in both
+train and test for different years), this strategy ensures the model is
+evaluated on entirely unseen locations.  It provides a finer-grained
+spatial generalization test than the basin-level spatial LOO (Step 2c),
+revealing how well the model interpolates to new pixels within known
+basins.
+
+Like Step 2a, the evaluation runs over the same
+`EVAL_TEST_SIZES` × `N_EVAL_SEEDS` grid with Optuna tuning on the
+first combination only.
 
 **Outputs:** `{MODEL_DIR}Model_Evaluation/Pixel_Holdout/`
 
@@ -1725,7 +1735,12 @@ Data/Outputs/
     ├── EDA/                                 # Exploratory data analysis plots
     ├── Model_Evaluation/
     │   ├── Random/                          # Step 2a results
-    │   ├── Pixel_Holdout/                   # Step 2a2 results
+    │   │   ├── ts10/seed_42/               #   test_size=10%, seed=42
+    │   │   ├── ts10/seed_…/
+    │   │   ├── ts15/…, ts20/…, …           #   other test sizes
+    │   │   ├── All_Runs.csv                #   All test_size × seed metrics
+    │   │   └── Model_Comparison_Averaged.csv #  Mean ± std by model & test_size
+    │   ├── Pixel_Holdout/                   # Step 2a2 (same grid structure)
     │   ├── Temporal_LOO/                    # Step 2b results (T1–T6)
     │   ├── Spatial_LOO/                     # Step 2c results (per sub-basin)
     │   ├── Cross_Strategy_Summary.csv       # All models × all strategies

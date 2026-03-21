@@ -783,6 +783,7 @@ def build_ml_model_optuna(
         pruning: bool = True,
         cv_groups: np.ndarray | pd.Series | None = None,
         log_target: bool = False,
+        best_params: dict | None = None,
         **kwargs: Any
 ) -> tuple[Any, pd.DataFrame]:
     """
@@ -807,6 +808,9 @@ def build_ml_model_optuna(
             When provided, uses GroupKFold instead of RepeatedKFold so that the
             inner CV matches the outer evaluation strategy (e.g. pixel, temporal,
             or spatial holdout). Default is None (random RepeatedKFold).
+        best_params (dict or None): Pre-tuned hyperparameters. When provided,
+            Optuna tuning is skipped and the model is trained directly with
+            these parameters. Default is None (run Optuna).
         kwargs: Additional arguments.
 
     Returns:
@@ -814,132 +818,17 @@ def build_ml_model_optuna(
     """
     makedirs(make_proper_dir_name(model_dir))
 
-    if not load_model:
-        if log_target:
-            scoring_metrics = {
-                # R² is scale-invariant for the model's operating space;
-                # use log-space R² to avoid Jensen's inequality bias from expm1.
-                'r2': make_scorer(_abs_r2_score),
-                'adjusted_r2': make_scorer(_abs_adjusted_r2, p=x_train.shape[1], greater_is_better=True),
-                # Log-space NRMSE — used as Optuna objective so that
-                # hyperparameter search optimises in the same space as the
-                # tree model's internal MSE loss.
-                'log_nrmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
-                # RMSE/MAE/MBE have physical units → report in original (mm) scale.
-                'normalized_rmse': make_scorer(_log_normalized_rmse, greater_is_better=False),
-                'normalized_mae': make_scorer(_log_normalized_mae, greater_is_better=False),
-                'normalized_mbe': make_scorer(_log_normalized_mbe, greater_is_better=False)
-            }
-        else:
-            scoring_metrics = {
-                'r2': make_scorer(_abs_r2_score),
-                'adjusted_r2': make_scorer(_abs_adjusted_r2, p=x_train.shape[1], greater_is_better=True),
-                'normalized_rmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
-                'normalized_mae': make_scorer(_abs_normalized_mae, greater_is_better=False),
-                'normalized_mbe': make_scorer(_abs_normalized_mbe, greater_is_better=False)
-            }
-        if cv_groups is not None:
-            n_unique_groups = len(np.unique(cv_groups))
-            effective_folds = min(fold_count, n_unique_groups)
-            cv = GroupKFold(n_splits=effective_folds)
-            logger.info(f'Using GroupKFold with {effective_folds} splits '
-                        f'({n_unique_groups} unique groups)')
-        elif stratified_kfold:
-            stratify_labels = kwargs['stratify_labels'].to_numpy().ravel()
-            cv = RepeatedStratifiedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
-            cv = cv.split(x_train, stratify_labels)
-        else:
-            cv = RepeatedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
+    if load_model:
+        model_file = os.path.join(model_dir, model_name)
+        with open(model_file, 'rb') as f:
+            model = pickle.load(f)
+        metric_csv = os.path.join(model_dir, f'CV_Metrics_{model_name}.csv')
+        metric_df = pd.read_csv(metric_csv)
+        return model, metric_df
 
-        optuna.logging.set_verbosity(optuna.logging.WARNING)
-        optuna_storage = os.path.join(model_dir, f'optuna_study_{model_name}.db')
-
-        # Setup Dask cluster if needed
-        dask_client = None
-        if use_dask and n_dask_workers > 1:
-            dask_cluster = LocalCluster(
-                n_workers=n_dask_workers,
-                threads_per_worker=2,
-                memory_limit='2GB'
-            )
-            dask_client = Client(dask_cluster)
-            logger.info(f'Dask cluster started with {n_dask_workers} workers')
-
-        # Create or load study (load_if_exists preserves completed trials)
-        sampler = optuna.samplers.TPESampler(
-            seed=random_state,
-            multivariate=True,
-            group=True
-        )
-        pruner = optuna.pruners.MedianPruner(
-            n_startup_trials=10,
-            n_warmup_steps=5
-        ) if pruning else optuna.pruners.NopPruner()
-
-        study = optuna.create_study(
-            direction='minimize',
-            storage=f'sqlite:///{optuna_storage}',
-            study_name=f'Optuna_{model_name}',
-            load_if_exists=True,
-            sampler=sampler,
-            pruner=pruner
-        )
-        study.set_metric_names(['Log_NRMSE_with_Overfitting_Penalty'])
-
-        completed = len([t for t in study.trials
-                         if t.state == optuna.trial.TrialState.COMPLETE])
-        logger.info(f'Study has {completed} completed trials')
-
-        # For parameter-free models (LR), a single trial suffices.
-        # Scikit-learn tree ensembles (RF, ETR, GBR, ADA, BAG) are much
-        # slower per trial than histogram-based models, so cap at 5 trials.
-        # RIDGE/LASSO are simple models and don't need capping.
-        _FAST_MODELS = {'XGB', 'XGBRF', 'LGBM', 'CAT', 'HGBR', 'ETR'}
-        _SIMPLE_MODELS = {'LR', 'RIDGE', 'LASSO'}
-        if model_name == 'LR':
-            effective_n_trials = 1
-        elif model_name in _SIMPLE_MODELS:
-            effective_n_trials = n_trials
-        elif model_name not in _FAST_MODELS:
-            effective_n_trials = min(n_trials, 10)
-        else:
-            effective_n_trials = n_trials
-        remaining = max(0, effective_n_trials - completed)
-
-        t0 = time.perf_counter()
-        if remaining > 0:
-            logger.info(f'Running {remaining} remaining trials '
-                        f'(target={effective_n_trials}, completed={completed})')
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', message='Ill-conditioned matrix',
-                                        category=LinAlgWarning)
-                study.optimize(
-                    lambda trial: objective_with_cv_enhanced(
-                        trial, x_train, y_train,
-                        model_name, cv, scoring_metrics,
-                        alpha, random_state, pruning,
-                        cv_groups=cv_groups,
-                    ),
-                    n_trials=remaining,
-                    n_jobs=1,
-                    show_progress_bar=True,
-                    gc_after_trial=True
-                )
-        else:
-            logger.info(f'Study already has {completed} completed trials '
-                        f'(target={effective_n_trials}) — skipping optimization')
-        tuning_runtime_sec = round(time.perf_counter() - t0, 2)
-        logger.info(f'Tuning runtime for {model_name}: {tuning_runtime_sec:.2f}s')
-
-        # Cleanup Dask
-        if dask_client:
-            dask_client.close()
-
-        best_params = study.best_params
-        logger.info(f'Best params for {model_name}: {best_params}')
-        logger.info(f'Best value: {study.best_value:.4f}')
-
-        # Train final model with best parameters
+    # When best_params are supplied, skip Optuna entirely
+    if best_params is not None:
+        logger.info(f'Using pre-tuned params for {model_name}: {best_params}')
         include_all = model_name in ['RF', 'ETR', 'HGBR', 'GBR', 'ADA', 'BAG', 'CAT']
         model_dict = get_model_dict(random_state, include_all_models=include_all)
         model = model_dict[model_name]
@@ -949,15 +838,146 @@ def build_ml_model_optuna(
         model_file = os.path.join(model_dir, model_name)
         with open(model_file, 'wb') as f:
             pickle.dump(model, f)
-        metric_csv = os.path.join(model_dir, f'CV_Metrics_{model_name}.csv')
-        metric_df = get_grid_search_stats(study, metric_csv, search_type='optuna')
-        metric_df.to_csv(metric_csv, index=False)
+        return model, pd.DataFrame()
+
+    # --- Optuna hyperparameter tuning ---
+    if log_target:
+        scoring_metrics = {
+            # R² is scale-invariant for the model's operating space;
+            # use log-space R² to avoid Jensen's inequality bias from expm1.
+            'r2': make_scorer(_abs_r2_score),
+            'adjusted_r2': make_scorer(_abs_adjusted_r2, p=x_train.shape[1], greater_is_better=True),
+            # Log-space NRMSE — used as Optuna objective so that
+            # hyperparameter search optimises in the same space as the
+            # tree model's internal MSE loss.
+            'log_nrmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
+            # RMSE/MAE/MBE have physical units → report in original (mm) scale.
+            'normalized_rmse': make_scorer(_log_normalized_rmse, greater_is_better=False),
+            'normalized_mae': make_scorer(_log_normalized_mae, greater_is_better=False),
+            'normalized_mbe': make_scorer(_log_normalized_mbe, greater_is_better=False)
+        }
     else:
-        model_file = os.path.join(model_dir, model_name)
-        with open(model_file, 'rb') as f:
-            model = pickle.load(f)
-        metric_csv = os.path.join(model_dir, f'CV_Metrics_{model_name}.csv')
-        metric_df = pd.read_csv(metric_csv)
+        scoring_metrics = {
+            'r2': make_scorer(_abs_r2_score),
+            'adjusted_r2': make_scorer(_abs_adjusted_r2, p=x_train.shape[1], greater_is_better=True),
+            'normalized_rmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
+            'normalized_mae': make_scorer(_abs_normalized_mae, greater_is_better=False),
+            'normalized_mbe': make_scorer(_abs_normalized_mbe, greater_is_better=False)
+        }
+    if cv_groups is not None:
+        n_unique_groups = len(np.unique(cv_groups))
+        effective_folds = min(fold_count, n_unique_groups)
+        cv = GroupKFold(n_splits=effective_folds)
+        logger.info(f'Using GroupKFold with {effective_folds} splits '
+                    f'({n_unique_groups} unique groups)')
+    elif stratified_kfold:
+        stratify_labels = kwargs['stratify_labels'].to_numpy().ravel()
+        cv = RepeatedStratifiedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
+        cv = cv.split(x_train, stratify_labels)
+    else:
+        cv = RepeatedKFold(n_splits=fold_count, n_repeats=repeats, random_state=random_state)
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    optuna_storage = os.path.join(model_dir, f'optuna_study_{model_name}.db')
+
+    # Setup Dask cluster if needed
+    dask_client = None
+    if use_dask and n_dask_workers > 1:
+        dask_cluster = LocalCluster(
+            n_workers=n_dask_workers,
+            threads_per_worker=2,
+            memory_limit='2GB'
+        )
+        dask_client = Client(dask_cluster)
+        logger.info(f'Dask cluster started with {n_dask_workers} workers')
+
+    # Create or load study (load_if_exists preserves completed trials)
+    sampler = optuna.samplers.TPESampler(
+        seed=random_state,
+        multivariate=True,
+        group=True
+    )
+    pruner = optuna.pruners.MedianPruner(
+        n_startup_trials=10,
+        n_warmup_steps=5
+    ) if pruning else optuna.pruners.NopPruner()
+
+    study = optuna.create_study(
+        direction='minimize',
+        storage=f'sqlite:///{optuna_storage}',
+        study_name=f'Optuna_{model_name}',
+        load_if_exists=True,
+        sampler=sampler,
+        pruner=pruner
+    )
+    study.set_metric_names(['Log_NRMSE_with_Overfitting_Penalty'])
+
+    completed = len([t for t in study.trials
+                     if t.state == optuna.trial.TrialState.COMPLETE])
+    logger.info(f'Study has {completed} completed trials')
+
+    # For parameter-free models (LR), a single trial suffices.
+    # Scikit-learn tree ensembles (RF, ETR, GBR, ADA, BAG) are much
+    # slower per trial than histogram-based models, so cap at 5 trials.
+    # RIDGE/LASSO are simple models and don't need capping.
+    _FAST_MODELS = {'XGB', 'XGBRF', 'LGBM', 'CAT', 'HGBR', 'ETR'}
+    _SIMPLE_MODELS = {'LR', 'RIDGE', 'LASSO'}
+    if model_name == 'LR':
+        effective_n_trials = 1
+    elif model_name in _SIMPLE_MODELS:
+        effective_n_trials = n_trials
+    elif model_name not in _FAST_MODELS:
+        effective_n_trials = min(n_trials, 10)
+    else:
+        effective_n_trials = n_trials
+    remaining = max(0, effective_n_trials - completed)
+
+    t0 = time.perf_counter()
+    if remaining > 0:
+        logger.info(f'Running {remaining} remaining trials '
+                    f'(target={effective_n_trials}, completed={completed})')
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', message='Ill-conditioned matrix',
+                                    category=LinAlgWarning)
+            study.optimize(
+                lambda trial: objective_with_cv_enhanced(
+                    trial, x_train, y_train,
+                    model_name, cv, scoring_metrics,
+                    alpha, random_state, pruning,
+                    cv_groups=cv_groups,
+                ),
+                n_trials=remaining,
+                n_jobs=1,
+                show_progress_bar=True,
+                gc_after_trial=True
+            )
+    else:
+        logger.info(f'Study already has {completed} completed trials '
+                    f'(target={effective_n_trials}) — skipping optimization')
+    tuning_runtime_sec = round(time.perf_counter() - t0, 2)
+    logger.info(f'Tuning runtime for {model_name}: {tuning_runtime_sec:.2f}s')
+
+    # Cleanup Dask
+    if dask_client:
+        dask_client.close()
+
+    best_params = study.best_params
+    logger.info(f'Best params for {model_name}: {best_params}')
+    logger.info(f'Best value: {study.best_value:.4f}')
+
+    # Train final model with best parameters
+    include_all = model_name in ['RF', 'ETR', 'HGBR', 'GBR', 'ADA', 'BAG', 'CAT']
+    model_dict = get_model_dict(random_state, include_all_models=include_all)
+    model = model_dict[model_name]
+    model.set_params(**best_params)
+    model.fit(x_train, y_train)
+
+    model_file = os.path.join(model_dir, model_name)
+    with open(model_file, 'wb') as f:
+        pickle.dump(model, f)
+    metric_csv = os.path.join(model_dir, f'CV_Metrics_{model_name}.csv')
+    metric_df = get_grid_search_stats(study, metric_csv, search_type='optuna')
+    metric_df.to_csv(metric_csv, index=False)
 
     return model, metric_df
 
@@ -1090,6 +1110,7 @@ def compare_all_models(
         raster_res: float = 2000,
         create_basin_plots: bool = True,
         log_target: bool = False,
+        all_best_params: dict[str, dict] | None = None,
 ) -> pd.DataFrame:
     """
     Compare all available models with full evaluation.
@@ -1126,6 +1147,8 @@ def compare_all_models(
         test_year_limits: Test period definitions for visualization shading.
         raster_res: Raster resolution in meters for visualization.
         create_basin_plots: Whether to create individual basin plots.
+        all_best_params: Dict mapping model name to pre-tuned hyperparameters.
+            When provided, Optuna tuning is skipped for those models.
 
     Returns:
         DataFrame with comparison results.
@@ -1154,12 +1177,14 @@ def compare_all_models(
         model_subdir = os.path.join(model_dir, model_name)
 
         if use_optuna:
+            bp = all_best_params.get(model_name) if all_best_params else None
             model, cv_metric_df = build_ml_model_optuna(
                 x_train, y_train, model_subdir, model_name,
                 random_state=random_state, fold_count=fold_count,
                 repeats=repeats, n_trials=n_trials,
                 n_dask_workers=n_dask_workers, use_dask=use_dask,
                 cv_groups=cv_groups, log_target=log_target,
+                best_params=bp,
             )
         else:
             model_dict = get_model_dict(random_state, include_all_models=True)
@@ -1289,7 +1314,12 @@ def compare_all_models(
     logger.info(f"Overfitting (R2 gap): {results_df.iloc[0]['Overfit_R2']:.4f}")
     logger.info('='*60)
 
-    return results_df
+    # Extract best params from trained models for multi-seed reuse
+    best_params_dict = {}
+    for name, mdl in trained_models.items():
+        best_params_dict[name] = mdl.get_params()
+
+    return results_df, best_params_dict
 
 
 def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> None:

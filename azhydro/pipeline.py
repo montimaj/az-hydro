@@ -92,6 +92,8 @@ START_YEAR = 1896
 END_YEAR = 2099
 YEAR_LIST = list(range(1984, 2025))
 RANDOM_STATE = 42
+N_EVAL_SEEDS = 5
+EVAL_TEST_SIZES = (0.10, 0.15, 0.20, 0.25, 0.30)
 N_TRIALS = 50
 FOLD_COUNT = 5
 REPEATS = 3
@@ -446,34 +448,32 @@ def _train_and_evaluate(
 
 
 # ---- 2a. Random 80/20 evaluation ------------------------------------------
-def evaluate_random(az_df: pd.DataFrame) -> dict:
-    """Random 80/20 split — single run with compare_all_models.
-
-    Args:
-        az_df (pd.DataFrame): Arizona training DataFrame.
+def _evaluate_random_single(
+        az_df: pd.DataFrame,
+        random_state: int,
+        strategy_dir: str,
+        all_best_params: dict[str, dict] | None = None,
+        test_size: float = 0.2,
+) -> tuple[pd.DataFrame, dict[str, dict]]:
+    """Run a single random evaluation with the given seed and test size.
 
     Returns:
-        dict: Evaluation results containing comparison DataFrame and
-            best model metadata.
+        Tuple of (comparison DataFrame, best_params dict per model).
     """
-    logger.info('='*60)
-    logger.info('Step 2a: Random 80/20 evaluation')
-    logger.info('='*60)
-
     ml_models = mlops.get_model_dict(
         get_model_names_only=True,
         include_all_models=INCLUDE_ALL_MODELS,
     )
-    strategy_dir = os.path.join(MODEL_DIR, 'Model_Evaluation/Random')
 
     data_dir = os.path.join(strategy_dir, 'data')
     ret_vals = dataops.create_train_test_data(
         az_df, data_dir,
         drop_attr=DROP_ATTRS,
-        random_state=RANDOM_STATE,
+        random_state=random_state,
         scaling=False, already_created=False,
         year_list=YEAR_LIST, split_strategy=4,
         test_year=True,
+        test_size=test_size,
         outlier_op=3 if MAX_GW is not None else None,
         max_gw_pumping=MAX_GW if MAX_GW is not None else np.inf,
         test_gw_basins=(),
@@ -489,11 +489,11 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
      northing_train, northing_test) = ret_vals
 
     comparison_dir = os.path.join(strategy_dir, 'Model_Comparison')
-    comparison_df = mlops.compare_all_models(
+    return mlops.compare_all_models(
         x_train, x_test, y_train, y_test,
         comparison_dir,
         model_names=ml_models,
-        random_state=RANDOM_STATE,
+        random_state=random_state,
         use_optuna=USE_OPTUNA,
         fold_count=FOLD_COUNT,
         repeats=REPEATS,
@@ -516,44 +516,99 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
         raster_res=MOSAIC_RASTER_RES,
         create_basin_plots=True,
         log_target=LOG_TARGET,
+        all_best_params=all_best_params,
     )
-    logger.info(f'\nRandom model comparison:\n{comparison_df.to_string(index=False)}')
-
-    return {'comparison_df': comparison_df, 'strategy': 'Random'}
 
 
-# ---- 2a2. Pixel holdout evaluation ----------------------------------------
-def evaluate_pixel_holdout(az_df: pd.DataFrame) -> dict:
-    """Pixel-level spatial holdout — 80/20 split on unique pixel locations.
+def evaluate_random(az_df: pd.DataFrame) -> dict:
+    """Random split — 5 test sizes × 5 seeds grid evaluation.
 
-    All years for a given pixel are assigned to either train or test, ensuring
-    the model is evaluated on entirely unseen spatial locations.
+    Optuna tuning runs once (first seed, first test size).  All other
+    combinations reuse the tuned hyperparameters and only re-split,
+    retrain, and evaluate.
 
     Args:
         az_df (pd.DataFrame): Arizona training DataFrame.
 
     Returns:
-        dict: Evaluation results containing comparison DataFrame and
-            best model metadata.
+        dict: Evaluation results containing averaged comparison DataFrame.
     """
-    logger.info('=' * 60)
-    logger.info('Step 2a2: Pixel holdout evaluation')
-    logger.info('=' * 60)
+    n_sizes = len(EVAL_TEST_SIZES)
+    n_seeds = N_EVAL_SEEDS
+    logger.info('='*60)
+    logger.info(f'Step 2a: Random evaluation ({n_sizes} test sizes × {n_seeds} seeds)')
+    logger.info('='*60)
 
+    base_dir = os.path.join(MODEL_DIR, 'Model_Evaluation/Random')
+    rng = np.random.RandomState(RANDOM_STATE)
+    seeds = [RANDOM_STATE] + [int(rng.randint(0, 2**31)) for _ in range(n_seeds - 1)]
+
+    all_dfs = []
+    all_best_params = None
+    for ts in EVAL_TEST_SIZES:
+        ts_label = f'ts{int(ts*100):02d}'
+        for i, seed in enumerate(seeds):
+            logger.info(f'--- Random test_size={ts:.0%} seed {i+1}/{n_seeds} (seed={seed}) ---')
+            run_dir = os.path.join(base_dir, ts_label, f'seed_{seed}')
+            df, bp = _evaluate_random_single(
+                az_df, seed, run_dir,
+                all_best_params=all_best_params,
+                test_size=ts,
+            )
+            if all_best_params is None:
+                all_best_params = bp
+            df['seed'] = seed
+            df['test_size'] = ts
+            all_dfs.append(df)
+
+    all_runs_df = pd.concat(all_dfs, ignore_index=True)
+    all_runs_df.to_csv(os.path.join(base_dir, 'All_Runs.csv'), index=False)
+
+    # Average across seeds per (Model, test_size)
+    group_cols = ['Model', 'test_size']
+    numeric_cols = all_runs_df.select_dtypes(include='number').columns.difference(
+        ['seed', 'test_size'])
+    avg_df = (all_runs_df.groupby(group_cols)[numeric_cols]
+              .agg(['mean', 'std']).reset_index())
+    avg_df.columns = [c[0] if c[1] == '' else f'{c[0]}_{c[1]}'
+                      for c in avg_df.columns]
+    avg_df = avg_df.sort_values(['test_size', 'Test_RMSE_mean'])
+    avg_df.to_csv(os.path.join(base_dir, 'Model_Comparison_Averaged.csv'), index=False)
+
+    logger.info(f'\nRandom averaged comparison ({n_sizes}×{n_seeds} grid):\n'
+                f'{avg_df.to_string(index=False)}')
+
+    return {'comparison_df': avg_df, 'strategy': 'Random',
+            'all_runs_df': all_runs_df}
+
+
+# ---- 2a2. Pixel holdout evaluation ----------------------------------------
+def _evaluate_pixel_holdout_single(
+        az_df: pd.DataFrame,
+        random_state: int,
+        strategy_dir: str,
+        all_best_params: dict[str, dict] | None = None,
+        test_size: float = 0.2,
+) -> tuple[pd.DataFrame, dict[str, dict]]:
+    """Run a single pixel holdout evaluation with the given seed and test size.
+
+    Returns:
+        Tuple of (comparison DataFrame, best_params dict per model).
+    """
     ml_models = mlops.get_model_dict(
         get_model_names_only=True,
         include_all_models=INCLUDE_ALL_MODELS,
     )
-    strategy_dir = os.path.join(MODEL_DIR, 'Model_Evaluation/Pixel_Holdout')
 
     data_dir = os.path.join(strategy_dir, 'data')
     ret_vals = dataops.create_train_test_data(
         az_df, data_dir,
         drop_attr=DROP_ATTRS,
-        random_state=RANDOM_STATE,
+        random_state=random_state,
         scaling=False, already_created=False,
         year_list=YEAR_LIST, split_strategy=5,
         test_year=True,
+        test_size=test_size,
         outlier_op=3 if MAX_GW is not None else None,
         max_gw_pumping=MAX_GW if MAX_GW is not None else np.inf,
         test_gw_basins=(),
@@ -575,11 +630,11 @@ def evaluate_pixel_holdout(az_df: pd.DataFrame) -> dict:
     ).values
 
     comparison_dir = os.path.join(strategy_dir, 'Model_Comparison')
-    comparison_df = mlops.compare_all_models(
+    return mlops.compare_all_models(
         x_train, x_test, y_train, y_test,
         comparison_dir,
         model_names=ml_models,
-        random_state=RANDOM_STATE,
+        random_state=random_state,
         use_optuna=USE_OPTUNA,
         fold_count=FOLD_COUNT,
         repeats=REPEATS,
@@ -603,10 +658,69 @@ def evaluate_pixel_holdout(az_df: pd.DataFrame) -> dict:
         raster_res=MOSAIC_RASTER_RES,
         create_basin_plots=True,
         log_target=LOG_TARGET,
+        all_best_params=all_best_params,
     )
-    logger.info(f'\nPixel holdout model comparison:\n{comparison_df.to_string(index=False)}')
 
-    return {'comparison_df': comparison_df, 'strategy': 'Pixel_Holdout'}
+
+def evaluate_pixel_holdout(az_df: pd.DataFrame) -> dict:
+    """Pixel holdout — 5 test sizes × 5 seeds grid evaluation.
+
+    Optuna tuning runs once (first seed, first test size).  All other
+    combinations reuse the tuned hyperparameters and only re-split,
+    retrain, and evaluate.
+
+    Args:
+        az_df (pd.DataFrame): Arizona training DataFrame.
+
+    Returns:
+        dict: Evaluation results containing averaged comparison DataFrame.
+    """
+    n_sizes = len(EVAL_TEST_SIZES)
+    n_seeds = N_EVAL_SEEDS
+    logger.info('=' * 60)
+    logger.info(f'Step 2a2: Pixel holdout evaluation ({n_sizes} test sizes × {n_seeds} seeds)')
+    logger.info('=' * 60)
+
+    base_dir = os.path.join(MODEL_DIR, 'Model_Evaluation/Pixel_Holdout')
+    rng = np.random.RandomState(RANDOM_STATE)
+    seeds = [RANDOM_STATE] + [int(rng.randint(0, 2**31)) for _ in range(n_seeds - 1)]
+
+    all_dfs = []
+    all_best_params = None
+    for ts in EVAL_TEST_SIZES:
+        ts_label = f'ts{int(ts*100):02d}'
+        for i, seed in enumerate(seeds):
+            logger.info(f'--- Pixel holdout test_size={ts:.0%} seed {i+1}/{n_seeds} (seed={seed}) ---')
+            run_dir = os.path.join(base_dir, ts_label, f'seed_{seed}')
+            df, bp = _evaluate_pixel_holdout_single(
+                az_df, seed, run_dir,
+                all_best_params=all_best_params,
+                test_size=ts,
+            )
+            if all_best_params is None:
+                all_best_params = bp
+            df['seed'] = seed
+            df['test_size'] = ts
+            all_dfs.append(df)
+
+    all_runs_df = pd.concat(all_dfs, ignore_index=True)
+    all_runs_df.to_csv(os.path.join(base_dir, 'All_Runs.csv'), index=False)
+
+    group_cols = ['Model', 'test_size']
+    numeric_cols = all_runs_df.select_dtypes(include='number').columns.difference(
+        ['seed', 'test_size'])
+    avg_df = (all_runs_df.groupby(group_cols)[numeric_cols]
+              .agg(['mean', 'std']).reset_index())
+    avg_df.columns = [c[0] if c[1] == '' else f'{c[0]}_{c[1]}'
+                      for c in avg_df.columns]
+    avg_df = avg_df.sort_values(['test_size', 'Test_RMSE_mean'])
+    avg_df.to_csv(os.path.join(base_dir, 'Model_Comparison_Averaged.csv'), index=False)
+
+    logger.info(f'\nPixel holdout averaged comparison ({n_sizes}×{n_seeds} grid):\n'
+                f'{avg_df.to_string(index=False)}')
+
+    return {'comparison_df': avg_df, 'strategy': 'Pixel_Holdout',
+            'all_runs_df': all_runs_df}
 
 
 # ---- 2b. Leave-one-out temporal holdout ------------------------------------
