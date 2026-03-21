@@ -783,7 +783,7 @@ def build_ml_model_optuna(
         pruning: bool = True,
         cv_groups: np.ndarray | pd.Series | None = None,
         log_target: bool = False,
-        best_params: dict | None = None,
+        tuning_dir: str | None = None,
         **kwargs: Any
 ) -> tuple[Any, pd.DataFrame]:
     """
@@ -808,9 +808,10 @@ def build_ml_model_optuna(
             When provided, uses GroupKFold instead of RepeatedKFold so that the
             inner CV matches the outer evaluation strategy (e.g. pixel, temporal,
             or spatial holdout). Default is None (random RepeatedKFold).
-        best_params (dict or None): Pre-tuned hyperparameters. When provided,
-            Optuna tuning is skipped and the model is trained directly with
-            these parameters. Default is None (run Optuna).
+        tuning_dir (str or None): Path to a model directory that already
+            contains a completed Optuna study DB. When provided, the best
+            hyperparameters and CV metrics are loaded from that study and
+            Optuna tuning is skipped. Default is None (run Optuna).
         kwargs: Additional arguments.
 
     Returns:
@@ -826,9 +827,19 @@ def build_ml_model_optuna(
         metric_df = pd.read_csv(metric_csv)
         return model, metric_df
 
-    # When best_params are supplied, skip Optuna entirely
-    if best_params is not None:
-        logger.info(f'Using pre-tuned params for {model_name}: {best_params}')
+    # Load best params + CV metrics from an existing Optuna study
+    if tuning_dir is not None:
+        tuning_db = os.path.join(tuning_dir, f'optuna_study_{model_name}.db')
+        logger.info(f'Loading tuned params for {model_name} from {tuning_db}')
+        study = optuna.create_study(
+            direction='minimize',
+            storage=f'sqlite:///{tuning_db}',
+            study_name=f'Optuna_{model_name}',
+            load_if_exists=True,
+        )
+        best_params = study.best_params
+        logger.info(f'Best params for {model_name}: {best_params}')
+
         include_all = model_name in ['RF', 'ETR', 'HGBR', 'GBR', 'ADA', 'BAG', 'CAT']
         model_dict = get_model_dict(random_state, include_all_models=include_all)
         model = model_dict[model_name]
@@ -838,7 +849,10 @@ def build_ml_model_optuna(
         model_file = os.path.join(model_dir, model_name)
         with open(model_file, 'wb') as f:
             pickle.dump(model, f)
-        return model, pd.DataFrame()
+        metric_csv = os.path.join(model_dir, f'CV_Metrics_{model_name}.csv')
+        metric_df = get_grid_search_stats(study, metric_csv, search_type='optuna')
+        metric_df.to_csv(metric_csv, index=False)
+        return model, metric_df
 
     # --- Optuna hyperparameter tuning ---
     if log_target:
@@ -914,7 +928,10 @@ def build_ml_model_optuna(
 
     completed = len([t for t in study.trials
                      if t.state == optuna.trial.TrialState.COMPLETE])
-    logger.info(f'Study has {completed} completed trials')
+    attempted = len([t for t in study.trials
+                     if t.state in (optuna.trial.TrialState.COMPLETE,
+                                    optuna.trial.TrialState.PRUNED)])
+    logger.info(f'Study has {completed} completed, {attempted} attempted trials')
 
     # For parameter-free models (LR), a single trial suffices.
     # Scikit-learn tree ensembles (RF, ETR, GBR, ADA, BAG) are much
@@ -930,7 +947,7 @@ def build_ml_model_optuna(
         effective_n_trials = min(n_trials, 10)
     else:
         effective_n_trials = n_trials
-    remaining = max(0, effective_n_trials - completed)
+    remaining = max(0, effective_n_trials - attempted)
 
     t0 = time.perf_counter()
     if remaining > 0:
@@ -1110,7 +1127,7 @@ def compare_all_models(
         raster_res: float = 2000,
         create_basin_plots: bool = True,
         log_target: bool = False,
-        all_best_params: dict[str, dict] | None = None,
+        tuning_model_dir: str | None = None,
 ) -> pd.DataFrame:
     """
     Compare all available models with full evaluation.
@@ -1147,8 +1164,10 @@ def compare_all_models(
         test_year_limits: Test period definitions for visualization shading.
         raster_res: Raster resolution in meters for visualization.
         create_basin_plots: Whether to create individual basin plots.
-        all_best_params: Dict mapping model name to pre-tuned hyperparameters.
-            When provided, Optuna tuning is skipped for those models.
+        tuning_model_dir: Path to the Model_Comparison directory from a
+            previous run that contains per-model Optuna study DBs. When
+            provided, best params and CV metrics are loaded from those DBs
+            instead of running Optuna.
 
     Returns:
         DataFrame with comparison results.
@@ -1177,14 +1196,14 @@ def compare_all_models(
         model_subdir = os.path.join(model_dir, model_name)
 
         if use_optuna:
-            bp = all_best_params.get(model_name) if all_best_params else None
+            td = os.path.join(tuning_model_dir, model_name) if tuning_model_dir else None
             model, cv_metric_df = build_ml_model_optuna(
                 x_train, y_train, model_subdir, model_name,
                 random_state=random_state, fold_count=fold_count,
                 repeats=repeats, n_trials=n_trials,
                 n_dask_workers=n_dask_workers, use_dask=use_dask,
                 cv_groups=cv_groups, log_target=log_target,
-                best_params=bp,
+                tuning_dir=td,
             )
         else:
             model_dict = get_model_dict(random_state, include_all_models=True)
@@ -1314,12 +1333,7 @@ def compare_all_models(
     logger.info(f"Overfitting (R2 gap): {results_df.iloc[0]['Overfit_R2']:.4f}")
     logger.info('='*60)
 
-    # Extract best params from trained models for multi-seed reuse
-    best_params_dict = {}
-    for name, mdl in trained_models.items():
-        best_params_dict[name] = mdl.get_params()
-
-    return results_df, best_params_dict
+    return results_df, model_dir
 
 
 def _create_model_comparison_plots(results_df: pd.DataFrame, model_dir: str) -> None:

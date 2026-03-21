@@ -452,13 +452,13 @@ def _evaluate_random_single(
         az_df: pd.DataFrame,
         random_state: int,
         strategy_dir: str,
-        all_best_params: dict[str, dict] | None = None,
+        tuning_model_dir: str | None = None,
         test_size: float = 0.2,
-) -> tuple[pd.DataFrame, dict[str, dict]]:
+) -> tuple[pd.DataFrame, str]:
     """Run a single random evaluation with the given seed and test size.
 
     Returns:
-        Tuple of (comparison DataFrame, best_params dict per model).
+        Tuple of (comparison DataFrame, model comparison dir path).
     """
     ml_models = mlops.get_model_dict(
         get_model_names_only=True,
@@ -516,7 +516,7 @@ def _evaluate_random_single(
         raster_res=MOSAIC_RASTER_RES,
         create_basin_plots=True,
         log_target=LOG_TARGET,
-        all_best_params=all_best_params,
+        tuning_model_dir=tuning_model_dir,
     )
 
 
@@ -544,19 +544,19 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
     seeds = [RANDOM_STATE] + [int(rng.randint(0, 2**31)) for _ in range(n_seeds - 1)]
 
     all_dfs = []
-    all_best_params = None
+    tuning_model_dir = None
     for ts in EVAL_TEST_SIZES:
         ts_label = f'ts{int(ts*100):02d}'
         for i, seed in enumerate(seeds):
             logger.info(f'--- Random test_size={ts:.0%} seed {i+1}/{n_seeds} (seed={seed}) ---')
             run_dir = os.path.join(base_dir, ts_label, f'seed_{seed}')
-            df, bp = _evaluate_random_single(
+            df, comp_dir = _evaluate_random_single(
                 az_df, seed, run_dir,
-                all_best_params=all_best_params,
+                tuning_model_dir=tuning_model_dir,
                 test_size=ts,
             )
-            if all_best_params is None:
-                all_best_params = bp
+            if tuning_model_dir is None:
+                tuning_model_dir = comp_dir  # capture from first run
             df['seed'] = seed
             df['test_size'] = ts
             all_dfs.append(df)
@@ -578,6 +578,9 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
     logger.info(f'\nRandom averaged comparison ({n_sizes}×{n_seeds} grid):\n'
                 f'{avg_df.to_string(index=False)}')
 
+    all_runs_csv = os.path.join(base_dir, 'All_Runs.csv')
+    vizops.plot_grid_boxplots(all_runs_csv, base_dir, strategy_label='Random')
+
     return {'comparison_df': avg_df, 'strategy': 'Random',
             'all_runs_df': all_runs_df}
 
@@ -587,13 +590,13 @@ def _evaluate_pixel_holdout_single(
         az_df: pd.DataFrame,
         random_state: int,
         strategy_dir: str,
-        all_best_params: dict[str, dict] | None = None,
+        tuning_model_dir: str | None = None,
         test_size: float = 0.2,
-) -> tuple[pd.DataFrame, dict[str, dict]]:
+) -> tuple[pd.DataFrame, str]:
     """Run a single pixel holdout evaluation with the given seed and test size.
 
     Returns:
-        Tuple of (comparison DataFrame, best_params dict per model).
+        Tuple of (comparison DataFrame, model comparison dir path).
     """
     ml_models = mlops.get_model_dict(
         get_model_names_only=True,
@@ -658,7 +661,7 @@ def _evaluate_pixel_holdout_single(
         raster_res=MOSAIC_RASTER_RES,
         create_basin_plots=True,
         log_target=LOG_TARGET,
-        all_best_params=all_best_params,
+        tuning_model_dir=tuning_model_dir,
     )
 
 
@@ -686,19 +689,19 @@ def evaluate_pixel_holdout(az_df: pd.DataFrame) -> dict:
     seeds = [RANDOM_STATE] + [int(rng.randint(0, 2**31)) for _ in range(n_seeds - 1)]
 
     all_dfs = []
-    all_best_params = None
+    tuning_model_dir = None
     for ts in EVAL_TEST_SIZES:
         ts_label = f'ts{int(ts*100):02d}'
         for i, seed in enumerate(seeds):
             logger.info(f'--- Pixel holdout test_size={ts:.0%} seed {i+1}/{n_seeds} (seed={seed}) ---')
             run_dir = os.path.join(base_dir, ts_label, f'seed_{seed}')
-            df, bp = _evaluate_pixel_holdout_single(
+            df, comp_dir = _evaluate_pixel_holdout_single(
                 az_df, seed, run_dir,
-                all_best_params=all_best_params,
+                tuning_model_dir=tuning_model_dir,
                 test_size=ts,
             )
-            if all_best_params is None:
-                all_best_params = bp
+            if tuning_model_dir is None:
+                tuning_model_dir = comp_dir
             df['seed'] = seed
             df['test_size'] = ts
             all_dfs.append(df)
@@ -718,6 +721,9 @@ def evaluate_pixel_holdout(az_df: pd.DataFrame) -> dict:
 
     logger.info(f'\nPixel holdout averaged comparison ({n_sizes}×{n_seeds} grid):\n'
                 f'{avg_df.to_string(index=False)}')
+
+    all_runs_csv = os.path.join(base_dir, 'All_Runs.csv')
+    vizops.plot_grid_boxplots(all_runs_csv, base_dir, strategy_label='Pixel Holdout')
 
     return {'comparison_df': avg_df, 'strategy': 'Pixel_Holdout',
             'all_runs_df': all_runs_df}
@@ -872,6 +878,10 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
         title='Temporal LOO: Test R² per Holdout',
     )
     vizops.plot_loo_bar(per_holdout_df, 'Holdout', temporal_dir)
+    vizops.plot_loo_distribution(
+        os.path.join(temporal_dir, 'Per_Holdout_Metrics.csv'),
+        'Holdout', temporal_dir, strategy_label='Temporal LOO',
+    )
 
     return {
         'per_holdout_df': per_holdout_df,
@@ -1076,6 +1086,10 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
         title='Spatial LOO: Test R² per Sub-basin',
     )
     vizops.plot_loo_bar(per_subbasin_df, 'Subbasin', spatial_dir)
+    vizops.plot_loo_distribution(
+        os.path.join(spatial_dir, 'Per_Subbasin_Metrics.csv'),
+        'Subbasin', spatial_dir, strategy_label='Spatial LOO',
+    )
 
     return {
         'per_subbasin_df': per_subbasin_df,

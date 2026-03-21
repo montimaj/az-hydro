@@ -4143,3 +4143,160 @@ def plot_temporal_r_vs_nse(
         plt.close(fig)
 
     logger.info(f'r vs NSE scatter plots saved to {output_dir}')
+
+
+# ---------------------------------------------------------------------------
+# Multi-seed / multi-test-size boxplot visualizations
+# ---------------------------------------------------------------------------
+
+_METRIC_LABELS: dict[str, str] = {
+    'Test_R2': 'Test R²',
+    'Test_RMSE': 'Test RMSE (%)',
+    'Test_MAE': 'Test MAE (%)',
+    'Overfit_R2': 'Overfit R² (Train − Test)',
+    'Val_R2': 'CV Validation R²',
+    'Val_RMSE': 'CV Validation RMSE (%)',
+}
+
+
+def plot_grid_boxplots(
+        all_runs_csv: str,
+        output_dir: str,
+        strategy_label: str = 'Random',
+        metrics: tuple[str, ...] = ('Test_R2', 'Test_RMSE', 'Test_MAE', 'Overfit_R2'),
+) -> None:
+    """Boxplots of metric distributions across the seed × test-size grid.
+
+    For each metric a figure is produced with one subplot per test_size,
+    models on the x-axis.
+
+    Args:
+        all_runs_csv (str): Path to ``All_Runs.csv`` produced by
+            ``evaluate_random`` or ``evaluate_pixel_holdout``.
+        output_dir (str): Directory for saved figures.
+        strategy_label (str): Label used in figure titles
+            (e.g. ``'Random'``, ``'Pixel Holdout'``).
+        metrics (tuple[str,...]): Metric column names to plot.
+    """
+    apply_journal_style()
+    makedirs(output_dir)
+    df = pd.read_csv(all_runs_csv)
+
+    for metric in metrics:
+        if metric not in df.columns:
+            continue
+        label = _METRIC_LABELS.get(metric, metric)
+        test_sizes = sorted(df['test_size'].unique())
+        n_ts = len(test_sizes)
+
+        fig, axes = plt.subplots(
+            1, n_ts, figsize=(5 * n_ts, 6),
+            constrained_layout=True, squeeze=False, sharey=True,
+        )
+        fig.suptitle(f'{strategy_label}: {label} Distribution',
+                     fontsize=14, fontweight='bold')
+
+        for ax, ts in zip(axes[0], test_sizes):
+            sub = df[df['test_size'] == ts]
+            models = sorted(sub['Model'].unique())
+            data = [sub.loc[sub['Model'] == m, metric].dropna().values
+                    for m in models]
+
+            bp = ax.boxplot(
+                data, positions=range(len(models)), widths=0.45,
+                patch_artist=True, showfliers=True,
+                flierprops={'marker': 'o', 'markersize': 4, 'alpha': 0.5},
+            )
+            palette = sns.color_palette('Set2', len(models))
+            for patch, color in zip(bp['boxes'], palette):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.75)
+
+            # Overlay individual points
+            for i, vals in enumerate(data):
+                jitter = np.random.default_rng(42).uniform(-0.12, 0.12, len(vals))
+                ax.scatter(np.full_like(vals, i) + jitter, vals,
+                           color='black', s=15, alpha=0.5, zorder=3)
+
+            ax.set_xticks(range(len(models)))
+            ax.set_xticklabels(models, rotation=45, ha='right', fontsize=9)
+            ax.set_title(f'Test size = {ts:.0%}', fontsize=12)
+            ax.set_ylabel(label)
+            ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+
+        fname = f'Boxplot_{metric}.png'
+        fig.savefig(os.path.join(output_dir, fname), dpi=600, bbox_inches='tight')
+        plt.close(fig)
+
+    logger.info(f'{strategy_label} grid boxplots saved to {output_dir}')
+
+
+def plot_loo_distribution(
+        per_fold_csv: str,
+        fold_col: str,
+        output_dir: str,
+        strategy_label: str = 'Temporal LOO',
+        metrics: tuple[str, ...] = ('Test_R2', 'Test_RMSE', 'Test_MAE',
+                                    'Test_MBE', 'Overfit_R2'),
+) -> None:
+    """Box + strip plots of per-fold metric distributions for LOO strategies.
+
+    Produces one figure per metric with models on the x-axis and individual
+    fold values overlaid as strip points.
+
+    Args:
+        per_fold_csv (str): Path to ``Per_Holdout_Metrics.csv`` or
+            ``Per_Subbasin_Metrics.csv``.
+        fold_col (str): Column identifying the fold (``'Holdout'`` or
+            ``'Subbasin'``).
+        output_dir (str): Directory for saved figures.
+        strategy_label (str): Label for figure titles.
+        metrics (tuple[str,...]): Metric column names to plot.
+    """
+    apply_journal_style()
+    makedirs(output_dir)
+    df = pd.read_csv(per_fold_csv)
+
+    for metric in metrics:
+        if metric not in df.columns:
+            continue
+        label = _METRIC_LABELS.get(metric, metric)
+        models = sorted(df['Model'].unique())
+        data = [df.loc[df['Model'] == m, metric].dropna().values
+                for m in models]
+
+        fig, ax = plt.subplots(figsize=(max(8, len(models) * 1.2), 6),
+                               constrained_layout=True)
+
+        vp = ax.violinplot(data, positions=range(len(models)), showextrema=False)
+        for body in vp['bodies']:
+            body.set_alpha(0.2)
+
+        bp = ax.boxplot(
+            data, positions=range(len(models)), widths=0.35,
+            patch_artist=True, showfliers=False,
+            flierprops={'marker': 'o', 'markersize': 4, 'alpha': 0.5},
+        )
+        palette = sns.color_palette('Set2', len(models))
+        for patch, color in zip(bp['boxes'], palette):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.7)
+
+        # Overlay individual fold points
+        for i, vals in enumerate(data):
+            jitter = np.random.default_rng(42).uniform(-0.1, 0.1, len(vals))
+            ax.scatter(np.full_like(vals, i) + jitter, vals,
+                       color='black', s=20, alpha=0.6, zorder=3)
+
+        ax.set_xticks(range(len(models)))
+        ax.set_xticklabels(models, rotation=45, ha='right', fontsize=10)
+        ax.set_ylabel(label, fontweight='bold')
+        ax.set_title(f'{strategy_label}: {label}',
+                     fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+
+        fname = f'Distribution_{metric}.png'
+        fig.savefig(os.path.join(output_dir, fname), dpi=600, bbox_inches='tight')
+        plt.close(fig)
+
+    logger.info(f'{strategy_label} distribution plots saved to {output_dir}')
