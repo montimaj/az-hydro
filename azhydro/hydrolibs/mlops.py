@@ -727,6 +727,7 @@ def compute_perm_imp(
             plt.xlabel(f'{model_name} Feature Importance')
             plt.tight_layout()
             plt.savefig(os.path.join(output_dir, f'F_IMP_{model_name}.png'), dpi=600)
+            plt.close()
             imp_df.to_csv(os.path.join(output_dir, f'F_IMP_{model_name}.csv'), index=False)
         perm_scorer = scoring_metrics[scoring_metric]
         train_result = permutation_importance(
@@ -757,6 +758,7 @@ def compute_perm_imp(
                 ax.figure.tight_layout()
                 plt.savefig(os.path.join(output_dir, f'{model_name}_{name}_PI.png'), dpi=600)
                 plt.clf()
+                plt.close()
         return train_importances, test_importances
     return None
 
@@ -811,44 +813,24 @@ def compute_ale_plots(
             features=feature_names,
             n_bootstrap=10,
             subsample=10000,
-            n_jobs=len(feature_names),
+            n_jobs=min(len(feature_names), os.cpu_count() or 1),
             n_bins=30
         )
-        _, ax = explainer.plot_ale(
+        explainer.plot_ale(
             ale_1d_reg,
             display_feature_names=feature_dict,
             display_units=feature_dict_units
         )
+        # Override y-axis label (skexplain hardcodes it internally)
+        ale_label = 'Centered ALE on Groundwater Withdrawals (mm)'
+        fig = plt.gcf()
+        for ax in fig.get_axes():
+            if 'ALE' in ax.get_ylabel():
+                ax.set_ylabel(ale_label)
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, f'{model_name}_ALE_{data_type}.png'), dpi=600)
         plt.clf()
-        # ale_var_1d_reg = explainer.ale_variance(ale_1d_reg)
-        # explainer.plot_importance(
-        #     data=ale_var_1d_reg,
-        #     panels=[('ale_variance', model_name)],
-        #     num_vars_to_plot=len(feature_names),
-        #     display_feature_names=feature_dict,
-        #     plot_correlated_features=True
-        # )
-        # plt.tight_layout()
-        # plt.savefig(f'{output_dir}{model_name}_ALE_Var_{data_type}.png', dpi=600)
-        # plt.clf()
-
-        # ale_2d_ds = explainer.ale(
-        #     features=feature_2d_names,
-        #     n_bootstrap=10,
-        #     subsample=1.0,
-        #     n_jobs=len(feature_2d_names),
-        #     n_bins=30
-        # )
-        # explainer.plot_ale(
-        #     ale=ale_2d_ds,
-        #     display_feature_names=feature_dict,
-        #     display_units=feature_dict_units
-        # )
-        # plt.tight_layout()
-        # plt.savefig(f'{output_dir}{model_name}_ALE_2D_{data_type}.png', dpi=600)
-        # plt.clf()
+        plt.close()
 
 
 def compute_shap_plots(
@@ -859,7 +841,6 @@ def compute_shap_plots(
         max_display: int = 20,
         n_dependence: int = 10,
         subsample: int = 5000,
-        log_target: bool = False,
         data_label: str = '',
 ) -> None:
     """
@@ -2590,6 +2571,7 @@ def perform_bias_correction(
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'ECDF_Train.png'), dpi=600)
     plt.clf()
+    plt.close()
     test_data_ecdf['BC_GW_mm'] = apply_linear_bc(test_data_ecdf.Pred_GW_mm.values, m_roe, b_roe)
     plot_ecdf_test_df = test_data_ecdf.filter(like="_GW", axis="columns")
     sns.ecdfplot(data=plot_ecdf_test_df, hue_order=hue_order)

@@ -1255,6 +1255,13 @@ def load_nhm_basin_ie(
                'std': {basin: std_ie},
                'overall_mean': float}``
     """
+    makedirs(output_dir)
+    cache_csv = os.path.join(output_dir, 'NHM_basin_IE_cache.csv')
+
+    if os.path.isfile(cache_csv):
+        logger.info(f'Loading cached NHM basin IE from {cache_csv}')
+        return _load_nhm_ie_from_cache(cache_csv)
+
     basin_gdf = gpd.read_file(basin_shp)
     result = _load_nhm_annual_csv_to_basins(
         csv_path=nhm_ie_csv,
@@ -1288,9 +1295,65 @@ def load_nhm_basin_ie(
     logger.info(f'NHM basin IE: overall mean = {overall_mean:.3f}, '
                 f'{len(yearly)} years, {len(basin_names)} basins')
 
-    return {
+    ie_dict = {
         'per_year': yearly,
         'mean': result['mean'],
+        'std': basin_std,
+        'overall_mean': overall_mean,
+    }
+
+    # Cache to CSV for fast reload on subsequent runs
+    _save_nhm_ie_to_cache(ie_dict, cache_csv)
+    return ie_dict
+
+
+def _save_nhm_ie_to_cache(ie_dict: dict, cache_csv: str) -> None:
+    """Serialize NHM basin IE dict to a CSV."""
+    rows = []
+    overall_mean = ie_dict['overall_mean']
+    for basin, mean_ie in ie_dict['mean'].items():
+        rows.append({
+            'basin': basin,
+            'year': 'mean',
+            'ie': mean_ie,
+            'std_ie': ie_dict['std'].get(basin, 0.0),
+            'overall_mean': overall_mean,
+        })
+    for year, basin_ie in ie_dict['per_year'].items():
+        for basin, ie_val in basin_ie.items():
+            rows.append({
+                'basin': basin,
+                'year': year,
+                'ie': ie_val,
+                'std_ie': np.nan,
+                'overall_mean': np.nan,
+            })
+    pd.DataFrame(rows).to_csv(cache_csv, index=False)
+    logger.info(f'  Cached NHM basin IE to {cache_csv}')
+
+
+def _load_nhm_ie_from_cache(cache_csv: str) -> dict:
+    """Deserialize NHM basin IE dict from a cached CSV."""
+    df = pd.read_csv(cache_csv)
+
+    # Mean and std rows (year == 'mean')
+    mean_rows = df[df['year'] == 'mean']
+    basin_mean = dict(zip(mean_rows['basin'], mean_rows['ie']))
+    basin_std = dict(zip(mean_rows['basin'], mean_rows['std_ie'].fillna(0.0)))
+    overall_mean = float(mean_rows['overall_mean'].iloc[0])
+
+    # Per-year rows
+    yearly_rows = df[df['year'] != 'mean'].copy()
+    yearly_rows['year'] = yearly_rows['year'].astype(int)
+    per_year = {}
+    for year, grp in yearly_rows.groupby('year'):
+        per_year[int(year)] = dict(zip(grp['basin'], grp['ie']))
+
+    logger.info(f'  Loaded {len(per_year)} years, {len(basin_mean)} basins, '
+                f'overall mean IE = {overall_mean:.3f}')
+    return {
+        'per_year': per_year,
+        'mean': basin_mean,
         'std': basin_std,
         'overall_mean': overall_mean,
     }
