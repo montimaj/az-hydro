@@ -14,8 +14,8 @@ This script executes the remaining pipeline:
       reporting per-sub-basin and averaged metrics.
    All strategies use kFolds + Optuna (TPE) + Dask parallelisation.
    Physics-informed models (PIML_XGB, PIML_LGBM, PIML_XGBRF) embed domain
-   knowledge via monotone constraints, interaction constraints, and a custom
-   irrigation-demand floor objective.
+   knowledge via monotone constraints and a custom irrigation-demand floor
+   objective.
 3. Uses the best model (PIML_XGB — physics-informed XGBoost) to predict annual
    pumping rasters from 1896-2099 with maps and time series highlighting four
    eras: Hindcast (1896-1983), Historical (1984-2024), Forecast (2025),
@@ -106,7 +106,7 @@ N_DASK_WORKERS_DATA_PREP = 40 # more workers for data prep since it involves man
 USE_OPTUNA = True
 USE_DASK = True
 INCLUDE_ALL_MODELS = False
-PHYSICS_INTERACTION_CONSTRAINTS = True
+PHYSICS_INTERACTION_CONSTRAINTS = False
 
 USE_AMA_INA = True
 DROP_GW_BASINS = ('WILLCOX AMA', 'HUALAPAI VALLEY INA')
@@ -603,6 +603,7 @@ def _evaluate_random_single(
         log_target=LOG_TARGET,
         tuning_model_dir=tuning_model_dir,
         create_interp_plots=create_interp_plots,
+        use_interaction_constraints=PHYSICS_INTERACTION_CONSTRAINTS,
     )
 
 
@@ -757,6 +758,7 @@ def _evaluate_pixel_holdout_single(
         log_target=LOG_TARGET,
         tuning_model_dir=tuning_model_dir,
         create_interp_plots=create_interp_plots,
+        use_interaction_constraints=PHYSICS_INTERACTION_CONSTRAINTS,
     )
 
 

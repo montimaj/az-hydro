@@ -148,53 +148,73 @@ def _build_monotone_constraints(feature_names: list[str]) -> tuple[int, ...]:
 def _build_interaction_constraints(
         feature_names: list[str],
         use_interaction_constraints: bool = True,
-) -> list[list[int]] | None:
-    """Build interaction constraint index lists aligned with feature columns.
+) -> list[list[str]] | None:
+    """Build interaction constraint name lists aligned with feature columns.
+
+    Returns feature **name** lists (not integer indices) so that constraints
+    remain valid after the PIML wrapper strips ``__y_phys_log__`` from the
+    DataFrame before calling the underlying estimator's ``fit()``.
 
     Returns None when disabled or when no group maps to the feature set.
     """
     if not use_interaction_constraints:
         return None
-    name_to_idx = {name: i for i, name in enumerate(feature_names)}
+    feature_set = set(feature_names)
     constraints = []
     for group in INTERACTION_GROUPS:
-        idx_list = [name_to_idx[f] for f in group if f in name_to_idx]
-        if len(idx_list) >= 2:
-            constraints.append(idx_list)
+        name_list = [f for f in group if f in feature_set]
+        if len(name_list) >= 2:
+            constraints.append(name_list)
     return constraints if constraints else None
+
+
+class PhysicsFloorObjective:
+    """Pickle-safe custom objective with irrigation-demand floor penalty.
+
+    The penalty is **one-sided**: only active when the prediction falls below
+    the physics-derived irrigation demand floor (in log1p space).
+
+    Gradients are normalised to match ``reg:squarederror`` scale (grad = ŷ−y,
+    hess = 1 when no floor violation) so that XGBoost's regularisation
+    parameters (``reg_lambda``, ``min_child_weight``, ``gamma``) retain their
+    usual effective strength.
+
+    Attributes:
+        y_phys_log: 1-D array of ``log1p(irrigation_demand_floor)`` per sample.
+        physics_lambda: Strength of the floor penalty (tuned by Optuna).
+        mask: Binary mask — 1 where irrigation demand > 0.
+    """
+
+    def __init__(self, y_phys_log: np.ndarray, physics_lambda: float):
+        self.y_phys_log = y_phys_log
+        self.physics_lambda = physics_lambda
+        self.mask = (y_phys_log > 0).astype(np.float64)
+
+    def __call__(self, y_true: np.ndarray, y_pred: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        # XGBoost 3.0+ passes (y_true, y_pred); older versions passed
+        # (y_pred, DMatrix).  Handle both by checking for DMatrix.
+        if hasattr(y_true, 'get_label'):
+            # Legacy XGBoost: first arg is predictions, second is DMatrix
+            y_pred, y_true = y_true, y_pred.get_label()
+        y_true = np.asarray(y_true, dtype=np.float64)
+        y_pred = np.asarray(y_pred, dtype=np.float64)
+
+        residual = y_pred - y_true                     # MSE component
+        violation = np.clip(self.y_phys_log - y_pred, 0, None)  # floor violation
+
+        # Normalised to reg:squarederror scale (base grad = ŷ−y, base hess = 1)
+        grad = residual - self.physics_lambda * self.mask * violation
+        hess = 1.0 + self.physics_lambda * self.mask * (violation > 0).astype(np.float64)
+        return grad, hess
 
 
 def make_physics_floor_objective(y_phys_log: np.ndarray, physics_lambda: float):
     """Factory for XGBoost/LightGBM custom objective with irrigation-demand floor.
 
-    The penalty is **one-sided**: only active when the prediction falls below
-    the physics-derived irrigation demand floor (in log1p space).
-
-    Args:
-        y_phys_log: 1-D array of ``log1p(irrigation_demand_floor)`` per sample.
-        physics_lambda: Strength of the floor penalty (tuned by Optuna).
-
-    Returns:
-        Callable ``(y_pred, y_true) -> (grad, hess)`` suitable for
-        ``XGBRegressor(objective=...)`` or ``LGBMRegressor(objective=...)``.
+    Returns a pickle-safe ``PhysicsFloorObjective`` callable suitable for
+    ``XGBRegressor(objective=...)`` or ``LGBMRegressor(objective=...)``.
     """
-    mask = (y_phys_log > 0).astype(np.float64)
-
-    def _objective(y_pred: np.ndarray, y_true) -> tuple[np.ndarray, np.ndarray]:
-        # y_true may be a DMatrix (XGB) or array (LGBM)
-        if hasattr(y_true, 'get_label'):
-            y_true = y_true.get_label()
-        y_true = np.asarray(y_true, dtype=np.float64)
-        y_pred = np.asarray(y_pred, dtype=np.float64)
-
-        residual = y_pred - y_true                     # MSE component
-        violation = np.clip(y_phys_log - y_pred, 0, None)  # floor violation
-
-        grad = 2.0 * residual - 2.0 * physics_lambda * mask * violation
-        hess = 2.0 + 2.0 * physics_lambda * mask * (violation > 0).astype(np.float64)
-        return grad, hess
-
-    return _objective
+    return PhysicsFloorObjective(y_phys_log, physics_lambda)
 
 
 # ── Physics wrapper estimators ───────────────────────────────────────────────
@@ -938,7 +958,8 @@ def compute_shap_plots(
                     cb_ax.set_ylabel(f'{cb_label} ({cb_unit})')
         plt.gcf().set_size_inches(10, 6)
         plt.tight_layout()
-        safe_name = feat_name.replace('/', '_').replace(' ', '_')
+        _safe_names = {'$T_{max}$': 'Tmax', '$T_{min}$': 'Tmin', '$K_{sat}$': 'Ksat'}
+        safe_name = _safe_names.get(feat_name, feat_name).replace('/', '_').replace(' ', '_')
         plt.savefig(os.path.join(dep_dir, f'{model_name}_SHAP_Dep_{safe_name}.png'), dpi=600)
         plt.close('all')
 
@@ -1112,6 +1133,7 @@ def build_ml_model_optuna(
         cv_groups: np.ndarray | pd.Series | None = None,
         log_target: bool = False,
         tuning_dir: str | None = None,
+        use_interaction_constraints: bool = True,
         **kwargs: Any
 ) -> tuple[Any, pd.DataFrame]:
     """
@@ -1173,7 +1195,8 @@ def build_ml_model_optuna(
         if feature_names and _PHYS_COL in feature_names:
             feature_names = [f for f in feature_names if f != _PHYS_COL]
         model_dict = get_model_dict(random_state, include_all_models=include_all,
-                                    feature_names=feature_names)
+                                    feature_names=feature_names,
+                                    use_interaction_constraints=use_interaction_constraints)
         model = model_dict[model_name]
         fit_params = dict(best_params)
         if model_name in _PIML_MODELS and 'physics_lambda' in fit_params:
@@ -1302,6 +1325,7 @@ def build_ml_model_optuna(
                     model_name, cv, scoring_metrics,
                     alpha, random_state, pruning,
                     cv_groups=cv_groups,
+                    use_interaction_constraints=use_interaction_constraints,
                 ),
                 n_trials=remaining,
                 n_jobs=1,
@@ -1329,7 +1353,8 @@ def build_ml_model_optuna(
     if feature_names and _PHYS_COL in feature_names:
         feature_names = [f for f in feature_names if f != _PHYS_COL]
     model_dict = get_model_dict(random_state, include_all_models=include_all,
-                                feature_names=feature_names)
+                                feature_names=feature_names,
+                                use_interaction_constraints=use_interaction_constraints)
     model = model_dict[model_name]
     # Extract physics_lambda for PIML wrappers (not a tree hyperparameter)
     fit_params = dict(best_params)
@@ -1363,6 +1388,7 @@ def objective_with_cv_enhanced(
         random_state: int = 42,
         pruning: bool = True,
         cv_groups: np.ndarray | pd.Series | None = None,
+        use_interaction_constraints: bool = True,
 ) -> float:
     """
     Enhanced objective function for Optuna with pruning support.
@@ -1391,7 +1417,8 @@ def objective_with_cv_enhanced(
     if feature_names and _PHYS_COL in feature_names:
         feature_names = [f for f in feature_names if f != _PHYS_COL]
     model = get_model_dict(random_state, include_all_models=include_all,
-                           feature_names=feature_names)[model_name]
+                           feature_names=feature_names,
+                           use_interaction_constraints=use_interaction_constraints)[model_name]
     # Extract physics_lambda for PIML wrappers before set_params
     fit_params = dict(params)
     if model_name in _PIML_MODELS and 'physics_lambda' in fit_params:
@@ -1625,6 +1652,7 @@ def compare_all_models(
         log_target: bool = False,
         tuning_model_dir: str | None = None,
         create_interp_plots: bool = False,
+        use_interaction_constraints: bool = True,
 ) -> pd.DataFrame:
     """
     Compare all available models with full evaluation.
@@ -1785,6 +1813,7 @@ def compare_all_models(
                     n_dask_workers=n_dask_workers, use_dask=use_dask,
                     cv_groups=cv_groups, log_target=log_target,
                     tuning_dir=td,
+                    use_interaction_constraints=use_interaction_constraints,
                 )
             else:
                 feature_names = list(x_train.columns) if isinstance(x_train, pd.DataFrame) else None
@@ -1793,6 +1822,7 @@ def compare_all_models(
                 model_dict = get_model_dict(
                     random_state, include_all_models=True,
                     feature_names=feature_names,
+                    use_interaction_constraints=use_interaction_constraints,
                 )
                 model = model_dict[model_name]
                 # PIML wrappers strip _PHYS_COL internally; standard models need it removed

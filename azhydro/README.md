@@ -410,21 +410,21 @@ zoo comprises 7 models — 4 standard baselines (XGB, LGBM, RF, XGBRF) and
 optional models (ETR, HGBR, GBR, ADA, BAG, CAT, LR, RIDGE, LASSO)
 available when `INCLUDE_ALL_MODELS=True`.
 
-The physics-informed models embed domain knowledge via three tiers:
+The physics-informed models embed domain knowledge via two tiers:
 
 1. **Monotone constraints** — ET, well density, AGRI, and URBAN are
    constrained to increase pumping predictions; effective precipitation
    and canal-weighted streamflow are constrained to decrease them (more
    surface-water availability substitutes for groundwater pumping).
-2. **Interaction constraints** — five physically meaningful feature groups
-   (water-balance core, climate drivers, pumping infrastructure, water
-   source, soil properties) restrict which features can interact in tree
-   splits.
-3. **Custom irrigation-demand floor objective** — a one-sided penalty
+2. **Custom irrigation-demand floor objective** — a one-sided penalty
    ensures predictions are not below the physics-estimated irrigation
    demand `(ET − Peff) × irr_frac × gw_frac / IE`.  The penalty
    strength (λ) is tuned by Optuna with λ=0 always reachable, so the
    model can fall back to pure MSE if the constraint is unhelpful.
+   The custom objective's gradients are normalised to match XGBoost's
+   built-in `reg:squarederror` scale (base grad = ŷ−y, base hess = 1),
+   ensuring that regularisation parameters (`reg_lambda`,
+   `min_child_weight`, `gamma`) retain their usual effective strength.
 
 All models use Optuna + Dask hyperparameter optimisation (100 TPE trials,
 5-fold CV) and report R², normalised RMSE (% of mean), normalised MAE
@@ -595,10 +595,9 @@ Saved to `{MODEL_DIR}Model_Evaluation/`.
 The core production step.  Trains a single **physics-informed XGBoost
 model** (`PIML_XGB`) on **all** metered data (1984–2024, no holdout) to
 maximise the training signal, then predicts annual pumping for every 2 km
-pixel from 1896 to 2099.  The physics-informed model uses all three tiers
-of domain constraints (monotone constraints, interaction constraints, and
-the irrigation-demand floor objective) to produce physically consistent
-predictions.
+pixel from 1896 to 2099.  The physics-informed model uses both tiers
+of domain constraints (monotone constraints and the irrigation-demand
+floor objective) to produce physically consistent predictions.
 
 **Absolute-value post-processing:** All predictions are wrapped in
 `np.abs()` because groundwater pumping depth is physically non-negative.
