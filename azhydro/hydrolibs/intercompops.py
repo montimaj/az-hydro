@@ -844,7 +844,7 @@ def _plot_spatial_diff_maps(
 
     For each GW/SW category, produces three difference maps:
         ML − NHM, ML − Reitz, NHM − Reitz
-    using a diverging colour map centred on zero.
+    using a diverging color map centered on zero.
 
     Args:
         mean_raster_paths (dict): ``{source: {cat: path}}`` where source ∈ {ML, NHM, Reitz} and

@@ -74,7 +74,7 @@ def _compute_capacity_weights(
         2. ``PUMPRATE`` from the Well Registry (GPM field).
         3. Equal-share fallback (weight = 1.0).
 
-    Within each pixel the weights are normalised to sum to 1.
+    Within each pixel the weights are normalized to sum to 1.
     """
     n = len(wells)
     raw_weight = np.ones(n, dtype=np.float64)   # fallback

@@ -304,7 +304,7 @@ Step 4   ─  USGS Intercomparison (Withdrawals, CU, Peff)
 
 ### Configuration constants
 
-All paths and modelling parameters are defined once at the top of
+All paths and modeling parameters are defined once at the top of
 `pipeline.py`:
 
 | Constant | Value | Description |
@@ -331,7 +331,7 @@ All paths and modelling parameters are defined once at the top of
 | `USE_AMA_INA` | `True` | Restrict training to AMA/INA management areas. |
 | `DROP_GW_BASINS` | `('WILLCOX AMA', …)` | Basins excluded from training. |
 | `TEMPORAL_HOLDOUTS` | T1–T6 | Six temporal leave-one-out configurations. |
-| `DROP_ATTRS` | (list) | Columns dropped before modelling. |
+| `DROP_ATTRS` | (list) | Columns dropped before modeling. |
 
 ### Step 0 — Data preparation (`prepare_data()`)
 
@@ -356,7 +356,7 @@ Downloads, mosaics, and aligns all input datasets to a common 2 km grid.
    and `streamflowops.create_streamflow_rasters()` build predictor layers
    from USGS/USBR gauge data and GRAIN canal geometry ([Suresh et al., 2026](https://doi.org/10.5194/essd-18-1855-2026)).
 4. **Basin & well rasters** — `gwops.create_gw_basin_rasters()` and
-   `gwops.create_well_density_raster()` rasterise ADWR basins, sub-basins,
+   `gwops.create_well_density_raster()` rasterize ADWR basins, sub-basins,
    and the well registry.
 5. **GEE reprojection** — `dataops.reproject_gee_mosaics()` aligns all GEE
    mosaics to the GW depth raster grid.
@@ -412,23 +412,24 @@ available when `INCLUDE_ALL_MODELS=True`.
 
 The physics-informed models embed domain knowledge via two tiers:
 
-1. **Monotone constraints** — ET, well density, AGRI, and URBAN are
-   constrained to increase pumping predictions; effective precipitation
-   and canal-weighted streamflow are constrained to decrease them (more
-   surface-water availability substitutes for groundwater pumping).
+1. **Monotone constraints** — ET, well density, AGRI, URBAN, crop fraction,
+   irrigation fraction, and groundwater fraction are constrained to increase
+   pumping predictions; effective precipitation and canal-weighted streamflow
+   are constrained to decrease them (more surface-water availability
+   substitutes for groundwater pumping).
 2. **Custom irrigation-demand floor objective** — a one-sided penalty
    ensures predictions are not below the physics-estimated irrigation
    demand `(ET − Peff) × irr_frac × gw_frac / IE`.  The penalty
    strength (λ) is tuned by Optuna with λ=0 always reachable, so the
    model can fall back to pure MSE if the constraint is unhelpful.
-   The custom objective's gradients are normalised to match XGBoost's
+   The custom objective's gradients are normalized to match XGBoost's
    built-in `reg:squarederror` scale (base grad = ŷ−y, base hess = 1),
    ensuring that regularisation parameters (`reg_lambda`,
    `min_child_weight`, `gamma`) retain their usual effective strength.
 
 All models use Optuna + Dask hyperparameter optimisation (100 TPE trials,
-5-fold CV) and report R², normalised RMSE (% of mean), normalised MAE
-(% of mean), and normalised MBE (%).  All three normalised metrics use
+5-fold CV) and report R², normalized RMSE (% of mean), normalized MAE
+(% of mean), and normalized MBE (%).  All three normalized metrics use
 the mean of observed values as the denominator, giving a physically
 interpretable percentage error relative to the average pumping magnitude.
 
@@ -442,7 +443,7 @@ interpretability plots for every holdout.
 
 When `LOG_TARGET=True`, the pipeline applies a `log1p(y)` transform to
 the target variable before training and `expm1(ŷ)` to predictions
-afterward.  This stabilises the right-skewed pumping distribution and
+afterward.  This stabilizes the right-skewed pumping distribution and
 improves tree-model performance on low-pumping pixels.  Because tree
 leaf predictions become means of log-transformed values, the inverse
 (`expm1`) yields the geometric mean, which is systematically lower than
@@ -461,7 +462,7 @@ remain interpretable as percentage-of-mean pumping.
 
 #### Optuna objective function
 
-The Optuna TPE sampler minimises a composite objective that balances
+The Optuna TPE sampler minimizes a composite objective that balances
 predictive accuracy, overfitting control, and fold stability:
 
 ```
@@ -470,29 +471,32 @@ objective = test_NRMSE × (1 + α × max(test_NRMSE / train_NRMSE − 1, 0)) + �
 
 where α = 0.1 and β = 0.05.
 
-- **Primary term** (`test_NRMSE`): Mean normalised RMSE across CV folds.
+- **Primary term** (`test_NRMSE`): Mean normalized RMSE across CV folds.
   When `LOG_TARGET=True`, this is computed in **log space** (`log_nrmse`)
-  so that the hyperparameter search optimises in the same space as the
+  so that the hyperparameter search optimizes in the same space as the
   tree model's internal MSE loss, giving equal weight to low- and
   high-pumping pixels.  When `LOG_TARGET=False`, original-scale NRMSE is
   used.
-- **Overfitting ratio penalty** (`α`): Penalises trials where
+- **Overfitting ratio penalty** (`α`): Penalizes trials where
   `test_NRMSE ≫ train_NRMSE` using the *ratio* rather than the absolute
-  difference.  A 20× train/test gap is penalised much more heavily than
+  difference.  A 20× train/test gap is penalized much more heavily than
   a 2× gap.  The `max(…, 0)` ensures no penalty when test ≤ train.
-- **Fold variance penalty** (`β`): Penalises inconsistent performance
-  across CV folds, favouring hyperparameters that generalise uniformly
+- **Fold variance penalty** (`β`): Penalizes inconsistent performance
+  across CV folds, favoring hyperparameters that generalize uniformly
   across data subsets.
 
 #### Linear bias correction (evaluation)
 
-All four evaluation strategies apply a **global linear bias correction**
+All four evaluation strategies attempt a **global linear bias correction**
 after prediction.  The correction is fit on training data using OLS:
-`y_corrected = |m × y_pred + b|`, where `m` and `b` minimise the
-squared residuals.  Because the identity transform (`m=1, b=0`) is in
-the OLS solution space, the correction can only improve or match raw
-predictions on the training set.  The absolute value ensures physical
-non-negativity.
+`y_corrected = |m × y_pred + b|`, where `m` and `b` minimize the
+squared residuals.  The absolute value ensures physical non-negativity.
+
+The correction is only applied if it improves **all** training metrics
+(R², RMSE, MAE, and |MBE|) simultaneously.  If any metric worsens —
+e.g. the linear transform overcorrects MBE — the original predictions
+are kept and a warning is logged.  Diagnostic plots and CSVs are still
+generated so the BC effect can be inspected regardless.
 
 **Strategy-consistent inner CV:** The inner cross-validation used during
 Optuna hyperparameter tuning mirrors the outer evaluation strategy to
@@ -518,7 +522,7 @@ A grid evaluation over `EVAL_TEST_SIZES` (default 10 %–30 %) ×
 the data with a different test fraction and seed, retrains with the
 tuned hyperparameters, and evaluates.  Optuna tuning runs only on the
 first combination (test_size=10 %, seed=42); all subsequent runs reuse
-those hyperparameters.  Results are organised under
+those hyperparameters.  Results are organized under
 `ts{NN}/seed_{S}/` subdirectories, and `Model_Comparison_Averaged.csv`
 reports mean ± std grouped by model and test size.
 
@@ -545,21 +549,38 @@ first combination only.
 
 #### Step 2b — Temporal leave-one-out (`evaluate_temporal_loo()`)
 
-Six pre-defined temporal holdout configurations (T1–T6):
+Seven pre-defined temporal holdout configurations (T1_Baseline + T1–T6):
 
-| Holdout | Withheld years |
-|---|---|
-| T1 | 2015–2024 |
-| T2 | 1990–1992, 2005–2007, 2022–2024 |
-| T3 | 2007–2010 |
-| T4 | 1985–1989, 2020–2024 |
-| T5 | 2024 |
-| T6 | 2010–2020 |
+| Holdout | Withheld years | Training years | MIN_GW |
+|---|---|---|---|
+| T1_Baseline | 2010–2020 | 2002–2020 (`TRAIN_YEAR_LIST_BASELINE`) | 0 |
+| T1 | 2010–2020 | 1984–2024 (`YEAR_LIST`) | `MIN_GW` |
+| T2 | 2015–2024 | 1984–2024 | `MIN_GW` |
+| T3 | 1990–1992, 2005–2007, 2022–2024 | 1984–2024 | `MIN_GW` |
+| T4 | 2007–2010 | 1984–2024 | `MIN_GW` |
+| T5 | 1985–1989, 2020–2024 | 1984–2024 | `MIN_GW` |
+| T6 | 2024 | 1984–2024 | `MIN_GW` |
+
+`T1_Baseline` reproduces the settings from [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757): training
+on 2002–2020 only, holding out 2010–2020, and including zero-pumping pixels
+(`MIN_GW=0`).  All other holdouts use the full `YEAR_LIST` (1984–2024) and
+the pipeline-level `MIN_GW` threshold.
 
 For each holdout, the model trains on the remaining years and is tested on
 the held-out period.  Per-holdout metrics are recorded, then averaged across
-all six splits.  Heatmaps and bar plots (`vizops.plot_loo_heatmap()`,
-`vizops.plot_loo_bar()`) visualise model performance across holdouts.
+all splits.  Heatmaps and bar plots (`vizops.plot_loo_heatmap()`,
+`vizops.plot_loo_bar()`) visualize model performance across holdouts.
+
+**Note on comparison with [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757):** The previous study tuned
+hyperparameters directly on the test set (without cross-validation), making
+its reported test metrics analogous to validation scores.  The current study
+uses Optuna with `GroupKFold` (grouped by year), ensuring strict separation
+between tuning and evaluation.  For the standard (non-PIML) models, the
+current CV metrics show comparable or improved R² and RMSE relative to the
+previous study's test metrics, while the current test metrics are only
+marginally lower — confirming that the model generalizes well without
+relying on test-set information during training.  PIML model comparisons are
+pending.
 
 **Outputs:** `{MODEL_DIR}Model_Evaluation/Temporal_LOO/`
 
@@ -594,7 +615,7 @@ Saved to `{MODEL_DIR}Model_Evaluation/`.
 
 The core production step.  Trains a single **physics-informed XGBoost
 model** (`PIML_XGB`) on **all** metered data (1984–2024, no holdout) to
-maximise the training signal, then predicts annual pumping for every 2 km
+maximize the training signal, then predicts annual pumping for every 2 km
 pixel from 1896 to 2099.  The physics-informed model uses both tiers
 of domain constraints (monotone constraints and the irrigation-demand
 floor objective) to produce physically consistent predictions.
@@ -640,7 +661,7 @@ the resulting feature-contribution profiles across eras reveals whether the
 model relies on the same physical relationships in extrapolation as during
 training.  Stable feature rankings and ALE shapes across eras support the
 stationarity assumption; divergent patterns flag features whose
-out-of-distribution behaviour may reduce prediction reliability.  Outputs
+out-of-distribution behavior may reduce prediction reliability.  Outputs
 are saved to `{prediction_dir}Model_Interpretability/{Era}/`.
 
 #### 3b. Annual raster prediction loop (1896–2099)
@@ -648,7 +669,7 @@ are saved to `{prediction_dir}Model_Interpretability/{Era}/`.
 Before the loop begins, an **out-of-distribution (OOD) detector**
 (`mlops.OODDetector`) is fitted on the training feature matrix.  The
 detector computes the Mahalanobis distance of each prediction-time pixel
-from the training distribution using a regularised covariance matrix.
+from the training distribution using a regularized covariance matrix.
 Pixels exceeding the χ²(n\_features) threshold at α = 0.01 are flagged as
 OOD — i.e., their feature vector lies outside the region spanned by the
 1984–2024 training data.
@@ -668,7 +689,7 @@ AMA/INA training data using `fit_linear_bc()`: `y_corrected = |m × y_pred + b|`
 where `m` and `b` are fit via OLS on training predictions vs observed values.
 Because the identity (`m=1, b=0`) is in the OLS solution space, the
 correction can only improve or match raw predictions.  A single correction
-is learned from all basins, so it generalises to non-AMA/INA basins during
+is learned from all basins, so it generalizes to non-AMA/INA basins during
 prediction.
 
 For each year the pipeline:
@@ -743,7 +764,7 @@ Four temporal eras are distinguished in the plots:
 
 - **Panel (a)**: Spatial map of mean-annual predicted pumping depth (mm)
   across all 204 years (1896–2099), with GW basin boundaries and AMA/INA
-  labels overlaid on a YlOrRd colour ramp.
+  labels overlaid on a YlOrRd color ramp.
 - **Panel (b)**: Time series of total annual AMA/INA pumping (acre-ft) with
   era shading and an inset bar chart of era-averaged volumes.
 
@@ -817,7 +838,7 @@ identical Optuna-tuned hyperparameters but different random seeds:
 Seeds: 42, 123, 456, 789, 1024, 2048, 3072, 4096, 5120, 6144
 ```
 
-Training is parallelised across Dask workers (100 Optuna trials per seed).
+Training is parallelized across Dask workers (100 Optuna trials per seed).
 For each year and pixel, σ_model is the sample standard deviation of the
 10 seed predictions:
 
@@ -1174,7 +1195,7 @@ predicted mean over the same period:
   outside AMA/INA appear as gray no-data.
 - Panel (b): **Predicted** (ML raster mean).
 - Panel (c): **Difference** (Predicted − Actual) with a diverging `RdBu_r`
-  colormap centred on zero.
+  colormap centered on zero.
 
 **Trend analysis** (`vizops.create_trend_maps()`) — Pixel-wise
 Mann-Kendall trend test (via `scipy.stats.kendalltau`) and Sen's slope
@@ -1259,12 +1280,12 @@ comparison.  The intercomparison produces:
 - Per-basin comparison tables (mm, ft, m³, AF).
 - Time series CSVs and per-basin time series plots.
 - Pairwise scatter plots with 1:1 lines and linear fits.
-- Spatial difference maps (diverging colourmap centred on zero).
+- Spatial difference maps (diverging colormap centered on zero).
 - Temporal agreement visualizations (`Temporal_Agreement/`):
-  - **Heatmaps** — Basin × pair grids coloured by Pearson r and NSE.
+  - **Heatmaps** — Basin × pair grids colored by Pearson r and NSE.
   - **Box/violin plots** — Distribution of per-basin r/NSE across pairs.
-  - **Taylor diagrams** — Correlation vs normalised std dev in polar
-    coordinates, with centred RMSD contours.
+  - **Taylor diagrams** — Correlation vs normalized std dev in polar
+    coordinates, with centered RMSD contours.
   - **r vs NSE scatter** — Paired scatter with quadrant annotations
     identifying basins with good/mixed/poor agreement.
 
@@ -1339,7 +1360,7 @@ Compares irrigated effective precipitation across three sources:
 
 All three datasets are scaled by `annual_irr_fraction` so that volumes
 represent only the irrigated-area contribution.  NHM PPTeff follows the
-same CSV → rasterise → basin-aggregate pipeline as NHM CU, with irrigated-
+same CSV → rasterize → basin-aggregate pipeline as NHM CU, with irrigated-
 area scaling for the volume-to-depth conversion.
 
 The intercomparison produces:
@@ -1409,8 +1430,8 @@ PIML_LGBM, PIML_XGBRF).  Optional models (ETR, HGBR, GBR, ADA, BAG, CAT,
 LR, RIDGE, LASSO) are available when `INCLUDE_ALL_MODELS=True`.
 
 Key functions:
-- **`get_model_dict()`** — Returns model objects with monotone/interaction
-  constraints for physics-informed variants.
+- **`get_model_dict()`** — Returns model objects with monotone constraints
+  and optional interaction constraints for physics-informed variants.
 - **`compute_irrigation_demand_floor()`** — Computes the per-sample
   irrigation demand lower bound from ET, Peff, irr_frac, gw_frac, and
   NHM basin-level irrigation efficiencies.
@@ -1421,7 +1442,7 @@ Key functions:
   physics floor through sklearn's `cross_validate` and build the custom
   objective during `fit()`.
 - **`build_ml_model_optuna()`** — Trains a single model with Optuna
-  TPE-based hyperparameter search parallelised across Dask workers.
+  TPE-based hyperparameter search parallelized across Dask workers.
 - **`compare_all_models()`** — Trains all models on a common split and
   ranks them by test R².  Optionally generates interpretability plots
   (permutation importance, ALE, SHAP) for both train and test data.
@@ -1436,8 +1457,8 @@ Key functions:
   linear bias correction (boolean `apply_bias_correction` flag).
 - **`perform_bias_correction()`** — Fits and applies global linear bias
   correction using `fit_linear_bc()` / `apply_linear_bc()`.
-- **`calc_train_test_metrics()`** — Computes R², normalised RMSE (% of mean),
-  normalised MAE (% of mean), and normalised MBE (% of mean).
+- **`calc_train_test_metrics()`** — Computes R², normalized RMSE (% of mean),
+  normalized MAE (% of mean), and normalized MBE (% of mean).
 - **`compute_perm_imp()`**, **`compute_ale_plots()`**,
   **`compute_shap_plots()`** — Model interpretability diagnostics.
 - **`generate_model_visualizations()`** — Scatter, residual, and time series
@@ -1464,7 +1485,7 @@ Key functions:
 - **`create_era_summary_maps()`** — Spatial maps of mean depth for each era
   (Hindcast, Historical, Forecast, Projected).
 - **`create_basin_time_series()`** / **`create_subbasin_time_series()`** —
-  Per-basin and per-sub-basin annual trends with AMA/INA colour coding.
+  Per-basin and per-sub-basin annual trends with AMA/INA color coding.
 - **`plot_loo_heatmap()`** / **`plot_loo_bar()`** — Heatmaps and bar plots
   for leave-one-out evaluation results.
 - **`create_cross_strategy_summary()`** — Side-by-side comparison of Random,
@@ -1499,13 +1520,13 @@ Key functions:
 - **`reproject_vectors()`** — Reprojects basin, sub-basin, well, CAP, and
   streamflow vectors to a consistent CRS.
 - **`create_gw_volume_rasters()`** / **`create_gw_depth_rasters()`** —
-  Rasterises pumping volumes (AF) and converts to depth (mm).
+  Rasterizes pumping volumes (AF) and converts to depth (mm).
 - **`crop_gw_rasters()`** — Clips GW rasters to the Arizona boundary.
-- **`create_gw_basin_rasters()`** — Rasterises ADWR basin and sub-basin
+- **`create_gw_basin_rasters()`** — Rasterizes ADWR basin and sub-basin
   polygons.
 - **`create_land_use_data()`** — Gaussian-filters the LULC raster to
   produce continuous AGRI, SW, and URBAN density features.  **Known design
-  choice:** The density features are independently min–max normalised to
+  choice:** The density features are independently min–max normalized to
   [0, 1] within each year, so the model sees only within-year spatial
   patterns, not temporal magnitude trends.  This is partially mitigated by
   `annual_crop_fraction` and `annual_irr_fraction`, which provide
@@ -1532,9 +1553,9 @@ Downloads and processes streamflow data from USGS ([Hodson et al., 2023](https:/
 Key functions:
 - **`download_streamflow()`** — Downloads monthly streamflow records from
   USGS gauges and retrieves USBR delivery data.
-- **`create_streamflow_rasters()`** — Rasterises annual streamflow volumes
+- **`create_streamflow_rasters()`** — Rasterizes annual streamflow volumes
   onto the 2 km grid using watershed polygons.
-- **`create_canal_density_raster()`** — Rasterises canal geometry from the
+- **`create_canal_density_raster()`** — Rasterizes canal geometry from the
   GRAIN dataset ([Suresh et al., 2026](https://doi.org/10.5194/essd-18-1855-2026))
   into a canal-density layer used for SW-fraction estimation.
 
@@ -1566,7 +1587,7 @@ they can be integrated to make the partition dynamic.
 | **Total_SW** | `Irrigation_SW + Non_Irrigation_SW` |
 
 **Known limitation (SW fraction proxy):** `compute_sw_fraction()` uses
-canal density normalised by the local maximum as a proxy for the
+canal density normalized by the local maximum as a proxy for the
 surface-water share of non-irrigation withdrawals.  Canal density
 (canal segments per pixel) is not a validated proxy for municipal or
 industrial SW sourcing.  Where canal infrastructure is sparse, all
@@ -1579,7 +1600,7 @@ Key helpers:
 - **`focal_fill_irr_fraction()`** — fills edge-pixel gaps (`irr_frac < 0.05`)
   with a focal mean of valid neighbours, avoiding NaN propagation along
   irrigated-area boundaries.
-- **`compute_sw_fraction()`** — normalises canal density to [0, 1] using a
+- **`compute_sw_fraction()`** — normalizes canal density to [0, 1] using a
   local-maximum filter (`maximum_filter(size=5)`), so that the pixel with the
   highest canal density in a 5 × 5 window receives `sw_fraction = 1.0`.
 - **`partition_predictions()`** — orchestrates all splits, applies well-density
@@ -1607,7 +1628,7 @@ Key functions:
   ET, ETo, and Peff and generates input spread CSVs and a 3-panel ribbon
   plot (`Climate_Input_Spread/`).
 - **`compute_sigma_model()`** — PIML_XGB 10-seed ensemble spread (all
-  years).  Parallelised via Dask + Optuna.  Returns per-year total σ and
+  years).  Parallelized via Dask + Optuna.  Returns per-year total σ and
   per-category σ.
 - **`compute_sigma_irr()`** — Irrigation fraction sensitivity (historical
   only, 1896–2025).  Uses IrrMapper vs regression finite-difference with
@@ -1669,7 +1690,7 @@ total is split using capacity-proportional weights with a three-tier fallback:
    from the Well Registry is used (~79 k wells have this attribute).
 3. **Equal-share fallback** — wells with neither record receive weight 1.0.
 
-Within each pixel the raw weights are normalised to sum to 1, so the pixel
+Within each pixel the raw weights are normalized to sum to 1, so the pixel
 budget is preserved regardless of which tier each well belongs to.
 
 **Nodata masking**: Wells landing in raster nodata or out-of-bounds pixels
@@ -1738,7 +1759,7 @@ Key functions:
 - **`reproject_vector()`** — Reprojects a vector file to a target CRS.
 - **`csv2shp()`** / **`csvs2shps()`** — Converts CSV tables with
   coordinates to shapefiles.
-- **`shp2raster()`** / **`shps2rasters()`** — Rasterises vector features
+- **`shp2raster()`** / **`shps2rasters()`** — Rasterizes vector features
   onto a reference grid.
 - **`add_attribute_well_reg()`** — Joins Well Registry attributes to
   shapefiles.
@@ -1858,6 +1879,8 @@ Ketchum, D., Jencso, K., Maneta, M. P., Melton, F., Jones, M. O., & Huntington, 
 Luukkonen, C.L., Alzraiee, A.H., Larsen, J.D., Martin, D.J., Herbert, D.M., Buchwald, C.A., Houston, N.A., Valseth, K.J., Paulinski, S., Miller, L.D., Niswonger, R.G., Stewart, J.S., & Dieter, C.A. (2023). Public supply water use reanalysis for the 2000-2020 period by HUC12, month, and year for the conterminous United States. _U.S. Geological Survey data release_. https://doi.org/10.5066/P9FUL880
 
 Majumdar, S., ReVelle, P., Pearson, C., Nozari, S., Minor, B. A., Hasan, M. F., Huntington, J. L., & Smith, R. G. (2026). pyCropWat: A Python Package for Computing Effective Precipitation Using Google Earth Engine Climate Data (v1.2.1). _Zenodo_. https://doi.org/10.5281/zenodo.18706481.
+
+Majumdar, S., Smith, R., Conway, B. D., & Lakshmi, V. (2022). Advancing remote sensing and machine learning‐driven frameworks for groundwater withdrawal estimation in Arizona: Linking land subsidence to groundwater withdrawals. _Hydrological Processes_, _36_(11), e14757. https://doi.org/10.1002/hyp.14757.
 
 Martin, D. J., Niswonger, R. G., Regan, R. S., Huntington, J. L., Ott, T., Morton, C., Senay, G. B., Friedrichs, M., Melton, F. S., Haynes, J., Henson, W., Read, A., Xie, Y., Lark, T., & Rush, M. (2025). Estimating irrigation consumptive use for the conterminous United States: coupling satellite-sourced estimates of actual evapotranspiration with a national hydrologic model. _Journal of Hydrology_, _662_, 133909. https://doi.org/10.1016/j.jhydrol.2025.133909.
 

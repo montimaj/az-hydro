@@ -65,12 +65,12 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # Monotone constraint map: +1 = increasing, -1 = decreasing, 0 = unconstrained
 MONOTONE_CONSTRAINT_MAP: dict[str, int] = {
-    'annual_et_ensemble_mm': 1,
-    'well_density': 1,
-    'AGRI': 1,
-    'URBAN': 1,
-    'annual_peff_mm': -1,
-    'canal_weighted_streamflow_mm': -1,
+    'annual_et_ensemble_mm': 0,
+    'well_density': 0,
+    'AGRI': 0,
+    'URBAN': 0,
+    'annual_peff_mm': 0,
+    'canal_weighted_streamflow_mm': 0,
 }
 
 # Interaction constraint groups (overlapping allowed in XGBoost)
@@ -174,8 +174,8 @@ class PhysicsFloorObjective:
     The penalty is **one-sided**: only active when the prediction falls below
     the physics-derived irrigation demand floor (in log1p space).
 
-    Gradients are normalised to match ``reg:squarederror`` scale (grad = ŷ−y,
-    hess = 1 when no floor violation) so that XGBoost's regularisation
+    Gradients are normalized to match ``reg:squarederror`` scale (grad = ŷ−y,
+    hess = 1 when no floor violation) so that XGBoost's regularization
     parameters (``reg_lambda``, ``min_child_weight``, ``gamma``) retain their
     usual effective strength.
 
@@ -202,7 +202,7 @@ class PhysicsFloorObjective:
         residual = y_pred - y_true                     # MSE component
         violation = np.clip(self.y_phys_log - y_pred, 0, None)  # floor violation
 
-        # Normalised to reg:squarederror scale (base grad = ŷ−y, base hess = 1)
+        # Normalized to reg:squarederror scale (base grad = ŷ−y, base hess = 1)
         grad = residual - self.physics_lambda * self.mask * violation
         hess = 1.0 + self.physics_lambda * self.mask * (violation > 0).astype(np.float64)
         return grad, hess
@@ -559,7 +559,7 @@ def normalized_mbe(
 # --- Abs-wrapped scoring functions for CV/Optuna --------------------------
 # Production code applies ``np.abs()`` after ``model.predict()`` to ensure
 # non-negative pumping values.  These wrappers apply the same transform
-# inside cross-validation scorers so that hyperparameter tuning optimises
+# inside cross-validation scorers so that hyperparameter tuning optimizes
 # the same quantity that is reported at evaluation time.
 
 def _abs_r2_score(y: np.array, y_pred: np.array) -> float:
@@ -739,17 +739,13 @@ def compute_perm_imp(
             imp_dict['F_IMP'] = np.round(f_imp, 5)
             imp_df = pd.DataFrame(data=imp_dict).sort_values(by='F_IMP', ascending=False)
             imp_df['Features'] = imp_df['Features'].replace(feature_dict)
-            plt.rcParams.update({'font.size': 20})
-            plt.figure(figsize=(14, max(8, len(imp_df) * 0.7)))
-            sns.barplot(
-                data=imp_df,
-                y='Features',
-                x='F_IMP'
-            )
-            plt.xlabel(f'{model_name} Feature Importance')
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, f'F_IMP_{model_name}.png'), dpi=600)
-            plt.close()
+            fig, ax = plt.subplots(figsize=(14, max(8, len(imp_df) * 0.7)))
+            sns.barplot(data=imp_df, y='Features', x='F_IMP', ax=ax)
+            ax.set_xlabel(f'{model_name} Feature Importance', fontsize=14)
+            ax.tick_params(axis='both', labelsize=12)
+            fig.tight_layout()
+            fig.savefig(os.path.join(output_dir, f'F_IMP_{model_name}.png'), dpi=600)
+            plt.close(fig)
             imp_df.to_csv(os.path.join(output_dir, f'F_IMP_{model_name}.csv'), index=False)
         perm_scorer = scoring_metrics[scoring_metric]
         train_result = permutation_importance(
@@ -772,15 +768,14 @@ def compute_perm_imp(
         test_importances = test_importances.rename(columns=feature_dict)
         if create_plots:
             for name, importances in zip(["train", "test"], [train_importances, test_importances]):
-                plt.figure(figsize=(10, 6))
-                plt.rcParams.update({'font.size': 12})
-                ax = importances.plot.box(vert=False, whis=10)
-                ax.set_xlabel(f"Increase in {scoring_metric.split('_')[1].upper()} (%)")
+                fig, ax = plt.subplots(figsize=(12, max(6, len(importances.columns) * 0.5)))
+                importances.plot.box(vert=False, whis=10, ax=ax)
+                ax.set_xlabel(f"Increase in {scoring_metric.split('_')[1].upper()} (%)", fontsize=14)
+                ax.tick_params(axis='both', labelsize=12)
                 ax.axvline(x=0, color="k", linestyle="--")
-                ax.figure.tight_layout()
-                plt.savefig(os.path.join(output_dir, f'{model_name}_{name}_PI.png'), dpi=600)
-                plt.clf()
-                plt.close()
+                fig.tight_layout()
+                fig.savefig(os.path.join(output_dir, f'{model_name}_{name}_PI.png'), dpi=600)
+                plt.close(fig)
         return train_importances, test_importances
     return None
 
@@ -849,6 +844,11 @@ def compute_ale_plots(
         for ax in fig.get_axes():
             if 'ALE' in ax.get_ylabel():
                 ax.set_ylabel(ale_label)
+            # Use scientific notation for large-value x-axes (e.g. Easting)
+            xlim = ax.get_xlim()
+            if abs(xlim[1]) >= 1e5:
+                ax.ticklabel_format(axis='x', style='scientific', scilimits=(0, 0))
+                ax.xaxis.get_offset_text().set_fontsize(8)
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, f'{model_name}_ALE_{data_type}.png'), dpi=600)
         plt.clf()
@@ -886,7 +886,7 @@ def compute_shap_plots(
 
     makedirs(output_dir)
     feature_dict, feature_units = get_feature_dict(get_units=True)
-    # Build display_name → unit mapping for axis labelling
+    # Build display_name → unit mapping for axis labeling
     _display_units = {}
     for raw_name, unit in feature_units.items():
         display_name = feature_dict.get(raw_name, raw_name)
@@ -1115,6 +1115,28 @@ def get_optuna_params_for_model(
         raise ValueError(f"Unknown model name: {model_name}")
 
 
+def _build_scoring_metrics(x_train, log_target: bool) -> dict:
+    """Build the CV scoring dict used by Optuna and best-fold selection."""
+    if log_target:
+        return {
+            'r2': make_scorer(_abs_r2_score),
+            'adjusted_r2': make_scorer(_abs_adjusted_r2, p=_real_n_features(x_train),
+                                       greater_is_better=True),
+            'log_nrmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
+            'normalized_rmse': make_scorer(_log_normalized_rmse, greater_is_better=False),
+            'normalized_mae': make_scorer(_log_normalized_mae, greater_is_better=False),
+            'normalized_mbe': make_scorer(_log_normalized_mbe, greater_is_better=False),
+        }
+    return {
+        'r2': make_scorer(_abs_r2_score),
+        'adjusted_r2': make_scorer(_abs_adjusted_r2, p=_real_n_features(x_train),
+                                   greater_is_better=True),
+        'normalized_rmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
+        'normalized_mae': make_scorer(_abs_normalized_mae, greater_is_better=False),
+        'normalized_mbe': make_scorer(_abs_normalized_mbe, greater_is_better=False),
+    }
+
+
 def build_ml_model_optuna(
         x_train: np.ndarray | pd.DataFrame,
         y_train: np.array,
@@ -1199,10 +1221,12 @@ def build_ml_model_optuna(
                                     use_interaction_constraints=use_interaction_constraints)
         model = model_dict[model_name]
         fit_params = dict(best_params)
-        if model_name in _PIML_MODELS and 'physics_lambda' in fit_params:
-            model.physics_lambda = fit_params.pop('physics_lambda')
+        if model_name in _PIML_MODELS:
+            if 'physics_lambda' in fit_params:
+                model.physics_lambda = fit_params.pop('physics_lambda')
+            if 'underpred_alpha' in fit_params:
+                model.underpred_alpha = fit_params.pop('underpred_alpha')
         model.set_params(**fit_params)
-        # PIML wrappers strip _PHYS_COL internally; standard models need it removed
         x_fit = x_train
         if model_name not in _PIML_MODELS and isinstance(x_train, pd.DataFrame) and _PHYS_COL in x_train.columns:
             x_fit = x_train.drop(columns=[_PHYS_COL])
@@ -1217,29 +1241,7 @@ def build_ml_model_optuna(
         return model, metric_df
 
     # --- Optuna hyperparameter tuning ---
-    if log_target:
-        scoring_metrics = {
-            # R² is scale-invariant for the model's operating space;
-            # use log-space R² to avoid Jensen's inequality bias from expm1.
-            'r2': make_scorer(_abs_r2_score),
-            'adjusted_r2': make_scorer(_abs_adjusted_r2, p=_real_n_features(x_train), greater_is_better=True),
-            # Log-space NRMSE — used as Optuna objective so that
-            # hyperparameter search optimises in the same space as the
-            # tree model's internal MSE loss.
-            'log_nrmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
-            # RMSE/MAE/MBE have physical units → report in original (mm) scale.
-            'normalized_rmse': make_scorer(_log_normalized_rmse, greater_is_better=False),
-            'normalized_mae': make_scorer(_log_normalized_mae, greater_is_better=False),
-            'normalized_mbe': make_scorer(_log_normalized_mbe, greater_is_better=False)
-        }
-    else:
-        scoring_metrics = {
-            'r2': make_scorer(_abs_r2_score),
-            'adjusted_r2': make_scorer(_abs_adjusted_r2, p=_real_n_features(x_train), greater_is_better=True),
-            'normalized_rmse': make_scorer(_abs_normalized_rmse, greater_is_better=False),
-            'normalized_mae': make_scorer(_abs_normalized_mae, greater_is_better=False),
-            'normalized_mbe': make_scorer(_abs_normalized_mbe, greater_is_better=False)
-        }
+    scoring_metrics = _build_scoring_metrics(x_train, log_target)
     if cv_groups is not None:
         n_unique_groups = len(np.unique(cv_groups))
         effective_folds = min(fold_count, n_unique_groups)
@@ -1346,20 +1348,21 @@ def build_ml_model_optuna(
     logger.info(f'Best params for {model_name}: {best_params}')
     logger.info(f'Best value: {study.best_value:.4f}')
 
-    # Train final model with best parameters
+    # Refit on full training data with best parameters
     include_all = model_name in _OPTIONAL_MODELS
     feature_names = list(x_train.columns) if isinstance(x_train, pd.DataFrame) else None
-    # Strip physics column from feature_names for constraint building
     if feature_names and _PHYS_COL in feature_names:
         feature_names = [f for f in feature_names if f != _PHYS_COL]
     model_dict = get_model_dict(random_state, include_all_models=include_all,
                                 feature_names=feature_names,
                                 use_interaction_constraints=use_interaction_constraints)
     model = model_dict[model_name]
-    # Extract physics_lambda for PIML wrappers (not a tree hyperparameter)
     fit_params = dict(best_params)
-    if model_name in _PIML_MODELS and 'physics_lambda' in fit_params:
-        model.physics_lambda = fit_params.pop('physics_lambda')
+    if model_name in _PIML_MODELS:
+        if 'physics_lambda' in fit_params:
+            model.physics_lambda = fit_params.pop('physics_lambda')
+        if 'underpred_alpha' in fit_params:
+            model.underpred_alpha = fit_params.pop('underpred_alpha')
     model.set_params(**fit_params)
     # PIML wrappers strip _PHYS_COL internally; standard models need it removed
     x_fit = x_train
@@ -1469,7 +1472,7 @@ def objective_with_cv_enhanced(
         trial.set_user_attr(mbe_key, -cv_results[mbe_key].mean())
 
     # Calculate objective: minimize NRMSE with overfitting ratio and variance penalties.
-    # The ratio test/train measures proportional overfitting — a 20× gap is penalised
+    # The ratio test/train measures proportional overfitting — a 20× gap is penalized
     # much harder than a 2× gap, unlike the absolute difference which treats them similarly.
     beta = 0.5 * alpha
     overfit_ratio = test_mean_nrmse / max(train_mean_nrmse, 1e-6)
@@ -2590,7 +2593,7 @@ def perform_bias_correction(
         n_features (int or None): Number of model features for adjusted R².
 
     Returns:
-        tuple[float, float]: Slope and intercept of the linear bias correction.
+        tuple[float, float, bool]: Slope, intercept, and whether BC improved all train metrics.
     """
 
     train_data_ecdf = train_df.copy(deep=True).drop(columns=[error_gw_col])
@@ -2663,7 +2666,23 @@ def perform_bias_correction(
         }
     ).round(2)
     metrics_df_test_linear.to_csv(os.path.join(output_dir, 'Test_Metrics_Linear.csv'), index=False)
-    return m_roe, b_roe
+    # Check if BC improved all key train metrics
+    bc_improved = (
+        train_r2_ecdf >= train_r2
+        and train_rmse_ecdf <= train_rmse
+        and train_mae_ecdf <= train_mae
+        and abs(train_mbe_ecdf) <= abs(train_mbe)
+    )
+    if not bc_improved:
+        logger.warning(
+            f'Bias correction did NOT improve all train metrics for {model_name}. '
+            f'R2: {train_r2:.3f}→{train_r2_ecdf:.3f}, '
+            f'RMSE: {train_rmse:.2f}→{train_rmse_ecdf:.2f}, '
+            f'MAE: {train_mae:.2f}→{train_mae_ecdf:.2f}, '
+            f'MBE: {train_mbe:.2f}→{train_mbe_ecdf:.2f}. '
+            f'Skipping BC application.'
+        )
+    return m_roe, b_roe, bc_improved
 
 
 def get_prediction_results(
@@ -2780,13 +2799,16 @@ def get_prediction_results(
         makedirs(make_proper_dir_name(output_dir))
         train_df = train_df.drop(columns=[gw_basin_col])
         test_df = test_df.drop(columns=[gw_basin_col])
-        m, b = perform_bias_correction(
+        m, b, bc_improved = perform_bias_correction(
             train_df, test_df, model_name, output_dir,
             n_features=_real_n_features(x_train)
         )
-        pred_df.Pred_GW_mm = apply_linear_bc(pred_df.Pred_GW_mm.values, m, b)
-        pred_df.Error_GW_mm = pred_df.Actual_GW_mm - pred_df.Pred_GW_mm
-    pred_df.to_parquet(os.path.join(model_dir, f'Predictions_{model_name}_BC.parquet'), index=False)
+        if bc_improved:
+            pred_df.Pred_GW_mm = apply_linear_bc(pred_df.Pred_GW_mm.values, m, b)
+            pred_df.Error_GW_mm = pred_df.Actual_GW_mm - pred_df.Pred_GW_mm
+            pred_df.to_parquet(os.path.join(model_dir, f'Predictions_{model_name}_BC.parquet'), index=False)
+        else:
+            logger.info(f'BC skipped for {model_name} — returning original predictions.')
     return pred_df
 
 
@@ -2932,12 +2954,12 @@ class OODDetector:
 
     Fits on training features and flags prediction-time pixels whose feature
     vectors fall outside the training distribution.  The Mahalanobis distance
-    is computed using the training covariance matrix (regularised for numerical
+    is computed using the training covariance matrix (regularized for numerical
     stability).
 
     Attributes:
         mean_ (np.ndarray): Training feature means (n_features,).
-        cov_inv_ (np.ndarray): Inverse of the regularised training covariance matrix.
+        cov_inv_ (np.ndarray): Inverse of the regularized training covariance matrix.
         threshold_ (float): Chi-squared threshold at the chosen significance level.
         n_features_ (int): Number of features.
     """

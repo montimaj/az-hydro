@@ -1609,7 +1609,6 @@ def create_train_test_data(
         input_df = input_df.dropna()
         if len(input_df) < n_before:
             logger.info(f'Dropped {n_before - len(input_df)} rows with NaN values')
-        input_df = input_df[input_df[pred_attr] > 0]
         if outlier_op is not None:
             input_df = process_outliers(
                 input_df, pred_attr,

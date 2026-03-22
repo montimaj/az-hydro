@@ -28,6 +28,7 @@ This script executes the remaining pipeline:
 import argparse
 import logging
 import os
+import pickle
 
 import geopandas as gpd
 import numpy as np
@@ -77,8 +78,9 @@ GCLOUD_BUCKET = 'azhydro'
 TILE_SIZE = 80000
 FILL_ATTR = 'AF Pumped'
 AF_MAX_THRESHOLD = 5000.  # max per-well AF; ~3,000 gpm sustained year-round
+MIN_GW = None    # min per-pixel GW pumping depth (mm); pixels below this are excluded
 MAX_GW = 3000  # max per-pixel GW pumping depth (mm); pixels above this are excluded
-LOG_TARGET = True  # log1p-transform target; metrics reported on original scale via expm1
+LOG_TARGET = False  # log1p-transform target; metrics reported on original scale via expm1
 
 # AMA_CODE → parent AMA/INA name mapping
 AMA_CODE_MAP = {
@@ -95,12 +97,13 @@ AMA_CODE_MAP = {
 START_YEAR = 1896
 END_YEAR = 2099
 YEAR_LIST = list(range(1984, 2025))
+TRAIN_YEAR_LIST_BASELINE = list(range(2002, 2021))  # for direct comparison with Majumdar et al., 2022
 RANDOM_STATE = 42
 N_EVAL_SEEDS = 5
 EVAL_TEST_SIZES = (0.10, 0.15, 0.20, 0.25, 0.30)
 N_TRIALS = 50
 FOLD_COUNT = 5
-REPEATS = 3
+REPEATS = 1
 N_DASK_WORKERS = 10
 N_DASK_WORKERS_DATA_PREP = 40 # more workers for data prep since it involves many independent raster operations
 USE_OPTUNA = True
@@ -117,21 +120,19 @@ DROP_ATTRS = (
     'GW_Subbasin',
     'SW',
     'GW_Basin_Type',
-    'annual_peff_pcml_mm',
-    'northing_m',
-    'easting_m',
+    'annual_peff_pcml_mm'
 )
 
-# Temporal holdout configurations (from azhydro.py)
+# # Temporal holdout configurations
 TEMPORAL_HOLDOUTS = {
-    'T1': ((2015, 2024),),
-    'T2': ((1990, 1992), (2005, 2007), (2022, 2024)),
-    'T3': ((2007, 2010),),
-    'T4': ((1985, 1989), (2020, 2024)),
-    'T5': ((2024, 2024),),
-    'T6': ((2010, 2020),),
+    'T1_Baseline': ((2010, 2020),), # same from Majumdar et al., 2022
+    'T1': ((2010, 2020),),
+    'T2': ((2015, 2024),), 
+    'T3': ((1990, 1992), (2005, 2007), (2022, 2024)),
+    'T4': ((2007, 2010),),
+    'T5': ((1985, 1989), (2020, 2024)),
+    'T6': ((2024, 2024),)
 }
-
 
 # =============================================================================
 # Step 0 — Data preparation (GEE download, GW processing, rasterisation)
@@ -487,8 +488,16 @@ def _train_and_evaluate(
         cv_groups=cv_groups,
         log_target=LOG_TARGET,
     )
-    y_pred_train = model.predict(x_train)
-    y_pred_test = model.predict(x_test)
+    # PIML wrappers strip __y_phys_log__ internally; standard models need it removed
+    phys_col = mlops._PHYS_COL
+    if model_name not in mlops._PIML_MODELS and isinstance(x_train, pd.DataFrame) and phys_col in x_train.columns:
+        x_train_pred = x_train.drop(columns=[phys_col])
+        x_test_pred = x_test.drop(columns=[phys_col])
+    else:
+        x_train_pred = x_train
+        x_test_pred = x_test
+    y_pred_train = model.predict(x_train_pred)
+    y_pred_test = model.predict(x_test_pred)
     if LOG_TARGET:
         y_pred_train = np.expm1(y_pred_train)
         y_pred_test = np.expm1(y_pred_test)
@@ -554,7 +563,8 @@ def _evaluate_random_single(
         year_list=YEAR_LIST, split_strategy=4,
         test_year=True,
         test_size=test_size,
-        outlier_op=3 if MAX_GW is not None else None,
+        outlier_op=3,
+        min_gw_pumping=MIN_GW if MIN_GW is not None else 1e-10,
         max_gw_pumping=MAX_GW if MAX_GW is not None else np.inf,
         test_gw_basins=(),
         use_ama_ina=USE_AMA_INA,
@@ -702,7 +712,8 @@ def _evaluate_pixel_holdout_single(
         year_list=YEAR_LIST, split_strategy=5,
         test_year=True,
         test_size=test_size,
-        outlier_op=3 if MAX_GW is not None else None,
+        outlier_op=3,
+        min_gw_pumping=MIN_GW if MIN_GW is not None else 1e-10,
         max_gw_pumping=MAX_GW if MAX_GW is not None else np.inf,
         test_gw_basins=(),
         use_ama_ina=USE_AMA_INA,
@@ -842,7 +853,7 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
         dict: Per-model averaged metrics across all temporal holdouts.
     """
     logger.info('='*60)
-    logger.info('Step 2b: LOO Temporal evaluation (T1-T6)')
+    logger.info('Step 2b: LOO Temporal evaluation (T1_Baseline + T1-T6)')
     logger.info('='*60)
 
     ml_models = mlops.get_model_dict(
@@ -863,15 +874,22 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
 
         holdout_dir = os.path.join(temporal_dir, holdout_name)
         data_dir = os.path.join(holdout_dir, 'data')
+        # Baseline holdouts use the full metered year range and no min pumping
+        # filter to match the previous study (Majumdar et al., 2022).
+        is_baseline = 'Baseline' in holdout_name
+        yl = TRAIN_YEAR_LIST_BASELINE if is_baseline else YEAR_LIST
+        min_gw = 0 if is_baseline else (MIN_GW if MIN_GW is not None else 1e-10)
+        max_gw = MAX_GW if MAX_GW is not None else np.inf
         ret_vals = dataops.create_train_test_data(
             az_df, data_dir,
             drop_attr=DROP_ATTRS,
             random_state=RANDOM_STATE,
             scaling=False, already_created=False,
-            year_list=YEAR_LIST, split_strategy=1,
+            year_list=yl, split_strategy=1,
             test_year=test_years,
-            outlier_op=3 if MAX_GW is not None else None,
-            max_gw_pumping=MAX_GW if MAX_GW is not None else np.inf,
+            outlier_op=3,
+            min_gw_pumping=min_gw,
+            max_gw_pumping=max_gw,
             test_gw_basins=(),
             use_ama_ina=USE_AMA_INA,
             drop_gw_basins=DROP_GW_BASINS,
@@ -908,6 +926,25 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
             if cached_pq is not None:
                 logger.info(f'  Loading cached {model_name} for {holdout_name}')
                 pred_df = pd.read_parquet(cached_pq)
+
+                # Generate interpretability plots if missing for cached predictions
+                interp_dir = os.path.join(model_dir, 'Interpretability')
+                interp_exists = (
+                    os.path.isdir(interp_dir)
+                    and len(os.listdir(interp_dir)) > 0
+                )
+                if not interp_exists:
+                    model_file = os.path.join(model_dir, model_name)
+                    if os.path.isfile(model_file):
+                        logger.info(f'Interpretability missing for cached {model_name} — '
+                                    f'loading model and generating plots')
+                        with open(model_file, 'rb') as f:
+                            cached_model = pickle.load(f)
+                        mlops.generate_interp_plots(
+                            cached_model, model_name, x_train, x_test,
+                            y_train, y_test, model_dir,
+                            RANDOM_STATE, LOG_TARGET,
+                        )
             else:
                 logger.info(f'  Training {model_name} for {holdout_name}...')
                 res = _train_and_evaluate(
@@ -948,7 +985,7 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
                 test_year_limits=test_year_limits,
                 raster_res=MOSAIC_RASTER_RES,
                 use_ama_ina=USE_AMA_INA,
-                create_basin_plots=False,
+                create_basin_plots=True,
             )
 
             bc_train, bc_test = _metrics_from_pred_df(pred_df)
@@ -1092,7 +1129,8 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
             scaling=False, already_created=False,
             year_list=YEAR_LIST, split_strategy=3,
             test_year=(),
-            outlier_op=3 if MAX_GW is not None else None,
+            outlier_op=3,
+            min_gw_pumping=MIN_GW if MIN_GW is not None else 1e-10,
             max_gw_pumping=MAX_GW if MAX_GW is not None else np.inf,
             test_gw_basins=(subbasin,),
             gw_basin_col='GW_Subbasin',
@@ -1133,6 +1171,25 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
             if cached_pq is not None:
                 logger.info(f'  Loading cached {model_name} (holdout: {subbasin})')
                 pred_df = pd.read_parquet(cached_pq)
+
+                # Generate interpretability plots if missing for cached predictions
+                interp_dir = os.path.join(model_dir, 'Interpretability')
+                interp_exists = (
+                    os.path.isdir(interp_dir)
+                    and len(os.listdir(interp_dir)) > 0
+                )
+                if not interp_exists:
+                    model_file = os.path.join(model_dir, model_name)
+                    if os.path.isfile(model_file):
+                        logger.info(f'Interpretability missing for cached {model_name} — '
+                                    f'loading model and generating plots')
+                        with open(model_file, 'rb') as f:
+                            cached_model = pickle.load(f)
+                        mlops.generate_interp_plots(
+                            cached_model, model_name, x_train, x_test,
+                            y_train, y_test, model_dir,
+                            RANDOM_STATE, LOG_TARGET,
+                        )
             else:
                 logger.info(f'  Training {model_name} (holdout: {subbasin})...')
                 res = _train_and_evaluate(
@@ -1176,7 +1233,7 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
                 test_year_limits=(),
                 gw_basin_col='GW_Subbasin',
                 use_ama_ina=False,
-                create_basin_plots=False,
+                create_basin_plots=True,
             )
 
             bc_train, bc_test = _metrics_from_pred_df(pred_df)
@@ -1301,7 +1358,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     makedirs(prediction_dir)
 
     # ---- 3a. Train on ALL 1984-2024 metered data (no holdout) ----
-    # Step 2 already provides thorough LOO evaluation; here we maximise
+    # Step 2 already provides thorough LOO evaluation; here we maximize
     # training data for the best possible full-period predictions.
     data_dir = os.path.join(prediction_dir, 'data')
     ret_vals = dataops.create_train_test_data(
@@ -1313,7 +1370,8 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         year_list=YEAR_LIST,
         split_strategy=1,
         test_year=(),
-        outlier_op=3 if MAX_GW is not None else None,
+        outlier_op=3,
+        min_gw_pumping=MIN_GW if MIN_GW is not None else 1e-10,
         max_gw_pumping=MAX_GW if MAX_GW is not None else np.inf,
         test_gw_basins=(),
         use_ama_ina=USE_AMA_INA,
@@ -1396,7 +1454,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
 
     # ---- Global linear bias correction from training residuals ----
     # A single linear correction (pred_corrected = |m*pred + b|) is learned
-    # from ALL AMA/INA training data so it generalises to non-AMA/INA basins
+    # from ALL AMA/INA training data so it generalizes to non-AMA/INA basins
     # during full-period prediction.
     # Bias correction operates in original (mm) scale.
     train_preds = np.abs(model.predict(x_train))
@@ -1865,7 +1923,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
 
     # ---- 3e. Era-specific model interpretability ----
     # Generate SHAP, ALE, and permutation importance plots per era to
-    # characterise how feature contributions change between the training
+    # characterize how feature contributions change between the training
     # window and extrapolation periods (hindcast, projection).
     logger.info('Computing era-specific interpretability plots...')
     for era_name, frames in era_features.items():
@@ -2547,6 +2605,7 @@ def main() -> None:
                 start_year=START_YEAR,
                 end_year=END_YEAR,
                 year_list=YEAR_LIST,
+                train_year_list_baseline=YEAR_LIST,
                 fold_count=FOLD_COUNT,
                 repeats=REPEATS,
                 n_trials=N_TRIALS,

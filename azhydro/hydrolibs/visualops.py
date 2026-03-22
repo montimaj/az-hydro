@@ -974,12 +974,18 @@ def create_complete_model_visualization(
         use_ama_ina=use_ama_ina, units=['af', 'm3', 'mm']
     )
 
-    # 2. Scatter plots
+    # 2. Scatter plots (BC predictions if available, otherwise raw)
     logger.info('  Creating scatter plots...')
     create_train_test_scatter(
         pred_df, output_dir, model_name, test_case,
         actual_col=actual_col, pred_col=pred_col
     )
+    # 2b. Raw (non-BC) scatter plots
+    if 'Pred_GW_mm_raw' in pred_df.columns:
+        create_train_test_scatter(
+            pred_df, output_dir, f'{model_name}_Raw', test_case,
+            actual_col=actual_col, pred_col='Pred_GW_mm_raw'
+        )
 
     # 3. Residual plots
     logger.info('  Creating residual plots...')
@@ -1981,7 +1987,7 @@ def _export_cross_strategy_latex(summary_df: pd.DataFrame, output_dir: str) -> N
         tex_rows.append(' & '.join(row_parts) + r' \\')
 
     n_metrics = len(metric_cols)
-    # Column spec: l + (n_metrics * n_strategies) centred columns
+    # Column spec: l + (n_metrics * n_strategies) centered columns
     col_spec = 'l' + 'c' * (n_metrics * len(strategies))
 
     # Build multicolumn header
@@ -2246,7 +2252,7 @@ def era_shaded_ts(
         years (np.ndarray): Array of years.
         mean_vals (np.ndarray): Mean values per year.
         std_vals (np.ndarray or None): Standard deviation per year (or None).
-        color (str): Line and shading colour.
+        color (str): Line and shading color.
         label (str or None): Legend label.
 
     Returns:
@@ -2950,7 +2956,7 @@ def create_era_raster_maps(
             ``Era_Maps_{title_slug}.png``.
         vmin (float or None): Explicit colorbar minimum.
         vmax (float or None): Explicit colorbar maximum.
-        symmetric (bool): If True, centre colorbar on zero.
+        symmetric (bool): If True, center colorbar on zero.
         band (int): Band number to read from each raster (1-based).
         mask_nan_only (bool): If True, only mask NaN pixels (keep zeros
             visible).
@@ -3387,7 +3393,7 @@ def create_trend_maps(
         title (str): Category name for the figure title.
         unit_label (str): Depth/volume unit (e.g. 'mm', 'AF').
         periods (dict or None): ``{period_name: (start, end)}`` year ranges
-            to analyse.  Defaults to the four standard eras plus full period.
+            to analyze.  Defaults to the four standard eras plus full period.
         alpha (float): Significance level for Mann-Kendall (default 0.05).
         band (int): Band number to read from each raster (1-based).
         subbasin_shp (str or None): Path to sub-basin shapefile for
@@ -3908,7 +3914,7 @@ def plot_intercomp_taylor(
         ax.set_theta_direction(-1)
         ax.set_theta_offset(np.pi / 2)
 
-        # Reference arc (normalised std = 1)
+        # Reference arc (normalized std = 1)
         theta_ref = np.linspace(0, np.pi / 2, 100)
         ax.plot(theta_ref, np.ones_like(theta_ref), 'k--', lw=1, label='Reference')
 
@@ -3961,7 +3967,7 @@ def plot_intercomp_taylor(
             ax.plot([], [], 'o', color=color, markersize=6, label=pair_key)
 
         ax.set_rlabel_position(0)
-        ax.set_ylabel('Normalised Std Dev', labelpad=30)
+        ax.set_ylabel('Normalized Std Dev', labelpad=30)
         ax.set_xlabel('Correlation', labelpad=10)
         corr_ticks = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6,
                       0.7, 0.8, 0.9, 0.95, 0.99, 1.0]
