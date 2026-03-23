@@ -9,7 +9,6 @@ import logging
 import multiprocessing
 import os
 import shutil
-import warnings
 from glob import glob
 from typing import Any
 
@@ -416,24 +415,69 @@ def create_land_use_data(
     return input_df
 
 
-def get_ama_ina_basin_names() -> list[str]:
-    """
-    Get the names of AMA and INA basins.
-    
-    .. deprecated::
-        Import from ``hydrolibs.visualops`` instead.
+def generate_basin_data_summary(
+        az_df: pd.DataFrame,
+        output_dir: str,
+        year_list: list[int],
+        pred_attr: str = 'gw_pumping_mm',
+        year_col: str = 'Year',
+        gw_basin_col: str = 'GW_Basin',
+) -> pd.DataFrame:
+    """Generate per-basin data availability summary for AMA/INA basins.
+
+    Computes pixel count, non-zero row count, metered year coverage, and
+    basic pumping statistics for each AMA/INA basin during the metered period.
+
+    Args:
+        az_df: Full Arizona predictor DataFrame.
+        output_dir: Directory to save the CSV.
+        year_list: Metered years to include (e.g. 1984-2024).
+        pred_attr: Target column name.
+        year_col: Year column name.
+        gw_basin_col: Basin column name.
 
     Returns:
-        list: List of AMA and INA basin names.
+        pd.DataFrame: Summary table (one row per basin, sorted by non-zero count).
     """
-    warnings.warn(
-        "gwops.get_ama_ina_basin_names() is deprecated; "
-        "import from hydrolibs.visualops instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
     import hydrolibs.visualops as vizops
-    return vizops.get_ama_ina_basin_names()
+
+    makedirs(output_dir)
+    ama_ina = vizops.get_ama_ina_basin_names()
+    metered = az_df[
+        az_df[year_col].isin(year_list) &
+        az_df[gw_basin_col].isin(ama_ina)
+    ]
+    n_years = len(year_list)
+
+    rows = []
+    for basin in sorted(ama_ina):
+        sub = metered[metered[gw_basin_col] == basin]
+        if sub.empty:
+            continue
+        vals = sub[pred_attr]
+        pos = sub[sub[pred_attr] > 0]
+        pixels_per_year = len(sub) // max(n_years, 1)
+        metered_years = sorted(pos[year_col].unique().tolist()) if not pos.empty else []
+        rows.append({
+            'Basin': basin,
+            'Pixels_Per_Year': pixels_per_year,
+            'Total_Rows': len(sub),
+            'Rows_GT_0': len(pos),
+            'Rows_EQ_0': int((vals == 0).sum()),
+            'Rows_NaN': int(vals.isna().sum()),
+            'Pct_NonZero': round(100 * len(pos) / max(len(sub), 1), 2),
+            'Metered_Years': len(metered_years),
+            'First_Year': metered_years[0] if metered_years else None,
+            'Last_Year': metered_years[-1] if metered_years else None,
+            'Mean_GT_0_mm': round(pos[pred_attr].mean(), 1) if not pos.empty else None,
+            'Max_mm': round(pos[pred_attr].max(), 1) if not pos.empty else None,
+        })
+
+    summary_df = pd.DataFrame(rows).sort_values('Rows_GT_0', ascending=False)
+    csv_path = os.path.join(output_dir, 'Basin_Data_Summary.csv')
+    summary_df.to_csv(csv_path, index=False)
+    logger.info(f'Basin data summary ({len(summary_df)} basins) saved to {csv_path}')
+    return summary_df
 
 
 def parallel_make_time_series_plots(

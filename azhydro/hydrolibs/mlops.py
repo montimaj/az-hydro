@@ -66,8 +66,8 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 # Monotone constraint map: +1 = increasing, -1 = decreasing, 0 = unconstrained
 MONOTONE_CONSTRAINT_MAP: dict[str, int] = {
     'annual_et_ensemble_mm': 0,
-    'well_density': 0,
-    'AGRI': 0,
+    'well_density': 1,
+    'AGRI': 1,
     'URBAN': 0,
     'annual_peff_mm': 0,
     'canal_weighted_streamflow_mm': 0,
@@ -99,17 +99,19 @@ def compute_irrigation_demand_floor(
         x: pd.DataFrame,
         basin_series: pd.Series,
         nhm_basin_ie: dict,
+        well_density: np.ndarray,
+        well_density_p99: float,
         et_col: str = 'annual_et_ensemble_mm',
         peff_col: str = 'annual_peff_mm',
         irr_frac_col: str = 'annual_irr_fraction',
         gw_frac_col: str = 'annual_gw_fraction',
 ) -> np.ndarray:
-    """Compute irrigation demand floor for each training sample.
+    """Compute well-density-weighted irrigation demand floor for each sample.
 
-    The water balance ``(ET - Peff) × irr_frac × gw_frac / IE`` estimates
-    only the irrigation component of GW pumping.  Since the model predicts
-    total GW pumping (irrigation + municipal/industrial), this serves as a
-    **lower bound**.
+    The water balance ``(ET - Peff) × irr_frac × gw_frac / IE`` uses
+    **pixel-scale** ET, Peff, irr_frac, and gw_frac and basin-scale IE
+    from NHM.  The result is scaled by normalized well density so that
+    pixels with no wells receive a floor of zero.
 
     Args:
         x: Feature DataFrame (must contain ET, Peff, irr_fraction, gw_fraction).
@@ -117,6 +119,9 @@ def compute_irrigation_demand_floor(
         nhm_basin_ie: Dict from ``load_nhm_basin_ie()`` with key ``'mean'``
             mapping basin names to mean irrigation efficiency, and
             ``'overall_mean'`` as fallback.
+        well_density: 1-D array of well counts per pixel (aligned with x).
+        well_density_p99: 99th percentile of non-zero well_density from
+            training data, used for normalization.
         et_col: Column name for annual ET.
         peff_col: Column name for annual effective precipitation.
         irr_frac_col: Column name for irrigated fraction.
@@ -133,10 +138,10 @@ def compute_irrigation_demand_floor(
     ie_mean = nhm_basin_ie['mean']
     overall_ie = nhm_basin_ie.get('overall_mean', 0.5)
     ie_arr = np.array([ie_mean.get(b, overall_ie) for b in basin_series.values])
-    # Avoid division by zero
     ie_arr = np.where(ie_arr > 0, ie_arr, overall_ie)
 
-    y_floor = (et - peff) * irr_frac * gw_frac / ie_arr
+    well_density_norm = np.clip(well_density / well_density_p99, 0, 1)
+    y_floor = (et - peff) * irr_frac * gw_frac / ie_arr * well_density_norm
     return np.clip(y_floor, 0, None)
 
 
@@ -152,7 +157,7 @@ def _build_interaction_constraints(
     """Build interaction constraint name lists aligned with feature columns.
 
     Returns feature **name** lists (not integer indices) so that constraints
-    remain valid after the PIML wrapper strips ``__y_phys_log__`` from the
+    remain valid after the PIML wrapper strips physics columns from the
     DataFrame before calling the underlying estimator's ``fit()``.
 
     Returns None when disabled or when no group maps to the feature set.
@@ -168,27 +173,40 @@ def _build_interaction_constraints(
     return constraints if constraints else None
 
 
-class PhysicsFloorObjective:
-    """Pickle-safe custom objective with irrigation-demand floor penalty.
+class PhysicsBoundsObjective:
+    """Pickle-safe custom objective with floor and ceiling physics penalties.
 
-    The penalty is **one-sided**: only active when the prediction falls below
-    the physics-derived irrigation demand floor (in log1p space).
+    The floor penalty is active when the prediction falls below the
+    physics-derived irrigation demand floor.  The ceiling penalty is active
+    when the prediction exceeds a well-density-derived pumping ceiling.
 
     Gradients are normalized to match ``reg:squarederror`` scale (grad = ŷ−y,
-    hess = 1 when no floor violation) so that XGBoost's regularization
-    parameters (``reg_lambda``, ``min_child_weight``, ``gamma``) retain their
-    usual effective strength.
+    hess = 1 when no violation) so that XGBoost's regularization parameters
+    (``reg_lambda``, ``min_child_weight``, ``gamma``) retain their usual
+    effective strength.
 
     Attributes:
-        y_phys_log: 1-D array of ``log1p(irrigation_demand_floor)`` per sample.
-        physics_lambda: Strength of the floor penalty (tuned by Optuna).
-        mask: Binary mask — 1 where irrigation demand > 0.
+        y_phys_floor: 1-D array of floor values per sample.
+        y_phys_ceil: 1-D array of ceiling values per sample.
+        physics_lambda_floor: Strength of the floor penalty (tuned by Optuna).
+        physics_lambda_ceil: Strength of the ceiling penalty (tuned by Optuna).
+        floor_mask: Binary mask — 1 where floor > 0.
+        ceil_mask: Binary mask — 1 where ceiling > 0.
     """
 
-    def __init__(self, y_phys_log: np.ndarray, physics_lambda: float):
-        self.y_phys_log = y_phys_log
-        self.physics_lambda = physics_lambda
-        self.mask = (y_phys_log > 0).astype(np.float64)
+    def __init__(
+            self,
+            y_phys_floor: np.ndarray,
+            y_phys_ceil: np.ndarray,
+            physics_lambda_floor: float,
+            physics_lambda_ceil: float,
+    ):
+        self.y_phys_floor = y_phys_floor
+        self.y_phys_ceil = y_phys_ceil
+        self.physics_lambda_floor = physics_lambda_floor
+        self.physics_lambda_ceil = physics_lambda_ceil
+        self.floor_mask = (y_phys_floor > 0).astype(np.float64)
+        self.ceil_mask = (y_phys_ceil > 0).astype(np.float64)
 
     def __call__(self, y_true: np.ndarray, y_pred: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         # XGBoost 3.0+ passes (y_true, y_pred); older versions passed
@@ -199,148 +217,191 @@ class PhysicsFloorObjective:
         y_true = np.asarray(y_true, dtype=np.float64)
         y_pred = np.asarray(y_pred, dtype=np.float64)
 
-        residual = y_pred - y_true                     # MSE component
-        violation = np.clip(self.y_phys_log - y_pred, 0, None)  # floor violation
+        residual = y_pred - y_true                                        # MSE component
+        floor_violation = np.clip(self.y_phys_floor - y_pred, 0, None)    # pred below floor
+        ceil_violation = np.clip(y_pred - self.y_phys_ceil, 0, None)      # pred above ceiling
 
-        # Normalized to reg:squarederror scale (base grad = ŷ−y, base hess = 1)
-        grad = residual - self.physics_lambda * self.mask * violation
-        hess = 1.0 + self.physics_lambda * self.mask * (violation > 0).astype(np.float64)
+        # Floor violation pushes prediction UP (negative grad)
+        # Ceiling violation pushes prediction DOWN (positive grad)
+        grad = (residual
+                - self.physics_lambda_floor * self.floor_mask * floor_violation
+                + self.physics_lambda_ceil * self.ceil_mask * ceil_violation)
+        hess = (1.0
+                + self.physics_lambda_floor * self.floor_mask * (floor_violation > 0).astype(np.float64)
+                + self.physics_lambda_ceil * self.ceil_mask * (ceil_violation > 0).astype(np.float64))
         return grad, hess
 
 
-def make_physics_floor_objective(y_phys_log: np.ndarray, physics_lambda: float):
-    """Factory for XGBoost/LightGBM custom objective with irrigation-demand floor.
+# Backward-compatible aliases
+PhysicsFloorObjective = PhysicsBoundsObjective
 
-    Returns a pickle-safe ``PhysicsFloorObjective`` callable suitable for
-    ``XGBRegressor(objective=...)`` or ``LGBMRegressor(objective=...)``.
-    """
-    return PhysicsFloorObjective(y_phys_log, physics_lambda)
+
+def make_physics_floor_objective(y_phys_log: np.ndarray, physics_lambda: float):
+    """Backward-compatible factory (floor only, no ceiling)."""
+    ceil = np.full_like(y_phys_log, np.inf)
+    return PhysicsBoundsObjective(y_phys_log, ceil, physics_lambda, 0.0)
 
 
 # ── Physics wrapper estimators ───────────────────────────────────────────────
 # These wrap XGBRegressor / LGBMRegressor / XGBRFRegressor and smuggle the
-# physics floor (y_phys_log) through sklearn's cross_validate by appending it
-# as an extra column ``__y_phys_log__`` in X.  fit() strips it, builds the
-# custom objective, and delegates to the underlying estimator.
+# physics floor and ceiling through sklearn's cross_validate by appending them
+# as extra columns in X.  fit() strips them, builds the custom objective, and
+# delegates to the underlying estimator.
 
-_PHYS_COL = '__y_phys_log__'
+_PHYS_COL = '__y_phys_log__'           # water-balance floor (smuggled column)
+_PHYS_CEIL_COL = '__y_phys_ceil__'     # kept for backward compat (unused)
+_PHYS_COLS = {_PHYS_COL, _PHYS_CEIL_COL}
+
+
+def _drop_phys_cols(x: pd.DataFrame | np.ndarray) -> pd.DataFrame | np.ndarray:
+    """Drop all physics columns from a DataFrame (no-op for ndarray)."""
+    if isinstance(x, pd.DataFrame):
+        to_drop = [c for c in _PHYS_COLS if c in x.columns]
+        return x.drop(columns=to_drop) if to_drop else x
+    return x
 
 
 def _real_n_features(x: pd.DataFrame | np.ndarray) -> int:
-    """Return the number of real features (excluding the physics column)."""
+    """Return the number of real features (excluding physics columns)."""
     n = x.shape[1]
-    if isinstance(x, pd.DataFrame) and _PHYS_COL in x.columns:
-        n -= 1
+    if isinstance(x, pd.DataFrame):
+        n -= sum(1 for c in _PHYS_COLS if c in x.columns)
     return n
+
+
 
 
 class _PhysicsXGBMixin:
     """Shared logic for physics-informed XGBoost-family estimators."""
 
-    def _extract_phys(self, X):
-        """Strip the physics column from X and return (X_clean, y_phys_log)."""
+    @staticmethod
+    def _extract_wb_floor(X):
+        """Extract water-balance floor and strip physics columns."""
         if isinstance(X, pd.DataFrame) and _PHYS_COL in X.columns:
-            y_phys = X[_PHYS_COL].values
-            X_clean = X.drop(columns=[_PHYS_COL])
-            return X_clean, y_phys
-        elif isinstance(X, np.ndarray) and hasattr(self, '_phys_col_idx'):
-            y_phys = X[:, self._phys_col_idx]
-            X_clean = np.delete(X, self._phys_col_idx, axis=1)
-            return X_clean, y_phys
-        return X, None
+            y_wb_floor = X[_PHYS_COL].values
+            return _drop_phys_cols(X), y_wb_floor
+        return _drop_phys_cols(X), None
 
     def fit(self, X, y, **kwargs):
-        X_clean, y_phys = self._extract_phys(X)
-        if y_phys is not None and self.physics_lambda > 0:
+        X_clean, y_floor = self._extract_wb_floor(X)
+        if y_floor is not None and self.physics_lambda_floor > 0:
+            n = len(y_floor)
             self.set_params(
-                objective=make_physics_floor_objective(y_phys, self.physics_lambda)
+                objective=PhysicsBoundsObjective(
+                    y_floor, np.full(n, np.inf),
+                    self.physics_lambda_floor, 0.0,
+                )
             )
         else:
-            # Pure MSE fallback (λ=0 or no physics column)
             self.set_params(objective='reg:squarederror')
         return super().fit(X_clean, y, **kwargs)
 
     def predict(self, X, **kwargs):
-        X_clean, _ = self._extract_phys(X)
+        X_clean, _ = self._extract_wb_floor(X)
         return super().predict(X_clean, **kwargs)
 
     def score(self, X, y, **kwargs):
-        X_clean, _ = self._extract_phys(X)
+        X_clean, _ = self._extract_wb_floor(X)
         return super().score(X_clean, y, **kwargs)
 
     def get_xgb_params(self):
-        """Exclude physics_lambda from XGBoost's internal parameter dict."""
+        """Exclude physics lambdas from XGBoost's internal parameter dict."""
         params = super().get_xgb_params()
-        params.pop('physics_lambda', None)
+        params.pop('physics_lambda_floor', None)
+        params.pop('physics_lambda_ceil', None)
+        params.pop('physics_lambda', None)  # backward compat
         return params
 
     def get_n_features(self, X):
-        """Return the number of real features (excluding physics column)."""
-        if isinstance(X, pd.DataFrame) and _PHYS_COL in X.columns:
-            return X.shape[1] - 1
-        return X.shape[1]
+        """Return the number of real features (excluding physics columns)."""
+        return _real_n_features(X)
 
 
 class _PhysicsLGBMMixin:
     """Shared logic for physics-informed LightGBM estimators."""
 
-    def _extract_phys(self, X):
+    @staticmethod
+    def _extract_wb_floor(X):
+        """Extract water-balance floor and strip physics columns."""
         if isinstance(X, pd.DataFrame) and _PHYS_COL in X.columns:
-            y_phys = X[_PHYS_COL].values
-            X_clean = X.drop(columns=[_PHYS_COL])
-            return X_clean, y_phys
-        elif isinstance(X, np.ndarray) and hasattr(self, '_phys_col_idx'):
-            y_phys = X[:, self._phys_col_idx]
-            X_clean = np.delete(X, self._phys_col_idx, axis=1)
-            return X_clean, y_phys
-        return X, None
+            y_wb_floor = X[_PHYS_COL].values
+            return _drop_phys_cols(X), y_wb_floor
+        return _drop_phys_cols(X), None
 
     def fit(self, X, y, **kwargs):
-        X_clean, y_phys = self._extract_phys(X)
-        if y_phys is not None and self.physics_lambda > 0:
+        X_clean, y_floor = self._extract_wb_floor(X)
+        if y_floor is not None and self.physics_lambda_floor > 0:
+            n = len(y_floor)
             self.set_params(
-                objective=make_physics_floor_objective(y_phys, self.physics_lambda)
+                objective=PhysicsBoundsObjective(
+                    y_floor, np.full(n, np.inf),
+                    self.physics_lambda_floor, 0.0,
+                )
             )
         else:
             self.set_params(objective='regression')
         return super().fit(X_clean, y, **kwargs)
 
     def predict(self, X, **kwargs):
-        X_clean, _ = self._extract_phys(X)
+        X_clean, _ = self._extract_wb_floor(X)
         return super().predict(X_clean, **kwargs)
 
     def score(self, X, y, **kwargs):
-        X_clean, _ = self._extract_phys(X)
+        X_clean, _ = self._extract_wb_floor(X)
         return super().score(X_clean, y, **kwargs)
 
     def get_n_features(self, X):
-        if isinstance(X, pd.DataFrame) and _PHYS_COL in X.columns:
-            return X.shape[1] - 1
-        return X.shape[1]
+        """Return the number of real features (excluding physics columns)."""
+        return _real_n_features(X)
 
 
 class PhysicsXGBRegressor(_PhysicsXGBMixin, XGBRegressor):
-    """XGBRegressor with physics-informed floor constraint objective."""
+    """XGBRegressor with physics-informed water-balance floor objective."""
 
-    def __init__(self, physics_lambda: float = 0.0, **kwargs):
-        self.physics_lambda = physics_lambda
+    def __init__(self, physics_lambda_floor: float = 0.0,
+                 physics_lambda_ceil: float = 0.0, **kwargs):
+        self.physics_lambda_floor = physics_lambda_floor
+        self.physics_lambda_ceil = physics_lambda_ceil
         super().__init__(**kwargs)
+
+    def __setstate__(self, state):
+        # Backward compat: old pickles have physics_lambda instead of split lambdas
+        if 'physics_lambda' in state and 'physics_lambda_floor' not in state:
+            state['physics_lambda_floor'] = state.pop('physics_lambda')
+            state.setdefault('physics_lambda_ceil', 0.0)
+        self.__dict__.update(state)
 
 
 class PhysicsXGBRFRegressor(_PhysicsXGBMixin, XGBRFRegressor):
-    """XGBRFRegressor with physics-informed floor constraint objective."""
+    """XGBRFRegressor with physics-informed water-balance floor objective."""
 
-    def __init__(self, physics_lambda: float = 0.0, **kwargs):
-        self.physics_lambda = physics_lambda
+    def __init__(self, physics_lambda_floor: float = 0.0,
+                 physics_lambda_ceil: float = 0.0, **kwargs):
+        self.physics_lambda_floor = physics_lambda_floor
+        self.physics_lambda_ceil = physics_lambda_ceil
         super().__init__(**kwargs)
+
+    def __setstate__(self, state):
+        if 'physics_lambda' in state and 'physics_lambda_floor' not in state:
+            state['physics_lambda_floor'] = state.pop('physics_lambda')
+            state.setdefault('physics_lambda_ceil', 0.0)
+        self.__dict__.update(state)
 
 
 class PhysicsLGBMRegressor(_PhysicsLGBMMixin, LGBMRegressor):
-    """LGBMRegressor with physics-informed floor constraint objective."""
+    """LGBMRegressor with physics-informed water-balance floor objective."""
 
-    def __init__(self, physics_lambda: float = 0.0, **kwargs):
-        self.physics_lambda = physics_lambda
+    def __init__(self, physics_lambda_floor: float = 0.0,
+                 physics_lambda_ceil: float = 0.0, **kwargs):
+        self.physics_lambda_floor = physics_lambda_floor
+        self.physics_lambda_ceil = physics_lambda_ceil
         super().__init__(**kwargs)
+
+    def __setstate__(self, state):
+        if 'physics_lambda' in state and 'physics_lambda_floor' not in state:
+            state['physics_lambda_floor'] = state.pop('physics_lambda')
+            state.setdefault('physics_lambda_ceil', 0.0)
+        self.__dict__.update(state)
 
 
 def get_model_dict(
@@ -348,6 +409,7 @@ def get_model_dict(
         use_dask: bool = False,
         get_model_names_only: bool = False,
         include_all_models: bool = False,
+        skip_piml: bool = False,
         feature_names: list[str] | None = None,
         use_interaction_constraints: bool = True,
 ) -> list[str] | dict[str, Any]:
@@ -360,11 +422,14 @@ def get_model_dict(
         include_all_models (bool): Set True to include additional ensemble models
                                    (ETR, HGBR, GBR, AdaBoost, Bagging, CatBoost,
                                    LR, Ridge, Lasso).
-                                   Core models (XGB, LGBM, RF, XGBRF, PIML_XGB,
-                                   PIML_LGBM, PIML_XGBRF) are always included.
+                                   Core models (XGB, LGBM, RF, XGBRF) are always
+                                   included.  PIML variants are included unless
+                                   *skip_piml* is True.
+        skip_piml (bool): Set True to exclude PIML_XGB, PIML_LGBM, PIML_XGBRF
+            from the model dictionary.
         feature_names (list[str] | None): Feature column names for building
             monotone/interaction constraints on PIML models.  Required when
-            ``get_model_names_only`` is False.
+            ``get_model_names_only`` is False and *skip_piml* is False.
         use_interaction_constraints (bool): Whether to apply Tier 2 interaction
             constraints to PIML models.
 
@@ -403,33 +468,34 @@ def get_model_dict(
         'XGBRF': XGBRFRegressor(
             n_jobs=n_jobs,
             seed=random_state,
-        ),
+        )
     }
 
     # Physics-informed models (3) — add constraints if feature_names provided
-    piml_xgb_kwargs = dict(n_jobs=n_jobs, seed=random_state)
-    piml_lgbm_kwargs = dict(
-        tree_learner='feature', random_state=random_state,
-        verbosity=-1, n_estimators=300, max_depth=16, num_leaves=31,
-        n_jobs=n_jobs,
-    )
-    piml_xgbrf_kwargs = dict(n_jobs=n_jobs, seed=random_state)
+    if not skip_piml:
+        piml_xgb_kwargs = dict(n_jobs=n_jobs, seed=random_state)
+        piml_lgbm_kwargs = dict(
+            tree_learner='feature', random_state=random_state,
+            verbosity=-1, n_estimators=300, max_depth=16, num_leaves=31,
+            n_jobs=n_jobs,
+        )
+        piml_xgbrf_kwargs = dict(n_jobs=n_jobs, seed=random_state)
 
-    if mono is not None:
-        piml_xgb_kwargs['monotone_constraints'] = mono
-        piml_xgbrf_kwargs['monotone_constraints'] = mono
-        # LGBM uses a string format for monotone constraints
-        piml_lgbm_kwargs['monotone_constraints'] = list(mono)
+        if mono is not None:
+            piml_xgb_kwargs['monotone_constraints'] = mono
+            piml_xgbrf_kwargs['monotone_constraints'] = mono
+            # LGBM uses a string format for monotone constraints
+            piml_lgbm_kwargs['monotone_constraints'] = list(mono)
 
-    if interaction is not None:
-        piml_xgb_kwargs['interaction_constraints'] = interaction
-        piml_xgbrf_kwargs['interaction_constraints'] = interaction
-        # LGBM uses interaction_constraints as list of lists
-        piml_lgbm_kwargs['interaction_constraints'] = interaction
+        if interaction is not None:
+            piml_xgb_kwargs['interaction_constraints'] = interaction
+            piml_xgbrf_kwargs['interaction_constraints'] = interaction
+            # LGBM uses interaction_constraints as list of lists
+            piml_lgbm_kwargs['interaction_constraints'] = interaction
 
-    model_dict['PIML_XGB'] = PhysicsXGBRegressor(**piml_xgb_kwargs)
-    model_dict['PIML_LGBM'] = PhysicsLGBMRegressor(**piml_lgbm_kwargs)
-    model_dict['PIML_XGBRF'] = PhysicsXGBRFRegressor(**piml_xgbrf_kwargs)
+        model_dict['PIML_XGB'] = PhysicsXGBRegressor(**piml_xgb_kwargs)
+        model_dict['PIML_LGBM'] = PhysicsLGBMRegressor(**piml_lgbm_kwargs)
+        model_dict['PIML_XGBRF'] = PhysicsXGBRFRegressor(**piml_xgbrf_kwargs)
 
     # Additional ensemble models (optional)
     # Note: GBR and ADA don't support n_jobs (sequential only)
@@ -1010,7 +1076,7 @@ def get_optuna_params_for_model(
             'min_child_weight': trial.suggest_int('min_child_weight', 1, 50),
         }
         if model_name == 'PIML_XGB':
-            params['physics_lambda'] = trial.suggest_float('physics_lambda', 0.0, 0.5)
+            params['physics_lambda_floor'] = trial.suggest_float('physics_lambda_floor', 0.0, 0.5)
         return params
     elif model_name in ('XGBRF', 'PIML_XGBRF'):
         params = {
@@ -1023,7 +1089,7 @@ def get_optuna_params_for_model(
             'min_child_weight': trial.suggest_int('min_child_weight', 1, 50),
         }
         if model_name == 'PIML_XGBRF':
-            params['physics_lambda'] = trial.suggest_float('physics_lambda', 0.0, 0.5)
+            params['physics_lambda_floor'] = trial.suggest_float('physics_lambda_floor', 0.0, 0.5)
         return params
     elif model_name in ('LGBM', 'PIML_LGBM'):
         params = {
@@ -1036,7 +1102,7 @@ def get_optuna_params_for_model(
             'min_child_samples': trial.suggest_int('min_child_samples', 10, 50, step=10)
         }
         if model_name == 'PIML_LGBM':
-            params['physics_lambda'] = trial.suggest_float('physics_lambda', 0.0, 0.5)
+            params['physics_lambda_floor'] = trial.suggest_float('physics_lambda_floor', 0.0, 0.5)
         return params
     elif model_name == 'RF':
         return {
@@ -1214,22 +1280,20 @@ def build_ml_model_optuna(
 
         include_all = model_name in _OPTIONAL_MODELS
         feature_names = list(x_train.columns) if isinstance(x_train, pd.DataFrame) else None
-        if feature_names and _PHYS_COL in feature_names:
-            feature_names = [f for f in feature_names if f != _PHYS_COL]
+        if feature_names:
+            feature_names = [f for f in feature_names if f not in _PHYS_COLS]
         model_dict = get_model_dict(random_state, include_all_models=include_all,
                                     feature_names=feature_names,
                                     use_interaction_constraints=use_interaction_constraints)
         model = model_dict[model_name]
         fit_params = dict(best_params)
         if model_name in _PIML_MODELS:
-            if 'physics_lambda' in fit_params:
-                model.physics_lambda = fit_params.pop('physics_lambda')
+            if 'physics_lambda_floor' in fit_params:
+                model.physics_lambda_floor = fit_params.pop('physics_lambda_floor')
             if 'underpred_alpha' in fit_params:
                 model.underpred_alpha = fit_params.pop('underpred_alpha')
         model.set_params(**fit_params)
-        x_fit = x_train
-        if model_name not in _PIML_MODELS and isinstance(x_train, pd.DataFrame) and _PHYS_COL in x_train.columns:
-            x_fit = x_train.drop(columns=[_PHYS_COL])
+        x_fit = x_train if model_name in _PIML_MODELS else _drop_phys_cols(x_train)
         model.fit(x_fit, y_train)
 
         model_file = os.path.join(model_dir, model_name)
@@ -1351,23 +1415,25 @@ def build_ml_model_optuna(
     # Refit on full training data with best parameters
     include_all = model_name in _OPTIONAL_MODELS
     feature_names = list(x_train.columns) if isinstance(x_train, pd.DataFrame) else None
-    if feature_names and _PHYS_COL in feature_names:
-        feature_names = [f for f in feature_names if f != _PHYS_COL]
+    if feature_names:
+        feature_names = [f for f in feature_names if f not in _PHYS_COLS]
     model_dict = get_model_dict(random_state, include_all_models=include_all,
                                 feature_names=feature_names,
                                 use_interaction_constraints=use_interaction_constraints)
     model = model_dict[model_name]
     fit_params = dict(best_params)
     if model_name in _PIML_MODELS:
-        if 'physics_lambda' in fit_params:
-            model.physics_lambda = fit_params.pop('physics_lambda')
+        if 'physics_lambda_floor' in fit_params:
+            model.physics_lambda_floor = fit_params.pop('physics_lambda_floor')
+        if 'physics_lambda_ceil' in fit_params:
+            model.physics_lambda_ceil = fit_params.pop('physics_lambda_ceil')
         if 'underpred_alpha' in fit_params:
             model.underpred_alpha = fit_params.pop('underpred_alpha')
     model.set_params(**fit_params)
-    # PIML wrappers strip _PHYS_COL internally; standard models need it removed
+    # PIML wrappers strip physics columns internally; standard models need them removed
     x_fit = x_train
-    if model_name not in _PIML_MODELS and isinstance(x_train, pd.DataFrame) and _PHYS_COL in x_train.columns:
-        x_fit = x_train.drop(columns=[_PHYS_COL])
+    if model_name not in _PIML_MODELS:
+        x_fit = _drop_phys_cols(x_train)
     model.fit(x_fit, y_train)
 
     model_file = os.path.join(model_dir, model_name)
@@ -1417,15 +1483,17 @@ def objective_with_cv_enhanced(
     # Get model
     include_all = model_name in _OPTIONAL_MODELS
     feature_names = list(x_train.columns) if isinstance(x_train, pd.DataFrame) else None
-    if feature_names and _PHYS_COL in feature_names:
-        feature_names = [f for f in feature_names if f != _PHYS_COL]
+    if feature_names:
+        feature_names = [f for f in feature_names if f not in _PHYS_COLS]
     model = get_model_dict(random_state, include_all_models=include_all,
                            feature_names=feature_names,
                            use_interaction_constraints=use_interaction_constraints)[model_name]
-    # Extract physics_lambda for PIML wrappers before set_params
     fit_params = dict(params)
-    if model_name in _PIML_MODELS and 'physics_lambda' in fit_params:
-        model.physics_lambda = fit_params.pop('physics_lambda')
+    if model_name in _PIML_MODELS:
+        if 'physics_lambda_floor' in fit_params:
+            model.physics_lambda_floor = fit_params.pop('physics_lambda_floor')
+        if 'physics_lambda_ceil' in fit_params:
+            model.physics_lambda_ceil = fit_params.pop('physics_lambda_ceil')
     model.set_params(**fit_params)
     # Single-threaded model training — cross_validate parallelises across folds
     if hasattr(model, 'n_jobs'):
@@ -1433,10 +1501,8 @@ def objective_with_cv_enhanced(
     elif hasattr(model, 'thread_count'):
         model.set_params(thread_count=1)
 
-    # PIML wrappers strip _PHYS_COL internally; standard models need it removed
-    x_cv = x_train
-    if model_name not in _PIML_MODELS and isinstance(x_train, pd.DataFrame) and _PHYS_COL in x_train.columns:
-        x_cv = x_train.drop(columns=[_PHYS_COL])
+    # PIML wrappers strip physics columns internally; standard models need them removed
+    x_cv = x_train if model_name in _PIML_MODELS else _drop_phys_cols(x_train)
 
     # Cross-validation with early stopping for pruning
     cv_results = cross_validate(
@@ -1497,7 +1563,7 @@ def _plot_physics_floor_diagnostic(
         output_dir: str,
         log_target: bool = False,
 ) -> None:
-    """Scatter predicted vs physics floor, colored by constraint activity.
+    """Scatter predicted vs water-balance floor, colored by constraint activity.
 
     Only generated for PIML models.  Silently returns for standard models.
     """
@@ -1507,7 +1573,7 @@ def _plot_physics_floor_diagnostic(
         return
 
     y_floor_log = x_train[_PHYS_COL].values
-    x_clean = x_train.drop(columns=[_PHYS_COL])
+    x_clean = _drop_phys_cols(x_train)
     y_pred_log = model.predict(x_clean)
 
     # Convert to original scale for plotting
@@ -1520,47 +1586,44 @@ def _plot_physics_floor_diagnostic(
         y_pred = np.abs(y_pred_log)
         y_obs = y_train
 
-    active = y_pred <= y_floor
-    n_active = int(active.sum())
-    n_total = len(active)
+    n_total = len(y_pred)
+    floor_active = y_pred <= y_floor
+    n_floor = int(floor_active.sum())
 
     fig, axes = plt.subplots(1, 2, figsize=(24, 10))
 
-    # Panel 1: predicted vs floor
+    resid = y_pred - y_obs
+    bins = np.linspace(np.nanpercentile(resid, 1), np.nanpercentile(resid, 99), 60)
+
     ax = axes[0]
-    ax.scatter(y_floor[~active], y_pred[~active], alpha=0.3, s=8,
-               color='steelblue', label=f'Above floor ({n_total - n_active:,})')
-    ax.scatter(y_floor[active], y_pred[active], alpha=0.5, s=12,
-               color='firebrick', label=f'At/below floor ({n_active:,})')
+    ax.scatter(y_floor[~floor_active], y_pred[~floor_active], alpha=0.3, s=8,
+               color='steelblue', label=f'Above floor ({n_total - n_floor:,})')
+    ax.scatter(y_floor[floor_active], y_pred[floor_active], alpha=0.5, s=12,
+               color='firebrick', label=f'At/below floor ({n_floor:,})')
     fmax = max(np.nanmax(y_floor), np.nanmax(y_pred))
     ax.plot([0, fmax], [0, fmax], 'k--', alpha=0.5, label='1:1 line')
-    ax.set_xlabel('Physics Floor — (ET−Peff)×irr×gw/IE  [mm]')
+    ax.set_xlabel('Physics Floor — (ET−Peff)×irr×gw/IE × wd_norm [mm]')
     ax.set_ylabel('Predicted GW Pumping [mm]')
-    ax.set_title(f'{model_name}: Predicted vs Irrigation Demand Floor')
+    ax.set_title(f'{model_name}: Predicted vs Floor')
     ax.legend(fontsize=12)
 
-    # Panel 2: residual (pred - observed) split by constraint activity
     ax = axes[1]
-    resid = y_pred - y_obs
-    resid_active = resid[active]
-    resid_inactive = resid[~active]
-    bins = np.linspace(np.nanpercentile(resid, 1), np.nanpercentile(resid, 99), 60)
-    ax.hist(resid_inactive, bins=bins, alpha=0.6, color='steelblue',
-            label=f'Floor inactive ({n_total - n_active:,})')
-    ax.hist(resid_active, bins=bins, alpha=0.6, color='firebrick',
-            label=f'Floor active ({n_active:,})')
+    ax.hist(resid[~floor_active], bins=bins, alpha=0.6, color='steelblue',
+            label=f'Floor inactive ({n_total - n_floor:,})')
+    ax.hist(resid[floor_active], bins=bins, alpha=0.6, color='firebrick',
+            label=f'Floor active ({n_floor:,})')
     ax.axvline(0, color='k', linestyle='--', alpha=0.5)
     ax.set_xlabel('Residual (Predicted − Observed) [mm]')
     ax.set_ylabel('Count')
-    ax.set_title(f'{model_name}: Residual Distribution by Floor Activity')
+    ax.set_title(f'{model_name}: Residuals by Floor Activity')
     ax.legend(fontsize=12)
 
     plt.tight_layout()
     out_path = os.path.join(output_dir, f'{model_name}_Physics_Floor_Diagnostic.png')
     plt.savefig(out_path, dpi=600, bbox_inches='tight')
     plt.close(fig)
-    logger.info(f'Physics floor diagnostic: {n_active}/{n_total} '
-                f'({100*n_active/n_total:.1f}%) training samples at/below floor')
+    logger.info(f'Physics floor diagnostic: floor active {n_floor}/{n_total} '
+                f'({100*n_floor/n_total:.1f}%)')
 
 
 def generate_interp_plots(
@@ -1573,25 +1636,34 @@ def generate_interp_plots(
         output_dir: str,
         random_state: int,
         log_target: bool = False,
+        shap_subsample: int | None = None,
 ) -> None:
     """Generate permutation importance, ALE, SHAP, and floor diagnostic plots.
 
     Strips the physics column (if present) before passing data to the
     interpretability functions.  For PIML models, also generates a physics
     floor diagnostic plot showing predicted vs irrigation demand floor.
+
+    Args:
+        shap_subsample: Max samples for SHAP computation.  ``None`` (default)
+            auto-selects: 1000 for slow sklearn ensembles (RF, ETR, BAG,
+            GBR, ADA), 5000 for others.
     """
+    _SLOW_SHAP_MODELS = {'RF', 'ETR', 'BAG', 'GBR', 'ADA'}
+    if shap_subsample is None:
+        shap_subsample = 1000 if model_name in _SLOW_SHAP_MODELS else 5000
     interp_dir = os.path.join(output_dir, 'Interpretability')
     makedirs(interp_dir)
 
-    # Physics floor diagnostic (before stripping _PHYS_COL)
+    # Physics floor diagnostic (before stripping physics columns)
     _plot_physics_floor_diagnostic(
         model, model_name, x_train, y_train,
         interp_dir, log_target=log_target,
     )
 
     # Strip physics column — interp functions expect real features only
-    x_tr = x_train.drop(columns=[_PHYS_COL], errors='ignore')
-    x_te = x_test.drop(columns=[_PHYS_COL], errors='ignore')
+    x_tr = _drop_phys_cols(x_train)
+    x_te = _drop_phys_cols(x_test)
 
     # Permutation importance (train + test)
     compute_perm_imp(
@@ -1611,11 +1683,11 @@ def generate_interp_plots(
     # SHAP plots (train + test, separate labels)
     compute_shap_plots(
         model_name, model, x_tr, interp_dir,
-        data_label='train',
+        subsample=shap_subsample, data_label='train',
     )
     compute_shap_plots(
         model_name, model, x_te, interp_dir,
-        data_label='test',
+        subsample=shap_subsample, data_label='test',
     )
 
 
@@ -1820,18 +1892,16 @@ def compare_all_models(
                 )
             else:
                 feature_names = list(x_train.columns) if isinstance(x_train, pd.DataFrame) else None
-                if feature_names and _PHYS_COL in feature_names:
-                    feature_names = [f for f in feature_names if f != _PHYS_COL]
+                if feature_names:
+                    feature_names = [f for f in feature_names if f not in _PHYS_COLS]
                 model_dict = get_model_dict(
                     random_state, include_all_models=True,
                     feature_names=feature_names,
                     use_interaction_constraints=use_interaction_constraints,
                 )
                 model = model_dict[model_name]
-                # PIML wrappers strip _PHYS_COL internally; standard models need it removed
-                x_fit = x_train
-                if model_name not in _PIML_MODELS and isinstance(x_train, pd.DataFrame) and _PHYS_COL in x_train.columns:
-                    x_fit = x_train.drop(columns=[_PHYS_COL])
+                # PIML wrappers strip physics columns internally; standard models need them removed
+                x_fit = x_train if model_name in _PIML_MODELS else _drop_phys_cols(x_train)
                 model.fit(x_fit, y_train)
                 cv_metric_df = pd.DataFrame()
 
@@ -1915,9 +1985,9 @@ def compare_all_models(
                 test_mae = normalized_mae(test_pred['Actual_GW_mm'].values, test_pred['Pred_GW_mm'].values)
             else:
                 # Evaluate directly on raw data
-                if model_name not in _PIML_MODELS and isinstance(x_train, pd.DataFrame) and _PHYS_COL in x_train.columns:
-                    x_tr_pred = x_train.drop(columns=[_PHYS_COL])
-                    x_te_pred = x_test.drop(columns=[_PHYS_COL])
+                if model_name not in _PIML_MODELS:
+                    x_tr_pred = _drop_phys_cols(x_train)
+                    x_te_pred = _drop_phys_cols(x_test)
                 else:
                     x_tr_pred = x_train
                     x_te_pred = x_test
@@ -2666,12 +2736,11 @@ def perform_bias_correction(
         }
     ).round(2)
     metrics_df_test_linear.to_csv(os.path.join(output_dir, 'Test_Metrics_Linear.csv'), index=False)
-    # Check if BC improved all key train metrics
+    # Check if BC improved R2, RMSE, and MAE on train data
     bc_improved = (
         train_r2_ecdf >= train_r2
         and train_rmse_ecdf <= train_rmse
         and train_mae_ecdf <= train_mae
-        and abs(train_mbe_ecdf) <= abs(train_mbe)
     )
     if not bc_improved:
         logger.warning(
@@ -2734,11 +2803,11 @@ def get_prediction_results(
         pd.DataFrame: Modified prediction data frame.
     """
 
-    # PIML wrappers strip _PHYS_COL internally during predict();
-    # standard models were trained without it, so strip before predict.
-    if model_name not in _PIML_MODELS and isinstance(x_train, pd.DataFrame) and _PHYS_COL in x_train.columns:
-        x_tr_pred = x_train.drop(columns=[_PHYS_COL])
-        x_te_pred = x_test.drop(columns=[_PHYS_COL])
+    # PIML wrappers strip physics columns internally during predict();
+    # standard models were trained without them, so strip before predict.
+    if model_name not in _PIML_MODELS:
+        x_tr_pred = _drop_phys_cols(x_train)
+        x_te_pred = _drop_phys_cols(x_test)
     else:
         x_tr_pred = x_train
         x_te_pred = x_test
@@ -2753,9 +2822,9 @@ def get_prediction_results(
     y_pred_train = np.abs(y_pred_train)
     y_pred_test = np.abs(y_pred_test)
 
-    # Output DataFrames always exclude the physics column
-    x_tr_out = x_train.drop(columns=[_PHYS_COL], errors='ignore') if isinstance(x_train, pd.DataFrame) else x_train
-    x_te_out = x_test.drop(columns=[_PHYS_COL], errors='ignore') if isinstance(x_test, pd.DataFrame) else x_test
+    # Output DataFrames always exclude the physics columns
+    x_tr_out = _drop_phys_cols(x_train) if isinstance(x_train, pd.DataFrame) else x_train
+    x_te_out = _drop_phys_cols(x_test) if isinstance(x_test, pd.DataFrame) else x_test
     if x_scaler and y_scaler:
         x_tr_out = pd.DataFrame(x_scaler.inverse_transform(x_tr_out), columns=x_tr_out.columns)
         x_te_out = pd.DataFrame(x_scaler.inverse_transform(x_te_out), columns=x_te_out.columns)

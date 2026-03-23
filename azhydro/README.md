@@ -105,7 +105,7 @@ python pipeline.py --skip-eval pixel,temporal,summary # skip multiple strategies
 | `2a2` | Evaluate pixel holdout (spatial locations held out across all years) |
 | `2b` | Evaluate LOO temporal holdout |
 | `2c` | Evaluate LOO spatial holdout |
-| `3`  | Full-period physics-informed XGBoost prediction (1896–2099) |
+| `3`  | Full-period XGBoost prediction (1896–2099) |
 | `3b` | Hybrid uncertainty quantification |
 | `3e` | Well package (per-well GeoPackage with uncertainty) |
 | `3g` | Raster maps, actual vs predicted, and trend analysis for all output categories |
@@ -296,7 +296,7 @@ numbered steps plus a cross-strategy summary:
 Step 0   ─  Data Preparation
 Step 1   ─  Create AZ Predictor DataFrame
 Step 2   ─  Model Evaluation (4 strategies: Random, Pixel Holdout, Temporal LOO, Spatial LOO)
-Step 3   ─  Full-Period Physics-Informed XGBoost Prediction (1896–2099)
+Step 3   ─  Full-Period XGBoost Prediction (1896–2099)
 Step 3e  ─  Well Package (per-well GeoPackage with uncertainty)
 Step 3g  ─  Raster Maps & Trend Analysis for All Output Categories
 Step 4   ─  USGS Intercomparison (Withdrawals, CU, Peff)
@@ -317,20 +317,28 @@ All paths and modeling parameters are defined once at the top of
 | `START_YEAR` | `1896` | First prediction year. |
 | `END_YEAR` | `2099` | Last prediction year. |
 | `YEAR_LIST` | `1984–2024` | Years with metered pumping data (ADWR). |
-| `MAX_GW` | `3000.` | Maximum allowed pumping depth (mm). Justified by Tukey's extreme fence (Q3 + 3×IQR), ≈P99, and prior Arizona literature. Set to `None` to disable (falls back to 10,000 mm). |
+| `TRAIN_YEAR_LIST_BASELINE` | `2002–2020` | Training years for direct comparison with [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757). Used only by the `T1_Baseline` temporal holdout. |
+| `MIN_GW` | `None` | Minimum per-pixel GW pumping depth (mm). Pixels below this are excluded via outlier processing. Set to `None` to include all non-zero pixels; set to `0` for baselines that include zeros. |
+| `MAX_GW` | `3000` | Maximum allowed pumping depth (mm). Justified by Tukey's extreme fence (Q3 + 3×IQR), ≈P99, and [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757). Set to `None` to disable (falls back to 10,000 mm). |
 | `AF_MAX_THRESHOLD` | `5000` | Maximum per-well `AF Pumped`; rows exceeding this are dropped from CSVs. |
+| `LOG_TARGET` | `False` | Apply `log1p` / `expm1` target transform. See [Target transform](#target-transform). |
 | `RANDOM_STATE` | `42` | Seed for reproducibility. |
 | `N_EVAL_SEEDS` | `5` | Random seeds per test size for random/pixel holdout evaluation. |
-| `EVAL_TEST_SIZES` | `(0.10, 0.15, 0.20, 0.25, 0.30)` | Test fractions to sweep in the evaluation grid. |
-| `LOG_TARGET` | `True` | Apply `log1p` / `expm1` target transform. See [Target transform](#target-transform). |
-| `N_TRIALS` | `100` | Optuna hyperparameter-tuning trials. |
+| `EVAL_TEST_SIZES` | `(0.10, …, 0.30)` | Test fractions to sweep in the evaluation grid. |
+| `N_TRIALS` | `50` | Optuna hyperparameter-tuning trials. |
 | `FOLD_COUNT` | `5` | k-fold cross-validation folds. |
-| `N_DASK_WORKERS` | `10` | Dask parallel workers. |
+| `REPEATS` | `1` | Number of CV repetitions (e.g., `RepeatedKFold`). |
+| `N_DASK_WORKERS` | `10` | Dask parallel workers for model training. |
+| `N_DASK_WORKERS_DATA_PREP` | `40` | Dask parallel workers for data preparation (independent raster operations). |
 | `USE_OPTUNA` | `True` | Enable TPE-based hyperparameter search. |
 | `USE_DASK` | `True` | Enable distributed training via Dask. |
+| `INCLUDE_ALL_MODELS` | `True` | When `True`, adds optional models (ETR, HGBR, GBR, ADA, BAG, CAT, LR, RIDGE, LASSO) to the 4 core models. |
+| `SKIP_PIML` | `True` | When `True`, excludes physics-informed models (PIML_XGB, PIML_LGBM, PIML_XGBRF) from training and evaluation. See [note on PIML models](#note-on-physics-informed-piml-models). |
+| `PHYSICS_INTERACTION_CONSTRAINTS` | `False` | When `True`, applies feature interaction constraints to PIML models (only relevant when `SKIP_PIML=False`). |
+| `PREDICTION_MODEL` | `'XGB'` | Model used for full-period prediction (Step 3+). Valid names: core — `XGB`, `LGBM`, `RF`, `XGBRF`; optional (`INCLUDE_ALL_MODELS=True`) — `ETR`, `HGBR`, `GBR`, `ADA`, `BAG`, `CAT`, `LR`, `RIDGE`, `LASSO`; PIML (`SKIP_PIML=False`) — `PIML_XGB`, `PIML_LGBM`, `PIML_XGBRF`. |
 | `USE_AMA_INA` | `True` | Restrict training to AMA/INA management areas. |
-| `DROP_GW_BASINS` | `('WILLCOX AMA', …)` | Basins excluded from training. |
-| `TEMPORAL_HOLDOUTS` | T1–T6 | Six temporal leave-one-out configurations. |
+| `DROP_GW_BASINS` | `()` | Basins excluded from training. Empty by default (all AMA/INA basins included). For the `T1_Baseline` holdout, WILLCOX AMA and HUALAPAI VALLEY INA are dropped as they were not metered during the baseline period (pre-2020). |
+| `TEMPORAL_HOLDOUTS` | T1_Baseline + T1–T6 | Seven temporal leave-one-out configurations. `T1_Baseline` uses `TRAIN_YEAR_LIST_BASELINE` and `MIN_GW=0`. |
 | `DROP_ATTRS` | (list) | Columns dropped before modeling. |
 
 ### Step 0 — Data preparation (`prepare_data()`)
@@ -404,28 +412,10 @@ steps.
 
 ### Step 2 — Model evaluation
 
-Four complementary strategies assess model performance.  The core model
-zoo comprises 7 models — 4 standard baselines (XGB, LGBM, RF, XGBRF) and
-3 physics-informed variants (PIML_XGB, PIML_LGBM, PIML_XGBRF) — with
-optional models (ETR, HGBR, GBR, ADA, BAG, CAT, LR, RIDGE, LASSO)
-available when `INCLUDE_ALL_MODELS=True`.
-
-The physics-informed models embed domain knowledge via two tiers:
-
-1. **Monotone constraints** — ET, well density, AGRI, URBAN, crop fraction,
-   irrigation fraction, and groundwater fraction are constrained to increase
-   pumping predictions; effective precipitation and canal-weighted streamflow
-   are constrained to decrease them (more surface-water availability
-   substitutes for groundwater pumping).
-2. **Custom irrigation-demand floor objective** — a one-sided penalty
-   ensures predictions are not below the physics-estimated irrigation
-   demand `(ET − Peff) × irr_frac × gw_frac / IE`.  The penalty
-   strength (λ) is tuned by Optuna with λ=0 always reachable, so the
-   model can fall back to pure MSE if the constraint is unhelpful.
-   The custom objective's gradients are normalized to match XGBoost's
-   built-in `reg:squarederror` scale (base grad = ŷ−y, base hess = 1),
-   ensuring that regularisation parameters (`reg_lambda`,
-   `min_child_weight`, `gamma`) retain their usual effective strength.
+Four complementary strategies assess model performance.  The default
+model zoo comprises 13 models — 4 core baselines (XGB, LGBM, RF, XGBRF)
+and 9 additional ensemble/linear models (ETR, HGBR, GBR, ADA, BAG, CAT,
+LR, RIDGE, LASSO) enabled via `INCLUDE_ALL_MODELS=True`.
 
 All models use Optuna + Dask hyperparameter optimisation (100 TPE trials,
 5-fold CV) and report R², normalized RMSE (% of mean), normalized MAE
@@ -575,12 +565,10 @@ all splits.  Heatmaps and bar plots (`vizops.plot_loo_heatmap()`,
 hyperparameters directly on the test set (without cross-validation), making
 its reported test metrics analogous to validation scores.  The current study
 uses Optuna with `GroupKFold` (grouped by year), ensuring strict separation
-between tuning and evaluation.  For the standard (non-PIML) models, the
-current CV metrics show comparable or improved R² and RMSE relative to the
-previous study's test metrics, while the current test metrics are only
-marginally lower — confirming that the model generalizes well without
-relying on test-set information during training.  PIML model comparisons are
-pending.
+between tuning and evaluation.  The current CV metrics show comparable or
+improved R² and RMSE relative to the previous study's test metrics, while the current test metrics are only
+marginally lower, confirming that the model generalizes well without
+relying on test-set information during training.
 
 **Outputs:** `{MODEL_DIR}Model_Evaluation/Temporal_LOO/`
 
@@ -613,12 +601,9 @@ Saved to `{MODEL_DIR}Model_Evaluation/`.
 
 ### Step 3 — Full-period prediction (`predict_full_period()`)
 
-The core production step.  Trains a single **physics-informed XGBoost
-model** (`PIML_XGB`) on **all** metered data (1984–2024, no holdout) to
-maximize the training signal, then predicts annual pumping for every 2 km
-pixel from 1896 to 2099.  The physics-informed model uses both tiers
-of domain constraints (monotone constraints and the irrigation-demand
-floor objective) to produce physically consistent predictions.
+The core production step.  Trains a single **XGBoost model** on **all**
+metered data (1984–2024, no holdout) to maximize the training signal,
+then predicts annual pumping for every 2 km pixel from 1896 to 2099.
 
 **Absolute-value post-processing:** All predictions are wrapped in
 `np.abs()` because groundwater pumping depth is physically non-negative.
@@ -815,7 +800,7 @@ For each future year, per-GCM predictor rasters are downloaded from GEE
 mosaicked, and stored in `GEE_Mosaics_{res}m_{GCM}/`.  The six
 MACA-derived climate columns (ET, ETo, precip, Peff, Tmax, Tmin) from each
 GCM's predictor raster replace the ensemble values in the year DataFrame,
-the PIML_XGB model predicts total pumping, and σ_MACA is the per-pixel
+the XGBoost model predicts total pumping, and σ_MACA is the per-pixel
 sample standard deviation across the 5 predictions:
 
 $$\sigma_{\text{MACA}}(x, y, t) = \text{std}\bigl[\hat{y}_{\text{GCM}_1}, \ldots, \hat{y}_{\text{GCM}_5}\bigr]$$
@@ -827,11 +812,11 @@ GCM projections.
 values of ET, ETo, and Peff are recorded for each GCM and year.  A 3-panel
 ribbon plot (`Climate_Input_Spread.png`) and per-variable CSVs are saved
 to `Sigma_MACA/Climate_Input_Spread/`, showing how the raw climate inputs
-diverge across the 5 GCMs before they propagate through the PIML_XGB model.
+diverge across the 5 GCMs before they propagate through the XGBoost model.
 
-##### σ_model — PIML_XGB seed ensemble (all years, 1896–2099)
+##### σ_model — XGBoost seed ensemble (all years, 1896–2099)
 
-Ten PIML_XGB models are trained on the full metered dataset (1984–2024) with
+Ten XGBoost models are trained on the full metered dataset (1984–2024) with
 identical Optuna-tuned hyperparameters but different random seeds:
 
 ```
@@ -861,7 +846,7 @@ Two independent estimates of irrigated area fraction are available:
 
 1. **Residual RMSE** of the regression on training data measures the
    typical discrepancy between the two fractions.
-2. **Finite-difference sensitivity** — the PIML_XGB model is evaluated at
+2. **Finite-difference sensitivity** — the XGBoost model is evaluated at
    `irr_frac ± δ` (where δ = regression RMSE), and σ_irr is taken as
    `|pred_plus − pred_minus| / 2`.
 
@@ -894,7 +879,7 @@ instead.  For each of the 4 scenarios:
 2. The LULC class, crop fraction, and irrigation fraction are re-derived
    end-to-end (LULC → AGRI/URBAN via `gwops.create_land_use_data()` →
    `crop_frac` → `irr_frac` via the regression model).
-3. The PIML_XGB model predicts total pumping under each scenario.
+3. The XGBoost model predicts total pumping under each scenario.
 
 σ_LULC is the sample standard deviation across the 4 scenario predictions:
 
@@ -955,7 +940,7 @@ A temporal average `Mean_CV.tif` is also computed across all years.
 **Outputs:**
 
 ```
-Full_Prediction_PIML_XGB/Uncertainty/
+Full_Prediction_XGB/Uncertainty/
 ├── Sigma_MACA/
 │   ├── Rasters/Sigma_MACA_mm_{year}.tif
 │   ├── Climate_Input_Spread/
@@ -1254,7 +1239,7 @@ each in 4 units (mm, ft, m³, AF).
 proportionally to capacity weight.  This is a simplification — true
 per-well uncertainty would require well-specific error models.
 
-**Outputs:** `{MODEL_DIR}Full_Prediction_PIML_XGB/Well_Package/`
+**Outputs:** `{MODEL_DIR}Full_Prediction_XGB/Well_Package/`
 
 ### Step 4 — USGS intercomparison
 
@@ -1425,22 +1410,15 @@ Key functions:
 ### `mlops.py` — Machine learning operations
 
 Builds, tunes, evaluates, and interprets ML models including standard
-baselines (XGB, LGBM, RF, XGBRF) and physics-informed variants (PIML_XGB,
-PIML_LGBM, PIML_XGBRF).  Optional models (ETR, HGBR, GBR, ADA, BAG, CAT,
-LR, RIDGE, LASSO) are available when `INCLUDE_ALL_MODELS=True`.
+baselines (XGB, LGBM, RF, XGBRF) and optional ensemble/linear models
+(ETR, HGBR, GBR, ADA, BAG, CAT, LR, RIDGE, LASSO) when
+`INCLUDE_ALL_MODELS=True`.  Also contains optional physics-informed
+wrapper estimators (PIML_XGB, PIML_LGBM, PIML_XGBRF) that are disabled
+by default — see [note on PIML models](#note-on-physics-informed-piml-models).
 
 Key functions:
-- **`get_model_dict()`** — Returns model objects with monotone constraints
-  and optional interaction constraints for physics-informed variants.
-- **`compute_irrigation_demand_floor()`** — Computes the per-sample
-  irrigation demand lower bound from ET, Peff, irr_frac, gw_frac, and
-  NHM basin-level irrigation efficiencies.
-- **`make_physics_floor_objective()`** — Factory for the custom XGB/LGBM
-  objective with one-sided irrigation demand floor penalty.
-- **`PhysicsXGBRegressor`** / **`PhysicsLGBMRegressor`** /
-  **`PhysicsXGBRFRegressor`** — Wrapper estimators that smuggle the
-  physics floor through sklearn's `cross_validate` and build the custom
-  objective during `fit()`.
+- **`get_model_dict()`** — Returns model objects.  Use `skip_piml=True`
+  (default in pipeline) to exclude PIML variants.
 - **`build_ml_model_optuna()`** — Trains a single model with Optuna
   TPE-based hyperparameter search parallelized across Dask workers.
 - **`compare_all_models()`** — Trains all models on a common split and
@@ -1627,7 +1605,7 @@ Key functions:
   directories (reused by σ_CU).  Also records per-GCM AZ-mean values of
   ET, ETo, and Peff and generates input spread CSVs and a 3-panel ribbon
   plot (`Climate_Input_Spread/`).
-- **`compute_sigma_model()`** — PIML_XGB 10-seed ensemble spread (all
+- **`compute_sigma_model()`** — XGBoost 10-seed ensemble spread (all
   years).  Parallelized via Dask + Optuna.  Returns per-year total σ and
   per-category σ.
 - **`compute_sigma_irr()`** — Irrigation fraction sensitivity (historical
@@ -1775,6 +1753,42 @@ Key functions:
 
 ---
 
+## Note on physics-informed (PIML) models
+
+The codebase includes optional physics-informed ML wrappers (`PIML_XGB`,
+`PIML_LGBM`, `PIML_XGBRF`) that embed domain knowledge into the training
+objective via two tiers: (1) monotone constraints enforcing physically
+expected directional relationships (e.g., pumping increases with ET, well
+density, and irrigation fraction; decreases with effective precipitation),
+and (2) a custom loss function with a one-sided irrigation-demand floor
+penalty that keeps predictions at or above the physics-estimated demand
+`(ET − Peff) × irr_frac × gw_frac / IE`, with penalty strength tuned by
+Optuna.
+
+These models are **disabled by default** (`SKIP_PIML=True` in
+`pipeline.py`) because they fail to outperform their purely statistical
+counterparts.  On random and pixel holdout evaluations the PIML variants
+perform comparably to standard XGBoost, but on temporal leave-one-out—the
+most demanding test of generalization to unseen years—PIML_XGB exhibits
+~20 % higher RMSE than standard XGBoost even after bias correction.  The
+root cause is that groundwater pumping, in Arizona and elsewhere, is not
+purely governed by physical irrigation demand: management decisions
+(water rights, fallowing programs, municipal/industrial allocations,
+conjunctive-use policies) drive pumping patterns that cannot be captured
+by a physics-based floor tied to crop water balance.  Unlike groundwater
+levels, which follow broadly predictable seasonal and climatic patterns,
+pumping volumes are a human decision variable with no universal physical
+law governing their magnitude.  In this setting, purely statistical
+approaches that learn flexible predictor–response mappings from the data
+outperform models constrained to respect a simplified physical prior.
+
+To re-enable PIML models, set `SKIP_PIML=False` in `pipeline.py`.  The
+full PIML infrastructure—`PhysicsXGBRegressor`, `PhysicsBoundsObjective`,
+`compute_irrigation_demand_floor()`, and the `_append_physics_floor()`
+pipeline helper—remains intact and tested (see `tests/test_core.py`).
+
+---
+
 ## Output directory structure
 
 After a full pipeline run, the output tree looks like:
@@ -1804,7 +1818,7 @@ Data/Outputs/
     │   ├── Cross_Strategy_Summary.tex       # LaTeX table for manuscripts
     │   └── Cross_Strategy_Comparison.png    # Grouped bar chart
     │
-    └── Full_Prediction_PIML_XGB/
+    └── Full_Prediction_XGB/
         ├── Model_Interpretability/          # SHAP, ALE, permutation importance
         │   ├── Hindcast/                    #   Era-specific plots (1896-1983)
         │   ├── Training/                    #   Era-specific plots (1984-2024)

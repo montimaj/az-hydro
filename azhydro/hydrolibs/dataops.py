@@ -1526,7 +1526,7 @@ def create_train_test_data(
         max_gw_pumping: float = np.inf,
         shuffle: bool = True,
         use_ama_ina: bool = False,
-        drop_gw_basins: tuple[str, ...] = ('JOSEPH CITY INA', 'WILLCOX AMA', 'HUALAPAI VALLEY INA'),
+        drop_gw_basins: tuple[str, ...] = (),
         log_target: bool = False,
 ) -> tuple:
     """Create train and test data.
@@ -1564,8 +1564,7 @@ def create_train_test_data(
         max_gw_pumping (float): Maximum gw pumping value in mm. Default is np.inf.
         shuffle (bool): Set False to stop data shuffling.
         use_ama_ina (bool): Set True to use AMA-INA basins.
-        drop_gw_basins (tuple (str, ...)): Tuple of GW basins to drop from the data set. Default basins are:
-        ('JOSEPH CITY INA', 'WILLCOX AMA', 'HUALAPAI VALLEY INA'). These basins have very less data.
+        drop_gw_basins (tuple (str, ...)): Tuple of GW basins to drop from the data set. Default is an empty tuple.
         log_target (bool): If True, apply np.log1p transform to the target variable.
             All error metrics should be computed on the original scale using np.expm1 inverse.
 

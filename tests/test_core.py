@@ -46,6 +46,7 @@ from hydrolibs.mlops import (
     _abs_normalized_mbe,
     compute_irrigation_demand_floor,
     make_physics_floor_objective,
+    PhysicsBoundsObjective,
     _build_monotone_constraints,
     _build_interaction_constraints,
     MONOTONE_CONSTRAINT_MAP,
@@ -654,24 +655,40 @@ class TestIrrigationDemandFloor:
 
     def test_output_shape(self):
         x, basins, nhm_ie = self._make_data()
-        y_floor = compute_irrigation_demand_floor(x, basins, nhm_ie)
+        wd = x['well_density'].values
+        wd_p99 = np.percentile(wd[wd > 0], 99)
+        y_floor = compute_irrigation_demand_floor(x, basins, nhm_ie, wd, wd_p99)
         assert y_floor.shape == (len(x),)
 
     def test_non_negative(self):
         x, basins, nhm_ie = self._make_data()
-        y_floor = compute_irrigation_demand_floor(x, basins, nhm_ie)
+        wd = x['well_density'].values
+        wd_p99 = np.percentile(wd[wd > 0], 99)
+        y_floor = compute_irrigation_demand_floor(x, basins, nhm_ie, wd, wd_p99)
         assert np.all(y_floor >= 0)
 
     def test_zero_for_non_irrigated(self):
         x, basins, nhm_ie = self._make_data(10)
         x['annual_irr_fraction'] = 0.0
-        y_floor = compute_irrigation_demand_floor(x, basins, nhm_ie)
+        wd = x['well_density'].values
+        wd_p99 = np.percentile(wd[wd > 0], 99)
+        y_floor = compute_irrigation_demand_floor(x, basins, nhm_ie, wd, wd_p99)
+        np.testing.assert_array_equal(y_floor, 0.0)
+
+    def test_zero_for_zero_well_density(self):
+        """Floor is zero where well_density is zero."""
+        x, basins, nhm_ie = self._make_data(20)
+        x['well_density'] = 0.0
+        wd = x['well_density'].values
+        y_floor = compute_irrigation_demand_floor(x, basins, nhm_ie, wd, well_density_p99=1.0)
         np.testing.assert_array_equal(y_floor, 0.0)
 
     def test_unknown_basin_uses_fallback(self):
         x, _, nhm_ie = self._make_data(5)
         basins = pd.Series(['UNKNOWN'] * 5)
-        y_floor = compute_irrigation_demand_floor(x, basins, nhm_ie)
+        wd = x['well_density'].values
+        wd_p99 = np.percentile(wd[wd > 0], 99)
+        y_floor = compute_irrigation_demand_floor(x, basins, nhm_ie, wd, wd_p99)
         # Should not raise; uses overall_mean IE
         assert y_floor.shape == (5,)
 
@@ -682,7 +699,8 @@ class TestMonotoneConstraints:
     def test_known_features(self):
         features = ['annual_et_ensemble_mm', 'well_density', 'annual_peff_mm', 'AGRI']
         mc = _build_monotone_constraints(features)
-        assert mc == (1, 1, -1, 1)
+        expected = tuple(MONOTONE_CONSTRAINT_MAP.get(f, 0) for f in features)
+        assert mc == expected
 
     def test_unconstrained_features(self):
         features = ['streamflow_mm', 'canal_density', 'soil_depth_mm']
@@ -692,23 +710,25 @@ class TestMonotoneConstraints:
     def test_mixed(self):
         features = ['annual_et_ensemble_mm', 'streamflow_mm', 'annual_peff_mm']
         mc = _build_monotone_constraints(features)
-        assert mc == (1, 0, -1)
+        expected = tuple(MONOTONE_CONSTRAINT_MAP.get(f, 0) for f in features)
+        assert mc == expected
 
 
 class TestInteractionConstraints:
     """Tests for _build_interaction_constraints()."""
 
-    def test_returns_lists_of_indices(self):
+    def test_returns_lists_of_names(self):
         features = ['annual_et_ensemble_mm', 'annual_peff_mm',
                      'annual_irr_fraction', 'annual_gw_fraction',
                      'well_density', 'AGRI', 'URBAN', 'annual_crop_fraction']
         ic = _build_interaction_constraints(features)
         assert ic is not None
         assert all(isinstance(g, list) for g in ic)
-        # All indices should be valid
+        # All names should be valid feature names
+        feature_set = set(features)
         for group in ic:
-            for idx in group:
-                assert 0 <= idx < len(features)
+            for name in group:
+                assert name in feature_set
 
     def test_disabled_returns_none(self):
         features = ['annual_et_ensemble_mm', 'annual_peff_mm']
@@ -716,81 +736,122 @@ class TestInteractionConstraints:
         assert ic is None
 
 
-class TestPhysicsFloorObjective:
-    """Tests for make_physics_floor_objective() gradient/hessian."""
+class TestPhysicsBoundsObjective:
+    """Tests for PhysicsBoundsObjective gradient/hessian (floor + ceiling)."""
 
     def test_gradient_hessian_shapes(self):
         n = 50
-        y_phys_log = np.random.default_rng(42).uniform(0, 5, n)
-        obj = make_physics_floor_objective(y_phys_log, physics_lambda=0.1)
+        rng = np.random.default_rng(42)
+        y_floor = rng.uniform(0, 5, n)
+        y_ceil = rng.uniform(8, 15, n)
+        obj = PhysicsBoundsObjective(y_floor, y_ceil, 0.1, 0.1)
 
-        y_pred = np.random.default_rng(0).uniform(0, 6, n)
-        y_true = np.random.default_rng(1).uniform(0, 6, n)
-        grad, hess = obj(y_pred, y_true)
+        y_true = rng.uniform(0, 6, n)
+        y_pred = rng.uniform(0, 6, n)
+        grad, hess = obj(y_true, y_pred)
         assert grad.shape == (n,)
         assert hess.shape == (n,)
 
-    def test_lambda_zero_is_pure_mse(self):
-        """When lambda=0, objective reduces to pure MSE gradient."""
+    def test_both_lambdas_zero_is_pure_mse(self):
+        """When both lambdas=0, objective reduces to pure MSE gradient."""
+        n = 20
+        y_floor = np.ones(n) * 3.0
+        y_ceil = np.ones(n) * 10.0
+        obj = PhysicsBoundsObjective(y_floor, y_ceil, 0.0, 0.0)
+
+        y_true = np.linspace(2, 4, n)
+        y_pred = np.linspace(1, 5, n)
+        grad, hess = obj(y_true, y_pred)
+
+        expected_grad = y_pred - y_true
+        expected_hess = np.full(n, 1.0)
+        np.testing.assert_allclose(grad, expected_grad)
+        np.testing.assert_allclose(hess, expected_hess)
+
+    def test_backward_compat_floor_only(self):
+        """make_physics_floor_objective still works (floor only, no ceiling)."""
         n = 20
         y_phys_log = np.ones(n) * 3.0
         obj = make_physics_floor_objective(y_phys_log, physics_lambda=0.0)
 
-        y_pred = np.linspace(1, 5, n)
         y_true = np.linspace(2, 4, n)
-        grad, hess = obj(y_pred, y_true)
+        y_pred = np.linspace(1, 5, n)
+        grad, hess = obj(y_true, y_pred)
 
-        # Pure MSE: grad = 2*(y_pred - y_true), hess = 2
-        expected_grad = 2.0 * (y_pred - y_true)
-        expected_hess = np.full(n, 2.0)
+        expected_grad = y_pred - y_true
         np.testing.assert_allclose(grad, expected_grad)
-        np.testing.assert_allclose(hess, expected_hess)
+        np.testing.assert_allclose(hess, np.full(n, 1.0))
 
-    def test_numerical_gradient(self):
-        """Verify gradient against finite differences."""
+    def test_numerical_gradient_floor_and_ceil(self):
+        """Verify gradient against finite differences with both penalties."""
         n = 30
         rng = np.random.default_rng(42)
-        y_phys_log = rng.uniform(1, 4, n)
-        lam = 0.2
-        obj = make_physics_floor_objective(y_phys_log, physics_lambda=lam)
+        y_floor = rng.uniform(1, 4, n)
+        y_ceil = rng.uniform(6, 10, n)
+        lam_f, lam_c = 0.2, 0.15
+        obj = PhysicsBoundsObjective(y_floor, y_ceil, lam_f, lam_c)
 
-        y_pred = rng.uniform(0, 5, n)
         y_true = rng.uniform(1, 4, n)
+        y_pred = rng.uniform(0, 12, n)
 
-        grad, _ = obj(y_pred, y_true)
+        grad, _ = obj(y_true, y_pred)
 
         # Numerical gradient via central differences
         eps = 1e-5
         num_grad = np.zeros(n)
-        mask = (y_phys_log > 0).astype(np.float64)
+        floor_mask = (y_floor > 0).astype(np.float64)
+        ceil_mask = (y_ceil > 0).astype(np.float64)
         for i in range(n):
             yp_plus = y_pred.copy(); yp_plus[i] += eps
             yp_minus = y_pred.copy(); yp_minus[i] -= eps
 
             def loss(yp):
                 res = (yp - y_true) ** 2
-                viol = np.clip(y_phys_log - yp, 0, None)
-                return (res + lam * mask * viol ** 2).sum()
+                f_viol = np.clip(y_floor - yp, 0, None)
+                c_viol = np.clip(yp - y_ceil, 0, None)
+                return (0.5 * res
+                        + 0.5 * lam_f * floor_mask * f_viol ** 2
+                        + 0.5 * lam_c * ceil_mask * c_viol ** 2).sum()
 
             num_grad[i] = (loss(yp_plus) - loss(yp_minus)) / (2 * eps)
 
         np.testing.assert_allclose(grad, num_grad, atol=1e-4)
 
-    def test_one_sided_penalty(self):
-        """Penalty only applies when prediction is below floor."""
+    def test_floor_one_sided_penalty(self):
+        """Floor penalty only applies when prediction is below floor."""
         n = 10
-        y_phys_log = np.full(n, 3.0)
-        obj = make_physics_floor_objective(y_phys_log, physics_lambda=0.3)
+        y_floor = np.full(n, 3.0)
+        y_ceil = np.full(n, 10.0)
+        obj = PhysicsBoundsObjective(y_floor, y_ceil, 0.3, 0.3)
 
-        # Predictions above floor
-        y_pred_above = np.full(n, 5.0)
+        # Predictions above floor but below ceiling — no penalty
         y_true = np.full(n, 4.0)
-        grad_above, hess_above = obj(y_pred_above, y_true)
+        y_pred = np.full(n, 5.0)
+        grad, hess = obj(y_true, y_pred)
 
-        # Pure MSE grad (no floor penalty)
-        expected_grad = 2.0 * (y_pred_above - y_true)
-        np.testing.assert_allclose(grad_above, expected_grad)
-        np.testing.assert_allclose(hess_above, np.full(n, 2.0))
+        # Pure MSE grad (no floor or ceiling penalty)
+        expected_grad = y_pred - y_true
+        np.testing.assert_allclose(grad, expected_grad)
+        np.testing.assert_allclose(hess, np.full(n, 1.0))
+
+    def test_ceiling_penalty_activates(self):
+        """Ceiling penalty activates when prediction exceeds ceiling."""
+        n = 10
+        y_floor = np.full(n, 1.0)
+        y_ceil = np.full(n, 5.0)
+        lam_c = 0.3
+        obj = PhysicsBoundsObjective(y_floor, y_ceil, 0.0, lam_c)
+
+        y_true = np.full(n, 4.0)
+        y_pred = np.full(n, 8.0)  # above ceiling
+        grad, hess = obj(y_true, y_pred)
+
+        # MSE grad + ceiling penalty (pushes DOWN)
+        residual = y_pred - y_true
+        c_viol = y_pred - y_ceil
+        expected_grad = residual + lam_c * c_viol
+        np.testing.assert_allclose(grad, expected_grad)
+        assert np.all(hess > 1.0)  # hessian includes ceiling term
 
 
 class TestPhysicsWrappers:
@@ -801,13 +862,19 @@ class TestPhysicsWrappers:
         x = pd.DataFrame({
             f'feat_{i}': rng.uniform(0, 1, n) for i in range(5)
         })
+        # easting_m / northing_m needed for per-fold pixel bounds
+        x['easting_m'] = rng.choice([100.0, 200.0, 300.0, 400.0], n)
+        x['northing_m'] = rng.choice([500.0, 600.0, 700.0, 800.0], n)
         x[_PHYS_COL] = rng.uniform(0, 3, n)
         y = rng.uniform(0, 5, n)
         return x, y
 
     def test_physics_xgb_fit_predict(self):
         x, y = self._make_train_data()
-        model = PhysicsXGBRegressor(physics_lambda=0.1, n_estimators=10, max_depth=3)
+        model = PhysicsXGBRegressor(
+            physics_lambda_floor=0.1, physics_lambda_ceil=0.05,
+            n_estimators=10, max_depth=3,
+        )
         model.fit(x, y)
         preds = model.predict(x)
         assert preds.shape == (len(x),)
@@ -815,7 +882,8 @@ class TestPhysicsWrappers:
     def test_physics_lgbm_fit_predict(self):
         x, y = self._make_train_data()
         model = PhysicsLGBMRegressor(
-            physics_lambda=0.1, n_estimators=10, max_depth=3,
+            physics_lambda_floor=0.1, physics_lambda_ceil=0.05,
+            n_estimators=10, max_depth=3,
             num_leaves=8, verbosity=-1,
         )
         model.fit(x, y)
@@ -825,24 +893,30 @@ class TestPhysicsWrappers:
     def test_physics_xgbrf_fit_predict(self):
         x, y = self._make_train_data()
         model = PhysicsXGBRFRegressor(
-            physics_lambda=0.1, num_parallel_tree=10, max_depth=3,
+            physics_lambda_floor=0.1, physics_lambda_ceil=0.05,
+            num_parallel_tree=10, max_depth=3,
         )
         model.fit(x, y)
         preds = model.predict(x)
         assert preds.shape == (len(x),)
 
-    def test_lambda_zero_uses_squarederror(self):
-        """When lambda=0, wrapper falls back to reg:squarederror."""
+    def test_lambdas_zero_uses_squarederror(self):
+        """When both lambdas=0, wrapper falls back to reg:squarederror."""
         x, y = self._make_train_data(50)
-        model = PhysicsXGBRegressor(physics_lambda=0.0, n_estimators=5, max_depth=3)
+        model = PhysicsXGBRegressor(
+            physics_lambda_floor=0.0, physics_lambda_ceil=0.0,
+            n_estimators=5, max_depth=3,
+        )
         model.fit(x, y)
-        # Should have objective = 'reg:squarederror'
         assert model.get_params()['objective'] == 'reg:squarederror'
 
-    def test_predict_strips_phys_column(self):
-        """Predict should work even when __y_phys_log__ is in X."""
+    def test_predict_strips_phys_columns(self):
+        """Predict should work even when physics columns are in X."""
         x, y = self._make_train_data(50)
-        model = PhysicsXGBRegressor(physics_lambda=0.1, n_estimators=5, max_depth=3)
+        model = PhysicsXGBRegressor(
+            physics_lambda_floor=0.1, physics_lambda_ceil=0.05,
+            n_estimators=5, max_depth=3,
+        )
         model.fit(x, y)
         # Predict with physics column present
         preds_with = model.predict(x)
