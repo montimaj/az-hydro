@@ -1,5 +1,5 @@
 """
-ML Pipeline Script for Arizona Groundwater Pumping Prediction.
+ML Pipeline Script for Arizona Annual Withdrawal Prediction.
 
 This script executes the remaining pipeline:
 1. Creates dummy annual predictor data from 1896-2099 for AZ and assigns each
@@ -8,7 +8,7 @@ This script executes the remaining pipeline:
    four splitting strategies:
    a) Random 80/20 train/test split.
    a2) Pixel holdout — 20% of unique spatial locations held out across all years.
-   b) Leave-one-out temporal holdout over multiple test-year ranges (T1-T6),
+   b) Leave-one-out temporal holdout over multiple test-year ranges (T1-T7),
       reporting per-holdout and averaged metrics.
    c) Leave-one-out spatial holdout over every AMA/INA sub-basin (ADWR),
       reporting per-sub-basin and averaged metrics.
@@ -132,7 +132,8 @@ TEMPORAL_HOLDOUTS = {
     'T3': ((1990, 1992), (2005, 2007), (2022, 2024)),
     'T4': ((2007, 2010),),
     'T5': ((1985, 1989), (2020, 2024)),
-    'T6': ((2024, 2024),)
+    'T6': ((2024, 2024),),
+    'T7': ((1984, 1994),),  # early-period holdout — backward extrapolation
 }
 
 # =============================================================================
@@ -862,7 +863,7 @@ def evaluate_pixel_holdout(az_df: pd.DataFrame) -> dict:
 # ---- 2b. Leave-one-out temporal holdout ------------------------------------
 def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
     """
-    Evaluate each model on every temporal holdout (T1-T6).
+    Evaluate each model on every temporal holdout (T1-T7).
 
     Returns per-holdout and averaged metrics across all holdouts.
 
@@ -873,7 +874,7 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
         dict: Per-model averaged metrics across all temporal holdouts.
     """
     logger.info('='*60)
-    logger.info('Step 2b: LOO Temporal evaluation (T1_Baseline + T1-T6)')
+    logger.info('Step 2b: LOO Temporal evaluation (T1_Baseline + T1-T7)')
     logger.info('='*60)
 
     ml_models = mlops.get_model_dict(
@@ -2076,7 +2077,7 @@ def create_all_raster_maps() -> None:
 
     # ── Depth-based categories (use Depth_mm sub-directory) ──────────
     depth_categories = [
-        ('Predicted_Rasters', 'Total Predicted GW Pumping'),
+        ('Predicted_Rasters', 'Total Predicted Annual Withdrawal'),
     ]
     for cat in partops.CATEGORIES:
         pretty = cat.replace('_', ' ')
@@ -2179,7 +2180,7 @@ def create_all_raster_maps() -> None:
             predicted_dir=predicted_mm_dir,
             basin_shp=AZ_GW_BASIN,
             output_dir=maps_dir,
-            title='Total GW Pumping',
+            title='Total Annual Withdrawal',
             unit_label='Depth (mm)',
             start_year=YEAR_LIST[0],
             end_year=YEAR_LIST[-1],
@@ -2188,13 +2189,13 @@ def create_all_raster_maps() -> None:
     # ── Trend analysis (Mann-Kendall + Sen's slope) ────────────────
     trend_dir = os.path.join(maps_dir, 'Trend_Analysis')
 
-    # Total predicted GW pumping
+    # Total predicted annual withdrawal
     if os.path.isdir(predicted_mm_dir):
         vizops.create_trend_maps(
             raster_dir=predicted_mm_dir,
             basin_shp=AZ_GW_BASIN,
             output_dir=trend_dir,
-            title='Total Predicted GW Pumping',
+            title='Total Predicted Annual Withdrawal',
             unit_label='mm',
             subbasin_shp=ADWR_SUBBASIN_SHP,
         )
@@ -2453,7 +2454,7 @@ def main() -> None:
         None.
     """
     parser = argparse.ArgumentParser(
-        description='ML Pipeline for Arizona Groundwater Pumping Prediction.',
+        description='ML Pipeline for Arizona Annual Withdrawal Prediction.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=STEP_HELP,
     )

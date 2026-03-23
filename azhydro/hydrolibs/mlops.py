@@ -2,7 +2,7 @@
 Handle ML Model Building Operations.
 
 This module provides comprehensive ML model building, hyperparameter optimization,
-and evaluation capabilities for groundwater pumping prediction.
+and evaluation capabilities for annual withdrawal prediction.
 
 Features:
 - Baseline linear models (LR, Ridge, Lasso) and ensemble tree algorithms (XGB, LGBM, RF, ETR, HGBR, CatBoost, GBR, AdaBoost)
@@ -93,6 +93,9 @@ _PIML_MODELS = {'PIML_XGB', 'PIML_LGBM', 'PIML_XGBRF'}
 
 # Optional models (require include_all_models=True)
 _OPTIONAL_MODELS = {'ETR', 'HGBR', 'GBR', 'ADA', 'BAG', 'CAT', 'LR', 'RIDGE', 'LASSO'}
+
+# Models incompatible with shap.TreeExplainer
+_NO_SHAP_MODELS = {'ADA', 'BAG', 'LR', 'RIDGE', 'LASSO'}
 
 
 def compute_irrigation_demand_floor(
@@ -705,7 +708,7 @@ def get_feature_dict(get_units: bool = False) -> dict[str, str] | tuple[dict[str
         'soil_depth_mm': 'Soil Depth',
         'awc_mm': 'Available Water Capacity',
         'ksat_mean_micromps': '$K_{sat}$',
-        'gw_pumping_mm': 'Groundwater Withdrawals',
+        'gw_pumping_mm': 'Annual Withdrawals',
     }
 
     feature_dict_units = {
@@ -905,7 +908,7 @@ def compute_ale_plots(
             display_units=feature_dict_units
         )
         # Override y-axis label (skexplain hardcodes it internally)
-        ale_label = 'Centered ALE on Groundwater Withdrawals (mm)'
+        ale_label = 'Centered ALE on Annual Withdrawals (mm)'
         fig = plt.gcf()
         for ax in fig.get_axes():
             if 'ALE' in ax.get_ylabel():
@@ -948,6 +951,11 @@ def compute_shap_plots(
     Returns:
         None
     """
+    if model_name in _NO_SHAP_MODELS:
+        logger.info(f'Skipping SHAP plots for {model_name} '
+                    f'(not supported by TreeExplainer)')
+        return
+
     import shap
 
     makedirs(output_dir)
@@ -972,11 +980,14 @@ def compute_shap_plots(
     explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(x_sub)
 
+    _shap_ylabel = 'SHAP Value — Impact on Annual Withdrawals (mm)'
+
     # 1. Beeswarm summary plot
     shap.summary_plot(
         shap_values, x_display,
         max_display=max_display, show=False,
     )
+    plt.gca().set_xlabel(_shap_ylabel)
     plt.gcf().set_size_inches(12, 8)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Summary{suffix}.png'), dpi=600)
@@ -987,6 +998,7 @@ def compute_shap_plots(
         shap_values, x_display,
         plot_type='bar', max_display=max_display, show=False,
     )
+    plt.gca().set_xlabel(f'mean(|{_shap_ylabel}|)')
     plt.gcf().set_size_inches(12, 8)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Bar{suffix}.png'), dpi=600)
@@ -1005,9 +1017,10 @@ def compute_shap_plots(
             idx, shap_values, x_display,
             show=False,
         )
-        # Append units to x-axis and colorbar (y-axis is SHAP value, unitless)
+        # Append units to x-axis and colorbar; override y-axis label
         fig = plt.gcf()
         ax = plt.gca()
+        ax.set_ylabel(_shap_ylabel)
         unit = _display_units.get(feat_name)
         if unit:
             xlabel = ax.get_xlabel()
@@ -1603,7 +1616,7 @@ def _plot_physics_floor_diagnostic(
     fmax = max(np.nanmax(y_floor), np.nanmax(y_pred))
     ax.plot([0, fmax], [0, fmax], 'k--', alpha=0.5, label='1:1 line')
     ax.set_xlabel('Physics Floor — (ET−Peff)×irr×gw/IE × wd_norm [mm]')
-    ax.set_ylabel('Predicted GW Pumping [mm]')
+    ax.set_ylabel('Predicted Annual Withdrawal [mm]')
     ax.set_title(f'{model_name}: Predicted vs Floor')
     ax.legend(fontsize=12)
 
@@ -1680,7 +1693,7 @@ def generate_interp_plots(
         interp_dir, log_target=log_target,
     )
 
-    # SHAP plots (train + test, separate labels)
+    # SHAP plots (train + test) — compute_shap_plots guards internally
     compute_shap_plots(
         model_name, model, x_tr, interp_dir,
         subsample=shap_subsample, data_label='train',
@@ -1830,6 +1843,13 @@ def compare_all_models(
                 model_name=model_name,
                 n_features=_real_n_features(x_train),
             )
+            calc_basin_metrics(
+                pred_df, model_subdir,
+                use_ama_ina=use_ama_ina,
+                gw_basin_col=gw_basin_col,
+                model_name=model_name,
+                n_features=_real_n_features(x_train),
+            )
             if test_case:
                 generate_model_visualizations(
                     pred_df=pred_df,
@@ -1950,6 +1970,13 @@ def compare_all_models(
                     year_col=year_col,
                     model_name=model_name,
                     n_features=_real_n_features(x_train)
+                )
+                calc_basin_metrics(
+                    pred_df, model_subdir,
+                    use_ama_ina=use_ama_ina,
+                    gw_basin_col=gw_basin_col,
+                    model_name=model_name,
+                    n_features=_real_n_features(x_train),
                 )
 
                 # Per-model visualizations (immediately after training)
@@ -2526,6 +2553,7 @@ def calc_train_test_metrics(
             temp_dict = {
                 'Year': year_name,
                 'Data': data_type,
+                'N': len(data_actual),
                 'R2': r2,
                 'Adjusted_R2': adj_r2,
                 'RMSE (%)': rmse,
@@ -2539,6 +2567,88 @@ def calc_train_test_metrics(
     for col in ['R2', 'Adjusted_R2', 'RMSE (%)', 'MAE (%)', 'MBE (%)']:
         metric_df[col] = metric_df[col].apply(lambda x: round_to_n_nonzero(x, precision))
     metric_df.to_csv(os.path.join(output_dir, f'Error_Metrics_{model_name}.csv'), index=False)
+
+
+def calc_basin_metrics(
+        pred_df: pd.DataFrame,
+        output_dir: str,
+        use_ama_ina: bool = True,
+        gw_basin_col: str = 'GW_Basin',
+        model_name: str = 'LGBM',
+        precision: int = 2,
+        n_features: int | None = None,
+) -> None:
+    """Calculate per-basin error metrics from the prediction DataFrame.
+
+    Produces a CSV with R², Adjusted R², RMSE (%), MAE (%), MBE (%) for
+    each GW basin × data split (TRAIN/TEST), plus an ALL row that
+    aggregates across basins.
+
+    Args:
+        pred_df (pd.DataFrame): Prediction DataFrame with ``Actual_GW_mm``,
+            ``Pred_GW_mm``, ``DATA``, and *gw_basin_col* columns.
+        output_dir (str): Output directory for the CSV.
+        use_ama_ina (bool): If True, restrict to AMA/INA basins.
+        gw_basin_col (str): Name of the GW basin column.
+        model_name (str): Model name (used in the output filename).
+        precision (int): Rounding precision.
+        n_features (int or None): Number of features for adjusted R².
+
+    Returns:
+        None.
+    """
+    if use_ama_ina:
+        ama_ina_basins = get_ama_ina_basin_names()
+        pred_df = pred_df[pred_df[gw_basin_col].isin(ama_ina_basins)]
+
+    metric_parts = []
+    # Per-basin metrics
+    for basin in sorted(pred_df[gw_basin_col].unique()):
+        basin_df = pred_df[pred_df[gw_basin_col] == basin]
+        for data_type in sorted(basin_df.DATA.unique()):
+            data_df = basin_df[basin_df.DATA == data_type]
+            if len(data_df) < 2:
+                continue
+            actual = data_df.Actual_GW_mm.to_numpy().ravel()
+            pred = data_df.Pred_GW_mm.to_numpy().ravel()
+            p = n_features if n_features is not None else data_df.shape[1]
+            metric_parts.append({
+                'Basin': basin,
+                'Data': data_type,
+                'N': len(actual),
+                'R2': r2_score(actual, pred),
+                'Adjusted_R2': adjusted_r2(actual, pred, p),
+                'RMSE (%)': normalized_rmse(actual, pred),
+                'MAE (%)': normalized_mae(actual, pred),
+                'MBE (%)': normalized_mbe(actual, pred),
+            })
+
+    # Aggregate ALL basins
+    for data_type in sorted(pred_df.DATA.unique()):
+        data_df = pred_df[pred_df.DATA == data_type]
+        if len(data_df) < 2:
+            continue
+        actual = data_df.Actual_GW_mm.to_numpy().ravel()
+        pred = data_df.Pred_GW_mm.to_numpy().ravel()
+        p = n_features if n_features is not None else data_df.shape[1]
+        metric_parts.append({
+            'Basin': 'ALL',
+            'Data': data_type,
+            'N': len(actual),
+            'R2': r2_score(actual, pred),
+            'Adjusted_R2': adjusted_r2(actual, pred, p),
+            'RMSE (%)': normalized_rmse(actual, pred),
+            'MAE (%)': normalized_mae(actual, pred),
+            'MBE (%)': normalized_mbe(actual, pred),
+        })
+
+    metric_df = pd.DataFrame(metric_parts)
+    metric_df = metric_df.sort_values(by=['Basin', 'Data'])
+    for col in ['R2', 'Adjusted_R2', 'RMSE (%)', 'MAE (%)', 'MBE (%)']:
+        metric_df[col] = metric_df[col].apply(lambda x: round_to_n_nonzero(x, precision))
+    metric_df.to_csv(
+        os.path.join(output_dir, f'Basin_Metrics_{model_name}.csv'), index=False,
+    )
 
 
 def get_grid_search_stats(

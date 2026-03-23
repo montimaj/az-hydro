@@ -1,5 +1,5 @@
 """
-Hybrid Uncertainty Quantification for AZ-Hydro Groundwater Pumping Predictions.
+Hybrid Uncertainty Quantification for AZ-Hydro Annual Withdrawal Predictions.
 
 Computes five independent uncertainty components and combines them via
 quadrature into a total pixel-level uncertainty (σ_total):
@@ -2930,10 +2930,10 @@ def _replot_from_augmented_rasters(
         logger.info(f'  {label}: time series with uncertainty complete.')
 
     # ══════════════════════════════════════════════════════════════════════
-    # 1. Total pumping
+    # 1. Total annual withdrawal
     # ══════════════════════════════════════════════════════════════════════
     _process_group(
-        'Total Pumping',
+        'Total Annual Withdrawal',
         os.path.join(prediction_dir, 'Predicted_Rasters/Depth_mm'),
         'Predicted_GW_{year}_mm.tif',
         '',

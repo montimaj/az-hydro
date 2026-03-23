@@ -141,6 +141,8 @@ def round_to_n_nonzero(x: float, n: int = 2) -> float:
         float: Rounded number.
     """
     import math
+    if x != x:  # NaN check
+        return x
     if x == 0:
         return 0
     return round(x, -int(math.floor(math.log10(abs(x)))) + (n - 1))

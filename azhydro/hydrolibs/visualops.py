@@ -320,12 +320,12 @@ def create_time_series_plot_journal(
 
     # Unit conversion factors (from mm)
     unit_info = {
-        'mm': {'factor': 1.0, 'label': r'Groundwater Withdrawals (mm)'},
-        'ft': {'factor': 1 / 304.8, 'label': r'Groundwater Withdrawals (ft)'},
+        'mm': {'factor': 1.0, 'label': r'Annual Withdrawals (mm)'},
+        'ft': {'factor': 1 / 304.8, 'label': r'Annual Withdrawals (ft)'},
         'af': {'factor': area / (4047 * 304.8 * 1000),
-               'label': r'Groundwater Withdrawals ($10^3$ acre-ft)'},
+               'label': r'Annual Withdrawals ($10^3$ acre-ft)'},
         'm3': {'factor': area * 1e-9,
-               'label': r'Groundwater Withdrawals ($10^6$ m$^3$)'},
+               'label': r'Annual Withdrawals ($10^6$ m$^3$)'},
     }
 
     # Two twinx pairs: (left_unit, right_unit, aggregation)
@@ -411,7 +411,7 @@ def create_time_series_plot_journal(
         left_label = f'{agg_label} {unit_info[left_unit]["label"]}'
         ax.set_xlabel('Year', fontweight='bold')
         ax.set_ylabel(left_label, fontweight='bold')
-        ax.set_title(f'{model_name} - {test_case}: Groundwater Withdrawals Time Series',
+        ax.set_title(f'{model_name} - {test_case}: Annual Withdrawals Time Series',
                      fontweight='bold', fontsize=14)
 
         # Secondary (twinx) axis — same data, converted scale
@@ -512,12 +512,12 @@ def create_basin_time_series_plot(
     area = raster_res ** 2
 
     unit_info = {
-        'mm': {'factor': 1.0, 'label': r'Groundwater Withdrawals (mm)'},
-        'ft': {'factor': 1 / 304.8, 'label': r'Groundwater Withdrawals (ft)'},
+        'mm': {'factor': 1.0, 'label': r'Annual Withdrawals (mm)'},
+        'ft': {'factor': 1 / 304.8, 'label': r'Annual Withdrawals (ft)'},
         'af': {'factor': area / (4047 * 304.8 * 1000),
-               'label': r'Groundwater Withdrawals ($10^3$ acre-ft)'},
+               'label': r'Annual Withdrawals ($10^3$ acre-ft)'},
         'm3': {'factor': area * 1e-9,
-               'label': r'Groundwater Withdrawals ($10^6$ m$^3$)'},
+               'label': r'Annual Withdrawals ($10^6$ m$^3$)'},
     }
 
     unit_pairs = [
@@ -768,8 +768,8 @@ def create_model_comparison_time_series(
 
     # Formatting
     ax.set_xlabel('Year', fontweight='bold')
-    ax.set_ylabel(f'Total Groundwater Withdrawals ({unit_label})', fontweight='bold')
-    ax.set_title(f'{test_case}: Model Comparison - Groundwater Withdrawals',
+    ax.set_ylabel(f'Total Annual Withdrawals ({unit_label})', fontweight='bold')
+    ax.set_title(f'{test_case}: Model Comparison - Annual Withdrawals',
                 fontweight='bold', fontsize=14)
 
     ax.xaxis.set_major_formatter(ticker.StrMethodFormatter('{x:.0f}'))
@@ -1126,7 +1126,7 @@ def get_variable_name_dict() -> dict[str, str]:
     """
 
     var_name_dict = {
-        'gw_pumping_mm': 'Annual Groundwater Withdrawals (mm)',
+        'gw_pumping_mm': 'Annual Withdrawals (mm)',
         'annual_et_ensemble_mm': 'Annual ET (mm)',
         'annual_eto_mm': 'Annual ETo (mm)',
         'annual_precip_mm': 'Annual Precipitation (mm)',
@@ -1540,10 +1540,9 @@ def explore_az_data(
             _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_gw_basin.png'))
             _plt.close()
 
-    n_jobs = max(1, multiprocessing.cpu_count() - 2)
-    Parallel(n_jobs=n_jobs, backend='loky')(
-        delayed(_plot_column)(col) for col in numeric_cols
-    )
+    for i, col in enumerate(numeric_cols, 1):
+        logger.info(f'  EDA [{i}/{len(numeric_cols)}] {col}')
+        _plot_column(col)
     logger.info(f'Exploratory plots saved to {output_dir}')
 
 
@@ -1614,8 +1613,8 @@ def analyze_et_by_land_use(
         # Only include positive pumping; set rest to NaN so they drop from melt
         df.loc[df[gw_col] <= 0, gw_col] = np.nan
         value_vars.append(gw_col)
-        var_labels[gw_col] = 'GW Pumping'
-        var_palette['GW Pumping'] = '#2ecc71'
+        var_labels[gw_col] = 'Withdrawals'
+        var_palette['Withdrawals'] = '#2ecc71'
 
     melted = df.melt(
         id_vars=['Land_Use'],
@@ -1633,7 +1632,7 @@ def analyze_et_by_land_use(
     )
     ax.set_xlabel('Dominant Land Use', fontweight='bold')
     ax.set_ylabel('Depth (mm)', fontweight='bold')
-    ax.set_title('ET, ETo & GW Pumping by Land Use', fontweight='bold')
+    ax.set_title('ET, ETo & Withdrawals by Land Use', fontweight='bold')
     ax.legend(title='Variable', framealpha=0.7)
     ax.grid(True, axis='y', alpha=0.3, ls='--')
     plt.tight_layout()
@@ -1787,9 +1786,9 @@ def analyze_pumping_distribution(
                    label=f'Upper bound = {max_gw:,.0f} mm '
                          f'(P{pct_rank:.1f}, removes {n_removed:,} pixels)')
 
-    ax.set_xlabel('Groundwater Pumping Depth (mm)', fontweight='bold')
+    ax.set_xlabel('Annual Withdrawal Depth (mm)', fontweight='bold')
     ax.set_ylabel('Cumulative Probability', fontweight='bold')
-    ax.set_title('Empirical CDF of Pumping Depth (Metered Years, AMA/INA)',
+    ax.set_title('Empirical CDF of Withdrawal Depth (Metered Years, AMA/INA)',
                  fontweight='bold')
     ax.legend(framealpha=0.9, fontsize=8, loc='lower right')
     ax.grid(True, alpha=0.3, ls='--')
@@ -2074,7 +2073,7 @@ def create_full_period_time_series(
     ax1.plot(years, depth_mm, color=COLORS['predicted'], linewidth=1.5, marker='.',
              markersize=3, label='Predicted')
     ax1.set_ylabel('Mean Depth (mm)', fontweight='bold')
-    ax1.set_title(f'XGBoost {label}AMA/INA Groundwater Pumping (1896–2099)',
+    ax1.set_title(f'XGBoost {label}AMA/INA Annual Withdrawals (1896–2099)',
                   fontweight='bold', fontsize=14)
     ax1.grid(True, alpha=0.3, linestyle='--')
 
@@ -2195,8 +2194,8 @@ def create_era_summary_maps(
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
                 f'{val:,.0f}', ha='center', va='bottom', fontsize=11, fontweight='bold')
 
-    ax.set_ylabel('Mean Annual Pumping\n(acre-ft)', fontweight='bold')
-    ax.set_title(f'Mean Annual {label}GW Pumping by Era', fontweight='bold', fontsize=14)
+    ax.set_ylabel('Mean Annual Withdrawal\n(acre-ft)', fontweight='bold')
+    ax.set_title(f'Mean Annual {label}Withdrawal by Era', fontweight='bold', fontsize=14)
     ax.grid(axis='y', alpha=0.3, linestyle='--')
 
     _add_m3_twinx(ax)
@@ -2333,8 +2332,8 @@ def create_basin_time_series(
     for era, (s, e) in ERA_PERIODS.items():
         ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.08)
     ax.set_xlabel('Year', fontweight='bold')
-    ax.set_ylabel('GW Withdrawal (acre-ft)', fontweight='bold')
-    ax.set_title(f'Annual {label}GW Withdrawal by Basin (1896–2099)', fontweight='bold',
+    ax.set_ylabel('Annual Withdrawal (acre-ft)', fontweight='bold')
+    ax.set_title(f'Annual {label}Withdrawal by Basin (1896–2099)', fontweight='bold',
                  fontsize=14)
     # Build legend: basin lines + era patches + optional observed
     handles, labels = ax.get_legend_handles_labels()
@@ -2387,7 +2386,7 @@ def create_basin_time_series(
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
         era_shaded_ts(ax1, years, depth_mm, std_depth, color=palette[i])
         ax1.set_ylabel('Mean Depth (mm)', fontweight='bold')
-        ax1.set_title(f'{basin} — Annual {label}GW Withdrawal (1896–2099)',
+        ax1.set_title(f'{basin} — Annual {label}Withdrawal (1896–2099)',
                       fontweight='bold', fontsize=13)
         ax1.grid(True, alpha=0.3, linestyle='--')
 
@@ -2533,7 +2532,7 @@ def create_subbasin_time_series(
         if idx >= (n_rows - 1) * n_cols:
             ax.set_xlabel('Year', fontweight='bold')
         if idx % n_cols == 0:
-            ax.set_ylabel('GW Withdrawal\n(acre-ft)', fontweight='bold')
+            ax.set_ylabel('Annual Withdrawal\n(acre-ft)', fontweight='bold')
         ax_m3 = ax.twinx()
         af_lo, af_hi = ax.get_ylim()
         ax_m3.set_ylim(af_lo * _AF_TO_M3, af_hi * _AF_TO_M3)
@@ -2543,7 +2542,7 @@ def create_subbasin_time_series(
     for k in range(n_parents, len(axes_flat)):
         axes_flat[k].set_visible(False)
 
-    plt.suptitle(f'Annual {label}GW Withdrawal by Sub-basin (1896–2099)',
+    plt.suptitle(f'Annual {label}Withdrawal by Sub-basin (1896–2099)',
                  fontweight='bold', fontsize=14, y=1.01)
     plt.tight_layout()
     fig.savefig(os.path.join(ts_dir, 'Subbasin_Grouped_Time_Series.png'), dpi=600,
@@ -2584,7 +2583,7 @@ def create_subbasin_time_series(
         era_shaded_ts(ax1, years, depth_mm, std_depth, color=palette_all[i])
         ax1.set_ylabel('Mean Depth (mm)', fontweight='bold')
         title_suffix = f' ({parent})' if parent else ''
-        ax1.set_title(f'{sb}{title_suffix} — Annual {label}GW Withdrawal (1896–2099)',
+        ax1.set_title(f'{sb}{title_suffix} — Annual {label}Withdrawal (1896–2099)',
                       fontweight='bold', fontsize=13)
         ax1.grid(True, alpha=0.3, linestyle='--')
 
@@ -2647,9 +2646,9 @@ def create_graphical_abstract(
     """Create a publication-quality Figure 1 / graphical abstract.
 
     Layout (2-panel figure):
-      - **Left**: Spatial map of mean-annual predicted pumping depth (mm)
+      - **Left**: Spatial map of mean-annual predicted withdrawal depth (mm)
         with GW basin boundaries overlaid.
-      - **Right**: Time series of total annual AMA/INA pumping (acre-ft)
+      - **Right**: Time series of total annual AMA/INA withdrawals (acre-ft)
         with era shading and an inset era bar chart.
 
     Args:
@@ -2747,11 +2746,11 @@ def create_graphical_abstract(
             )
 
     cbar = fig.colorbar(im, ax=ax_map, shrink=0.75, pad=0.02)
-    cbar.set_label('Mean Annual Pumping Depth (mm)', fontweight='bold')
+    cbar.set_label('Mean Annual Withdrawal Depth (mm)', fontweight='bold')
     ax_map.set_xlabel('Easting (m)', fontweight='bold')
     ax_map.set_ylabel('Northing (m)', fontweight='bold')
     ax_map.set_title(
-        f'(a) Mean Annual Predicted GW Pumping ({start_year}–{end_year})',
+        f'(a) Mean Annual Predicted Withdrawal ({start_year}–{end_year})',
         fontweight='bold', fontsize=13,
     )
     ax_map.tick_params(axis='both', labelsize=9)
@@ -2768,9 +2767,9 @@ def create_graphical_abstract(
         ax_ts.plot(years, vol_af, color=COLORS['predicted'],
                    linewidth=1.2, marker='.', markersize=2)
         ax_ts.set_xlabel('Year', fontweight='bold')
-        ax_ts.set_ylabel('Total Annual Pumping (acre-ft)', fontweight='bold')
+        ax_ts.set_ylabel('Total Annual Withdrawal (acre-ft)', fontweight='bold')
         ax_ts.set_title(
-            '(b) Arizona AMA/INA Annual GW Withdrawal',
+            '(b) Arizona AMA/INA Annual Withdrawal',
             fontweight='bold', fontsize=13,
         )
         ax_ts.set_xlim(start_year - 2, end_year + 2)
@@ -2927,7 +2926,7 @@ def create_era_raster_maps(
     basin_shp: str,
     output_dir: str,
     *,
-    title: str = 'Predicted GW Pumping',
+    title: str = 'Predicted Annual Withdrawal',
     unit_label: str = 'Depth (mm)',
     cmap: str = 'YlOrRd',
     out_filename: str | None = None,
@@ -3069,7 +3068,7 @@ def create_actual_vs_predicted_maps(
     basin_shp: str,
     output_dir: str,
     *,
-    title: str = 'GW Pumping',
+    title: str = 'Annual Withdrawal',
     unit_label: str = 'Depth (mm)',
     cmap: str = 'YlOrRd',
     diff_cmap: str = 'RdBu_r',
@@ -3362,7 +3361,7 @@ def create_trend_maps(
     basin_shp: str,
     output_dir: str,
     *,
-    title: str = 'Predicted GW Pumping',
+    title: str = 'Predicted Annual Withdrawal',
     unit_label: str = 'mm',
     periods: dict[str, tuple[int, int]] | None = None,
     alpha: float = 0.05,

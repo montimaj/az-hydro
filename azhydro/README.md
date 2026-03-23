@@ -316,10 +316,10 @@ All paths and modeling parameters are defined once at the top of
 | `TILE_SIZE` | `80000` | Tile size for GEE export (m). |
 | `START_YEAR` | `1896` | First prediction year. |
 | `END_YEAR` | `2099` | Last prediction year. |
-| `YEAR_LIST` | `1984–2024` | Years with metered pumping data (ADWR). |
+| `YEAR_LIST` | `1984–2024` | Years with metered withdrawal data (ADWR). |
 | `TRAIN_YEAR_LIST_BASELINE` | `2002–2020` | Training years for direct comparison with [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757). Used only by the `T1_Baseline` temporal holdout. |
-| `MIN_GW` | `None` | Minimum per-pixel GW pumping depth (mm). Pixels below this are excluded via outlier processing. Set to `None` to include all non-zero pixels; set to `0` for baselines that include zeros. |
-| `MAX_GW` | `3000` | Maximum allowed pumping depth (mm). Justified by Tukey's extreme fence (Q3 + 3×IQR), ≈P99, and [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757). Set to `None` to disable (falls back to 10,000 mm). |
+| `MIN_GW` | `None` | Minimum per-pixel withdrawal depth (mm). Pixels below this are excluded via outlier processing. Set to `None` to include all non-zero pixels; set to `0` for baselines that include zeros. |
+| `MAX_GW` | `3000` | Maximum allowed withdrawal depth (mm). Justified by Tukey's extreme fence (Q3 + 3×IQR), ≈P99, and [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757). Set to `None` to disable (falls back to 10,000 mm). |
 | `AF_MAX_THRESHOLD` | `5000` | Maximum per-well `AF Pumped`; rows exceeding this are dropped from CSVs. |
 | `LOG_TARGET` | `False` | Apply `log1p` / `expm1` target transform. See [Target transform](#target-transform). |
 | `RANDOM_STATE` | `42` | Seed for reproducibility. |
@@ -338,7 +338,7 @@ All paths and modeling parameters are defined once at the top of
 | `PREDICTION_MODEL` | `'XGB'` | Model used for full-period prediction (Step 3+). Valid names: core — `XGB`, `LGBM`, `RF`, `XGBRF`; optional (`INCLUDE_ALL_MODELS=True`) — `ETR`, `HGBR`, `GBR`, `ADA`, `BAG`, `CAT`, `LR`, `RIDGE`, `LASSO`; PIML (`SKIP_PIML=False`) — `PIML_XGB`, `PIML_LGBM`, `PIML_XGBRF`. |
 | `USE_AMA_INA` | `True` | Restrict training to AMA/INA management areas. |
 | `DROP_GW_BASINS` | `()` | Basins excluded from training. Empty by default (all AMA/INA basins included). For the `T1_Baseline` holdout, WILLCOX AMA and HUALAPAI VALLEY INA are dropped as they were not metered during the baseline period (pre-2020). |
-| `TEMPORAL_HOLDOUTS` | T1_Baseline + T1–T6 | Seven temporal leave-one-out configurations. `T1_Baseline` uses `TRAIN_YEAR_LIST_BASELINE` and `MIN_GW=0`. |
+| `TEMPORAL_HOLDOUTS` | T1_Baseline + T1–T7 | Eight temporal leave-one-out configurations. `T1_Baseline` uses `TRAIN_YEAR_LIST_BASELINE` and `MIN_GW=0`. |
 | `DROP_ATTRS` | (list) | Columns dropped before modeling. |
 
 ### Step 0 — Data preparation (`prepare_data()`)
@@ -375,7 +375,7 @@ Downloads, mosaics, and aligns all input datasets to a common 2 km grid.
 |---|---|
 | `GEE_Mosaics_2000m/` | Mosaicked annual GEE predictor rasters. |
 | `GW/Vectors/{WNAME}/` | Per-year GW shapefiles. |
-| `GW/Rasters/GW_Depths_{WNAME}_2000m/` | Pumping depth rasters (mm). |
+| `GW/Rasters/GW_Depths_{WNAME}_2000m/` | Withdrawal depth rasters (mm). |
 | `GW_Data/Vector_Reproj/` | Reprojected vectors (basins, wells, CAP, etc.). |
 | `Predictor_Data_{WNAME}_2000m/` | Final predictor stack (Predictor\_YYYY.tif). |
 
@@ -385,7 +385,7 @@ Reads every year's multi-band predictor raster (1896–2099) plus the
 basin, sub-basin, streamflow, canal-density, and well-density rasters into
 a single DataFrame via `dataops.create_az_data_parquet()`.  Each row represents
 one pixel in one year; columns include all GEE predictors, ancillary
-layers, basin/sub-basin labels, and (for metered years) observed pumping.
+layers, basin/sub-basin labels, and (for metered years) observed withdrawals.
 
 ADWR sub-basin OBJECTID codes are mapped to human-readable names using the
 ADWR shapefile.  Before writing the Parquet file, `create_az_data_parquet()`
@@ -400,7 +400,7 @@ ET > ETo exceedance outside AGRI/URBAN/SW land uses is negligible.
 Exploratory data analysis (EDA) plots are generated via
 `vizops.explore_az_data()` and saved to `{MODEL_DIR}EDA/`.
 
-A targeted pumping distribution analysis follows via
+A targeted withdrawal distribution analysis follows via
 `vizops.analyze_pumping_distribution()`.  This logs percentile summaries,
 Tukey's fence outlier benchmarks (Q3 + 1.5×IQR mild, Q3 + 3×IQR extreme),
 and the percentile rank of `MAX_GW`, then saves an empirical CDF plot with
@@ -421,7 +421,7 @@ All models use Optuna + Dask hyperparameter optimisation (100 TPE trials,
 5-fold CV) and report R², normalized RMSE (% of mean), normalized MAE
 (% of mean), and normalized MBE (%).  All three normalized metrics use
 the mean of observed values as the denominator, giving a physically
-interpretable percentage error relative to the average pumping magnitude.
+interpretable percentage error relative to the average withdrawal magnitude.
 
 Permutation importance, ALE, and SHAP plots are generated for both train
 and test data.  For random and pixel holdout evaluations (which sweep
@@ -433,8 +433,8 @@ interpretability plots for every holdout.
 
 When `LOG_TARGET=True`, the pipeline applies a `log1p(y)` transform to
 the target variable before training and `expm1(ŷ)` to predictions
-afterward.  This stabilizes the right-skewed pumping distribution and
-improves tree-model performance on low-pumping pixels.  Because tree
+afterward.  This stabilizes the right-skewed withdrawal distribution and
+improves tree-model performance on low-withdrawal pixels.  Because tree
 leaf predictions become means of log-transformed values, the inverse
 (`expm1`) yields the geometric mean, which is systematically lower than
 the arithmetic mean (Jensen's inequality).  Global linear bias correction
@@ -448,7 +448,7 @@ operating space but *not* invariant under nonlinear transforms like
 `expm1`.  Applying `expm1` before R² would deflate scores via Jensen's
 inequality.  RMSE, MAE, and MBE, which have physical units (mm), are
 still inverse-transformed to original scale so that CV error metrics
-remain interpretable as percentage-of-mean pumping.
+remain interpretable as percentage-of-mean withdrawal.
 
 #### Optuna objective function
 
@@ -465,7 +465,7 @@ where α = 0.1 and β = 0.05.
   When `LOG_TARGET=True`, this is computed in **log space** (`log_nrmse`)
   so that the hyperparameter search optimizes in the same space as the
   tree model's internal MSE loss, giving equal weight to low- and
-  high-pumping pixels.  When `LOG_TARGET=False`, original-scale NRMSE is
+  high-withdrawal pixels.  When `LOG_TARGET=False`, original-scale NRMSE is
   used.
 - **Overfitting ratio penalty** (`α`): Penalizes trials where
   `test_NRMSE ≫ train_NRMSE` using the *ratio* rather than the absolute
@@ -539,20 +539,21 @@ first combination only.
 
 #### Step 2b — Temporal leave-one-out (`evaluate_temporal_loo()`)
 
-Seven pre-defined temporal holdout configurations (T1_Baseline + T1–T6):
+Eight pre-defined temporal holdout configurations (T1_Baseline + T1–T7):
 
-| Holdout | Withheld years | Training years | MIN_GW |
-|---|---|---|---|
-| T1_Baseline | 2010–2020 | 2002–2020 (`TRAIN_YEAR_LIST_BASELINE`) | 0 |
-| T1 | 2010–2020 | 1984–2024 (`YEAR_LIST`) | `MIN_GW` |
-| T2 | 2015–2024 | 1984–2024 | `MIN_GW` |
-| T3 | 1990–1992, 2005–2007, 2022–2024 | 1984–2024 | `MIN_GW` |
-| T4 | 2007–2010 | 1984–2024 | `MIN_GW` |
-| T5 | 1985–1989, 2020–2024 | 1984–2024 | `MIN_GW` |
-| T6 | 2024 | 1984–2024 | `MIN_GW` |
+| Holdout | Withheld years | Training years | MIN_GW | Purpose |
+|---|---|---|---|---|
+| T1_Baseline | 2010–2020 | 2002–2020 (`TRAIN_YEAR_LIST_BASELINE`) | 0 | Backward compat with Majumdar et al. (2022) |
+| T1 | 2010–2020 | 1984–2024 (`YEAR_LIST`) | `MIN_GW` | Mid-period block (same years, current config) |
+| T2 | 2015–2024 | 1984–2024 | `MIN_GW` | Recent decade — forward extrapolation |
+| T3 | 1990–1992, 2005–2007, 2022–2024 | 1984–2024 | `MIN_GW` | Scattered gaps — temporal interpolation |
+| T4 | 2007–2010 | 1984–2024 | `MIN_GW` | Short mid-period block — interpolation from both sides |
+| T5 | 1985–1989, 2020–2024 | 1984–2024 | `MIN_GW` | Both tails removed — no early/late anchoring |
+| T6 | 2024 | 1984–2024 | `MIN_GW` | Single most recent year — forward extrapolation |
+| T7 | 1984–1994 | 1984–2024 | `MIN_GW` | Early period — backward extrapolation |
 
 `T1_Baseline` reproduces the settings from [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757): training
-on 2002–2020 only, holding out 2010–2020, and including zero-pumping pixels
+on 2002–2020 only, holding out 2010–2020, and including zero-withdrawal pixels
 (`MIN_GW=0`).  All other holdouts use the full `YEAR_LIST` (1984–2024) and
 the pipeline-level `MIN_GW` threshold.
 
@@ -603,10 +604,10 @@ Saved to `{MODEL_DIR}Model_Evaluation/`.
 
 The core production step.  Trains a single **XGBoost model** on **all**
 metered data (1984–2024, no holdout) to maximize the training signal,
-then predicts annual pumping for every 2 km pixel from 1896 to 2099.
+then predicts annual withdrawals for every 2 km pixel from 1896 to 2099.
 
 **Absolute-value post-processing:** All predictions are wrapped in
-`np.abs()` because groundwater pumping depth is physically non-negative.
+`np.abs()` because withdrawal depth is physically non-negative.
 Tree-based regressors can produce small negative values near zero
 (numerical noise at the leaf level), and `abs()` ensures physical
 validity.  The same transform is applied consistently in Optuna CV
@@ -662,7 +663,7 @@ OOD — i.e., their feature vector lies outside the region spanned by the
 A **prediction exceedance check** complements the OOD detector from the
 opposite direction.  While OOD flags feature-space extrapolation, the
 exceedance check flags *output-space* implausibility: per-pixel predictions
-exceeding the training-era maximum (or 99th percentile) pumping depth
+exceeding the training-era maximum (or 99th percentile) withdrawal depth
 indicate physically implausible rates, since modern pump infrastructure
 operates near hydraulic efficiency limits (~75–85 %) and volumetric capacity
 is unlikely to change substantially over the projection horizon.  Per-year
@@ -679,10 +680,10 @@ prediction.
 
 For each year the pipeline:
 
-1. **Predicts** total pumping (mm) across all valid pixels.
+1. **Predicts** total annual withdrawals (mm) across all valid pixels.
 1. **Applies global linear bias correction** via `apply_linear_bc()`.
 2. **Checks prediction exceedance** against the training-era per-pixel
-   maximum and P99 pumping depth.  Pixels exceeding these thresholds are
+   maximum and P99 withdrawal depth.  Pixels exceeding these thresholds are
    counted per year.
 3. **Flags out-of-distribution pixels** via the OOD detector.  Per-year
    binary flag rasters (`OOD_Flag_{year}.tif`, 1 = OOD, 0 = in-distribution)
@@ -709,7 +710,7 @@ For each year the pipeline:
 
 | Product | Units written | File naming |
 |---|---|---|
-| Total pumping | mm, ft, m³, AF | `Predicted_GW_{year}_{unit}.tif` |
+| Total annual withdrawal | mm, ft, m³, AF | `Predicted_GW_{year}_{unit}.tif` |
 | 8 withdrawal categories | mm, ft, m³, AF | `{Category}_{year}_{unit}.tif` |
 | 3 CU categories | mm, ft, m³, AF | `{CU_Category}_{year}_{unit}.tif` |
 | OOD flags | binary (0/1) | `OOD_Flag_{year}.tif` |
@@ -747,10 +748,10 @@ Four temporal eras are distinguished in the plots:
 
 `vizops.create_graphical_abstract()` produces a two-panel publication figure:
 
-- **Panel (a)**: Spatial map of mean-annual predicted pumping depth (mm)
+- **Panel (a)**: Spatial map of mean-annual predicted withdrawal depth (mm)
   across all 204 years (1896–2099), with GW basin boundaries and AMA/INA
   labels overlaid on a YlOrRd color ramp.
-- **Panel (b)**: Time series of total annual AMA/INA pumping (acre-ft) with
+- **Panel (b)**: Time series of total annual AMA/INA withdrawals (acre-ft) with
   era shading and an inset bar chart of era-averaged volumes.
 
 Saved as `{prediction_dir}Graphical_Abstract_Fig1.png` (600 dpi).
@@ -800,7 +801,7 @@ For each future year, per-GCM predictor rasters are downloaded from GEE
 mosaicked, and stored in `GEE_Mosaics_{res}m_{GCM}/`.  The six
 MACA-derived climate columns (ET, ETo, precip, Peff, Tmax, Tmin) from each
 GCM's predictor raster replace the ensemble values in the year DataFrame,
-the XGBoost model predicts total pumping, and σ_MACA is the per-pixel
+the XGBoost model predicts total annual withdrawals, and σ_MACA is the per-pixel
 sample standard deviation across the 5 predictions:
 
 $$\sigma_{\text{MACA}}(x, y, t) = \text{std}\bigl[\hat{y}_{\text{GCM}_1}, \ldots, \hat{y}_{\text{GCM}_5}\bigr]$$
@@ -879,7 +880,7 @@ instead.  For each of the 4 scenarios:
 2. The LULC class, crop fraction, and irrigation fraction are re-derived
    end-to-end (LULC → AGRI/URBAN via `gwops.create_land_use_data()` →
    `crop_frac` → `irr_frac` via the regression model).
-3. The XGBoost model predicts total pumping under each scenario.
+3. The XGBoost model predicts total annual withdrawals under each scenario.
 
 σ_LULC is the sample standard deviation across the 4 scenario predictions:
 
@@ -1030,7 +1031,7 @@ This augmentation is applied to:
 
 | Product | σ source | Units augmented | Details |
 |---------|----------|----------------|---------|
-| **Total pumping** (32 rasters/yr) | σ_total × unit scale | mm, ft, m³, AF | σ_total computed in mm, scaled by conversion factor per unit |
+| **Total annual withdrawal** (32 rasters/yr) | σ_total × unit scale | mm, ft, m³, AF | σ_total computed in mm, scaled by conversion factor per unit |
 | **8 withdrawal categories** (256 rasters/yr) | σ_cat via quadrature of per-category ensemble spreads | mm, ft, m³, AF | Each ensemble member is partitioned before computing std |
 | **3 CU categories** (48 rasters/yr) | σ_CU (error propagation) | mm, ft, m³, AF | σ_CU in mm, scaled to target unit |
 
@@ -1166,7 +1167,7 @@ on every panel.  No-data pixels appear as gray background.
 
 | Category group | Colormap | Count |
 |---|---|---|
-| Total predicted GW + 8 partition categories + 3 CU | `YlOrRd` | 12 figures |
+| Total predicted withdrawal + 8 partition categories + 3 CU | `YlOrRd` | 12 figures |
 | OOD flags (mean fraction) | `RdYlGn_r` | 1 figure |
 | 6 sigma components — band 1 (σ in mm) | `Purples` | 6 figures |
 | 6 sigma components — band 2 (CV) | `inferno` | 6 figures |
@@ -1196,7 +1197,7 @@ per-era).  Each figure shows:
   increasing (↑), decreasing (↓), and non-significant trends.
 - Basin boundaries and AMA/INA labels overlaid.
 
-Trend maps are generated for: total predicted GW, 8 partition categories,
+Trend maps are generated for: total predicted withdrawal, 8 partition categories,
 and 3 CU categories — each with up to 5 periods (full +
 4 eras), yielding ~60 trend figures.
 
@@ -1402,7 +1403,7 @@ Key functions:
 - **`mosaic_tiles()`** — Merges GEE tiles into annual mosaics.
 - **`reproject_gee_mosaics()`** — Reprojects mosaics to the GW raster grid.
 - **`create_az_data_parquet()`** — Reads all years' predictor rasters and
-  stacks them with basin labels and observed pumping into a single DataFrame.
+  stacks them with basin labels and observed withdrawals into a single DataFrame.
 - **`create_train_test_data()`** — Splits the DataFrame into train/test
   sets using one of four strategies (temporal, spatial, random ratio,
   random 80/20).
@@ -1455,10 +1456,10 @@ Key functions:
 - **`explore_az_data()`** — Exploratory data analysis (histograms + KDE,
   boxplots by era/basin type/GW basin, violin plots, time series, and
   boxplots by year for all numeric columns).
-- **`analyze_pumping_distribution()`** — Pumping depth distribution analysis
+- **`analyze_pumping_distribution()`** — Withdrawal depth distribution analysis
   with summary statistics, Tukey's fence outlier benchmarks, and empirical
   CDF plot (separate curves per depth threshold vs. no threshold).
-- **`create_full_period_time_series()`** — Annual pumping line plot (1896–
+- **`create_full_period_time_series()`** — Annual withdrawal line plot (1896–
   2099) with era shading and optional observed-data overlay.
 - **`create_era_summary_maps()`** — Spatial maps of mean depth for each era
   (Hindcast, Historical, Forecast, Projected).
@@ -1470,7 +1471,7 @@ Key functions:
   Temporal LOO, and Spatial LOO results with R², RMSE, MAE, MBE, and
   Overfit R².  Produces CSV, LaTeX (`booktabs`), and grouped bar chart.
 - **`create_graphical_abstract()`** — Two-panel Figure 1: (a) mean-annual
-  pumping depth map with GW basin boundaries, (b) annual pumping time series
+  withdrawal depth map with GW basin boundaries, (b) annual withdrawal time series
   with era shading and inset bar chart.
 - **`create_era_raster_maps()`** — 2×2 panel era-mean spatial maps with
   basin/AMA/INA overlays and shared colorbar.  Supports multi-band rasters
@@ -1498,7 +1499,7 @@ Key functions:
 - **`reproject_vectors()`** — Reprojects basin, sub-basin, well, CAP, and
   streamflow vectors to a consistent CRS.
 - **`create_gw_volume_rasters()`** / **`create_gw_depth_rasters()`** —
-  Rasterizes pumping volumes (AF) and converts to depth (mm).
+  Rasterizes withdrawal volumes (AF) and converts to depth (mm).
 - **`crop_gw_rasters()`** — Clips GW rasters to the Arizona boundary.
 - **`create_gw_basin_rasters()`** — Rasterizes ADWR basin and sub-basin
   polygons.
@@ -1539,7 +1540,7 @@ Key functions:
 
 ### `partitionops.py` — Water-budget partitioning
 
-Decomposes total pumping predictions into eight withdrawal categories using
+Decomposes total annual withdrawal predictions into eight categories using
 ancillary data already in the predictor stack:
 
 | Category | Derivation |
@@ -1590,7 +1591,7 @@ to guarantee exact budget closure with no floating-point drift.
 ### `uncertaintyops.py` — Hybrid uncertainty quantification
 
 Computes pixel-level prediction uncertainty for all products (total
-pumping, withdrawal categories, consumptive use) and writes augmented
+annual withdrawals, withdrawal categories, consumptive use) and writes augmented
 6-band GeoTIFFs.
 
 Key functions:
@@ -1631,7 +1632,7 @@ Key functions:
   reporting per-category volume changes.  Years < 2005 and ≥ 2015 are
   most affected since they are frozen at a single snapshot.  Writes
   `Sigma_GW/GW_Fraction_Sensitivity.csv`.
-- **`augment_prediction_rasters()`** — Rewrites total pumping rasters as
+- **`augment_prediction_rasters()`** — Rewrites total annual withdrawal rasters as
   6-band GeoTIFFs (pred, σ, CV, SNR, lower CI, upper CI) for all 4 units.
 - **`augment_category_rasters()`** — Augments 8 withdrawal category rasters
   using per-category σ_total rasters computed directly from ensemble
@@ -1758,7 +1759,7 @@ Key functions:
 The codebase includes optional physics-informed ML wrappers (`PIML_XGB`,
 `PIML_LGBM`, `PIML_XGBRF`) that embed domain knowledge into the training
 objective via two tiers: (1) monotone constraints enforcing physically
-expected directional relationships (e.g., pumping increases with ET, well
+expected directional relationships (e.g., withdrawals increase with ET, well
 density, and irrigation fraction; decreases with effective precipitation),
 and (2) a custom loss function with a one-sided irrigation-demand floor
 penalty that keeps predictions at or above the physics-estimated demand
@@ -1771,13 +1772,13 @@ counterparts.  On random and pixel holdout evaluations the PIML variants
 perform comparably to standard XGBoost, but on temporal leave-one-out—the
 most demanding test of generalization to unseen years—PIML_XGB exhibits
 ~20 % higher RMSE than standard XGBoost even after bias correction.  The
-root cause is that groundwater pumping, in Arizona and elsewhere, is not
+root cause is that groundwater withdrawals, in Arizona and elsewhere, are not
 purely governed by physical irrigation demand: management decisions
 (water rights, fallowing programs, municipal/industrial allocations,
-conjunctive-use policies) drive pumping patterns that cannot be captured
+conjunctive-use policies) drive withdrawal patterns that cannot be captured
 by a physics-based floor tied to crop water balance.  Unlike groundwater
 levels, which follow broadly predictable seasonal and climatic patterns,
-pumping volumes are a human decision variable with no universal physical
+withdrawal volumes are a human decision variable with no universal physical
 law governing their magnitude.  In this setting, purely statistical
 approaches that learn flexible predictor–response mappings from the data
 outperform models constrained to respect a simplified physical prior.
@@ -1797,7 +1798,7 @@ After a full pipeline run, the output tree looks like:
 Data/Outputs/
 ├── GEE_Mosaics_2000m/                      # Mosaicked GEE predictor tiles
 ├── GW/
-│   ├── Rasters/GW_Depths_All_Wells_2000m/   # Observed pumping rasters (mm)
+│   ├── Rasters/GW_Depths_All_Wells_2000m/   # Observed withdrawal rasters (mm)
 │   └── Vectors/All_Wells/                   # Per-year GW shapefiles
 ├── GW_Data/Vector_Reproj/                   # Reprojected basins, wells, etc.
 ├── Predictor_Data_All_Wells_2000m/          # Multi-band Predictor_YYYY.tif
@@ -1812,7 +1813,7 @@ Data/Outputs/
     │   │   ├── All_Runs.csv                #   All test_size × seed metrics
     │   │   └── Model_Comparison_Averaged.csv #  Mean ± std by model & test_size
     │   ├── Pixel_Holdout/                   # Step 2a2 (same grid structure)
-    │   ├── Temporal_LOO/                    # Step 2b results (T1–T6)
+    │   ├── Temporal_LOO/                    # Step 2b results (T1–T7)
     │   ├── Spatial_LOO/                     # Step 2c results (per sub-basin)
     │   ├── Cross_Strategy_Summary.csv       # All models × all strategies
     │   ├── Cross_Strategy_Summary.tex       # LaTeX table for manuscripts
@@ -1823,7 +1824,7 @@ Data/Outputs/
         │   ├── Hindcast/                    #   Era-specific plots (1896-1983)
         │   ├── Training/                    #   Era-specific plots (1984-2024)
         │   └── Projection/                  #   Era-specific plots (2025-2099)
-        ├── Predicted_Rasters/               # Total pumping (4 units, 6-band)
+        ├── Predicted_Rasters/               # Total annual withdrawal (4 units, 6-band)
         │   ├── Depth_mm/
         │   ├── Depth_ft/
         │   ├── Volume_m3/
