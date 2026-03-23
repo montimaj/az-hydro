@@ -2968,8 +2968,7 @@ def get_prediction_results(
     pred_df.to_parquet(os.path.join(model_dir, f'Predictions_{model_name}.parquet'), index=False)
     if not apply_bias_correction:
         return pred_df
-    elif model_name not in ['LGBM', 'DRF', 'ETR', 'RF', 'XGB', 'XGBRF', 'HGBR',
-                            'PIML_XGB', 'PIML_LGBM', 'PIML_XGBRF']:
+    elif model_name in ('LR', 'RIDGE', 'LASSO'):
         logger.info(f'No bias correction for {model_name} model.')
         return pred_df
     else:
