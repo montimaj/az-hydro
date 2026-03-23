@@ -1312,9 +1312,9 @@ def explore_az_data(
                 handles = [_mpatches.Patch(color=ERA_COLORS[e], label=f'{e} ({eda_periods[e][0]}–{eda_periods[e][1]})')
                            for e in era_order]
                 ax.legend(handles=handles, loc='best', fontsize=9)
-            _plt.tight_layout()
-            _plt.savefig(os.path.join(output_dir, f'{safe}_timeseries.png'))
-            _plt.close()
+            fig.tight_layout()
+            fig.savefig(os.path.join(output_dir, f'{safe}_timeseries.png'))
+            _plt.close(fig)
 
             # ── 2. Time series grouped by Basin Type ─────────────────────
             fig, ax = _plt.subplots(figsize=figsize_ts)
@@ -1334,9 +1334,9 @@ def explore_az_data(
                     for e in era_order
                 ])
             ax.legend(handles=bt_handles, loc='best', fontsize=9)
-            _plt.tight_layout()
-            _plt.savefig(os.path.join(output_dir, f'{safe}_timeseries_by_basin_type.png'))
-            _plt.close()
+            fig.tight_layout()
+            fig.savefig(os.path.join(output_dir, f'{safe}_timeseries_by_basin_type.png'))
+            _plt.close(fig)
 
             # ── 2b. Boxplot by Year with era shading ────────────────────
             fig, ax = _plt.subplots(figsize=(14, 6))
@@ -1369,9 +1369,9 @@ def explore_az_data(
                     if i % 5 != 0:
                         lbl.set_visible(False)
             ax.tick_params(axis='x', rotation=45)
-            _plt.tight_layout()
-            _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_year.png'))
-            _plt.close()
+            fig.tight_layout()
+            fig.savefig(os.path.join(output_dir, f'{safe}_boxplot_year.png'))
+            _plt.close(fig)
 
         # ── Histogram + KDE (clipped to P1–P99) ──────────────────────────
         clip_lower = col_df[col].quantile(0.01)
@@ -1384,9 +1384,9 @@ def explore_az_data(
         _sns.histplot(clip_vals, kde=True, ax=ax, color='#2C3E50', edgecolor='white', stat='count')
         ax.set_xlabel(label)
         ax.set_title(f'{label} — Histogram + KDE (P1–P99)')
-        _plt.tight_layout()
-        _plt.savefig(os.path.join(output_dir, f'{safe}_hist_kde.png'))
-        _plt.close()
+        fig.tight_layout()
+        fig.savefig(os.path.join(output_dir, f'{safe}_hist_kde.png'))
+        _plt.close(fig)
 
         clip_col_df = col_df[clip_mask]
 
@@ -1408,9 +1408,9 @@ def explore_az_data(
             if legend is not None:
                 legend.set_title('Era')
                 legend.set_loc('upper right')
-            _plt.tight_layout()
-            _plt.savefig(os.path.join(output_dir, f'{safe}_kde_era.png'))
-            _plt.close()
+            fig.tight_layout()
+            fig.savefig(os.path.join(output_dir, f'{safe}_kde_era.png'))
+            _plt.close(fig)
 
         # H3. Histogram + KDE by Basin Type
         fig, ax = _plt.subplots(figsize=figsize_box)
@@ -1424,9 +1424,9 @@ def explore_az_data(
         if legend is not None:
             legend.set_title('Basin Type')
             legend.set_loc('upper right')
-        _plt.tight_layout()
-        _plt.savefig(os.path.join(output_dir, f'{safe}_kde_basin_type.png'))
-        _plt.close()
+        fig.tight_layout()
+        fig.savefig(os.path.join(output_dir, f'{safe}_kde_basin_type.png'))
+        _plt.close(fig)
 
         # H4. Histogram + KDE by GW Basin (AMA/INA)
         basin_df_kde = clip_col_df[clip_col_df[gw_basin_col].isin(ama_ina_basins)]
@@ -1446,9 +1446,9 @@ def explore_az_data(
                 legend.set_bbox_to_anchor((1.02, 1))
                 for text in legend.get_texts():
                     text.set_fontsize(7)
-            _plt.tight_layout()
-            _plt.savefig(os.path.join(output_dir, f'{safe}_kde_gw_basin.png'))
-            _plt.close()
+            fig.tight_layout()
+            fig.savefig(os.path.join(output_dir, f'{safe}_kde_gw_basin.png'))
+            _plt.close(fig)
 
         if not skip_era:
             # ── 3. Boxplot by Era ────────────────────────────────────────
@@ -1462,9 +1462,9 @@ def explore_az_data(
             )
             ax.set_ylabel(label)
             ax.set_title(f'{label} — Distribution by Era')
-            _plt.tight_layout()
-            _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_era.png'))
-            _plt.close()
+            fig.tight_layout()
+            fig.savefig(os.path.join(output_dir, f'{safe}_boxplot_era.png'))
+            _plt.close(fig)
 
             # ── 4. Violin plot by Era ────────────────────────────────────
             fig, ax = _plt.subplots(figsize=figsize_box)
@@ -1474,9 +1474,9 @@ def explore_az_data(
             )
             ax.set_ylabel(label)
             ax.set_title(f'{label} — Violin by Era')
-            _plt.tight_layout()
-            _plt.savefig(os.path.join(output_dir, f'{safe}_violin_era.png'))
-            _plt.close()
+            fig.tight_layout()
+            fig.savefig(os.path.join(output_dir, f'{safe}_violin_era.png'))
+            _plt.close(fig)
 
             # ── 5. Boxplot by GW_Basin_Type ──────────────────────────────
             fig, ax = _plt.subplots(figsize=figsize_box)
@@ -1489,9 +1489,9 @@ def explore_az_data(
             ax.set_title(f'{label} — by Basin Type & Era')
             ax.set_xlabel('Basin Type')
             ax.legend(loc='best', fontsize=9, title='Era')
-            _plt.tight_layout()
-            _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_basin_type.png'))
-            _plt.close()
+            fig.tight_layout()
+            fig.savefig(os.path.join(output_dir, f'{safe}_boxplot_basin_type.png'))
+            _plt.close(fig)
 
             # ── 6. Boxplot by GW_Basin ───────────────────────────────────
             basin_df = col_df[col_df[gw_basin_col].isin(ama_ina_basins)]
@@ -1508,9 +1508,9 @@ def explore_az_data(
             ax.set_xlabel('GW Basin')
             ax.tick_params(axis='x', rotation=35)
             ax.legend(loc='best', fontsize=8, title='Era')
-            _plt.tight_layout()
-            _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_gw_basin.png'))
-            _plt.close()
+            fig.tight_layout()
+            fig.savefig(os.path.join(output_dir, f'{safe}_boxplot_gw_basin.png'))
+            _plt.close(fig)
         else:
             # Static / single-era variables: spatial distribution only (no era split)
             # ── 3s. Boxplot by Basin Type ────────────────────────────────
@@ -1522,9 +1522,9 @@ def explore_az_data(
             ax.set_ylabel(label)
             ax.set_title(f'{label} — by Basin Type')
             ax.set_xlabel('Basin Type')
-            _plt.tight_layout()
-            _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_basin_type.png'))
-            _plt.close()
+            fig.tight_layout()
+            fig.savefig(os.path.join(output_dir, f'{safe}_boxplot_basin_type.png'))
+            _plt.close(fig)
 
             # ── 4s. Boxplot by GW_Basin ──────────────────────────────────
             basin_df = col_df[col_df[gw_basin_col].isin(ama_ina_basins)]
@@ -1538,13 +1538,15 @@ def explore_az_data(
             ax.set_title(f'{label} — by GW Basin (AMA/INA)')
             ax.set_xlabel('GW Basin')
             ax.tick_params(axis='x', rotation=35)
-            _plt.tight_layout()
-            _plt.savefig(os.path.join(output_dir, f'{safe}_boxplot_gw_basin.png'))
-            _plt.close()
+            fig.tight_layout()
+            fig.savefig(os.path.join(output_dir, f'{safe}_boxplot_gw_basin.png'))
+            _plt.close(fig)
 
-    for i, col in enumerate(numeric_cols, 1):
-        logger.info(f'  EDA [{i}/{len(numeric_cols)}] {col}')
-        _plot_column(col)
+    n_workers = max(1, multiprocessing.cpu_count() - 2)
+    logger.info(f'Processing EDA with {n_workers} threads …')
+    Parallel(n_jobs=n_workers, backend='threading')(
+        delayed(_plot_column)(col) for col in numeric_cols
+    )
     logger.info(f'Exploratory plots saved to {output_dir}')
 
 

@@ -29,10 +29,17 @@ The conda package manager can be updated by running the following command: ```co
 
 Anaconda is a Python distribution and environment manager. Miniconda is a free minimal installer for conda. These will help in installing the correct packages and Python version to run the codes.
 
-### 2. Clone or download the repository
+### 2. Clone the repository and download input data
 
-Download the repository from the compressed file link at the top right of the repository webpage, or clone the repository using Git.
-Unzip all zipped files.  Several of the input datasets in this repository are zipped for efficient storage and must be unzipped before they can be used to run this project.
+Clone the repository using Git:
+```bash
+git clone https://github.com/<owner>/az-hydro.git
+cd az-hydro
+```
+
+The `Data/` folder is hosted separately on Zenodo due to its size (~14 GB).
+Download it from [https://doi.org/10.5281/zenodo.19057936](https://doi.org/10.5281/zenodo.19057936) and extract it at the repository root so that `Data/Inputs/` exists.
+Unzip all zipped files — several input datasets are compressed and must be unzipped before running the pipeline.
 
 ### 3. Creating the conda environment and installing packages
 Open Linux/Mac terminal or Windows PowerShell and run the following:
@@ -57,10 +64,11 @@ From the `azhydro/` directory, run the pipeline with:
 python pipeline.py
 ```
 
-> **First-time run:** The default flags (`--skip-download`, `--load-files`) assume
-> GEE tiles and intermediate files already exist on disk. If you are starting
-> from scratch, use `--download --recreate` to fetch the data and build all
-> intermediate files:
+> **First-time run:** Ensure you have downloaded the `Data/` folder from
+> [Zenodo](https://doi.org/10.5281/zenodo.19057936) (see step 2). The default
+> flags (`--skip-download`, `--load-files`) assume GEE tiles and intermediate
+> files already exist on disk. If you are starting from scratch, use
+> `--download --recreate` to fetch GEE data and build all intermediate files:
 >
 > ```bash
 > python pipeline.py --download --recreate
@@ -309,7 +317,7 @@ All paths and modeling parameters are defined once at the top of
 
 | Constant | Value | Description |
 |---|---|---|
-| `INPUT_DIR` | `../Data/Inputs/` | Root for all input datasets. |
+| `INPUT_DIR` | `../Data/Inputs/` | Root for all input datasets (downloaded from [Zenodo](https://doi.org/10.5281/zenodo.19057936)). |
 | `OUTPUT_DIR` | `../Data/Outputs/` | Root for all generated outputs. |
 | `WATER_USE` | `'All'` | Well filter (`'All'` or `'Irr_Wells'`). |
 | `MOSAIC_RASTER_RES` | `2000` | Raster pixel size (m). |
@@ -417,7 +425,7 @@ model zoo comprises 13 models — 4 core baselines (XGB, LGBM, RF, XGBRF)
 and 9 additional ensemble/linear models (ETR, HGBR, GBR, ADA, BAG, CAT,
 LR, RIDGE, LASSO) enabled via `INCLUDE_ALL_MODELS=True`.
 
-All models use Optuna + Dask hyperparameter optimisation (100 TPE trials,
+All models use Optuna + Dask hyperparameter optimisation (50 TPE trials,
 5-fold CV) and report R², normalized RMSE (% of mean), normalized MAE
 (% of mean), and normalized MBE (%).  All three normalized metrics use
 the mean of observed values as the denominator, giving a physically

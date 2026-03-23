@@ -9,7 +9,7 @@ Maintainer: [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majum
 
 ## Abstract
 
-AZ-Hydro is a physics-constrained machine learning pipeline for estimating annual withdrawals, consumptive use, effective precipitation, and irrigation efficiencies across Arizona at 2 km resolution from 1896 to 2099. The pipeline fuses 13 bands of satellite-derived and climate-model-projected predictor data—including evapotranspiration, reference ET, precipitation, effective precipitation, temperature, land use/land cover, irrigated fraction, groundwater fraction, soil properties, canal-weighted streamflow, canal density, and well density—into a spatially explicit predictor stack via Google Earth Engine. An XGBoost model is tuned with Optuna TPE hyperparameter search (50 trials, 5-fold CV), parallelized with Dask, and trained on metered Arizona Department of Water Resources (ADWR) withdrawal records (1984–2024). Up to 13 models—four core baselines (XGBoost, LightGBM, Random Forest, XGBoost Random Forest) and nine additional ensemble/linear models (ExtraTrees, HistGradientBoosting, GradientBoosting, AdaBoost, Bagging, CatBoost, Linear Regression, Ridge, Lasso)—are benchmarked across four evaluation strategies: random holdout, pixel-level spatial holdout, temporal leave-one-out (eight configurations), and spatial leave-one-out. Random and pixel holdout strategies are assessed over a grid of five test sizes (10 %–30 %) × five random seeds to quantify sensitivity to the train/test split. Model interpretability is assessed via permutation importance, accumulated local effects (ALE), and SHAP analyses on both training and test sets. Physical constraints are enforced post-hoc: conservation-consistent withdrawal partitioning (Irrigation + Non-Irrigation = Total, GW + SW = Total), well density masking, canal density-based surface-water fraction estimation, and physics-based consumptive use calculation (CU = IE × Withdrawal) with USGS NHM basin-level irrigation efficiencies. Full-period predictions are partitioned into eight withdrawal categories and three consumptive-use products. A hybrid uncertainty quantification framework combines five independent error components (inter-GCM climate spread, model seed ensemble, irrigation fraction sensitivity, LULC projection spread, and GW fraction snapshot spread) via quadrature, with physics-based error propagation for consumptive use (σ_CU = √((IE·σ_wd)² + (wd·σ_IE)²)), to produce 6-band augmented GeoTIFFs (prediction, σ, CV, SNR, lower 95 % CI, upper 95 % CI) for every product and unit. All time-series plots—AZ-wide, per-basin, and per-sub-basin—are generated with 95 % confidence interval bounds derived from zonal statistics on these augmented rasters. A well-level package disaggregates pixel-level rasters to individual ADWR wells using capacity-proportional weighting, including per-well uncertainty bounds. Predictions are independently validated against USGS National Hydrologic Model (NHM) HUC12 withdrawals, consumptive use, and effective precipitation, as well as USGS Reitz 800 m irrigation water-use rasters, aggregated to ADWR groundwater basin totals.
+AZ-Hydro is a physics-constrained machine learning pipeline for estimating annual withdrawals and consumptive use across Arizona at 2 km resolution from 1896 to 2099, building on the foundational Arizona groundwater withdrawal study by [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757). The pipeline fuses 13 bands of satellite-derived and climate-model-projected predictor data—including evapotranspiration, reference ET, precipitation, effective precipitation, temperature, land use/land cover, irrigated fraction, groundwater fraction, soil properties, canal-weighted streamflow, canal density, and well density—into a spatially explicit predictor stack via Google Earth Engine. An XGBoost model is tuned with Optuna TPE hyperparameter search (50 trials, 5-fold CV), parallelized with Dask, and trained on metered Arizona Department of Water Resources (ADWR) groundwater withdrawal records (1984–2024). Up to 13 models—four core baselines (XGBoost, LightGBM, Random Forest, XGBoost Random Forest) and nine additional ensemble/linear models (ExtraTrees, HistGradientBoosting, GradientBoosting, AdaBoost, Bagging, CatBoost, Linear Regression, Ridge, Lasso)—are benchmarked across four evaluation strategies: random holdout, pixel-level spatial holdout, temporal leave-one-out (eight configurations), and spatial leave-one-out. Random and pixel holdout strategies are assessed over a grid of five test sizes (10 %–30 %) × five random seeds to quantify sensitivity to the train/test split. Model interpretability is assessed via permutation importance, accumulated local effects (ALE), and SHAP analyses on both training and test sets. Physical constraints are enforced post-hoc: conservation-consistent withdrawal partitioning (Irrigation + Non-Irrigation = Total, GW + SW = Total), well density masking, canal density-based surface-water fraction estimation, and physics-based consumptive use calculation (CU = IE × Withdrawal) with USGS NHM basin-level irrigation efficiencies. Full-period predictions are partitioned into eight withdrawal categories and three consumptive-use products. A hybrid uncertainty quantification framework combines five independent error components (inter-GCM climate spread, model seed ensemble, irrigation fraction sensitivity, LULC projection spread, and GW fraction snapshot spread) via quadrature, with physics-based error propagation for consumptive use (σ_CU = √((IE·σ_wd)² + (wd·σ_IE)²)), to produce 6-band augmented GeoTIFFs (prediction, σ, CV, SNR, lower 95 % CI, upper 95 % CI) for every product and unit. All time-series plots—AZ-wide, per-basin, and per-sub-basin—are generated with 95 % confidence interval bounds derived from zonal statistics on these augmented rasters. A well-level package disaggregates pixel-level rasters to individual ADWR wells using capacity-proportional weighting, including per-well uncertainty bounds. Predictions are independently validated against USGS National Hydrologic Model (NHM) HUC12 withdrawals, consumptive use, effective precipitation ([Martin et al., 2025](https://doi.org/10.1016/j.jhydrol.2025.133909); [Martin et al., 2023](https://doi.org/10.5066/P9YWR0OJ); [Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM)), and public supply ([Alzraiee et al., 2024](https://doi.org/10.1029/2023WR036632); [Luukkonen et al., 2023](https://doi.org/10.5066/P9FUL880)), as well as USGS Reitz 800 m irrigation water-use rasters ([Reitz et al., 2023a](https://doi.org/10.1029/2022WR034012); [2023b](https://doi.org/10.5066/P9EZ3VAS)), aggregated to ADWR groundwater basin totals.
 
 ## Getting Started
 
@@ -67,27 +67,41 @@ az-hydro/
 │   ├── conftest.py                  # Shared fixtures
 │   └── test_core.py                 # Core pipeline tests
 │
-├── Data/                            # Input data (not tracked in full by git)
-│   └── Inputs/
-│       ├── GEE_Data/                # Downloaded GEE tiles & HUC12 polygons
-│       ├── GW_Data/                 # ADWR records, shapefiles, ancillary vectors
-│       └── USGS WU/                 # NHM withdrawals, Reitz rasters, crop surveys
+├── Data/                            # External — download from Zenodo (see below)
+│   ├── Inputs/
+│   │   ├── GEE_Data/                # Downloaded GEE tiles & HUC12 polygons
+│   │   ├── GW_Data/                 # ADWR records, shapefiles, ancillary vectors
+│   │   └── USGS WU/                 # NHM withdrawals, Reitz rasters, crop surveys
+│   └── Outputs/                     # Generated by the pipeline
+│       ├── GW_Data/                 # Observed withdrawal depth rasters & vectors
+│       └── ML_Model_*/              # Model evaluation, predictions, intercomparisons
 │
 └── docs/
     └── images/                   # Logo images for README
 ```
 
-### Repository disk space requirements
+### Input data
 
-A full clone with all input data and a complete pipeline run requires approximately **37 GB**:
+The `Data/` folder is **not** included in the Git repository. Download it from the [Zenodo archive](https://doi.org/10.5281/zenodo.19057936) and place it at the repository root so that the path `Data/Inputs/` exists:
+
+```bash
+# After cloning the repository
+cd az-hydro
+# Download and extract the Data folder from Zenodo
+# https://doi.org/10.5281/zenodo.19057936
+```
+
+### Disk space requirements
+
+A full setup with input data and a complete pipeline run requires approximately **37 GB**:
 
 | Component | Size | Notes |
 |---|---|---|
-| **Inputs total** | ~14 GB | |
+| **Inputs total (Zenodo)** | ~14 GB | Downloaded separately from the Git repository |
 | &emsp;GEE tiles | ~1 GB | Raw 2 km tiles (80 km × 80 km each) |
 | &emsp;GW data | ~2.5 GB | ADWR metered records, shapefiles, well registry, ancillary vectors |
 | &emsp;USGS water-use data | ~11 GB | NHM withdrawals/CU/IE, Reitz 800 m rasters, crop surveys |
-| **Outputs total** | ~16 GB | |
+| **Outputs (generated)** | ~16 GB | |
 | &emsp;GW rasters & vectors | ~14 GB | Observed withdrawal depth rasters + per-year vector shapefiles |
 | &emsp;Reprojected vectors | ~900 MB | Basins, wells, CAP, streamflow in consistent CRS |
 | &emsp;ML model outputs | ~500 MB+ | Evaluation, predictions, intercomparisons (grows with full run) |
@@ -126,12 +140,24 @@ writing remain entirely the responsibility of the authors.
 
 ## References
 
+Alzraiee, A., Niswonger, R., Luukkonen, C., Larsen, J., Martin, D., Herbert, D., Buchwald, C., Dieter, C., Miller, L., Stewart, J., Houston, N., Paulinski, S., & Valseth, K. (2024). Next Generation Public Supply Water Withdrawal Estimation for the Conterminous United States Using Machine Learning and Operational Frameworks. _Water Resources Research_, _60_(7). https://doi.org/10.1029/2023WR036632
+
 Hasan, M. F., Smith, R. G., Majumdar, S., Huntington, J. L., Alves Meira Neto, A., & Minor, B. A. (2025). Satellite data and physics-constrained machine learning for estimating effective precipitation in the Western United States and application for monitoring groundwater irrigation. _Agricultural Water Management_, _319_, 109821. https://doi.org/10.1016/j.agwat.2025.109821.
+
+Haynes, J. V., Read, A. L., Chan, A. Y., Martin, D. J., Regan, R. S., Henson, W. R., Niswonger, R. G., & Stewart, J. S. (2023). Monthly crop irrigation withdrawals and efficiencies by HUC12 watershed for years 2000–2020 within the conterminous United States (ver. 2.0, September 2024). _U.S. Geological Survey data release_. https://doi.org/10.5066/P9LGISUM.
+
+Luukkonen, C.L., Alzraiee, A.H., Larsen, J.D., Martin, D.J., Herbert, D.M., Buchwald, C.A., Houston, N.A., Valseth, K.J., Paulinski, S., Miller, L.D., Niswonger, R.G., Stewart, J.S., & Dieter, C.A. (2023). Public supply water use reanalysis for the 2000-2020 period by HUC12, month, and year for the conterminous United States. _U.S. Geological Survey data release_. https://doi.org/10.5066/P9FUL880
 
 Majumdar, S., Smith, R., Butler, J. J., & Lakshmi, V. (2020). Groundwater withdrawal prediction using integrated multitemporal remote sensing data sets and machine learning. _Water Resources Research_, _56_(11), e2020WR028059. https://doi.org/10.1029/2020WR028059.
 
 Majumdar, S., Smith, R., Conway, B. D., & Lakshmi, V. (2022). Advancing remote sensing and machine learning‐driven frameworks for groundwater withdrawal estimation in Arizona: Linking land subsidence to groundwater withdrawals. _Hydrological Processes, 36_(11), e14757. https://doi.org/10.1002/hyp.14757.
 
+Martin, D. J., Regan, R. S., Haynes, J. V., Read, A. L., Henson, W. R., Stewart, J. S., Brandt, J. T., & Niswonger, R. G. (2023). Irrigation water use reanalysis for the 2000–20 period by HUC12, month, and year for the conterminous United States (ver. 2.0, September 2024). _U.S. Geological Survey data release_. https://doi.org/10.5066/P9YWR0OJ.
+
 Martin, D. J., Niswonger, R. G., Regan, R. S., Huntington, J. L., Ott, T., Morton, C., Senay, G. B., Friedrichs, M., Melton, F. S., Haynes, J., Henson, W., Read, A., Xie, Y., Lark, T., & Rush, M. (2025). Estimating irrigation consumptive use for the conterminous United States: coupling satellite-sourced estimates of actual evapotranspiration with a national hydrologic model. _Journal of Hydrology_, _662_, 133909. https://doi.org/10.1016/j.jhydrol.2025.133909.
 
 Ott, T. J., Majumdar, S., Huntington, J. L., Pearson, C., Bromley, M., Minor, B. A., ReVelle, P., Morton, C. G., Sueki, S., Beamer, J. P., & Jasoni, R. L. (2024). Toward field-scale groundwater pumping and improved groundwater management using remote sensing and climate data. _Agricultural Water Management_, _302_, 109000. https://doi.org/10.1016/j.agwat.2024.109000.
+
+Reitz, M., Sanford, W. E., & Saxe, S. (2023a). Ensemble Estimation of Historical Evapotranspiration for the Conterminous U.S. _Water Resources Research_, _59_(6). https://doi.org/10.1029/2022WR034012.
+
+Reitz, M., Sanford, W. E., & Saxe, S. (2023b). Historical evapotranspiration for the conterminous U.S. _U.S. Geological Survey Data Release_. https://doi.org/10.5066/P9EZ3VAS.
