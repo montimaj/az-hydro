@@ -1264,8 +1264,10 @@ def explore_az_data(
 
     def _plot_column(col):
         """Generate all EDA plots for a single column."""
+        import logging as _logging
         import matplotlib
         matplotlib.use('Agg')
+        _logging.getLogger('matplotlib.category').setLevel(_logging.WARNING)
         import matplotlib.pyplot as _plt
         import matplotlib.patches as _mpatches
         import seaborn as _sns
