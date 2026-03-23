@@ -249,7 +249,9 @@ def aggregate_yearly_data(
                 'upper_ci': upper
             })
 
-    return pd.DataFrame(results)
+    result_df = pd.DataFrame(results)
+    result_df['lower_ci'] = result_df['lower_ci'].clip(lower=0)
+    return result_df
 
 
 def create_time_series_plot_journal(
@@ -328,9 +330,9 @@ def create_time_series_plot_journal(
                'label': r'Annual Withdrawals ($10^6$ m$^3$)'},
     }
 
-    # Two twinx pairs: (left_unit, right_unit, aggregation)
+    # Two twinx pairs: (left_unit, right_unit, aggregation) — metric left, imperial right
     unit_pairs = [
-        ('af', 'm3', 'sum'),
+        ('m3', 'af', 'sum'),
         ('mm', 'ft', 'mean'),
     ]
 
@@ -521,7 +523,7 @@ def create_basin_time_series_plot(
     }
 
     unit_pairs = [
-        ('af', 'm3', 'sum'),
+        ('m3', 'af', 'sum'),
         ('mm', 'ft', 'mean'),
     ]
 
