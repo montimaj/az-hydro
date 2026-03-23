@@ -22,6 +22,7 @@ See [gee/README.md](gee/README.md) for documentation of the Google Earth Engine 
 ```
 az-hydro/
 ├── README.md                        # This file
+├── DISCLAIMER.md                    # Provisional software disclaimer
 ├── LICENSE
 ├── environment.yml                  # Conda environment specification
 ├── recommendations.md               # Code-review recommendations & resolutions
