@@ -94,8 +94,8 @@ _PIML_MODELS = {'PIML_XGB', 'PIML_LGBM', 'PIML_XGBRF'}
 # Optional models (require include_all_models=True)
 _OPTIONAL_MODELS = {'ETR', 'HGBR', 'GBR', 'ADA', 'BAG', 'CAT', 'LR', 'RIDGE', 'LASSO'}
 
-# Models incompatible with shap.TreeExplainer
-_NO_SHAP_MODELS = {'ADA', 'BAG', 'LR', 'RIDGE', 'LASSO'}
+# Models excluded from SHAP (incompatible with or crash TreeExplainer)
+_NO_SHAP_MODELS = {'ADA', 'BAG', 'ETR', 'LR', 'RIDGE', 'LASSO'}
 
 
 def compute_irrigation_demand_floor(
@@ -1662,7 +1662,7 @@ def generate_interp_plots(
             auto-selects: 1000 for slow sklearn ensembles (RF, ETR, BAG,
             GBR, ADA), 5000 for others.
     """
-    _SLOW_SHAP_MODELS = {'RF', 'ETR', 'BAG', 'GBR', 'ADA'}
+    _SLOW_SHAP_MODELS = {'RF', 'GBR', 'BAG', 'ADA'}
     if shap_subsample is None:
         shap_subsample = 1000 if model_name in _SLOW_SHAP_MODELS else 5000
     interp_dir = os.path.join(output_dir, 'Interpretability')
