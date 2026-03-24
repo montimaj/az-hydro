@@ -15,7 +15,7 @@ This script executes the remaining pipeline:
    All strategies use kFolds + Optuna (TPE) + Dask parallelisation.
    Optional physics-informed models (PIML_XGB, PIML_LGBM, PIML_XGBRF) are
    available but disabled by default (SKIP_PIML=True) — see azhydro/README.md.
-3. Uses the best model (XGBoost) to predict annual
+3. Uses the best model (XGBoost Random Forests) to predict annual
    pumping rasters from 1896-2099 with maps and time series highlighting four
    eras: Hindcast (1896-1983), Historical (1984-2024), Forecast (2025),
    Projected (2026-2099).
@@ -110,7 +110,7 @@ USE_DASK = True
 INCLUDE_ALL_MODELS = True
 SKIP_PIML = True
 PHYSICS_INTERACTION_CONSTRAINTS = False
-PREDICTION_MODEL = 'XGB'  # Model used for full-period prediction (Step 3+)
+PREDICTION_MODEL = 'XGBRF'  # Model used for full-period prediction (Step 3+)
 
 USE_AMA_INA = True
 DROP_GW_BASINS = ()

@@ -115,7 +115,7 @@ python pipeline.py --skip-eval pixel,temporal,summary # skip multiple strategies
 | `2a2` | Evaluate pixel holdout (spatial locations held out across all years) |
 | `2b` | Evaluate LOO temporal holdout |
 | `2c` | Evaluate LOO spatial holdout |
-| `3`  | Full-period XGBoost prediction (1896–2099) |
+| `3`  | Full-period XGBRF prediction (1896–2099) |
 | `3b` | Hybrid uncertainty quantification |
 | `3e` | Well package (per-well GeoPackage with uncertainty) |
 | `3g` | Raster maps, actual vs predicted, and trend analysis for all output categories |
@@ -306,7 +306,7 @@ numbered steps plus a cross-strategy summary:
 Step 0   ─  Data Preparation
 Step 1   ─  Create AZ Predictor DataFrame
 Step 2   ─  Model Evaluation (4 strategies: Random, Pixel Holdout, Temporal LOO, Spatial LOO)
-Step 3   ─  Full-Period XGBoost Prediction (1896–2099)
+Step 3   ─  Full-Period XGBRF Prediction (1896–2099)
 Step 3e  ─  Well Package (per-well GeoPackage with uncertainty)
 Step 3g  ─  Raster Maps & Trend Analysis for All Output Categories
 Step 4   ─  USGS Intercomparison (Withdrawals, CU, Peff)
@@ -345,7 +345,7 @@ All paths and modeling parameters are defined once at the top of
 | `INCLUDE_ALL_MODELS` | `True` | When `True`, adds optional models (ETR, HGBR, GBR, ADA, BAG, CAT, LR, RIDGE, LASSO) to the 4 core models. |
 | `SKIP_PIML` | `True` | When `True`, excludes physics-informed models (PIML_XGB, PIML_LGBM, PIML_XGBRF) from training and evaluation. See [note on PIML models](#note-on-physics-informed-piml-models). |
 | `PHYSICS_INTERACTION_CONSTRAINTS` | `False` | When `True`, applies feature interaction constraints to PIML models (only relevant when `SKIP_PIML=False`). |
-| `PREDICTION_MODEL` | `'XGB'` | Model used for full-period prediction (Step 3+). Valid names: core — `XGB`, `LGBM`, `RF`, `XGBRF`; optional (`INCLUDE_ALL_MODELS=True`) — `ETR`, `HGBR`, `GBR`, `ADA`, `BAG`, `CAT`, `LR`, `RIDGE`, `LASSO`; PIML (`SKIP_PIML=False`) — `PIML_XGB`, `PIML_LGBM`, `PIML_XGBRF`. |
+| `PREDICTION_MODEL` | `'XGBRF'` | Model used for full-period prediction (Step 3+). Valid names: core — `XGB`, `LGBM`, `RF`, `XGBRF`; optional (`INCLUDE_ALL_MODELS=True`) — `ETR`, `HGBR`, `GBR`, `ADA`, `BAG`, `CAT`, `LR`, `RIDGE`, `LASSO`; PIML (`SKIP_PIML=False`) — `PIML_XGB`, `PIML_LGBM`, `PIML_XGBRF`. |
 | `USE_AMA_INA` | `True` | Restrict training to AMA/INA management areas. |
 | `DROP_GW_BASINS` | `()` | Basins excluded from training. Empty by default (all AMA/INA basins included). For the `T1_Baseline` holdout, WILLCOX AMA and HUALAPAI VALLEY INA are dropped because they were not yet designated as AMA/INA management areas during the 2002–2020 period used by [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757), and therefore had no (or limited) metered withdrawal data at that time. |
 | `TEMPORAL_HOLDOUTS` | T1_Baseline + T1–T7 | Eight temporal leave-one-out configurations. `T1_Baseline` uses `TRAIN_YEAR_LIST_BASELINE` and `MIN_GW=0`. |
@@ -619,9 +619,22 @@ Saved to `{MODEL_DIR}Model_Evaluation/`.
 
 ### Step 3 — Full-period prediction (`predict_full_period()`)
 
-The core production step.  Trains a single **XGBoost model** on **all**
+The core production step.  Trains a single **XGBoost Random Forest (XGBRF) model** on **all**
 metered data (1984–2024, no holdout) to maximize the training signal,
 then predicts annual withdrawals for every 2 km pixel from 1896 to 2099.
+
+**Why XGBRF?**  XGBRF is a hybrid of XGBoost and Random Forest.  Standard
+XGBoost builds trees sequentially (each tree corrects the errors of the
+previous one), which can overfit noisy metered records.  Standard Random
+Forest trains independent trees on bootstrap samples (bagging), providing
+strong variance reduction but lacking XGBoost's regularized split-finding.
+XGBRF combines both: it grows a full forest of trees per boosting round
+using bagging (`num_parallel_tree = N`), while each tree still benefits
+from XGBoost's histogram-based, L1/L2-regularized split algorithm.  The
+result is RF-style variance reduction with XGBoost-grade regularization.
+Pixel holdout and temporal leave-one-out evaluations confirm that XGBRF
+generalizes better to unseen locations and years than either pure XGBoost
+or Random Forest.
 
 **Absolute-value post-processing:** All predictions are wrapped in
 `np.abs()` because withdrawal depth is physically non-negative.
@@ -818,7 +831,7 @@ For each future year, per-GCM predictor rasters are downloaded from GEE
 mosaicked, and stored in `GEE_Mosaics_{res}m_{GCM}/`.  The six
 MACA-derived climate columns (ET, ETo, precip, Peff, Tmax, Tmin) from each
 GCM's predictor raster replace the ensemble values in the year DataFrame,
-the XGBoost model predicts total annual withdrawals, and σ_MACA is the per-pixel
+the XGBRF model predicts total annual withdrawals, and σ_MACA is the per-pixel
 sample standard deviation across the 5 predictions:
 
 $$\sigma_{\text{MACA}}(x, y, t) = \text{std}\bigl[\hat{y}_{\text{GCM}_1}, \ldots, \hat{y}_{\text{GCM}_5}\bigr]$$
@@ -830,11 +843,11 @@ GCM projections.
 values of ET, ETo, and Peff are recorded for each GCM and year.  A 3-panel
 ribbon plot (`Climate_Input_Spread.png`) and per-variable CSVs are saved
 to `Sigma_MACA/Climate_Input_Spread/`, showing how the raw climate inputs
-diverge across the 5 GCMs before they propagate through the XGBoost model.
+diverge across the 5 GCMs before they propagate through the XGBRF model.
 
-##### σ_model — XGBoost seed ensemble (all years, 1896–2099)
+##### σ_model — XGBRF seed ensemble (all years, 1896–2099)
 
-Ten XGBoost models are trained on the full metered dataset (1984–2024) with
+Ten XGBRF models are trained on the full metered dataset (1984–2024) with
 identical Optuna-tuned hyperparameters but different random seeds:
 
 ```
@@ -864,7 +877,7 @@ Two independent estimates of irrigated area fraction are available:
 
 1. **Residual RMSE** of the regression on training data measures the
    typical discrepancy between the two fractions.
-2. **Finite-difference sensitivity** — the XGBoost model is evaluated at
+2. **Finite-difference sensitivity** — the XGBRF model is evaluated at
    `irr_frac ± δ` (where δ = regression RMSE), and σ_irr is taken as
    `|pred_plus − pred_minus| / 2`.
 
@@ -897,7 +910,7 @@ instead.  For each of the 4 scenarios:
 2. The LULC class, crop fraction, and irrigation fraction are re-derived
    end-to-end (LULC → AGRI/URBAN via `gwops.create_land_use_data()` →
    `crop_frac` → `irr_frac` via the regression model).
-3. The XGBoost model predicts total annual withdrawals under each scenario.
+3. The XGBRF model predicts total annual withdrawals under each scenario.
 
 σ_LULC is the sample standard deviation across the 4 scenario predictions:
 
@@ -1627,7 +1640,7 @@ Key functions:
   directories (reused by σ_CU).  Also records per-GCM AZ-mean values of
   ET, ETo, and Peff and generates input spread CSVs and a 3-panel ribbon
   plot (`Climate_Input_Spread/`).
-- **`compute_sigma_model()`** — XGBoost 10-seed ensemble spread (all
+- **`compute_sigma_model()`** — XGBRF 10-seed ensemble spread (all
   years).  Parallelized via Dask + Optuna.  Returns per-year total σ and
   per-category σ.
 - **`compute_sigma_irr()`** — Irrigation fraction sensitivity (historical
