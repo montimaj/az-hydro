@@ -328,7 +328,7 @@ All paths and modeling parameters are defined once at the top of
 | `END_YEAR` | `2099` | Last prediction year. |
 | `YEAR_LIST` | `1984–2024` | Years with metered withdrawal data (ADWR). |
 | `TRAIN_YEAR_LIST_BASELINE` | `2002–2020` | Training years for direct comparison with [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757). Used only by the `T1_Baseline` temporal holdout. |
-| `MIN_GW` | `None` | Minimum per-pixel withdrawal depth (mm). Pixels below this are excluded via outlier processing. Set to `None` to include all non-zero pixels; set to `0` for baselines that include zeros. |
+| `MIN_GW` | `None` | Minimum per-pixel withdrawal depth (mm). Pixels below this are excluded via outlier processing. The default `None` includes only positive withdrawal pixels (i.e., zero-withdrawal pixels are excluded), which is appropriate when annual irrigation masks are available to identify actively pumped areas. Set to `0` for baselines that include zeros (e.g., `T1_Baseline`). |
 | `MAX_GW` | `3000` | Maximum allowed withdrawal depth (mm). Justified by Tukey's extreme fence (Q3 + 3×IQR), ≈P99, and [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757). Set to `None` to disable (falls back to 10,000 mm). |
 | `AF_MAX_THRESHOLD` | `5000` | Maximum per-well `AF Pumped`; rows exceeding this are dropped from CSVs. |
 | `LOG_TARGET` | `False` | Apply `log1p` / `expm1` target transform. See [Target transform](#target-transform). |
@@ -571,7 +571,8 @@ on 2002–2020 only, holding out 2010–2020, and including zero-withdrawal pixe
 annual irrigation masks (e.g., [IrrMapper; Ketchum et al., 2020](https://doi.org/10.3390/rs12142328)) spanning the 2002–2020
 period were not yet available when the study was conceptualized, so non-irrigated pixels could not be reliably
 excluded.  All other holdouts use the full `YEAR_LIST` (1984–2024) and
-the pipeline-level `MIN_GW` threshold.
+the pipeline-level `MIN_GW` threshold (`None` by default, which excludes
+zero-withdrawal pixels).
 
 For each holdout, the model trains on the remaining years and is tested on
 the held-out period.  Per-holdout metrics are recorded, then averaged across
