@@ -797,7 +797,11 @@ def create_train_test_scatter(
 ) -> None:
     """
     Create scatter plots comparing actual vs predicted for train and test data.
-    
+
+    Metrics (R², RMSE, MAE, MBE) are loaded from the pre-computed
+    ``Error_Metrics_{model_name}.csv`` in the parent directory. If the CSV
+    is not found, metrics are computed on the fly.
+
     Args:
         pred_df: DataFrame with predictions.
         output_dir: Output directory.
@@ -808,8 +812,23 @@ def create_train_test_scatter(
         data_col: Name of data type column (TRAIN/TEST).
         figsize: Figure size.
     """
+    from sklearn.metrics import r2_score as _r2_score
+    from hydrolibs.mlops import normalized_rmse, normalized_mae, normalized_mbe
+
     makedirs(output_dir)
     apply_journal_style()
+
+    # Load pre-computed metrics from Error_Metrics CSV if available
+    metric_csv = os.path.join(
+        os.path.dirname(output_dir), f'Error_Metrics_{model_name}.csv')
+    metric_lookup: dict[str, dict[str, float]] = {}
+    if os.path.isfile(metric_csv):
+        mdf = pd.read_csv(metric_csv)
+        for _, row in mdf[mdf['Year'] == 'ALL'].iterrows():
+            metric_lookup[row['Data']] = {
+                'R2': row['R2'], 'RMSE': row['RMSE (%)'],
+                'MAE': row['MAE (%)'], 'MBE': row['MBE (%)'],
+            }
 
     fig, axes = plt.subplots(1, 2, figsize=figsize)
 
@@ -840,15 +859,35 @@ def create_train_test_scatter(
         z = np.polyfit(df[pred_col], df[actual_col], 1)
         p = np.poly1d(z)
         x_line = np.linspace(min_val, max_val, 100)
-        ax.plot(x_line, p(x_line), color='red', linewidth=1.5, label=f'Fit: y={z[0]:.2f}x+{z[1]:.2f}')
+        sign = '\u2212' if z[1] < 0 else '+'
+        ax.plot(x_line, p(x_line), color='red', linewidth=1.5,
+                label=f'Fit: y={z[0]:.2f}x {sign} {abs(z[1]):.2f}')
 
-        # Calculate R²
-        from sklearn.metrics import r2_score
-        r2 = r2_score(df[actual_col], df[pred_col])
+        # Use pre-computed metrics; fall back to on-the-fly computation
+        if data_type in metric_lookup:
+            m = metric_lookup[data_type]
+            r2, rmse, mae, mbe = m['R2'], m['RMSE'], m['MAE'], m['MBE']
+        else:
+            actual = df[actual_col].to_numpy()
+            pred = df[pred_col].to_numpy()
+            r2 = _r2_score(actual, pred)
+            rmse = normalized_rmse(actual, pred)
+            mae = normalized_mae(actual, pred)
+            mbe = normalized_mbe(actual, pred)
 
         ax.set_xlabel('Predicted (mm)', fontweight='bold')
         ax.set_ylabel('Observed (mm)', fontweight='bold')
-        ax.set_title(f'{data_type} Data (R² = {r2:.3f})', fontweight='bold')
+        ax.set_title(f'{data_type} Data', fontweight='bold')
+        mbe_sign = '\u2212' if mbe < 0 else ''
+        metrics_text = (f'R²={r2:.3f}\n'
+                        f'RMSE={rmse:.1f}%\n'
+                        f'MAE={mae:.1f}%\n'
+                        f'MBE={mbe_sign}{abs(mbe):.1f}%')
+        ax.text(0.97, 0.03, metrics_text, transform=ax.transAxes,
+                fontsize=9, verticalalignment='bottom',
+                horizontalalignment='right',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                          alpha=0.8, edgecolor='gray'))
         ax.legend(loc='upper left', framealpha=0.7)
         ax.grid(True, alpha=0.3)
         ax.set_aspect('equal', adjustable='box')
@@ -3846,15 +3885,32 @@ def plot_intercomp_scatter(
             ax.plot([lo, hi], [lo, hi], 'k--', lw=1, label='1:1')
 
             if len(vx) > 1 and np.std(vx) > 0:
+                from sklearn.metrics import r2_score as _r2_score
+                from hydrolibs.mlops import (
+                    normalized_rmse, normalized_mae, normalized_mbe,
+                )
                 z = np.polyfit(vx, vy, 1)
                 x_fit = np.linspace(lo, hi, 100)
+                sign = '\u2212' if z[1] < 0 else '+'
                 ax.plot(x_fit, np.polyval(z, x_fit), 'r-', lw=1.2,
-                        label=f'y={z[0]:.2f}x+{z[1]:.1f}')
-                ss_res = np.sum((vy - np.polyval(z, vx)) ** 2)
-                ss_tot = np.sum((vy - np.mean(vy)) ** 2)
-                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+                        label=f'y={z[0]:.2f}x {sign} {abs(z[1]):.1f}')
+                r2 = _r2_score(vy, vx)
+                rmse_pct = normalized_rmse(vy, vx)
+                mae_pct = normalized_mae(vy, vx)
+                mbe_pct = normalized_mbe(vy, vx)
+                mbe_sign = '\u2212' if mbe_pct < 0 else ''
+                metrics_text = (f'R²={r2:.3f}\n'
+                                f'RMSE={rmse_pct:.1f}%\n'
+                                f'MAE={mae_pct:.1f}%\n'
+                                f'MBE={mbe_sign}{abs(mbe_pct):.1f}%')
+                ax.text(0.97, 0.03, metrics_text, transform=ax.transAxes,
+                        fontsize=8, verticalalignment='bottom',
+                        horizontalalignment='right',
+                        bbox=dict(boxstyle='round,pad=0.3',
+                                  facecolor='white', alpha=0.8,
+                                  edgecolor='gray'))
                 unit_label = f'  ({unit})' if unit else ''
-                ax.set_title(f'{label_a} vs {label_b}{unit_label}  R²={r2:.3f}',
+                ax.set_title(f'{label_a} vs {label_b}{unit_label}',
                              fontsize=11, fontweight='bold')
             else:
                 ax.set_title(f'{label_a} vs {label_b}', fontsize=11)
