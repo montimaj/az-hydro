@@ -693,8 +693,8 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
     avg_df = avg_df.sort_values(['test_size', 'Test_RMSE_mean'])
     avg_df.to_csv(os.path.join(base_dir, 'Model_Comparison_Averaged.csv'), index=False)
 
-    logger.info(f'\nRandom averaged comparison ({n_sizes}×{n_seeds} grid):\n'
-                f'{avg_df.to_string(index=False)}')
+    logger.debug(f'\nRandom averaged comparison ({n_sizes}×{n_seeds} grid):\n'
+                 f'{avg_df.to_string(index=False)}')
 
     all_runs_csv = os.path.join(base_dir, 'All_Runs.csv')
     vizops.plot_grid_boxplots(all_runs_csv, base_dir, strategy_label='Random')
@@ -850,8 +850,8 @@ def evaluate_pixel_holdout(az_df: pd.DataFrame) -> dict:
     avg_df = avg_df.sort_values(['test_size', 'Test_RMSE_mean'])
     avg_df.to_csv(os.path.join(base_dir, 'Model_Comparison_Averaged.csv'), index=False)
 
-    logger.info(f'\nPixel holdout averaged comparison ({n_sizes}×{n_seeds} grid):\n'
-                f'{avg_df.to_string(index=False)}')
+    logger.debug(f'\nPixel holdout averaged comparison ({n_sizes}×{n_seeds} grid):\n'
+                 f'{avg_df.to_string(index=False)}')
 
     all_runs_csv = os.path.join(base_dir, 'All_Runs.csv')
     vizops.plot_grid_boxplots(all_runs_csv, base_dir, strategy_label='Pixel Holdout')
