@@ -347,7 +347,7 @@ All paths and modeling parameters are defined once at the top of
 | `PHYSICS_INTERACTION_CONSTRAINTS` | `False` | When `True`, applies feature interaction constraints to PIML models (only relevant when `SKIP_PIML=False`). |
 | `PREDICTION_MODEL` | `'XGB'` | Model used for full-period prediction (Step 3+). Valid names: core — `XGB`, `LGBM`, `RF`, `XGBRF`; optional (`INCLUDE_ALL_MODELS=True`) — `ETR`, `HGBR`, `GBR`, `ADA`, `BAG`, `CAT`, `LR`, `RIDGE`, `LASSO`; PIML (`SKIP_PIML=False`) — `PIML_XGB`, `PIML_LGBM`, `PIML_XGBRF`. |
 | `USE_AMA_INA` | `True` | Restrict training to AMA/INA management areas. |
-| `DROP_GW_BASINS` | `()` | Basins excluded from training. Empty by default (all AMA/INA basins included). For the `T1_Baseline` holdout, WILLCOX AMA and HUALAPAI VALLEY INA are dropped as they were not metered during the baseline period (pre-2020). |
+| `DROP_GW_BASINS` | `()` | Basins excluded from training. Empty by default (all AMA/INA basins included). For the `T1_Baseline` holdout, WILLCOX AMA and HUALAPAI VALLEY INA are dropped because they were not yet designated as AMA/INA management areas during the 2002–2020 period used by [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757), and therefore had no (or limited) metered withdrawal data at that time. |
 | `TEMPORAL_HOLDOUTS` | T1_Baseline + T1–T7 | Eight temporal leave-one-out configurations. `T1_Baseline` uses `TRAIN_YEAR_LIST_BASELINE` and `MIN_GW=0`. |
 | `DROP_ATTRS` | (list) | Columns dropped before modeling. |
 
