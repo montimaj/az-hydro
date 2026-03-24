@@ -488,15 +488,18 @@ where α = 0.1 and β = 0.05.
 #### Linear bias correction (evaluation)
 
 All four evaluation strategies attempt a **global linear bias correction**
-after prediction.  The correction is fit on training data using OLS:
-`y_corrected = |m × y_pred + b|`, where `m` and `b` minimize the
-squared residuals.  The absolute value ensures physical non-negativity.
+after prediction for all tree-based models (XGB, LGBM, RF, XGBRF, ETR,
+HGBR, GBR, ADA, BAG, CAT, and PIML variants).  Linear models (LR,
+RIDGE, LASSO) are excluded since a post-hoc linear correction is
+redundant with an already-linear predictor.  The correction is fit on
+training data using OLS: `y_corrected = |m × y_pred + b|`, where `m`
+and `b` minimize the squared residuals.  The absolute value ensures
+physical non-negativity.
 
 The correction is only applied if it improves **all** training metrics
-(R², RMSE, MAE, and |MBE|) simultaneously.  If any metric worsens —
-e.g. the linear transform overcorrects MBE — the original predictions
-are kept and a warning is logged.  Diagnostic plots and CSVs are still
-generated so the BC effect can be inspected regardless.
+(R², RMSE, and MAE) simultaneously.  If any metric worsens, the original
+predictions are kept and a warning is logged.  Diagnostic plots and CSVs
+are still generated so the BC effect can be inspected regardless.
 
 **Strategy-consistent inner CV:** The inner cross-validation used during
 Optuna hyperparameter tuning mirrors the outer evaluation strategy to
@@ -553,7 +556,7 @@ Eight pre-defined temporal holdout configurations (T1_Baseline + T1–T7):
 
 | Holdout | Withheld years | Training years | MIN_GW | Purpose |
 |---|---|---|---|---|
-| T1_Baseline | 2010–2020 | 2002–2020 (`TRAIN_YEAR_LIST_BASELINE`) | 0 | Backward compat with Majumdar et al. (2022) |
+| T1_Baseline | 2010–2020 | 2002–2020 (`TRAIN_YEAR_LIST_BASELINE`) | 0 | Backward compatibility with Majumdar et al. (2022) |
 | T1 | 2010–2020 | 1984–2024 (`YEAR_LIST`) | `MIN_GW` | Mid-period block (same years, current config) |
 | T2 | 2015–2024 | 1984–2024 | `MIN_GW` | Recent decade — forward extrapolation |
 | T3 | 1990–1992, 2005–2007, 2022–2024 | 1984–2024 | `MIN_GW` | Scattered gaps — temporal interpolation |
@@ -564,7 +567,10 @@ Eight pre-defined temporal holdout configurations (T1_Baseline + T1–T7):
 
 `T1_Baseline` reproduces the settings from [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757): training
 on 2002–2020 only, holding out 2010–2020, and including zero-withdrawal pixels
-(`MIN_GW=0`).  All other holdouts use the full `YEAR_LIST` (1984–2024) and
+(`MIN_GW=0`).  The original study included zeros because publicly available
+annual irrigation masks (e.g., [IrrMapper; Ketchum et al., 2020](https://doi.org/10.3390/rs12142328)) spanning the 2002–2020
+period were not yet available when the study was conceptualized, so non-irrigated pixels could not be reliably
+excluded.  All other holdouts use the full `YEAR_LIST` (1984–2024) and
 the pipeline-level `MIN_GW` threshold.
 
 For each holdout, the model trains on the remaining years and is tested on
@@ -1443,9 +1449,13 @@ Key functions:
 - **`apply_linear_bc()`** — Applies a pre-fitted linear bias correction:
   `|m × predictions + b|`.
 - **`get_prediction_results()`** — Makes predictions and optionally applies
-  linear bias correction (boolean `apply_bias_correction` flag).
+  linear bias correction (boolean `apply_bias_correction` flag).  BC is
+  applied to all tree-based models; linear models (LR, RIDGE, LASSO) are
+  skipped.
 - **`perform_bias_correction()`** — Fits and applies global linear bias
-  correction using `fit_linear_bc()` / `apply_linear_bc()`.
+  correction using `fit_linear_bc()` / `apply_linear_bc()`.  The
+  correction is accepted only if R², RMSE, and MAE all improve on
+  training data.
 - **`calc_train_test_metrics()`** — Computes R², normalized RMSE (% of mean),
   normalized MAE (% of mean), and normalized MBE (% of mean).
 - **`compute_perm_imp()`**, **`compute_ale_plots()`**,
