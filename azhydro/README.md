@@ -1357,7 +1357,7 @@ Compares irrigated effective precipitation across three sources:
 
 | Source | Description | Years | Resolution |
 |---|---|---|---|
-| **ML Peff (SCS)** | Predictor band 4 × `irr_fraction` | 2000–2024 | 2 km rasters |
+| **Peff (USDA SCS)** | Predictor band 4 × `irr_fraction` | 2000–2024 | 2 km rasters |
 | **ML Peff (PCML)** | Predictor band 5 × `irr_fraction` | 2000–2023 | 2 km rasters |
 | **NHM PPTeff** | USGS NHM HUC12 data ([Martin et al., 2023](https://doi.org/10.5066/P9YWR0OJ)) (Mgal/d) | 2000–2020 | HUC12 polygons |
 
