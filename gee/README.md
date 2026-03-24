@@ -235,7 +235,7 @@ Two external datasets — [Reitz Ensemble ET](https://doi.org/10.5066/P9EZ3VAS) 
 
 **Method:** For each year in 2026–2099:
 1. Load ALL [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) daily images for the year (20 models × 2 scenarios × 365 days ≈ 14,600 images).
-2. Map `openet.refetgee.Daily.maca()` over the entire collection to compute daily ETo for each image (using NASADEM elevation and pixel latitude).
+2. Map `openet.refetgee.Daily.maca()` over the entire collection to compute daily ETo for each image (using [NASADEM](https://doi.org/10.5067/MEaSUREs/NASADEM/NASADEM_HGT.001) elevation and pixel latitude).
 3. For each month, sum all daily ETo and divide by `N_MEMBERS` (40) to get the ensemble-mean monthly ETo.
 4. Apply gridMET bias-correction ratios (`projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/{MonthName}`), joined on `month`.
 5. Export each month.
@@ -492,6 +492,8 @@ Majumdar, S., ReVelle, P., Pearson, C., Nozari, S., Minor, B. A., Hasan, M. F., 
 Melton, F., Huntington, J., Grimm, R., Herring, J., Hall, M., Rollison, D., Erickson, T., Allen, R., Anderson, M., Fisher, J. B., Kilic, A., Senay, G. B., Volk, J., Hain, C., Johnson, L., Ruhoff, A., Blankenau, P., Bromley, M., Carrara, W., … Anderson, R. G. (2022). OpenET: Filling a Critical Data Gap in Water Management for the Western United States. _JAWRA Journal of the American Water Resources Association_. https://doi.org/10.1111/1752-1688.12956.
 
 Muratoglu, A., Bilgen, G. K., Angin, I., & Kodal, S. (2023). Performance analyses of effective rainfall estimation methods for accurate quantification of agricultural water footprint. _Water Research_, _238_, 120011. https://doi.org/10.1016/j.watres.2023.120011.
+
+NASA JPL. (2020). NASADEM Merged DEM Global 1 arc second V001 [Data set]. _NASA EOSDIS Land Processes DAAC_. https://doi.org/10.5067/MEaSUREs/NASADEM/NASADEM_HGT.001.
 
 Reitz, M., Sanford, W. E., & Saxe, S. (2023). Ensemble Estimation of Historical Evapotranspiration for the Conterminous U.S. _Water Resources Research_, _59_(6). https://doi.org/10.1029/2022WR034012.
 

@@ -329,7 +329,7 @@ All paths and modeling parameters are defined once at the top of
 | `YEAR_LIST` | `1984–2024` | Years with metered withdrawal data (ADWR). |
 | `TRAIN_YEAR_LIST_BASELINE` | `2002–2020` | Training years for direct comparison with [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757). Used only by the `T1_Baseline` temporal holdout. |
 | `MIN_GW` | `None` | Minimum per-pixel withdrawal depth (mm). Pixels below this are excluded via outlier processing. The default `None` includes only positive withdrawal pixels (i.e., zero-withdrawal pixels are excluded), which is appropriate when annual irrigation masks are available to identify actively pumped areas. Set to `0` for baselines that include zeros (e.g., `T1_Baseline`). |
-| `MAX_GW` | `3000` | Maximum allowed withdrawal depth (mm). Justified by Tukey's extreme fence (Q3 + 3×IQR), ≈P99, and [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757). Set to `None` to disable (falls back to 10,000 mm). |
+| `MAX_GW` | `3000` | Maximum allowed withdrawal depth (mm). A conservative upper bound approximately twice Tukey's extreme fence (Q3 + 3×IQR) and well above P99, designed to remove only `gdal_rasterize` artifacts and physically implausible extremes while retaining legitimately high-withdrawal pixels. Consistent with [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757). Set to `None` to disable (falls back to 10,000 mm). |
 | `AF_MAX_THRESHOLD` | `5000` | Maximum per-well `AF Pumped`; rows exceeding this are dropped from CSVs. |
 | `LOG_TARGET` | `False` | Apply `log1p` / `expm1` target transform. See [Target transform](#target-transform). |
 | `RANDOM_STATE` | `42` | Seed for reproducibility. |
