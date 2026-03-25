@@ -176,7 +176,7 @@ The [`download_gee_data()`](hydrolibs/dataops.py) function downloads 14 bands of
 | Band | Description | Units | Source |
 |------|-------------|-------|--------|
 | `annual_et_ensemble_mm` | Actual evapotranspiration | mm/yr | [Reitz et al., 2023](https://doi.org/10.1029/2022WR034012) (1896–1999), [OpenET (Melton et al., 2022](https://doi.org/10.1111/1752-1688.12956); [Volk et al., 2024)](https://doi.org/10.1038/s44221-023-00181-7) (2000–2025), [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) ensemble (2026–2099) |
-| `annual_eto_mm` | Reference evapotranspiration (Penman-Monteith) | mm/yr | [PRISM (Daly et al., 2008)](https://doi.org/10.1002/joc.1688) Hargreaves (1896–1978), [gridMET (Abatzoglou, 2013)](https://doi.org/10.1002/joc.3413) (1979–2025), [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) bias-corrected ([Volk et al., 2026](https://doi.org/10.5281/zenodo.18673484)) ensemble (2026–2099) |
+| `annual_eto_mm` | Reference evapotranspiration (Penman-Monteith) | mm/yr | [PRISM (Daly et al., 2008)](https://doi.org/10.1002/joc.1688) Hargreaves (1896–1978), [OpenET gridMET (Abatzoglou, 2013](https://doi.org/10.1002/joc.3413); [Volk et al., 2026)](https://doi.org/10.5281/zenodo.18673484) (1979–2025), [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) bias-corrected ([Volk et al., 2026](https://doi.org/10.5281/zenodo.18673484)) ensemble (2026–2099) |
 | `annual_precip_mm` | Precipitation | mm/yr | [PRISM (Daly et al., 2008)](https://doi.org/10.1002/joc.1688) (1896–2025), [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) ensemble (2026–2099) |
 | `annual_peff_mm` | Effective precipitation (USDA SCS method) | mm/yr | [USDA SCS, 1993](https://www.wcc.nrcs.usda.gov/ftpref/wntsc/waterMgt/irrigation/NEH15/ch2.pdf); [Muratoglu et al., 2023](https://doi.org/10.1016/j.watres.2023.120011); [Majumdar et al., 2026](https://doi.org/10.5281/zenodo.18706481) |
 | `annual_peff_pcml_mm` | Effective precipitation (PCML obs-based, 2000–2024) | mm/yr | [Hasan et al., 2025](https://doi.org/10.1016/j.agwat.2025.109821), climatological mean outside 2000–2024 |
@@ -195,7 +195,7 @@ The [`download_gee_data()`](hydrolibs/dataops.py) function downloads 14 bands of
 The pipeline stitches disparate sources into a consistent 1896–2099 time series:
 
 - **ET**: Reitz ensemble (1896–1999) → OpenET v2.0/v2.1 (2000–2025) → MACA × EToF crop coefficients (2026–2099)
-- **ETo**: PRISM Hargreaves (1896–1978) → gridMET (1979–2025) → MACA 20-model ensemble (2026–2099)
+- **ETo**: PRISM Hargreaves (1896–1978) → OpenET gridMET (1979–2025) → MACA 20-model ensemble (2026–2099)
 - **LULC**: USGS historical scenario (≤1984) → NLCD (1985–2025) → USGS 4-scenario mode ensemble (2026–2099)
 - **Climate projections**: MACA v2 daily data across 20 GCMs × 2 RCPs (RCP 4.5, RCP 8.5) = 40-member ensemble. All MACA queries use a flat-pipeline approach (single filter + reduce) to keep GEE computation graphs small: ETo uses `.sum().divide(40)` per month (computed per-image to preserve nonlinearity), precip uses `.sum().divide(40)`, and temperature uses `.mean()`.
 
@@ -207,9 +207,9 @@ Twelve custom ImageCollections are pre-computed via scripts in [`gee/`](../gee/)
 
 | Asset | Description | Years |
 |-------|-------------|-------|
-| `gridmet_hargreaves_eto_ratio` | gridMET / PRISM Hargreaves monthly ratio (12 images) | Climatology |
+| `gridmet_hargreaves_eto_ratio` | OpenET gridMET / PRISM Hargreaves monthly ratio (12 images) | Climatology |
 | `openet_reitz_et_ratio` | OpenET / Reitz ensemble monthly ratio (12 images) | Climatology |
-| `monthly_etof` | Crop coefficient (OpenET / gridMET ETo) | Climatology |
+| `monthly_etof` | Crop coefficient (OpenET / OpenET gridMET ETo) | Climatology |
 | `prism_hargreaves_eto` | PRISM-based Hargreaves ETo | 1896–1978 |
 | `usgs_adjusted_et` | Bias-adjusted Reitz actual ET | 1896–1999 |
 | `maca_monthly_eto_v2` | MACA per-model/scenario projected ETo, bias-corrected using [Volk et al., (2026)](https://doi.org/10.5281/zenodo.18673484) | 2026–2099 |

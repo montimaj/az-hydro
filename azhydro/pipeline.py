@@ -697,7 +697,10 @@ def evaluate_random(az_df: pd.DataFrame) -> dict:
                  f'{avg_df.to_string(index=False)}')
 
     all_runs_csv = os.path.join(base_dir, 'All_Runs.csv')
+    avg_csv = os.path.join(base_dir, 'Model_Comparison_Averaged.csv')
+    vizops.plot_grid_heatmap(avg_csv, base_dir, strategy_label='Random')
     vizops.plot_grid_boxplots(all_runs_csv, base_dir, strategy_label='Random')
+    vizops.plot_grid_bar_charts(all_runs_csv, base_dir, strategy_label='Random')
 
     return {'comparison_df': avg_df, 'strategy': 'Random',
             'all_runs_df': all_runs_df}
@@ -854,7 +857,10 @@ def evaluate_pixel_holdout(az_df: pd.DataFrame) -> dict:
                  f'{avg_df.to_string(index=False)}')
 
     all_runs_csv = os.path.join(base_dir, 'All_Runs.csv')
+    avg_csv = os.path.join(base_dir, 'Model_Comparison_Averaged.csv')
+    vizops.plot_grid_heatmap(avg_csv, base_dir, strategy_label='Pixel Holdout')
     vizops.plot_grid_boxplots(all_runs_csv, base_dir, strategy_label='Pixel Holdout')
+    vizops.plot_grid_bar_charts(all_runs_csv, base_dir, strategy_label='Pixel Holdout')
 
     return {'comparison_df': avg_df, 'strategy': 'Pixel_Holdout',
             'all_runs_df': all_runs_df}
@@ -1027,6 +1033,7 @@ def evaluate_temporal_loo(az_df: pd.DataFrame) -> dict:
                 'Test_MAE': bc_test['MAE_pct'],
                 'Test_MBE': bc_test['MBE_pct'],
                 'Overfit_R2': bc_train['R2'] - bc_test['R2'],
+                'Overfit_RMSE': bc_train['RMSE_pct'] - bc_test['RMSE_pct'],
             })
 
     # Build results DataFrames
@@ -1283,6 +1290,7 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
                 'Test_MAE': bc_test['MAE_pct'],
                 'Test_MBE': bc_test['MBE_pct'],
                 'Overfit_R2': bc_train['R2'] - bc_test['R2'],
+                'Overfit_RMSE': bc_train['RMSE_pct'] - bc_test['RMSE_pct'],
             })
 
     # Build results DataFrames

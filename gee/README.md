@@ -46,13 +46,13 @@ Level 1 (no dependencies — can run in parallel):
 Level 2 (depends on Level 1):
   ├── export_prism_hargreaves_eto.py    ← needs gridmet_hargreaves_eto_ratio
   ├── export_usgs_adjusted_et.py        ← needs openet_reitz_et_ratio
-  └── export_maca_monthly_eto.py        ← no custom dep (uses gridMET ratios)
+  └── export_maca_monthly_eto.py        ← no custom dep (uses OpenET gridMET ratios)
 
 Level 3 (depends on Level 1 + Level 2):
   ├── export_maca_monthly_et.py         ← needs monthly_etof + maca_monthly_eto_v2
   └── export_monthly_peff.py            ← needs prism_hargreaves_eto + maca_monthly_eto_v2
 
-Level 4 — per-GCM uncertainty (uses gridMET ratios + etof):
+Level 4 — per-GCM uncertainty (uses OpenET gridMET ratios + etof):
   ├── export_maca_gcm_annual_eto.py     ← 5 representative GCMs (370 images)
   ├── export_maca_gcm_annual_et.py      ← computes monthly ETo×EToF internally
   └── export_maca_gcm_annual_peff.py    ← computes monthly USDA SCS Peff internally
@@ -86,20 +86,20 @@ The export pipeline harmonizes multiple heterogeneous data sources into temporal
 
 - **2000–2025 (OpenET, native):** OpenET Ensemble v2.0/v2.1 ([Melton et al., 2022](https://doi.org/10.1111/1752-1688.12956); [Volk et al., 2024](https://doi.org/10.1038/s44221-023-00181-7)) (`et_ensemble_mad`) is used directly. Monthly ET is computed by summing all OpenET images within each calendar month.
 
-- **2026–2099 (MACA → OpenET scale):** No observational ET exists for the future. Instead, monthly EToF (crop coefficient = ET/ETo) grids are derived from the 2000–2025 OpenET/gridMET overlap. Future monthly ET is then: $\text{ET}_{\text{future}} = \text{EToF} \times \text{MACA ETo}$, where MACA ETo is from [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312). This preserves the observed spatial crop-water-demand patterns while allowing the climate signal (ETo) to evolve under future scenarios.
+- **2026–2099 (MACA → OpenET scale):** No observational ET exists for the future. Instead, monthly EToF (crop coefficient = ET/ETo) grids are derived from the 2000–2025 OpenET/OpenET gridMET overlap. Future monthly ET is then: $\text{ET}_{\text{future}} = \text{EToF} \times \text{MACA ETo}$, where MACA ETo is from [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312). This preserves the observed spatial crop-water-demand patterns while allowing the climate signal (ETo) to evolve under future scenarios.
 
 ### ETo Harmonization (3 eras)
 
 ```
-      PRISM Hargreaves ETo      gridMET ETo           MACA ETo
+      PRISM Hargreaves ETo    OpenET gridMET ETo        MACA ETo
     ┌─────────────────────┐   ┌───────────────┐   ┌─────────────────┐
     │    1896 – 1978      │   │  1979 – 2025  │   │   2026 – 2099   │
     │  (monthly tmax/tmin │   │  (native      │   │ (per-model/scen │
     │   → Hargreaves PET) │   │   monthly)    │   │  → RefET → ens) │
     └──────────┬──────────┘   └───────┬───────┘   └────────┬────────┘
                │                      │                    │
-               │ Hargreaves/gridMET   │   gridMET bias     │
-               │ ratio (1979-2025     │   correction       │
+               │ Hargreaves/OpenET    │   OpenET gridMET   │
+               │ gridMET ratio        │   bias correction  │
                │ overlap)             │   ratios           │
                ▼                      ▼                    ▼
     ┌─────────────────────────────────────────────────────────────┐
@@ -108,11 +108,11 @@ The export pipeline harmonizes multiple heterogeneous data sources into temporal
     └─────────────────────────────────────────────────────────────┘
 ```
 
-- **1896–1978 (PRISM Hargreaves → gridMET scale):** Daily climate data is unavailable before 1979, so monthly ETo is estimated from [PRISM (Daly et al., 2008)](https://doi.org/10.1002/joc.1688) monthly tmax/tmin via the Hargreaves method (`openet.refetgee.Daily` with mid-month DOY). This systematically differs from Penman-Monteith-based [gridMET (Abatzoglou, 2013)](https://doi.org/10.1002/joc.3413) ETo, so a per-pixel, per-month correction ratio is derived from the 1979–2025 overlap (564 paired monthly images) where both Hargreaves and gridMET are available. The corrected ETo is: $\text{ETo}_{\text{corrected}} = \text{Hargreaves PET} \times \overline{R}$, where $\overline{R} = \text{mean}\left(\frac{\text{gridMET ETo}}{\text{Hargreaves PET}}\right)$ over 1979–2025.
+- **1896–1978 (PRISM Hargreaves → OpenET gridMET scale):** Daily climate data is unavailable before 1979, so monthly ETo is estimated from [PRISM (Daly et al., 2008)](https://doi.org/10.1002/joc.1688) monthly tmax/tmin via the Hargreaves method (`openet.refetgee.Daily` with mid-month DOY). This systematically differs from Penman-Monteith-based [OpenET gridMET (Abatzoglou, 2013](https://doi.org/10.1002/joc.3413); [Volk et al., 2026)](https://doi.org/10.5281/zenodo.18673484) ETo, so a per-pixel, per-month correction ratio is derived from the 1979–2025 overlap (564 paired monthly images) where both Hargreaves and OpenET gridMET are available. The corrected ETo is: $\text{ETo}_{\text{corrected}} = \text{Hargreaves PET} \times \overline{R}$, where $\overline{R} = \text{mean}\left(\frac{\text{OpenET gridMET ETo}}{\text{Hargreaves PET}}\right)$ over 1979–2025.
 
-- **1979–2025 (gridMET, native):** [gridMET (Abatzoglou, 2013)](https://doi.org/10.1002/joc.3413) monthly ETo (`projects/openet/assets/reference_et/conus/gridmet/monthly/v1`) is used directly. This is the reference standard to which all other eras are harmonized.
+- **1979–2025 (OpenET gridMET, native):** [OpenET gridMET (Abatzoglou, 2013](https://doi.org/10.1002/joc.3413); [Volk et al., 2026)](https://doi.org/10.5281/zenodo.18673484) monthly ETo (`projects/openet/assets/reference_et/conus/gridmet/monthly/v1`) is used directly. This is the reference standard to which all other eras are harmonized.
 
-- **2026–2099 (MACA → gridMET scale):** To preserve the nonlinear response of the Penman-Monteith equation, ETo is computed for every individual [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) image (all 20 GCMs × 2 RCPs) using a flat pipeline. A single `map()` applies `openet.refetgee.Daily.maca()` to every MACA image in the year, then for each month the sum is divided by the number of members (40) to obtain the ensemble-mean monthly ETo. GridMET bias-correction ratios ([Volk et al., 2026](https://doi.org/10.5281/zenodo.18673484); `projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/`) are then applied: $\text{ETo}_{\text{corrected}} = \frac{1}{N}\sum_{i=1}^{N}\text{ETo}_i \times \text{gridMET ratio}$ to reduce high ETo bias, particularly over irrigated areas. The flat-pipeline approach (single map + reduce instead of 40 separate computation pipelines) keeps the GEE computation graph small enough to avoid out-of-memory errors.
+- **2026–2099 (MACA → OpenET gridMET scale):** To preserve the nonlinear response of the Penman-Monteith equation, ETo is computed for every individual [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) image (all 20 GCMs × 2 RCPs) using a flat pipeline. A single `map()` applies `openet.refetgee.Daily.maca()` to every MACA image in the year, then for each month the sum is divided by the number of members (40) to obtain the ensemble-mean monthly ETo. OpenET gridMET bias-correction ratios ([Abatzoglou, 2013](https://doi.org/10.1002/joc.3413); [Volk et al., 2026](https://doi.org/10.5281/zenodo.18673484); `projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/`) are then applied: $\text{ETo}_{\text{corrected}} = \frac{1}{N}\sum_{i=1}^{N}\text{ETo}_i \times \text{OpenET gridMET ratio}$ to reduce high ETo bias, particularly over irrigated areas. The flat-pipeline approach (single map + reduce instead of 40 separate computation pipelines) keeps the GEE computation graph small enough to avoid out-of-memory errors.
 
 ### LULC Harmonization (2 eras)
 
@@ -131,7 +131,7 @@ The export pipeline harmonizes multiple heterogeneous data sources into temporal
 
 ### Join Strategy
 
-All ratio computations use `ee.Join.inner()` with paired filters on **both** `month` **and** `year` properties. This prevents many-to-many cross-joins that would occur if matching on `month` alone (e.g., January 2005 gridMET would incorrectly pair with January 2010 PRISM). The final climatological ratios are then produced by averaging across years within each calendar month.
+All ratio computations use `ee.Join.inner()` with paired filters on **both** `month` **and** `year` properties. This prevents many-to-many cross-joins that would occur if matching on `month` alone (e.g., January 2005 OpenET gridMET would incorrectly pair with January 2010 PRISM). The final climatological ratios are then produced by averaging across years within each calendar month.
 
 ### Scale Consistency
 
@@ -139,7 +139,7 @@ Each asset is exported at its native source resolution to avoid resampling artif
 
 | Source | Native Scale |
 |---|---|
-| [PRISM](https://doi.org/10.1002/joc.1688) / [gridMET](https://doi.org/10.1002/joc.3413) / [MACA](https://doi.org/10.1002/joc.2312) | 4,638.3 m (~4 km) |
+| [PRISM](https://doi.org/10.1002/joc.1688) / [OpenET gridMET](https://doi.org/10.1002/joc.3413) ([Volk et al., 2026](https://doi.org/10.5281/zenodo.18673484)) / [MACA](https://doi.org/10.1002/joc.2312) | 4,638.3 m (~4 km) |
 | [Reitz Ensemble ET](https://doi.org/10.5066/P9EZ3VAS) | 800 m |
 | [OpenET Ensemble](https://doi.org/10.1111/1752-1688.12956) | 30 m |
 | [USGS LULC](https://doi.org/10.1080/1747423X.2016.1147619) | 250 m |
@@ -152,18 +152,20 @@ Two external datasets — [Reitz Ensemble ET](https://doi.org/10.5066/P9EZ3VAS) 
 
 ## Detailed Export Logic
 
-### 1. gridMET/Hargreaves ETo Ratio (`gridmet_hargreaves_eto_ratio`)
+### 1. OpenET gridMET/Hargreaves ETo Ratio (`gridmet_hargreaves_eto_ratio`)
 
-**Purpose:** Bias-correct [PRISM (Daly et al., 2008)](https://doi.org/10.1002/joc.1688) Hargreaves ETo (1896–1978) to be consistent with [gridMET (Abatzoglou, 2013)](https://doi.org/10.1002/joc.3413) ETo (1979–2025).
+**Purpose:** Bias-correct [PRISM (Daly et al., 2008)](https://doi.org/10.1002/joc.1688) Hargreaves ETo (1896–1978) to be consistent with [OpenET gridMET (Abatzoglou, 2013](https://doi.org/10.1002/joc.3413); [Volk et al., 2026)](https://doi.org/10.5281/zenodo.18673484) ETo (1979–2025).
 
 **Method:**
-1. Load gridMET monthly ETo for 1979–2025 (`projects/openet/assets/reference_et/conus/gridmet/monthly/v1`).
+1. Load OpenET gridMET monthly ETo for 1979–2025 (`projects/openet/assets/reference_et/conus/gridmet/monthly/v1`).
 2. Load PRISM monthly data for 1979–2025 (`OREGONSTATE/PRISM/ANm`) and compute Hargreaves PET using `openet.refetgee.Daily` with tmax/tmin and day-of-year at mid-month.
 3. Inner join on both `month` AND `year` to pair same-timestep images.
-4. Compute per-pixel ratio: $\text{ratio} = \frac{\text{gridMET ETo}}{\text{Hargreaves ETo}}$.
+4. Compute per-pixel ratio: $\text{ratio} = \frac{\text{OpenET gridMET ETo}}{\text{Hargreaves ETo}}$.
 5. Average ratios across all years for each month → 12 monthly ratio grids.
 
 **Output:** 12 images (`month_01` through `month_12`), each with band `ratio`.
+
+> **Note:** A separate ETo ratio (`projects/azhydro/assets/prism_gridmet_ratio/monthly`) is also available across CONUS. That ratio is computed from **monthly** PRISM and OpenET gridMET ETo over **1981–2021**, whereas the `gridmet_hargreaves_eto_ratio` used in this project is calculated from **monthly** PRISM Hargreaves and OpenET gridMET ETo over **1979–2025**.
 
 ---
 
@@ -188,9 +190,9 @@ Two external datasets — [Reitz Ensemble ET](https://doi.org/10.5066/P9EZ3VAS) 
 
 **Method:**
 1. Build monthly [OpenET](https://doi.org/10.1111/1752-1688.12956) ET for 2000–2025 (same as above).
-2. Load [gridMET](https://doi.org/10.1002/joc.3413) monthly ETo for 2000–2025.
+2. Load [OpenET gridMET (Abatzoglou, 2013](https://doi.org/10.1002/joc.3413); [Volk et al., 2026)](https://doi.org/10.5281/zenodo.18673484) monthly ETo for 2000–2025.
 3. Inner join on both `month` AND `year`.
-4. Compute per-pixel EToF: $\text{EToF} = \frac{\text{OpenET ET}}{\text{gridMET ETo}}$.
+4. Compute per-pixel EToF: $\text{EToF} = \frac{\text{OpenET ET}}{\text{OpenET gridMET ETo}}$.
 5. Average across all years for each month → 12 monthly EToF grids.
 
 **Output:** 12 images (`month_01` through `month_12`), each with band `etof`.
@@ -201,7 +203,7 @@ Two external datasets — [Reitz Ensemble ET](https://doi.org/10.5066/P9EZ3VAS) 
 
 **Dependency:** `gridmet_hargreaves_eto_ratio`
 
-**Purpose:** Monthly ETo for the historical period 1896–1978, bias-corrected to match gridMET.
+**Purpose:** Monthly ETo for the historical period 1896–1978, bias-corrected to match OpenET gridMET.
 
 **Method:** For each year in 1896–1978:
 1. Load PRISM monthly data and compute Hargreaves PET (same Hargreaves method as the ratio script).
@@ -231,13 +233,13 @@ Two external datasets — [Reitz Ensemble ET](https://doi.org/10.5066/P9EZ3VAS) 
 
 ### 6. MACA Monthly ETo (`maca_monthly_eto_v2`)
 
-**Purpose:** Monthly ETo for future scenarios 2026–2099, bias-corrected with gridMET ratios ([Volk et al., 2026](https://doi.org/10.5281/zenodo.18673484)). Computed per-image via a flat pipeline to preserve nonlinear ETo response while keeping the computation graph small.
+**Purpose:** Monthly ETo for future scenarios 2026–2099, bias-corrected with OpenET gridMET ratios ([Abatzoglou, 2013](https://doi.org/10.1002/joc.3413); [Volk et al., 2026](https://doi.org/10.5281/zenodo.18673484)). Computed per-image via a flat pipeline to preserve nonlinear ETo response while keeping the computation graph small.
 
 **Method:** For each year in 2026–2099:
 1. Load ALL [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) daily images for the year (20 models × 2 scenarios × 365 days ≈ 14,600 images).
 2. Map `openet.refetgee.Daily.maca()` over the entire collection to compute daily ETo for each image (using [NASADEM](https://doi.org/10.5067/MEaSUREs/NASADEM/NASADEM_HGT.001) elevation and pixel latitude).
 3. For each month, sum all daily ETo and divide by `N_MEMBERS` (40) to get the ensemble-mean monthly ETo.
-4. Apply gridMET bias-correction ratios (`projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/{MonthName}`), joined on `month`.
+4. Apply OpenET gridMET bias-correction ratios (`projects/openet/assets/reference_et/conus/gridmet/ratios/v1/monthly/eto/{MonthName}`), joined on `month`.
 5. Export each month.
 
 The flat pipeline (one `.map()` + `.sum().divide(40)` per month) keeps the GEE computation graph as a simple map-reduce pattern, avoiding the out-of-memory errors that result from building 40 separate computation pipelines.
@@ -289,7 +291,7 @@ This approach still preserves per-image nonlinearity: ETo is computed from each 
 **Method:** For each year in 1896–2099:
 1. **Get monthly ETo** from the appropriate source:
    - 1896–1978: Pre-exported `prism_hargreaves_eto` asset
-   - 1979–2025: gridMET native monthly ETo
+   - 1979–2025: OpenET gridMET native monthly ETo
    - 2026–2099: Pre-exported `maca_monthly_eto_v2` asset
 2. **Get monthly precipitation:**
    - 1896–2025: [PRISM](https://doi.org/10.1002/joc.1688) (`OREGONSTATE/PRISM/ANm`, band `ppt`)
@@ -330,7 +332,7 @@ Since the downstream ML model operates on **annual** predictor variables, all pe
 
 #### 10. Per-GCM Annual ETo (`maca_gcm_annual_eto`)
 
-Same flat pipeline as §6 (ensemble ETo), but filtered to one model (2 scenarios). Monthly ETo is `daily_eto.sum().divide(2)`, gridMET bias-corrected, then summed to annual. Used at tile-download time for the Peff clamp safeguard in `dataops.py`.
+Same flat pipeline as §6 (ensemble ETo), but filtered to one model (2 scenarios). Monthly ETo is `daily_eto.sum().divide(2)`, OpenET gridMET bias-corrected, then summed to annual. Used at tile-download time for the Peff clamp safeguard in `dataops.py`.
 
 **Output:** 370 images (`{model}_{year}`), band `eto` (mm/year), properties `model` + `year`.
 
@@ -342,7 +344,7 @@ Computes bias-corrected monthly ETo internally (same as §10), multiplies by mon
 
 #### 12. Per-GCM Annual Peff (`maca_gcm_annual_peff`)
 
-Computes bias-corrected monthly ETo + per-GCM precip internally, applies the nonlinear USDA SCS formula per month (same as §9), sums to annual. Only 2026–2099 because historical Peff uses PRISM/gridMET observations equally for all GCMs.
+Computes bias-corrected monthly ETo + per-GCM precip internally, applies the nonlinear USDA SCS formula per month (same as §9), sums to annual. Only 2026–2099 because historical Peff uses PRISM/OpenET gridMET observations equally for all GCMs.
 
 **Output:** 370 images (`{model}_{year}`), band `peff` (mm/year), properties `model` + `year`.
 
@@ -406,6 +408,25 @@ python export_maca_gcm_annual_et.py --gcm CCSM4
 python export_maca_gcm_annual_peff.py --start-year 2050 --end-year 2099
 ```
 
+### Visualize monthly ratio grids
+
+```bash
+python plot_monthly_ratios.py [--output-dir DIR]
+```
+
+Produces 12 PNG figures (default output: `Data/Outputs/GEE_Ratios/`), four per ratio:
+
+| File | Description |
+|---|---|
+| `{ratio}.png` | 4x3 spatial maps (Jan-Dec) with basin overlays |
+| `{ratio}_basin_avg.png` | 4x3 choropleth maps of basin-averaged ratios |
+| `{ratio}_monthly_mean_ts.png` | AZ-wide monthly mean time series |
+| `{ratio}_monthly_mean_ts_ama_ina.png` | AMA/INA-only area-weighted monthly mean time series |
+
+Where `{ratio}` is one of: `gridmet_hargreaves_eto_ratio`, `monthly_etof`, `openet_reitz_et_ratio`.
+
+All figures use a discrete diverging blue-white-red colormap centered on 1.0. Downloaded GeoTIFFs are cached in `{output-dir}/.cache/` so subsequent runs skip the GEE download.
+
 ### Resumability
 
 All scripts check for existing assets before exporting. If a run is interrupted, simply re-run the same script — it will skip already-exported images and only submit remaining ones.
@@ -413,6 +434,17 @@ All scripts check for existing assets before exporting. If a run is interrupted,
 ### Queue Throttling
 
 GEE enforces a 3,000-task queue limit. `export_image()` automatically calls `_wait_for_queue_capacity()` before each submission. If there are already 2,900+ pending/running tasks, it polls every 60 seconds until the queue has room. This means large batch exports (e.g., 2,448 peff images) can be launched without manually splitting runs.
+
+## Visualization (`plot_monthly_ratios.py`)
+
+| Function | Purpose |
+|---|---|
+| `_download_ee_image(...)` | Download a single-band GEE image as a numpy array; caches GeoTIFFs locally |
+| `_plot_ratio(...)` | 4x3 pixel-level spatial maps (Jan-Dec) with GW basin boundary overlays |
+| `_plot_basin_avg(...)` | 4x3 choropleth maps of basin-averaged (zonal mean) ratios per month |
+| `_plot_monthly_mean_ts(...)` | AZ-wide monthly mean time series (Jan-Dec) for all three ratios |
+| `_plot_monthly_mean_ts_ama_ina(...)` | Area-weighted monthly mean time series for AMA/INA basins only |
+| `_make_ratio_norm(...)` | Discrete `BoundaryNorm` centered on 1 for the diverging colormap |
 
 ## Shared Utilities (`config.py`)
 

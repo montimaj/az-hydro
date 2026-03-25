@@ -895,13 +895,17 @@ def compute_ale_plots(
             X=x_data, y=y_data,
             feature_names=feature_names
         )
-        ale_1d_reg = explainer.ale(
-            features=feature_names,
-            n_bootstrap=10,
-            subsample=10000,
-            n_jobs=min(len(feature_names), os.cpu_count() or 1),
-            n_bins=30
-        )
+        try:
+            ale_1d_reg = explainer.ale(
+                features=feature_names,
+                n_bootstrap=10,
+                subsample=10000,
+                n_jobs=min(len(feature_names), os.cpu_count() or 1),
+                n_bins=30
+            )
+        except (IndexError, ValueError) as e:
+            logger.warning(f'Skipping ALE for {data_type} data: {e}')
+            continue
         explainer.plot_ale(
             ale_1d_reg,
             display_feature_names=feature_dict,

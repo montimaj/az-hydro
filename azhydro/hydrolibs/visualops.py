@@ -1848,6 +1848,43 @@ def analyze_pumping_distribution(
 # ─── ML Pipeline Visualization Helpers ───────────────────────────────────────
 
 
+def plot_grid_heatmap(
+        avg_csv: str,
+        output_dir: str,
+        strategy_label: str = 'Random',
+) -> None:
+    """Heatmap of mean Test R² (test-size × model).
+
+    Reads ``Model_Comparison_Averaged.csv`` and pivots ``Test_R2_mean``
+    into a test-size (rows) × model (columns) heatmap.
+
+    Args:
+        avg_csv (str): Path to ``Model_Comparison_Averaged.csv``.
+        output_dir (str): Directory for saved figures.
+        strategy_label (str): Label used in figure title.
+    """
+    apply_journal_style()
+    makedirs(output_dir)
+    df = pd.read_csv(avg_csv)
+    df['test_size_label'] = df['test_size'].map(lambda x: f'{x:.0%}')
+    pivot = df.pivot(index='test_size_label', columns='Model', values='Test_R2_mean')
+    pivot = pivot.loc[sorted(pivot.index, key=lambda s: float(s.strip('%')) / 100)]
+
+    fig, ax = plt.subplots(figsize=(max(8, len(pivot.columns) * 1.2),
+                                    max(4, len(pivot) * 0.6)))
+    sns.heatmap(
+        pivot, annot=True, fmt='.3f', cmap='RdYlGn',
+        linewidths=0.5, ax=ax, vmin=0, vmax=1,
+    )
+    ax.set_title(f'{strategy_label}: Mean Test R² per Test Size',
+                 fontweight='bold')
+    ax.set_ylabel('Test Size')
+    plt.tight_layout()
+    fig.savefig(os.path.join(output_dir, 'Heatmap_R2.png'), dpi=600)
+    plt.close()
+    logger.info(f'{strategy_label} heatmap saved to {output_dir}')
+
+
 def plot_loo_heatmap(
         metrics_df: pd.DataFrame,
         fold_col: str,
@@ -1903,7 +1940,7 @@ def plot_loo_bar(
         R2_std=('Test_R2', 'std'),
         RMSE_mean=('Test_RMSE', 'mean'),
         RMSE_std=('Test_RMSE', 'std'),
-    ).reset_index()
+    ).reset_index().sort_values('RMSE_mean')
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -1912,16 +1949,134 @@ def plot_loo_bar(
     axes[0].set_ylabel('Mean Test R²', fontweight='bold')
     axes[0].set_title(f'LOO Averaged Test R² ({fold_col})', fontweight='bold')
     axes[0].tick_params(axis='x', rotation=45)
+    axes[0].grid(True, alpha=0.3, axis='y', linestyle='--')
 
     axes[1].bar(avg.Model, avg.RMSE_mean, yerr=avg.RMSE_std, capsize=4,
                 color='#E74C3C', edgecolor='black', linewidth=0.5)
     axes[1].set_ylabel('Mean Test RMSE (%)', fontweight='bold')
     axes[1].set_title(f'LOO Averaged Test RMSE ({fold_col})', fontweight='bold')
     axes[1].tick_params(axis='x', rotation=45)
+    axes[1].grid(True, alpha=0.3, axis='y', linestyle='--')
 
     plt.tight_layout()
     fig.savefig(os.path.join(output_dir, 'LOO_Averaged_Metrics.png'), dpi=600)
     plt.close()
+
+    # Overfitting bar charts
+    overfit_cols = [c for c in ['Overfit_R2', 'Overfit_RMSE']
+                    if c in metrics_df.columns]
+    if overfit_cols:
+        agg_dict = {}
+        for c in overfit_cols:
+            agg_dict[f'{c}_mean'] = (c, 'mean')
+            agg_dict[f'{c}_std'] = (c, 'std')
+        avg_of = metrics_df.groupby('Model').agg(**agg_dict).reset_index()
+        avg_of = avg_of.loc[avg.index]  # keep same model order
+
+        fig, axes = plt.subplots(1, len(overfit_cols), figsize=(7 * len(overfit_cols), 5))
+        if len(overfit_cols) == 1:
+            axes = [axes]
+
+        if 'Overfit_R2' in overfit_cols:
+            ax = axes[overfit_cols.index('Overfit_R2')]
+            ax.bar(avg_of.Model, avg_of['Overfit_R2_mean'],
+                   yerr=avg_of['Overfit_R2_std'], capsize=4,
+                   color='#F39C12', edgecolor='black', linewidth=0.5)
+            ax.set_ylabel('Mean Overfit R² (Train − Test)', fontweight='bold')
+            ax.set_title(f'LOO Averaged Overfit R² ({fold_col})', fontweight='bold')
+            ax.tick_params(axis='x', rotation=45)
+            ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+
+        if 'Overfit_RMSE' in overfit_cols:
+            ax = axes[overfit_cols.index('Overfit_RMSE')]
+            ax.bar(avg_of.Model, avg_of['Overfit_RMSE_mean'],
+                   yerr=avg_of['Overfit_RMSE_std'], capsize=4,
+                   color='#8E44AD', edgecolor='black', linewidth=0.5)
+            ax.set_ylabel('Mean Overfit RMSE (%) (Train − Test)', fontweight='bold')
+            ax.set_title(f'LOO Averaged Overfit RMSE ({fold_col})', fontweight='bold')
+            ax.tick_params(axis='x', rotation=45)
+            ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+
+        plt.tight_layout()
+        fig.savefig(os.path.join(output_dir, 'LOO_Averaged_Overfitting.png'), dpi=600)
+        plt.close()
+
+
+def plot_grid_bar_charts(
+        all_runs_csv: str,
+        output_dir: str,
+        strategy_label: str = 'Random',
+) -> None:
+    """Bar charts of metrics averaged across all splits (test-size × seed).
+
+    Reads ``All_Runs.csv`` and aggregates across every split to produce two
+    figures, each with a single pair of bar charts (one bar per model):
+
+    1. **Metrics** — Mean Test R² and Mean Test RMSE (± std).
+    2. **Overfitting** — Mean Overfit R² and Mean Overfit RMSE (± std).
+
+    Args:
+        all_runs_csv (str): Path to ``All_Runs.csv``.
+        output_dir (str): Directory for saved figures.
+        strategy_label (str): Label used in figure titles.
+    """
+    apply_journal_style()
+    makedirs(output_dir)
+    df = pd.read_csv(all_runs_csv)
+
+    avg = df.groupby('Model').agg(
+        Test_R2_mean=('Test_R2', 'mean'), Test_R2_std=('Test_R2', 'std'),
+        Test_RMSE_mean=('Test_RMSE', 'mean'), Test_RMSE_std=('Test_RMSE', 'std'),
+        Overfit_R2_mean=('Overfit_R2', 'mean'), Overfit_R2_std=('Overfit_R2', 'std'),
+        Overfit_RMSE_mean=('Overfit_RMSE', 'mean'), Overfit_RMSE_std=('Overfit_RMSE', 'std'),
+    ).reset_index().sort_values('Test_RMSE_mean')
+    models = avg['Model'].values
+
+    # --- 1. Error-metric bar charts ---
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].bar(models, avg['Test_R2_mean'], yerr=avg['Test_R2_std'],
+                capsize=4, color='#2980B9', edgecolor='black', linewidth=0.5)
+    axes[0].set_ylabel('Mean Test R²', fontweight='bold')
+    axes[0].set_title(f'{strategy_label}: Averaged Test R²', fontweight='bold')
+    axes[0].tick_params(axis='x', rotation=45)
+    axes[0].grid(True, alpha=0.3, axis='y', linestyle='--')
+
+    axes[1].bar(models, avg['Test_RMSE_mean'], yerr=avg['Test_RMSE_std'],
+                capsize=4, color='#E74C3C', edgecolor='black', linewidth=0.5)
+    axes[1].set_ylabel('Mean Test RMSE (%)', fontweight='bold')
+    axes[1].set_title(f'{strategy_label}: Averaged Test RMSE', fontweight='bold')
+    axes[1].tick_params(axis='x', rotation=45)
+    axes[1].grid(True, alpha=0.3, axis='y', linestyle='--')
+
+    plt.tight_layout()
+    fig.savefig(os.path.join(output_dir, 'Averaged_Metrics.png'),
+                dpi=600, bbox_inches='tight')
+    plt.close(fig)
+
+    # --- 2. Overfitting bar charts ---
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].bar(models, avg['Overfit_R2_mean'], yerr=avg['Overfit_R2_std'],
+                capsize=4, color='#F39C12', edgecolor='black', linewidth=0.5)
+    axes[0].set_ylabel('Mean Overfit R² (Train − Test)', fontweight='bold')
+    axes[0].set_title(f'{strategy_label}: Averaged Overfit R²', fontweight='bold')
+    axes[0].tick_params(axis='x', rotation=45)
+    axes[0].grid(True, alpha=0.3, axis='y', linestyle='--')
+
+    axes[1].bar(models, avg['Overfit_RMSE_mean'], yerr=avg['Overfit_RMSE_std'],
+                capsize=4, color='#8E44AD', edgecolor='black', linewidth=0.5)
+    axes[1].set_ylabel('Mean Overfit RMSE (%) (Train − Test)', fontweight='bold')
+    axes[1].set_title(f'{strategy_label}: Averaged Overfit RMSE', fontweight='bold')
+    axes[1].tick_params(axis='x', rotation=45)
+    axes[1].grid(True, alpha=0.3, axis='y', linestyle='--')
+
+    plt.tight_layout()
+    fig.savefig(os.path.join(output_dir, 'Averaged_Overfitting.png'),
+                dpi=600, bbox_inches='tight')
+    plt.close(fig)
+
+    logger.info(f'{strategy_label} averaged bar charts saved to {output_dir}')
 
 
 def create_cross_strategy_summary(all_results: dict, output_dir: str) -> None:
