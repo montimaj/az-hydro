@@ -784,9 +784,10 @@ def compute_perm_imp(
         None if model_name is not in the supported set.
     """
     _perm_imp_models = {
-        'RF', 'ETR', 'LGBM', 'XGB', 'XGBRF', 'HGBR',
+        'RF', 'ETR', 'LGBM', 'XGB', 'XGBRF', 'GBR', 'HGBR', 'BAG', 'ADA',
         'PIML_XGB', 'PIML_LGBM', 'PIML_XGBRF',
     }
+    _no_fimp_models = {'BAG', 'HGBR'}
     if model_name in _perm_imp_models:
         logger.info('Computing permutation importance...')
         if log_target:
@@ -800,7 +801,7 @@ def compute_perm_imp(
             'scaled_mbe': make_scorer(normalized_mbe, greater_is_better=False)
         }
         feature_dict = get_feature_dict()
-        if create_plots and model_name != 'HGBR':
+        if create_plots and model_name not in _no_fimp_models:
             imp_dict = {'Features': list(x_train.columns)}
             f_imp = np.array(model.feature_importances_).astype(float)
             if model_name == 'LGBM':
