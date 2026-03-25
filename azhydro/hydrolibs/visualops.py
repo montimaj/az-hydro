@@ -4501,11 +4501,21 @@ def plot_loo_distribution(
     makedirs(output_dir)
     df = pd.read_csv(per_fold_csv)
 
+    # Order models by median Test RMSE (ascending) for consistency with bar charts
+    if 'Test_RMSE' in df.columns:
+        model_order = (
+            df.groupby('Model')['Test_RMSE'].median()
+            .sort_values()
+            .index.tolist()
+        )
+    else:
+        model_order = sorted(df['Model'].unique())
+
     for metric in metrics:
         if metric not in df.columns:
             continue
         label = _METRIC_LABELS.get(metric, metric)
-        models = sorted(df['Model'].unique())
+        models = model_order
         data = [df.loc[df['Model'] == m, metric].dropna().values
                 for m in models]
 
