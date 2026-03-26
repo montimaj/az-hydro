@@ -491,6 +491,40 @@ def _metrics_from_pred_df(pred_df: pd.DataFrame) -> tuple[dict, dict]:
     return train_m, test_m
 
 
+# Pumping magnitude bins for stratified error diagnostics
+PUMPING_BINS = {
+    'Low (<500 mm)': (0, 500),
+    'Medium (500-2000 mm)': (500, 2000),
+    'High (>2000 mm)': (2000, np.inf),
+}
+
+
+def _stratified_test_metrics(pred_df: pd.DataFrame) -> list[dict]:
+    """Compute per-pumping-category test metrics from a prediction DataFrame.
+
+    Bins are defined by ``PUMPING_BINS`` and applied to the *actual*
+    test-set pumping values (``Actual_GW_mm``).
+
+    Returns:
+        list[dict]: One dict per bin with keys ``Category``, ``N``,
+        ``R2``, ``RMSE_pct``, ``MAE_pct``, ``MBE_pct``.
+    """
+    test_part = pred_df[pred_df['DATA'] == 'TEST']
+    rows: list[dict] = []
+    for cat_name, (lo, hi) in PUMPING_BINS.items():
+        mask = (test_part['Actual_GW_mm'] >= lo) & (test_part['Actual_GW_mm'] < hi)
+        subset = test_part[mask]
+        if len(subset) < 2:
+            rows.append({'Category': cat_name, 'N': len(subset),
+                         'R2': np.nan, 'RMSE_pct': np.nan,
+                         'MAE_pct': np.nan, 'MBE_pct': np.nan})
+            continue
+        m = _compute_metrics(subset['Actual_GW_mm'].values,
+                             subset['Pred_GW_mm'].values)
+        rows.append({'Category': cat_name, 'N': len(subset), **m})
+    return rows
+
+
 def _train_and_evaluate(
         x_train: pd.DataFrame, y_train: np.ndarray,
         x_test: pd.DataFrame, y_test: np.ndarray,
@@ -1155,6 +1189,7 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
     makedirs(spatial_dir)
 
     per_subbasin_rows = []
+    stratified_rows = []
 
     for subbasin in subbasins:
         logger.info(f'\n--- Spatial holdout: {subbasin} ---')
@@ -1297,6 +1332,11 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
                 'Overfit_RMSE': bc_train['RMSE_pct'] - bc_test['RMSE_pct'],
             })
 
+            for cat_row in _stratified_test_metrics(pred_df):
+                cat_row['Subbasin'] = subbasin
+                cat_row['Model'] = model_name
+                stratified_rows.append(cat_row)
+
     # Build results DataFrames
     per_subbasin_df = pd.DataFrame(per_subbasin_rows).round(4)
     per_subbasin_df.to_csv(os.path.join(spatial_dir, 'Per_Subbasin_Metrics.csv'), index=False)
@@ -1332,6 +1372,15 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
         os.path.join(spatial_dir, 'Per_Subbasin_Metrics.csv'),
         'Subbasin', spatial_dir, strategy_label='Spatial LOO',
     )
+
+    # Stratified metrics by pumping magnitude
+    if stratified_rows:
+        strat_df = pd.DataFrame(stratified_rows).round(4)
+        strat_df.to_csv(
+            os.path.join(spatial_dir, 'Stratified_Metrics.csv'), index=False)
+        logger.info(f'\nStratified metrics:\n{strat_df.to_string(index=False)}')
+        vizops.plot_stratified_metrics(strat_df, spatial_dir,
+                                       strategy_label='Spatial LOO')
 
     return {
         'per_subbasin_df': per_subbasin_df,
@@ -1390,6 +1439,7 @@ def evaluate_spatial_lpo(az_df: pd.DataFrame,
     makedirs(lpo_dir)
 
     all_combo_rows: list[dict] = []
+    all_stratified_rows: list[dict] = []
 
     for p in range(min_p, max_p + 1):
         combos = list(itertools.combinations(subbasins, p))
@@ -1513,6 +1563,12 @@ def evaluate_spatial_lpo(az_df: pd.DataFrame,
                 per_combo_rows.append(row)
                 all_combo_rows.append(row)
 
+                for cat_row in _stratified_test_metrics(pred_df):
+                    cat_row['P'] = p
+                    cat_row['Holdout'] = combo_label
+                    cat_row['Model'] = model_name
+                    all_stratified_rows.append(cat_row)
+
         # --- Per-p summaries and plots ---
         if not per_combo_rows:
             continue
@@ -1588,6 +1644,15 @@ def evaluate_spatial_lpo(az_df: pd.DataFrame,
         'Holdout', lpo_dir,
         strategy_label='Spatial LPO (all p)',
     )
+
+    # Stratified metrics by pumping magnitude
+    if all_stratified_rows:
+        strat_df = pd.DataFrame(all_stratified_rows).round(4)
+        strat_df.to_csv(
+            os.path.join(lpo_dir, 'Stratified_Metrics.csv'), index=False)
+        logger.info(f'\nStratified metrics:\n{strat_df.to_string(index=False)}')
+        vizops.plot_stratified_metrics(strat_df, lpo_dir,
+                                       strategy_label='Spatial LPO')
 
     return {
         'all_combo_df': all_df,

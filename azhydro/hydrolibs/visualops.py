@@ -4558,3 +4558,110 @@ def plot_loo_distribution(
         plt.close(fig)
 
     logger.info(f'{strategy_label} distribution plots saved to {output_dir}')
+
+
+def plot_stratified_metrics(
+        strat_df: pd.DataFrame,
+        output_dir: str,
+        strategy_label: str = 'Spatial LOO',
+        metrics: tuple[str, ...] = ('R2', 'RMSE_pct', 'MAE_pct', 'MBE_pct'),
+) -> None:
+    """Grouped bar charts of test metrics stratified by pumping category.
+
+    For each metric, produces a bar chart with models on the x-axis and
+    one group of bars per pumping category (Low / Medium / High).  Bars
+    show the mean across all holdout folds; error bars show ± 1 std.
+
+    Args:
+        strat_df (pd.DataFrame): DataFrame with columns ``Category``,
+            ``Model``, and one or more metric columns.
+        output_dir (str): Directory for saved figures.
+        strategy_label (str): Label for figure titles.
+        metrics (tuple[str,...]): Metric column names to plot.
+    """
+    apply_journal_style()
+    makedirs(output_dir)
+
+    cat_order = [c for c in ['Low (<500 mm)', 'Medium (500-2000 mm)',
+                              'High (>2000 mm)']
+                 if c in strat_df['Category'].values]
+    cat_colors = {'Low (<500 mm)': '#2ECC71',
+                  'Medium (500-2000 mm)': '#F39C12',
+                  'High (>2000 mm)': '#E74C3C'}
+
+    metric_labels = {
+        'R2': 'Test R²',
+        'RMSE_pct': 'Test RMSE (%)',
+        'MAE_pct': 'Test MAE (%)',
+        'MBE_pct': 'Test MBE (%)',
+    }
+
+    # Order models by overall median RMSE for consistency
+    if 'RMSE_pct' in strat_df.columns:
+        model_order = (
+            strat_df.groupby('Model')['RMSE_pct'].median()
+            .sort_values()
+            .index.tolist()
+        )
+    else:
+        model_order = sorted(strat_df['Model'].unique())
+
+    for metric in metrics:
+        if metric not in strat_df.columns:
+            continue
+        label = metric_labels.get(metric, metric)
+
+        # Aggregate: mean ± std per (Model, Category) across folds
+        agg = (
+            strat_df.groupby(['Model', 'Category'])[metric]
+            .agg(['mean', 'std'])
+            .reset_index()
+        )
+
+        n_models = len(model_order)
+        n_cats = len(cat_order)
+        bar_width = 0.8 / max(n_cats, 1)
+        x = np.arange(n_models)
+
+        fig, ax = plt.subplots(
+            figsize=(max(8, n_models * 1.4), 6), constrained_layout=True)
+
+        for j, cat in enumerate(cat_order):
+            cat_data = agg[agg['Category'] == cat].set_index('Model')
+            means = [cat_data.loc[m, 'mean'] if m in cat_data.index
+                     else np.nan for m in model_order]
+            stds = [cat_data.loc[m, 'std'] if m in cat_data.index
+                    else 0 for m in model_order]
+            offset = (j - (n_cats - 1) / 2) * bar_width
+            ax.bar(x + offset, means, bar_width, yerr=stds, capsize=3,
+                   label=cat, color=cat_colors.get(cat, '#999999'),
+                   edgecolor='black', linewidth=0.5)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(model_order, rotation=45, ha='right', fontsize=10)
+        ax.set_ylabel(label, fontweight='bold')
+        ax.set_title(f'{strategy_label}: {label} by Pumping Category',
+                     fontsize=14, fontweight='bold')
+        ax.legend(title='Pumping Category', fontsize=9, title_fontsize=10)
+        ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+
+        fname = f'Stratified_{metric}.png'
+        fig.savefig(os.path.join(output_dir, fname), dpi=600,
+                    bbox_inches='tight')
+        plt.close(fig)
+
+    # Summary table: mean N per category across folds
+    if 'N' in strat_df.columns:
+        n_summary = (
+            strat_df.groupby(['Model', 'Category'])['N']
+            .agg(['mean', 'sum'])
+            .rename(columns={'mean': 'Mean_N', 'sum': 'Total_N'})
+            .reset_index()
+            .round(1)
+        )
+        n_summary.to_csv(
+            os.path.join(output_dir, 'Stratified_Sample_Counts.csv'),
+            index=False)
+
+    logger.info(f'{strategy_label} stratified metric plots saved to '
+                f'{output_dir}')

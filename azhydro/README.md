@@ -603,6 +603,14 @@ applied and model visualizations (scatter, residual, and spatial plots) are
 generated.  Post-bias-correction metrics are logged and used for the
 summary rows.
 
+Both Steps 2c and 2d also produce **stratified error metrics** that bin
+test-set predictions by actual pumping magnitude (Low < 500 mm, Medium
+500–2000 mm, High > 2000 mm).  For each model and bin, R², RMSE, MAE,
+and MBE are computed across holdout folds, revealing whether errors
+concentrate in a particular pumping regime.  Results are saved to
+`Stratified_Metrics.csv` with grouped bar charts (`Stratified_*.png`)
+and a `Stratified_Sample_Counts.csv` showing bin populations.
+
 **Outputs:** `{MODEL_DIR}Model_Evaluation/Spatial_LOO/`
 
 #### Step 2d — Spatial leave-p-out (`evaluate_spatial_lpo()`)
@@ -1898,10 +1906,14 @@ Data/Outputs/
     │   ├── Pixel_Holdout/                   # Step 2a2 (same grid structure)
     │   ├── Temporal_LOO/                    # Step 2b results (T1–T7)
     │   ├── Spatial_LOO/                     # Step 2c results (per sub-basin)
+    │   │   ├── Stratified_Metrics.csv       #   per-category (Low/Med/High) metrics
+    │   │   └── Stratified_*.png             #   grouped bar charts by pumping bin
     │   ├── Spatial_LPO/                     # Step 2d results (leave-p-out)
     │   │   ├── P_2/, P_3/, …               #   per-p directories with bar/dist plots
     │   │   ├── All_Combo_Metrics.csv        #   all combos across all p
-    │   │   └── Overall_Averaged_Metrics.csv #   grouped by (P, Model)
+    │   │   ├── Overall_Averaged_Metrics.csv #   grouped by (P, Model)
+    │   │   ├── Stratified_Metrics.csv       #   per-category metrics (all p)
+    │   │   └── Stratified_*.png             #   grouped bar charts by pumping bin
     │   ├── Cross_Strategy_Summary.csv       # All models × all strategies
     │   ├── Cross_Strategy_Summary.tex       # LaTeX table for manuscripts
     │   └── Cross_Strategy_Comparison.png    # Grouped bar chart
