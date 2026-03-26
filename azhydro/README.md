@@ -1248,8 +1248,10 @@ actual vs predicted) and `{prediction_dir}Raster_Maps/Trend_Analysis/`
 
 `wellops.create_well_package()` disaggregates pixel-level prediction
 rasters to individual wells from the ADWR Well Registry and writes a
-GeoPackage (`Well_Package.gpkg`).  See the `wellops` module description
-below for the capacity-proportional distribution logic.
+GeoPackage (`Well_Package.gpkg`).  For each year, only wells that existed
+by that year are included (see temporal filtering below).  See the
+`wellops` module description below for the capacity-proportional
+distribution logic.
 
 This step runs **after** UQ augmentation (Step 3b) so that the 6-band
 augmented rasters are available.  When augmented rasters are present,
@@ -1693,6 +1695,23 @@ available (after Step 3b), band 2 (σ) is also sampled and per-well
 uncertainty columns (σ, lower/upper 95 % CI) are included for every
 category and unit.
 
+**Temporal filtering** — for each year, only wells that existed by that year
+are included in the disaggregation.  A well's start year is determined by:
+
+1. **`INSTALLED` date** (year extracted from the Well Registry).
+2. **`APPLICATIO` date fallback** if `INSTALLED` is missing or invalid.
+   The application date serves as a lower bound — if a permit was filed, the
+   well was likely drilled within a reasonable timeframe, making it a better
+   estimate than the full-history default.
+3. **Conservative default** (`start_year`) if both are missing — the well is
+   included for all years.
+
+Dates equal to the ADWR sentinel value `1899-12-30` (meaning "unknown") are
+treated as missing and fall through to the next tier.
+
+Capacity weights are re-normalised per year within each pixel using only the
+active wells, so the pixel total is always fully distributed.
+
 **Distribution logic** — when multiple wells share a 2 km pixel, the pixel
 total is split using capacity-proportional weights with a three-tier fallback:
 
@@ -1703,12 +1722,9 @@ total is split using capacity-proportional weights with a three-tier fallback:
    from the Well Registry is used (~79 k wells have this attribute).
 3. **Equal-share fallback** — wells with neither record receive weight 1.0.
 
-Within each pixel the raw weights are normalized to sum to 1, so the pixel
-budget is preserved regardless of which tier each well belongs to.
-
 **Nodata masking**: Wells landing in raster nodata or out-of-bounds pixels
 are dropped before weight computation, preventing valid wells from losing
-share to neighbours in invalid pixels.
+share to neighbors in invalid pixels.
 
 **Zero floor**: A `np.maximum(all_mm, 0)` clamp is applied after sampling to
 eliminate any negative model artifacts before unit conversion.

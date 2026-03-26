@@ -33,6 +33,19 @@ capacity-based weight:
    within a pixel the split is capacity-proportional where data exist and
    equal otherwise.
 
+Temporal filtering
+------------------
+For each year, only wells that existed by that year are included in the
+disaggregation.  A well's start year is determined by:
+
+1. ``INSTALLED`` date (year extracted).
+2. ``APPLICATIO`` date fallback if ``INSTALLED`` is missing/invalid.
+3. Conservative default (``start_year``) if both are missing — the well
+   is included for all years.
+
+Capacity weights are re-normalised per year within each pixel using only
+the active wells, so the pixel total is always fully distributed.
+
 Wells that fall in raster nodata pixels are excluded before weighting.
 All sampled values are floored at zero.
 """
@@ -64,6 +77,7 @@ def _compute_capacity_weights(
         wells: gpd.GeoDataFrame,
         pixel_keys: np.ndarray,
         gw_vector_dir: str | None,
+        normalize: bool = True,
 ) -> np.ndarray:
     """
     Compute per-well weights so that wells sharing a pixel receive a
@@ -74,7 +88,10 @@ def _compute_capacity_weights(
         2. ``PUMPRATE`` from the Well Registry (GPM field).
         3. Equal-share fallback (weight = 1.0).
 
-    Within each pixel the weights are normalized to sum to 1.
+    Args:
+        normalize: If True (default), normalise weights within each pixel
+            to sum to 1.  If False, return the raw (un-normalised) weights
+            so the caller can normalise per year using only active wells.
     """
     n = len(wells)
     raw_weight = np.ones(n, dtype=np.float64)   # fallback
@@ -116,6 +133,9 @@ def _compute_capacity_weights(
         raw_weight[use_pump] = pump[use_pump] * 1.6133
         logger.info(f'  Capacity weights: {use_pump.sum()} wells using '
                     f'PUMPRATE fallback')
+
+    if not normalize:
+        return raw_weight
 
     # --- Normalise within each pixel ---
     unique_keys, inverse = np.unique(pixel_keys, return_inverse=True)
@@ -227,9 +247,26 @@ def create_well_package(
         )
     pixel_keys = pixel_rc[:, 0] * 1_000_000 + pixel_rc[:, 1]
 
-    # ---- Capacity-proportional weights ----
-    well_share = _compute_capacity_weights(wells, pixel_keys, gw_vector_dir)
-    unique_keys = np.unique(pixel_keys)
+    # ---- Derive well start year (INSTALLED → APPLICATIO → conservative) ----
+    # 1899 is a sentinel value in the ADWR registry meaning "unknown"
+    _SENTINEL_YEAR = 1899
+    well_start_year = np.full(n_wells, start_year, dtype=np.int32)
+    for date_col in ('INSTALLED', 'APPLICATIO'):
+        if date_col not in wells.columns:
+            continue
+        dates = pd.to_datetime(wells[date_col], errors='coerce')
+        years = dates.dt.year
+        fill_mask = ((well_start_year == start_year) & dates.notnull()
+                     & (years != _SENTINEL_YEAR))
+        well_start_year[fill_mask] = years[fill_mask].values
+    n_fallback = (well_start_year == start_year).sum()
+    logger.info(f'  Well start years: {n_wells - n_fallback} from registry dates, '
+                f'{n_fallback} using conservative default ({start_year})')
+
+    # ---- Base capacity weights (before year-filtering) ----
+    raw_weight = _compute_capacity_weights(wells, pixel_keys, gw_vector_dir,
+                                           normalize=False)
+    unique_keys, inverse = np.unique(pixel_keys, return_inverse=True)
     logger.info(f'  Unique pixels occupied: {len(unique_keys)}, '
                 f'wells retained: {n_wells}')
 
@@ -253,6 +290,22 @@ def create_well_package(
 
     years_sampled = []
     for yi, year in enumerate(range(start_year, end_year + 1)):
+        # Only include wells installed by this year
+        active = well_start_year <= year
+        if not active.any():
+            continue
+
+        # Per-year capacity weights: normalise within each pixel
+        # using only active wells
+        well_share = np.zeros(n_wells, dtype=np.float64)
+        for ui in range(len(unique_keys)):
+            pix_mask = inverse == ui
+            pix_active = pix_mask & active
+            if not pix_active.any():
+                continue
+            w = raw_weight[pix_active]
+            well_share[pix_active] = w / w.sum()
+
         sampled_any = False
         for ci, (cat, mm_dir, prefix) in enumerate(cat_mm_info):
             raster_path = os.path.join(mm_dir, f'{prefix}_{year}_mm.tif')
