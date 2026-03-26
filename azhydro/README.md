@@ -114,8 +114,8 @@ python pipeline.py --skip-eval pixel,temporal,summary # skip multiple strategies
 | `2a` | Evaluate random 80/20 train/test split |
 | `2a2` | Evaluate pixel holdout (spatial locations held out across all years) |
 | `2b` | Evaluate LOO temporal holdout |
-| `2c` | Evaluate LOO spatial holdout |
-| `2d` | Evaluate leave-p-out spatial holdout |
+| `2c` | Evaluate LOO spatial holdout (AMA/INA basins) |
+| `2d` | Evaluate leave-p-out spatial holdout (AMA/INA basins) |
 | `3`  | Full-period XGBRF prediction (1896–2099) |
 | `3b` | Hybrid uncertainty quantification |
 | `3e` | Well package (per-well GeoPackage with uncertainty) |
@@ -512,8 +512,8 @@ prevent optimistic CV scores from data leakage:
 | Random (2a) | `RepeatedKFold` | — (standard random splits) |
 | Pixel holdout (2a2) | `GroupKFold` | Pixel coordinates (easting/northing) |
 | Temporal LOO (2b) | `GroupKFold` | Year |
-| Spatial LOO (2c) | `GroupKFold` | Sub-basin name |
-| Spatial LPO (2d) | `GroupKFold` | Sub-basin name |
+| Spatial LOO (2c) | `GroupKFold` | AMA/INA basin name |
+| Spatial LPO (2d) | `GroupKFold` | AMA/INA basin name |
 
 For group-based strategies, `GroupKFold` ensures that all samples sharing
 the same group label (pixel, year, or sub-basin) stay together in the same
@@ -595,17 +595,18 @@ relying on test-set information during training.
 
 #### Step 2c — Spatial leave-one-out (`evaluate_spatial_loo()`)
 
-Iterates over every ADWR sub-basin within AMA/INA management areas.  For
-each sub-basin the model trains on the rest of Arizona and is tested on the
-held-out region.  Only sub-basins with metered data in the 1984–2024 period
-are included.  After each sub-basin evaluation, linear bias correction is
-applied and model visualizations (scatter, residual, and spatial plots) are
-generated.  Post-bias-correction metrics are logged and used for the
+Iterates over every AMA/INA management area (identified by
+``GW_Basin_Type`` 0=AMA or 1=INA in the predictor DataFrame).  For each basin the model trains on the rest of
+Arizona and is tested on the held-out management area.  Basins with
+fewer than ``MIN_SPATIAL_EVAL_SAMPLES`` (default 30) non-zero metered
+samples are excluded.  After each basin evaluation, linear bias correction
+is applied and model visualizations (scatter, residual, and spatial plots)
+are generated.  Post-bias-correction metrics are logged and used for the
 summary rows.
 
 Both Steps 2c and 2d also produce **stratified error metrics** that bin
-test-set predictions by actual pumping magnitude (Low < 500 mm, Medium
-500–2000 mm, High > 2000 mm).  For each model and bin, R², RMSE, MAE,
+test-set predictions by actual pumping magnitude (Low < 500 mm,
+High >= 500 mm).  For each model and bin, R², RMSE, MAE,
 and MBE are computed across holdout folds, revealing whether errors
 concentrate in a particular pumping regime.  Results are saved to
 `Stratified_Metrics.csv` with grouped bar charts (`Stratified_*.png`)
@@ -615,18 +616,23 @@ and a `Stratified_Sample_Counts.csv` showing bin populations.
 
 #### Step 2d — Spatial leave-p-out (`evaluate_spatial_lpo()`)
 
-A generalization of the spatial LOO that holds out **p** sub-basins at a
-time instead of just one.  For each value of *p* from 2 to *n* − 2
+A generalization of the spatial LOO that holds out **p** AMA/INA basins
+at a time instead of just one.  For each value of *p* from 2 to *n* − 2
 (ensuring at least two training basins), every C(*n*, *p*) combination of
-sub-basins is held out as the test set while the model trains on the
-remaining basins.  With 7 sub-basins this produces:
+basins is held out as the test set while the model trains on the
+remaining basins.  *p* is capped at ``MAX_LPO_P`` (default 5).
+With 10 AMA/INA basins (all with >= ``MIN_SPATIAL_EVAL_SAMPLES``
+non-zero metered samples) the full enumeration is tractable:
 
 | *p* | Combinations |
 |-----|-------------|
-| 2   | 21 |
-| 3   | 35 |
-| 4   | 35 |
-| 5   | 21 |
+| 2   | 45 |
+| 3   | 120 |
+| 4   | 210 |
+| 5   | 252 |
+| 6   | 210 |
+| 7   | 120 |
+| 8   | 45 |
 
 The motivation is that spatial LOO penalizes the model for failing to
 capture basin-specific management decisions (pumping allocations, water
@@ -1905,7 +1911,7 @@ Data/Outputs/
     │   │   └── Model_Comparison_Averaged.csv #  Mean ± std by model & test_size
     │   ├── Pixel_Holdout/                   # Step 2a2 (same grid structure)
     │   ├── Temporal_LOO/                    # Step 2b results (T1–T7)
-    │   ├── Spatial_LOO/                     # Step 2c results (per sub-basin)
+    │   ├── Spatial_LOO/                     # Step 2c results (per AMA/INA)
     │   │   ├── Stratified_Metrics.csv       #   per-category (Low/Med/High) metrics
     │   │   └── Stratified_*.png             #   grouped bar charts by pumping bin
     │   ├── Spatial_LPO/                     # Step 2d results (leave-p-out)
