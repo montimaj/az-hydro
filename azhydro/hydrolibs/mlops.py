@@ -3008,21 +3008,22 @@ def generate_model_visualizations(
         raster_res: float = 2000,
         use_ama_ina: bool = True,
         create_basin_plots: bool = True,
+        skip_aggregate_ts: bool = False,
         n_jobs: int = -1
 ) -> None:
     """
     Generate journal-quality visualizations for a trained model.
-    
+
     Creates comprehensive visualization suite including:
     - Time series plots with training/test period highlighting
     - Scatter plots of actual vs predicted (train/test)
     - Residual analysis plots
     - Individual basin-level time series
-    
+
     All figures are saved in both PNG (600 dpi) and PDF formats for publication.
-    
+
     Args:
-        pred_df: DataFrame with predictions (must have columns: Year, GW_Basin, 
+        pred_df: DataFrame with predictions (must have columns: Year, GW_Basin,
                  Actual_GW_mm, Pred_GW_mm, DATA).
         output_dir: Output directory for visualizations.
         model_name: Name of the ML model (e.g., 'XGB', 'LGBM').
@@ -3035,14 +3036,15 @@ def generate_model_visualizations(
         raster_res: Raster resolution in meters.
         use_ama_ina: Whether to filter for AMA/INA basins only.
         create_basin_plots: Whether to create individual basin plots (can be slow).
+        skip_aggregate_ts: Skip the statewide aggregate time series plot.
         n_jobs: Number of parallel jobs for basin plots (-1 for all cores).
-        
+
     Returns:
         None. Plots are saved to output_dir.
-    
+
     Example:
         >>> generate_model_visualizations(
-        ...     pred_df, 
+        ...     pred_df,
         ...     output_dir='./Plots/',
         ...     model_name='XGB',
         ...     test_case='T1',
@@ -3062,6 +3064,7 @@ def generate_model_visualizations(
         raster_res=raster_res,
         use_ama_ina=use_ama_ina,
         create_basin_plots=create_basin_plots,
+        skip_aggregate_ts=skip_aggregate_ts,
         n_jobs=n_jobs
     )
 

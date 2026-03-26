@@ -983,11 +983,12 @@ def create_complete_model_visualization(
         raster_res: float = 2000,
         use_ama_ina: bool = True,
         create_basin_plots: bool = True,
+        skip_aggregate_ts: bool = False,
         n_jobs: int = -1
 ) -> None:
     """
     Create complete visualization suite for a model.
-    
+
     Args:
         pred_df: DataFrame with predictions.
         output_dir: Output directory.
@@ -1001,19 +1002,22 @@ def create_complete_model_visualization(
         raster_res: Raster resolution.
         use_ama_ina: Filter for AMA/INA basins.
         create_basin_plots: Whether to create individual basin plots.
+        skip_aggregate_ts: Skip the statewide aggregate time series plot
+            (useful for spatial LOO where the training set dominates).
         n_jobs: Number of parallel jobs.
     """
     logger.info(f'Creating visualizations for {model_name} - {test_case}...')
     makedirs(output_dir)
 
     # 1. Aggregate time series plot
-    logger.info('  Creating time series plots...')
-    create_time_series_plot_journal(
-        pred_df, output_dir, model_name, test_case, test_year_limits,
-        year_col=year_col, actual_col=actual_col, pred_col=pred_col,
-        gw_basin_col=gw_basin_col, raster_res=raster_res,
-        use_ama_ina=use_ama_ina, units=['af', 'm3', 'mm']
-    )
+    if not skip_aggregate_ts:
+        logger.info('  Creating time series plots...')
+        create_time_series_plot_journal(
+            pred_df, output_dir, model_name, test_case, test_year_limits,
+            year_col=year_col, actual_col=actual_col, pred_col=pred_col,
+            gw_basin_col=gw_basin_col, raster_res=raster_res,
+            use_ama_ina=use_ama_ina, units=['af', 'm3', 'mm']
+        )
 
     # 2. Scatter plots (BC predictions if available, otherwise raw)
     logger.info('  Creating scatter plots...')

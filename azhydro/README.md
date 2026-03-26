@@ -115,6 +115,7 @@ python pipeline.py --skip-eval pixel,temporal,summary # skip multiple strategies
 | `2a2` | Evaluate pixel holdout (spatial locations held out across all years) |
 | `2b` | Evaluate LOO temporal holdout |
 | `2c` | Evaluate LOO spatial holdout |
+| `2d` | Evaluate leave-p-out spatial holdout |
 | `3`  | Full-period XGBRF prediction (1896–2099) |
 | `3b` | Hybrid uncertainty quantification |
 | `3e` | Well package (per-well GeoPackage with uncertainty) |
@@ -145,6 +146,7 @@ python pipeline.py --skip-eval pixel,temporal,summary # skip multiple strategies
 | `pixel` | Skip pixel holdout evaluation (Step 2a2) |
 | `temporal` | Skip LOO temporal holdout evaluation (Step 2b) |
 | `spatial` | Skip LOO spatial holdout evaluation (Step 2c) |
+| `spatial-lpo` | Skip leave-p-out spatial evaluation (Step 2d) |
 | `summary` | Skip cross-strategy summary |
 
 #### CLI flags
@@ -305,7 +307,7 @@ numbered steps plus a cross-strategy summary:
 ```
 Step 0   ─  Data Preparation
 Step 1   ─  Create AZ Predictor DataFrame
-Step 2   ─  Model Evaluation (4 strategies: Random, Pixel Holdout, Temporal LOO, Spatial LOO)
+Step 2   ─  Model Evaluation (5 strategies: Random, Pixel Holdout, Temporal LOO, Spatial LOO, Spatial LPO)
 Step 3   ─  Full-Period XGBRF Prediction (1896–2099)
 Step 3e  ─  Well Package (per-well GeoPackage with uncertainty)
 Step 3g  ─  Raster Maps & Trend Analysis for All Output Categories
@@ -511,6 +513,7 @@ prevent optimistic CV scores from data leakage:
 | Pixel holdout (2a2) | `GroupKFold` | Pixel coordinates (easting/northing) |
 | Temporal LOO (2b) | `GroupKFold` | Year |
 | Spatial LOO (2c) | `GroupKFold` | Sub-basin name |
+| Spatial LPO (2d) | `GroupKFold` | Sub-basin name |
 
 For group-based strategies, `GroupKFold` ensures that all samples sharing
 the same group label (pixel, year, or sub-basin) stay together in the same
@@ -601,6 +604,36 @@ generated.  Post-bias-correction metrics are logged and used for the
 summary rows.
 
 **Outputs:** `{MODEL_DIR}Model_Evaluation/Spatial_LOO/`
+
+#### Step 2d — Spatial leave-p-out (`evaluate_spatial_lpo()`)
+
+A generalization of the spatial LOO that holds out **p** sub-basins at a
+time instead of just one.  For each value of *p* from 2 to *n* − 2
+(ensuring at least two training basins), every C(*n*, *p*) combination of
+sub-basins is held out as the test set while the model trains on the
+remaining basins.  With 7 sub-basins this produces:
+
+| *p* | Combinations |
+|-----|-------------|
+| 2   | 21 |
+| 3   | 35 |
+| 4   | 35 |
+| 5   | 21 |
+
+The motivation is that spatial LOO penalizes the model for failing to
+capture basin-specific management decisions (pumping allocations, water
+rights, land-use regulations) that are essentially unobservable from the
+predictor features.  By varying *p*, the held-out test set averages over
+multiple basins' management idiosyncrasies, and the resulting
+*generalization curve* (R² vs *p*) reveals how many training basins are
+needed before performance plateaus or collapses.
+
+For each *p*, the same heatmap, bar chart, and violin/box/strip
+distribution plots used by the LOO strategy are generated.  An
+`Overall_Averaged_Metrics.csv` grouped by (*p*, Model) provides the data
+for the generalization curve.
+
+**Outputs:** `{MODEL_DIR}Model_Evaluation/Spatial_LPO/`
 
 #### Cross-strategy summary
 
@@ -1865,6 +1898,10 @@ Data/Outputs/
     │   ├── Pixel_Holdout/                   # Step 2a2 (same grid structure)
     │   ├── Temporal_LOO/                    # Step 2b results (T1–T7)
     │   ├── Spatial_LOO/                     # Step 2c results (per sub-basin)
+    │   ├── Spatial_LPO/                     # Step 2d results (leave-p-out)
+    │   │   ├── P_2/, P_3/, …               #   per-p directories with bar/dist plots
+    │   │   ├── All_Combo_Metrics.csv        #   all combos across all p
+    │   │   └── Overall_Averaged_Metrics.csv #   grouped by (P, Model)
     │   ├── Cross_Strategy_Summary.csv       # All models × all strategies
     │   ├── Cross_Strategy_Summary.tex       # LaTeX table for manuscripts
     │   └── Cross_Strategy_Comparison.png    # Grouped bar chart

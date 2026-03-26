@@ -12,7 +12,9 @@ This script executes the remaining pipeline:
       reporting per-holdout and averaged metrics.
    c) Leave-one-out spatial holdout over every AMA/INA sub-basin (ADWR),
       reporting per-sub-basin and averaged metrics.
-   All strategies use kFolds + Optuna (TPE) + Dask parallelisation.
+   d) Leave-p-out spatial holdout: for each p in [2, n−2], hold out every
+      C(n, p) combination of sub-basins and report per-p aggregated metrics.
+   All strategies use kFolds + Optuna (TPE) + Dask parallelization.
    Optional physics-informed models (PIML_XGB, PIML_LGBM, PIML_XGBRF) are
    available but disabled by default (SKIP_PIML=True) — see azhydro/README.md.
 3. Uses the best model (XGBoost Random Forests) to predict annual
@@ -25,6 +27,7 @@ This script executes the remaining pipeline:
 # Email: sayantan.majumdar@dri.edu
 
 import argparse
+import itertools
 import logging
 import os
 import pickle
@@ -1272,6 +1275,7 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
                 gw_basin_col='GW_Subbasin',
                 use_ama_ina=False,
                 create_basin_plots=True,
+                skip_aggregate_ts=True,
             )
 
             bc_train, bc_test = _metrics_from_pred_df(pred_df)
@@ -1333,6 +1337,262 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
         'per_subbasin_df': per_subbasin_df,
         'avg_df': avg_df,
         'strategy': 'Spatial_LOO',
+    }
+
+
+def evaluate_spatial_lpo(az_df: pd.DataFrame,
+                         min_p: int = 2,
+                         max_p: int | None = None) -> dict:
+    """
+    Leave-p-out spatial evaluation: for each *p* from ``min_p`` to ``max_p``,
+    hold out every C(n, p) combination of ADWR sub-basins, train on the rest,
+    and evaluate on the held-out group.
+
+    Produces per-combination and per-p aggregated metrics plus the same
+    bar / distribution charts used by the LOO strategy.
+
+    Args:
+        az_df (pd.DataFrame): Full predictor dataframe with all years.
+        min_p (int): Smallest holdout group size (default 2).
+        max_p (int | None): Largest holdout group size. Defaults to
+            ``n_basins - 2`` so at least two basins remain for training.
+
+    Returns:
+        dict: Per-model averaged metrics across all p-values.
+    """
+    logger.info('=' * 60)
+    logger.info('Step 2d: Leave-P-Out Spatial evaluation (ADWR sub-basins)')
+    logger.info('=' * 60)
+
+    ml_models = mlops.get_model_dict(
+        get_model_names_only=True,
+        include_all_models=INCLUDE_ALL_MODELS,
+        skip_piml=SKIP_PIML,
+    )
+    subbasins = _get_ama_ina_subbasins()
+
+    # Keep only sub-basins that have data in the metered years
+    metered_df = az_df[az_df['Year'].isin(YEAR_LIST)]
+    subbasins_with_data = set(metered_df['GW_Subbasin'].unique())
+    skipped = [s for s in subbasins if s not in subbasins_with_data]
+    subbasins = [s for s in subbasins if s in subbasins_with_data]
+    if skipped:
+        logger.warning(f'Skipping sub-basins with no data: {skipped}')
+    n_basins = len(subbasins)
+    logger.info(f'Sub-basins ({n_basins}): {subbasins}')
+
+    if max_p is None:
+        max_p = max(min_p, n_basins - 2)
+    max_p = min(max_p, n_basins - 2)  # ensure ≥ 2 training basins
+    logger.info(f'p range: {min_p} to {max_p}')
+
+    lpo_dir = os.path.join(MODEL_DIR, 'Model_Evaluation/Spatial_LPO')
+    makedirs(lpo_dir)
+
+    all_combo_rows: list[dict] = []
+
+    for p in range(min_p, max_p + 1):
+        combos = list(itertools.combinations(subbasins, p))
+        logger.info(f'\n=== p = {p}  ({len(combos)} combinations) ===')
+        p_dir = os.path.join(lpo_dir, f'P_{p}')
+        makedirs(p_dir)
+
+        per_combo_rows: list[dict] = []
+
+        for combo_idx, held_out in enumerate(combos, 1):
+            combo_label = '__'.join(
+                s.replace(' ', '_').replace('.', '') for s in held_out
+            )
+            logger.info(f'\n--- p={p} combo {combo_idx}/{len(combos)}: '
+                        f'{held_out} ---')
+            combo_dir = os.path.join(p_dir, combo_label)
+
+            data_dir = os.path.join(combo_dir, 'data')
+            ret_vals = dataops.create_train_test_data(
+                az_df, data_dir,
+                drop_attr=DROP_ATTRS,
+                random_state=RANDOM_STATE,
+                scaling=False, already_created=False,
+                year_list=YEAR_LIST, split_strategy=3,
+                test_year=(),
+                outlier_op=3,
+                min_gw_pumping=MIN_GW if MIN_GW is not None else 1e-10,
+                max_gw_pumping=MAX_GW if MAX_GW is not None else np.inf,
+                test_gw_basins=tuple(held_out),
+                gw_basin_col='GW_Subbasin',
+                use_ama_ina=False,
+                drop_gw_basins=(),
+                log_target=LOG_TARGET,
+            )
+            (x_train, x_test, y_train, y_test,
+             x_scaler, y_scaler,
+             year_train, year_test,
+             basin_train, basin_test,
+             easting_train, easting_test,
+             northing_train, northing_test) = ret_vals
+
+            if len(y_test) == 0:
+                logger.warning(f'No test data for combo {held_out}, skipping.')
+                continue
+
+            logger.info(f'  Train: {len(y_train)}, Test: {len(y_test)}')
+
+            if not SKIP_PIML:
+                x_train, x_test = _append_physics_floor(
+                    x_train, x_test, basin_train, basin_test,
+                )
+
+            spatial_cv_groups = basin_train.values.ravel()
+
+            for model_name in ml_models:
+                model_dir = os.path.join(combo_dir, model_name)
+
+                # Fast path: reuse cached BC predictions if available
+                bc_pq = os.path.join(
+                    model_dir, f'Predictions_{model_name}_BC.parquet')
+                plain_pq = os.path.join(
+                    model_dir, f'Predictions_{model_name}.parquet')
+                cached_pq = bc_pq if os.path.isfile(bc_pq) else (
+                    plain_pq if os.path.isfile(plain_pq) else None)
+
+                if cached_pq is not None:
+                    logger.info(f'  Loading cached {model_name} '
+                                f'(holdout: {combo_label})')
+                    pred_df = pd.read_parquet(cached_pq)
+                else:
+                    logger.info(f'  Training {model_name} '
+                                f'(holdout: {combo_label})...')
+                    res = _train_and_evaluate(
+                        x_train, y_train, x_test, y_test,
+                        model_name, model_dir,
+                        cv_groups=spatial_cv_groups,
+                    )
+                    pred_df = mlops.get_prediction_results(
+                        res['model'], x_train, x_test,
+                        y_train, y_test, x_scaler, y_scaler,
+                        year_train, year_test,
+                        basin_train, basin_test,
+                        model_dir, model_name,
+                        gw_basin_col='GW_Subbasin',
+                        apply_bias_correction=True,
+                        easting_train=easting_train,
+                        easting_test=easting_test,
+                        northing_train=northing_train,
+                        northing_test=northing_test,
+                        log_target=LOG_TARGET,
+                    )
+
+                mlops.calc_train_test_metrics(
+                    pred_df, pd.DataFrame(), model_dir,
+                    use_ama_ina=False,
+                    gw_basin_col='GW_Subbasin',
+                    model_name=model_name,
+                )
+
+                bc_train, bc_test = _metrics_from_pred_df(pred_df)
+                logger.info(f'    [BC] Train R2: {bc_train["R2"]:.4f}, '
+                            f'Test R2: {bc_test["R2"]:.4f}, '
+                            f'Test RMSE: {bc_test["RMSE_pct"]:.2f}%')
+
+                row = {
+                    'P': p,
+                    'Holdout': combo_label,
+                    'Model': model_name,
+                    'N_train': len(y_train),
+                    'N_test': len(y_test),
+                    'Train_R2': bc_train['R2'],
+                    'Test_R2': bc_test['R2'],
+                    'Train_RMSE': bc_train['RMSE_pct'],
+                    'Test_RMSE': bc_test['RMSE_pct'],
+                    'Test_MAE': bc_test['MAE_pct'],
+                    'Test_MBE': bc_test['MBE_pct'],
+                    'Overfit_R2': bc_train['R2'] - bc_test['R2'],
+                    'Overfit_RMSE': (bc_train['RMSE_pct']
+                                     - bc_test['RMSE_pct']),
+                }
+                per_combo_rows.append(row)
+                all_combo_rows.append(row)
+
+        # --- Per-p summaries and plots ---
+        if not per_combo_rows:
+            continue
+        per_combo_df = pd.DataFrame(per_combo_rows).round(4)
+        per_combo_df.to_csv(
+            os.path.join(p_dir, 'Per_Combo_Metrics.csv'), index=False)
+
+        avg_p_df = (
+            per_combo_df
+            .groupby('Model')
+            .agg(
+                Mean_Test_R2=('Test_R2', 'mean'),
+                Std_Test_R2=('Test_R2', 'std'),
+                Mean_Test_RMSE=('Test_RMSE', 'mean'),
+                Std_Test_RMSE=('Test_RMSE', 'std'),
+                Mean_Test_MAE=('Test_MAE', 'mean'),
+                Mean_Test_MBE=('Test_MBE', 'mean'),
+                Mean_Overfit_R2=('Overfit_R2', 'mean'),
+            )
+            .reset_index()
+            .sort_values('Mean_Test_RMSE')
+            .round(4)
+        )
+        avg_p_df.to_csv(
+            os.path.join(p_dir, 'Averaged_Metrics.csv'), index=False)
+        logger.info(f'\nAveraged metrics (p={p}):\n'
+                    f'{avg_p_df.to_string(index=False)}')
+
+        vizops.plot_loo_heatmap(
+            per_combo_df, 'Holdout', p_dir,
+            title=f'Spatial LPO (p={p}): Test R² per Holdout Combo',
+        )
+        vizops.plot_loo_bar(per_combo_df, 'Holdout', p_dir)
+        vizops.plot_loo_distribution(
+            os.path.join(p_dir, 'Per_Combo_Metrics.csv'),
+            'Holdout', p_dir,
+            strategy_label=f'Spatial LPO (p={p})',
+        )
+
+    # --- Overall summary across all p values ---
+    if not all_combo_rows:
+        logger.warning('No LPO combinations produced results.')
+        return {}
+
+    all_df = pd.DataFrame(all_combo_rows).round(4)
+    all_df.to_csv(os.path.join(lpo_dir, 'All_Combo_Metrics.csv'), index=False)
+
+    overall_avg = (
+        all_df
+        .groupby(['P', 'Model'])
+        .agg(
+            Mean_Test_R2=('Test_R2', 'mean'),
+            Std_Test_R2=('Test_R2', 'std'),
+            Mean_Test_RMSE=('Test_RMSE', 'mean'),
+            Std_Test_RMSE=('Test_RMSE', 'std'),
+            Mean_Test_MAE=('Test_MAE', 'mean'),
+            Mean_Test_MBE=('Test_MBE', 'mean'),
+            Mean_Overfit_R2=('Overfit_R2', 'mean'),
+        )
+        .reset_index()
+        .sort_values(['P', 'Mean_Test_RMSE'])
+        .round(4)
+    )
+    overall_avg.to_csv(
+        os.path.join(lpo_dir, 'Overall_Averaged_Metrics.csv'), index=False)
+    logger.info(f'\nOverall LPO averaged metrics:\n'
+                f'{overall_avg.to_string(index=False)}')
+
+    # Top-level bar / distribution using all combos (fold_col = 'Holdout')
+    vizops.plot_loo_bar(all_df, 'Holdout', lpo_dir)
+    vizops.plot_loo_distribution(
+        os.path.join(lpo_dir, 'All_Combo_Metrics.csv'),
+        'Holdout', lpo_dir,
+        strategy_label='Spatial LPO (all p)',
+    )
+
+    return {
+        'all_combo_df': all_df,
+        'overall_avg': overall_avg,
+        'strategy': 'Spatial_LPO',
     }
 
 
@@ -2444,6 +2704,7 @@ Evaluation sub-steps (use with --skip-eval to skip individual strategies):
   pixel         Skip pixel holdout evaluation (Step 2a2)
   temporal      Skip LOO temporal holdout evaluation (Step 2b)
   spatial       Skip LOO spatial holdout evaluation (Step 2c)
+  spatial-lpo   Skip leave-p-out spatial evaluation (Step 2d)
   summary       Skip cross-strategy summary
 """
 
@@ -2506,7 +2767,7 @@ def main() -> None:
         '--skip-eval', type=str, default='',
         help=(
             'Comma-separated evaluation strategies to skip: '
-            'random, pixel, temporal, spatial, summary.'
+            'random, pixel, temporal, spatial, spatial-lpo, summary.'
         ),
     )
     args = parser.parse_args()
@@ -2586,12 +2847,20 @@ def main() -> None:
     elif 'spatial' in skip_eval:
         logger.info('Skipping Step 2c (spatial LOO) per --skip-eval.')
 
+    # Step 2d — LPO Spatial (ADWR sub-basins)
+    spatial_lpo_results = None
+    if should_run('2d') and 'spatial-lpo' not in skip_eval:
+        spatial_lpo_results = evaluate_spatial_lpo(get_az_df())
+    elif 'spatial-lpo' in skip_eval:
+        logger.info('Skipping Step 2d (spatial LPO) per --skip-eval.')
+
     # Cross-strategy summary (only if all evaluations ran)
     eval_strategies = {
         'Random': random_results,
         'Pixel_Holdout': pixel_results,
         'Temporal_LOO': temporal_results,
         'Spatial_LOO': spatial_results,
+        'Spatial_LPO': spatial_lpo_results,
     }
     eval_strategies = {k: v for k, v in eval_strategies.items() if v is not None}
     if 'summary' not in skip_eval and len(eval_strategies) >= 3:
