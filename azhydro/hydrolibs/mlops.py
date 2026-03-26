@@ -625,6 +625,80 @@ def normalized_mbe(
     return nmbe
 
 
+def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    """Compute standard regression metrics (R², RMSE%, MAE%, MBE%).
+
+    Args:
+        y_true (np.ndarray): Actual values.
+        y_pred (np.ndarray): Predicted values.
+
+    Returns:
+        dict: Keys ``R2``, ``RMSE_pct``, ``MAE_pct``, ``MBE_pct``.
+    """
+    return {
+        'R2': r2_score(y_true, y_pred),
+        'RMSE_pct': normalized_rmse(y_true, y_pred),
+        'MAE_pct': normalized_mae(y_true, y_pred),
+        'MBE_pct': normalized_mbe(y_true, y_pred),
+    }
+
+
+def metrics_from_pred_df(pred_df: 'pd.DataFrame') -> tuple[dict, dict]:
+    """Compute train/test metrics from a prediction DataFrame.
+
+    Args:
+        pred_df (pd.DataFrame): DataFrame with ``DATA``, ``Actual_GW_mm``,
+            and ``Pred_GW_mm`` columns.
+
+    Returns:
+        tuple[dict, dict]: (train_metrics, test_metrics).
+    """
+    train_part = pred_df[pred_df['DATA'] == 'TRAIN']
+    test_part = pred_df[pred_df['DATA'] == 'TEST']
+    train_m = compute_metrics(train_part['Actual_GW_mm'].values,
+                              train_part['Pred_GW_mm'].values)
+    test_m = compute_metrics(test_part['Actual_GW_mm'].values,
+                             test_part['Pred_GW_mm'].values)
+    return train_m, test_m
+
+
+# Pumping magnitude bins for stratified error diagnostics
+PUMPING_BINS = {
+    'Low (<500 mm)': (0, 500),
+    'High (>=500 mm)': (500, np.inf),
+}
+
+
+def stratified_test_metrics(pred_df: 'pd.DataFrame') -> list[dict]:
+    """Compute per-pumping-category test metrics from a prediction DataFrame.
+
+    Bins are defined by ``PUMPING_BINS`` and applied to the *actual*
+    test-set pumping values (``Actual_GW_mm``).
+
+    Args:
+        pred_df (pd.DataFrame): DataFrame with ``DATA``, ``Actual_GW_mm``,
+            and ``Pred_GW_mm`` columns.
+
+    Returns:
+        list[dict]: One dict per bin with keys ``Category``, ``N``,
+        ``R2``, ``RMSE_pct``, ``MAE_pct``, ``MBE_pct``.
+    """
+    test_part = pred_df[pred_df['DATA'] == 'TEST']
+    rows: list[dict] = []
+    for cat_name, (lo, hi) in PUMPING_BINS.items():
+        mask = (test_part['Actual_GW_mm'] >= lo) & (test_part['Actual_GW_mm'] < hi)
+        subset = test_part[mask]
+        if len(subset) < 2:
+            rows.append({'Category': cat_name, 'N': len(subset),
+                         'R2': np.nan, 'RMSE_pct': np.nan,
+                         'MAE_pct': np.nan, 'MBE_pct': np.nan})
+            continue
+        m = compute_metrics(subset['Actual_GW_mm'].values,
+                            subset['Pred_GW_mm'].values)
+        rows.append({'Category': cat_name, 'N': len(subset), **m})
+    return rows
+
+
 # --- Abs-wrapped scoring functions for CV/Optuna --------------------------
 # Production code applies ``np.abs()`` after ``model.predict()`` to ensure
 # non-negative pumping values.  These wrappers apply the same transform
@@ -897,13 +971,26 @@ def compute_ale_plots(
             feature_names=feature_names
         )
         try:
-            ale_1d_reg = explainer.ale(
-                features=feature_names,
-                n_bootstrap=10,
-                subsample=10000,
-                n_jobs=min(len(feature_names), os.cpu_count() or 1),
-                n_bins=30
-            )
+            # Suppress skexplain's internal multiprocessing tracebacks
+            # for features with too few unique values (single-bin ALE).
+            # skexplain uses traceback.print_exc() which writes to the
+            # real fd, so we redirect at the OS file-descriptor level.
+            import io
+            _real_fd = os.dup(2)
+            _devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(_devnull, 2)
+            os.close(_devnull)
+            try:
+                ale_1d_reg = explainer.ale(
+                    features=feature_names,
+                    n_bootstrap=10,
+                    subsample=10000,
+                    n_jobs=min(len(feature_names), os.cpu_count() or 1),
+                    n_bins=30
+                )
+            finally:
+                os.dup2(_real_fd, 2)
+                os.close(_real_fd)
         except (IndexError, ValueError) as e:
             logger.warning(f'Skipping ALE for {data_type} data: {e}')
             continue
@@ -1692,11 +1779,14 @@ def generate_interp_plots(
     )
 
     # ALE plots (train + test)
-    compute_ale_plots(
-        model_name, model,
-        x_tr, y_train, x_te, y_test,
-        interp_dir, log_target=log_target,
-    )
+    try:
+        compute_ale_plots(
+            model_name, model,
+            x_tr, y_train, x_te, y_test,
+            interp_dir, log_target=log_target,
+        )
+    except (IndexError, ValueError) as e:
+        logger.warning(f'ALE computation failed for {model_name}: {e}')
 
     # SHAP plots (train + test) — compute_shap_plots guards internally
     compute_shap_plots(

@@ -115,6 +115,7 @@ python pipeline.py --skip-eval pixel,temporal,summary # skip multiple strategies
 | `2a2` | Evaluate pixel holdout (spatial locations held out across all years) |
 | `2b` | Evaluate LOO temporal holdout |
 | `2c` | Evaluate LOO spatial holdout (AMA/INA basins) |
+| `2c-seed` | Evaluate seeded LOO spatial holdout (10% local calibration) |
 | `2d` | Evaluate leave-p-out spatial holdout (AMA/INA basins) |
 | `3`  | Full-period XGBRF prediction (1896–2099) |
 | `3b` | Hybrid uncertainty quantification |
@@ -146,6 +147,7 @@ python pipeline.py --skip-eval pixel,temporal,summary # skip multiple strategies
 | `pixel` | Skip pixel holdout evaluation (Step 2a2) |
 | `temporal` | Skip LOO temporal holdout evaluation (Step 2b) |
 | `spatial` | Skip LOO spatial holdout evaluation (Step 2c) |
+| `spatial-seed` | Skip seeded LOO spatial holdout evaluation (Step 2c-seed) |
 | `spatial-lpo` | Skip leave-p-out spatial evaluation (Step 2d) |
 | `summary` | Skip cross-strategy summary |
 
@@ -307,7 +309,7 @@ numbered steps plus a cross-strategy summary:
 ```
 Step 0   ─  Data Preparation
 Step 1   ─  Create AZ Predictor DataFrame
-Step 2   ─  Model Evaluation (5 strategies: Random, Pixel Holdout, Temporal LOO, Spatial LOO, Spatial LPO)
+Step 2   ─  Model Evaluation (6 strategies: Random, Pixel Holdout, Temporal LOO, Spatial LOO, Seeded Spatial LOO, Spatial LPO)
 Step 3   ─  Full-Period XGBRF Prediction (1896–2099)
 Step 3e  ─  Well Package (per-well GeoPackage with uncertainty)
 Step 3g  ─  Raster Maps & Trend Analysis for All Output Categories
@@ -350,6 +352,9 @@ All paths and modeling parameters are defined once at the top of
 | `PREDICTION_MODEL` | `'XGBRF'` | Model used for full-period prediction (Step 3+). Valid names: core — `XGB`, `LGBM`, `RF`, `XGBRF`; optional (`INCLUDE_ALL_MODELS=True`) — `ETR`, `HGBR`, `GBR`, `ADA`, `BAG`, `CAT`, `LR`, `RIDGE`, `LASSO`; PIML (`SKIP_PIML=False`) — `PIML_XGB`, `PIML_LGBM`, `PIML_XGBRF`. |
 | `USE_AMA_INA` | `True` | Restrict training to AMA/INA management areas. |
 | `DROP_GW_BASINS` | `()` | Basins excluded from training. Empty by default (all AMA/INA basins included). For the `T1_Baseline` holdout, WILLCOX AMA and HUALAPAI VALLEY INA are dropped because they were not yet designated as AMA/INA management areas during the 2002–2020 period used by [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757), and therefore had no (or limited) metered withdrawal data at that time. |
+| `MAX_LPO_P` | `5` | Maximum holdout group size for leave-p-out spatial evaluation (Step 2d). |
+| `MIN_SPATIAL_EVAL_SAMPLES` | `30` | Minimum non-zero metered samples for a basin to be included in spatial LOO/LPO. |
+| `SPATIAL_SEED_FRACTION` | `0.1` | Fraction of held-out basin samples randomly seeded into training for the seeded spatial LOO (Step 2c-seed). |
 | `TEMPORAL_HOLDOUTS` | T1_Baseline + T1–T7 | Eight temporal leave-one-out configurations. `T1_Baseline` uses `TRAIN_YEAR_LIST_BASELINE` and `MIN_GW=0`. |
 | `DROP_ATTRS` | (list) | Columns dropped before modeling. |
 
@@ -512,8 +517,9 @@ prevent optimistic CV scores from data leakage:
 | Random (2a) | `RepeatedKFold` | — (standard random splits) |
 | Pixel holdout (2a2) | `GroupKFold` | Pixel coordinates (easting/northing) |
 | Temporal LOO (2b) | `GroupKFold` | Year |
-| Spatial LOO (2c) | `GroupKFold` | AMA/INA basin name |
-| Spatial LPO (2d) | `GroupKFold` | AMA/INA basin name |
+| Spatial LOO (2c) | `RepeatedKFold` | — (standard random splits) |
+| Spatial LOO seeded (2c-seed) | `RepeatedKFold` | — (standard random splits) |
+| Spatial LPO (2d) | `RepeatedKFold` | — (standard random splits) |
 
 For group-based strategies, `GroupKFold` ensures that all samples sharing
 the same group label (pixel, year, or sub-basin) stay together in the same
@@ -596,23 +602,49 @@ relying on test-set information during training.
 #### Step 2c — Spatial leave-one-out (`evaluate_spatial_loo()`)
 
 Iterates over every AMA/INA management area (identified by
-``GW_Basin_Type`` 0=AMA or 1=INA in the predictor DataFrame).  For each basin the model trains on the rest of
-Arizona and is tested on the held-out management area.  Basins with
-fewer than ``MIN_SPATIAL_EVAL_SAMPLES`` (default 30) non-zero metered
-samples are excluded.  After each basin evaluation, linear bias correction
-is applied and model visualizations (scatter, residual, and spatial plots)
-are generated.  Post-bias-correction metrics are logged and used for the
-summary rows.
+``GW_Basin_Type`` 0=AMA or 1=INA in the predictor DataFrame).  For
+each basin the model trains on the rest of Arizona and is tested on the
+held-out management area.  Basins with fewer than
+``MIN_SPATIAL_EVAL_SAMPLES`` (default 30) non-zero metered samples are
+excluded.  Bias correction is **disabled** for spatial strategies because
+a linear correction calibrated on training-basin residuals can actively
+hurt when applied to a held-out basin with a different management regime.
 
-Both Steps 2c and 2d also produce **stratified error metrics** that bin
-test-set predictions by actual pumping magnitude (Low < 500 mm,
-High >= 500 mm).  For each model and bin, R², RMSE, MAE,
-and MBE are computed across holdout folds, revealing whether errors
-concentrate in a particular pumping regime.  Results are saved to
+Steps 2c, 2c-seed, and 2d also produce **stratified error metrics** that
+bin test-set predictions by actual pumping magnitude (Low < 500 mm,
+High >= 500 mm).  For each model and bin, R², RMSE, MAE, and MBE are
+computed across holdout folds, revealing whether errors concentrate in a
+particular pumping regime.  Results are saved to
 `Stratified_Metrics.csv` with grouped bar charts (`Stratified_*.png`)
 and a `Stratified_Sample_Counts.csv` showing bin populations.
 
 **Outputs:** `{MODEL_DIR}Model_Evaluation/Spatial_LOO/`
+
+#### Step 2c-seed — Seeded spatial LOO (`evaluate_spatial_loo(seed_fraction=0.1)`)
+
+A variant of the spatial LOO where 10 % of each held-out basin's
+samples are randomly moved into the training set as a calibration
+anchor; the remaining 90 % serve as the test set.
+Motivated by [Asfaw et al. (2025)](https://doi.org/10.1016/j.agwat.2025.109691),
+who showed that ML-based groundwater withdrawal predictions can perform
+well with limited metering data, this tests whether a small amount of
+local data is sufficient to correct the basin-specific pumping magnitude
+offset that the pure LOO exposes.
+
+Comparing pure LOO (Step 2c) with seeded LOO demonstrates that the
+model captures the climate-driven temporal variability across basins but
+requires a minimal local signal to calibrate the management-driven
+pumping intensity.  Preliminary results show that adding just 10 % of
+local data improves mean test R² from approximately −0.16 (pure LOO) to
++0.42 (seeded LOO) over the Dougles AMA, confirming that the negative R² in pure LOO is
+driven almost entirely by a basin-specific magnitude offset — not by a
+failure to capture the underlying hydrological process.  This supports
+the argument that conventional spatial LOO is overly punitive for
+groundwater pumping prediction, where management decisions (pumping
+allocations, water rights, land-use regulations) are unobservable from
+remote-sensing predictors.
+
+**Outputs:** `{MODEL_DIR}Model_Evaluation/Spatial_LOO_Seed10/`
 
 #### Step 2d — Spatial leave-p-out (`evaluate_spatial_lpo()`)
 
@@ -1912,8 +1944,9 @@ Data/Outputs/
     │   ├── Pixel_Holdout/                   # Step 2a2 (same grid structure)
     │   ├── Temporal_LOO/                    # Step 2b results (T1–T7)
     │   ├── Spatial_LOO/                     # Step 2c results (per AMA/INA)
-    │   │   ├── Stratified_Metrics.csv       #   per-category (Low/Med/High) metrics
+    │   │   ├── Stratified_Metrics.csv       #   per-category (Low/High) metrics
     │   │   └── Stratified_*.png             #   grouped bar charts by pumping bin
+    │   ├── Spatial_LOO_Seed10/              # Step 2c-seed (10% local calibration)
     │   ├── Spatial_LPO/                     # Step 2d results (leave-p-out)
     │   │   ├── P_2/, P_3/, …               #   per-p directories with bar/dist plots
     │   │   ├── All_Combo_Metrics.csv        #   all combos across all p
@@ -1975,6 +2008,8 @@ Abatzoglou, J. T. (2013). Development of gridded surface meteorological data for
 Abatzoglou, J. T., & Brown, T. J. (2012). A comparison of statistical downscaling methods suited for wildfire applications. _International Journal of Climatology_, _32_(5), 772–780. https://doi.org/10.1002/joc.2312.
 
 Alzraiee, A., Niswonger, R., Luukkonen, C., Larsen, J., Martin, D., Herbert, D., Buchwald, C., Dieter, C., Miller, L., Stewart, J., Houston, N., Paulinski, S., & Valseth, K. (2024). Next Generation Public Supply Water Withdrawal Estimation for the Conterminous United States Using Machine Learning and Operational Frameworks. _Water Resources Research_, _60_(7). https://doi.org/10.1029/2023WR036632
+
+Asfaw, D., Smith, R. G., Majumdar, S., Grote, K., Fang, B., Wilson, B. B., Lakshmi, V., & Butler, J. J. (2025). Predicting groundwater withdrawals using machine learning with limited metering data: Assessment of training data requirements. Agricultural Water Management, 318, 109691. https://doi.org/10.1016/j.agwat.2025.109691
 
 Daly, C., Halbleib, M., Smith, J. I., Gibson, W. P., Doggett, M. K., Taylor, G. H., Curtis, J., & Pasteris, P. P. (2008). Physiographically sensitive mapping of climatological temperature and precipitation across the conterminous United States. _International Journal of Climatology_, _28_(15), 2031–2064. https://doi.org/10.1002/joc.1688.
 

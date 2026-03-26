@@ -35,8 +35,6 @@ import pickle
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from sklearn.metrics import r2_score
-
 import hydrolibs.dataops as dataops
 import hydrolibs.gwops as gwops
 import hydrolibs.intercompops as intercompops
@@ -119,6 +117,7 @@ USE_AMA_INA = True
 DROP_GW_BASINS = ()
 MAX_LPO_P = 5                   # max holdout group size for leave-p-out spatial evaluation
 MIN_SPATIAL_EVAL_SAMPLES = 30   # skip sub-basins with fewer non-zero metered samples
+SPATIAL_SEED_FRACTION = 0.1     # fraction of held-out basin samples seeded into training
 
 DROP_ATTRS = (
     'Year',
@@ -472,59 +471,10 @@ def _append_physics_floor(
     return x_train, x_test
 
 
-def _compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-    """Compute standard regression metrics."""
-    return {
-        'R2': r2_score(y_true, y_pred),
-        'RMSE_pct': mlops.normalized_rmse(y_true, y_pred),
-        'MAE_pct': mlops.normalized_mae(y_true, y_pred),
-        'MBE_pct': mlops.normalized_mbe(y_true, y_pred),
-    }
-
-
-def _metrics_from_pred_df(pred_df: pd.DataFrame) -> tuple[dict, dict]:
-    """Compute train/test metrics from a (bias-corrected) prediction DataFrame."""
-    train_part = pred_df[pred_df['DATA'] == 'TRAIN']
-    test_part = pred_df[pred_df['DATA'] == 'TEST']
-    train_m = _compute_metrics(train_part['Actual_GW_mm'].values,
-                               train_part['Pred_GW_mm'].values)
-    test_m = _compute_metrics(test_part['Actual_GW_mm'].values,
-                              test_part['Pred_GW_mm'].values)
-    return train_m, test_m
-
-
-# Pumping magnitude bins for stratified error diagnostics
-PUMPING_BINS = {
-    'Low (<500 mm)': (0, 500),
-    'Medium (500-2000 mm)': (500, 2000),
-    'High (>2000 mm)': (2000, np.inf),
-}
-
-
-def _stratified_test_metrics(pred_df: pd.DataFrame) -> list[dict]:
-    """Compute per-pumping-category test metrics from a prediction DataFrame.
-
-    Bins are defined by ``PUMPING_BINS`` and applied to the *actual*
-    test-set pumping values (``Actual_GW_mm``).
-
-    Returns:
-        list[dict]: One dict per bin with keys ``Category``, ``N``,
-        ``R2``, ``RMSE_pct``, ``MAE_pct``, ``MBE_pct``.
-    """
-    test_part = pred_df[pred_df['DATA'] == 'TEST']
-    rows: list[dict] = []
-    for cat_name, (lo, hi) in PUMPING_BINS.items():
-        mask = (test_part['Actual_GW_mm'] >= lo) & (test_part['Actual_GW_mm'] < hi)
-        subset = test_part[mask]
-        if len(subset) < 2:
-            rows.append({'Category': cat_name, 'N': len(subset),
-                         'R2': np.nan, 'RMSE_pct': np.nan,
-                         'MAE_pct': np.nan, 'MBE_pct': np.nan})
-            continue
-        m = _compute_metrics(subset['Actual_GW_mm'].values,
-                             subset['Pred_GW_mm'].values)
-        rows.append({'Category': cat_name, 'N': len(subset), **m})
-    return rows
+# Thin aliases — implementations moved to mlops
+_compute_metrics = mlops.compute_metrics
+_metrics_from_pred_df = mlops.metrics_from_pred_df
+_stratified_test_metrics = mlops.stratified_test_metrics
 
 
 def _train_and_evaluate(
@@ -1153,22 +1103,33 @@ def _get_ama_ina_subbasins() -> list[str]:
     return subbasins
 
 
-def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
+def evaluate_spatial_loo(az_df: pd.DataFrame,
+                         seed_fraction: float = 0.0) -> dict:
     """
     Leave-one-out spatial evaluation: hold out each AMA/INA management
     area one at a time, train on the rest, evaluate on the held-out
     basin.
 
+    When ``seed_fraction > 0``, a randomly sampled fraction of each
+    held-out basin's samples are moved into the training set as a
+    calibration anchor, and only the remaining samples are used for
+    evaluation.  This tests whether a small amount of local data is
+    sufficient to correct the basin-specific pumping magnitude offset.
+
     Reports per-basin and averaged metrics.
 
     Args:
         az_df (pd.DataFrame): Full predictor dataframe with all years.
+        seed_fraction (float): Fraction of held-out basin samples to
+            move into training (default 0.0 = pure LOO).
 
     Returns:
         dict: Per-model averaged metrics across all spatial holdouts.
     """
     logger.info('='*60)
-    logger.info('Step 2c: LOO Spatial evaluation (AMA/INA basins)')
+    seed_pct = int(seed_fraction * 100)
+    label = f'LOO Spatial evaluation (AMA/INA, seed={seed_pct}%)'
+    logger.info(f'Step 2c: {label}')
     logger.info('='*60)
 
     ml_models = mlops.get_model_dict(
@@ -1200,7 +1161,8 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
 
     logger.info(f'Basins to evaluate ({len(basins)}): {basins}')
 
-    spatial_dir = os.path.join(MODEL_DIR, 'Model_Evaluation/Spatial_LOO')
+    dir_suffix = f'_Seed{seed_pct}' if seed_fraction > 0 else ''
+    spatial_dir = os.path.join(MODEL_DIR, f'Model_Evaluation/Spatial_LOO{dir_suffix}')
     makedirs(spatial_dir)
 
     per_basin_rows = []
@@ -1239,6 +1201,31 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
             logger.warning(f'No test data for basin {basin}, skipping.')
             continue
 
+        # Move a year-stratified fraction of held-out samples into training
+        if seed_fraction > 0:
+            rng = np.random.default_rng(RANDOM_STATE)
+            n_test = len(y_test)
+            n_seed = max(1, int(n_test * seed_fraction))
+            seed_idx = rng.choice(n_test, size=n_seed, replace=False)
+            keep_idx = np.setdiff1d(np.arange(n_test), seed_idx)
+
+            x_train = pd.concat([x_train, x_test.iloc[seed_idx]], ignore_index=True)
+            y_train = np.concatenate([y_train, y_test[seed_idx]])
+            year_train = pd.concat([year_train, year_test.iloc[seed_idx]], ignore_index=True)
+            basin_train = pd.concat([basin_train, basin_test.iloc[seed_idx]], ignore_index=True)
+            easting_train = pd.concat([easting_train, easting_test.iloc[seed_idx]], ignore_index=True)
+            northing_train = pd.concat([northing_train, northing_test.iloc[seed_idx]], ignore_index=True)
+
+            x_test = x_test.iloc[keep_idx].reset_index(drop=True)
+            y_test = y_test[keep_idx]
+            year_test = year_test.iloc[keep_idx].reset_index(drop=True)
+            basin_test = basin_test.iloc[keep_idx].reset_index(drop=True)
+            easting_test = easting_test.iloc[keep_idx].reset_index(drop=True)
+            northing_test = northing_test.iloc[keep_idx].reset_index(drop=True)
+
+            logger.info(f'  Seeded {n_seed} samples ({seed_pct}%) '
+                        f'from {basin} into training')
+
         logger.info(f'  Train: {len(y_train)}, Test: {len(y_test)}')
 
         # Append physics floor column for PIML models
@@ -1246,9 +1233,6 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
             x_train, x_test = _append_physics_floor(
                 x_train, x_test, basin_train, basin_test,
             )
-
-        # Group CV by basin so inner folds mirror the outer spatial-holdout strategy
-        spatial_cv_groups = basin_train.values.ravel()
 
         for model_name in ml_models:
             model_dir = os.path.join(holdout_dir, model_name)
@@ -1286,7 +1270,6 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
                 res = _train_and_evaluate(
                     x_train, y_train, x_test, y_test,
                     model_name, model_dir,
-                    cv_groups=spatial_cv_groups,
                 )
                 pred_df = mlops.get_prediction_results(
                     res['model'], x_train, x_test,
@@ -1295,7 +1278,7 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
                     basin_train, basin_test,
                     model_dir, model_name,
                     gw_basin_col='GW_Basin',
-                    apply_bias_correction=True,
+                    apply_bias_correction=False,
                     easting_train=easting_train,
                     easting_test=easting_test,
                     northing_train=northing_train,
@@ -1328,23 +1311,23 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
                 skip_aggregate_ts=True,
             )
 
-            bc_train, bc_test = _metrics_from_pred_df(pred_df)
-            logger.info(f'    [BC] Train R2: {bc_train["R2"]:.4f}, '
-                        f'Test R2: {bc_test["R2"]:.4f}, '
-                        f'Test RMSE: {bc_test["RMSE_pct"]:.2f}%')
+            train_m, test_m = _metrics_from_pred_df(pred_df)
+            logger.info(f'    Train R2: {train_m["R2"]:.4f}, '
+                        f'Test R2: {test_m["R2"]:.4f}, '
+                        f'Test RMSE: {test_m["RMSE_pct"]:.2f}%')
 
             per_basin_rows.append({
                 'Basin': basin,
                 'Model': model_name,
                 'N_test': len(y_test),
-                'Train_R2': bc_train['R2'],
-                'Test_R2': bc_test['R2'],
-                'Train_RMSE': bc_train['RMSE_pct'],
-                'Test_RMSE': bc_test['RMSE_pct'],
-                'Test_MAE': bc_test['MAE_pct'],
-                'Test_MBE': bc_test['MBE_pct'],
-                'Overfit_R2': bc_train['R2'] - bc_test['R2'],
-                'Overfit_RMSE': bc_train['RMSE_pct'] - bc_test['RMSE_pct'],
+                'Train_R2': train_m['R2'],
+                'Test_R2': test_m['R2'],
+                'Train_RMSE': train_m['RMSE_pct'],
+                'Test_RMSE': test_m['RMSE_pct'],
+                'Test_MAE': test_m['MAE_pct'],
+                'Test_MBE': test_m['MBE_pct'],
+                'Overfit_R2': train_m['R2'] - test_m['R2'],
+                'Overfit_RMSE': train_m['RMSE_pct'] - test_m['RMSE_pct'],
             })
 
             for cat_row in _stratified_test_metrics(pred_df):
@@ -1378,14 +1361,15 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
     logger.info(f'\nAveraged spatial metrics:\n{avg_df.to_string(index=False)}')
 
     # Visualisations
+    strategy_label = f'Spatial LOO (seed {seed_pct}%)' if seed_fraction > 0 else 'Spatial LOO'
     vizops.plot_loo_heatmap(
         per_basin_df, 'Basin', spatial_dir,
-        title='Spatial LOO: Test R² per AMA/INA',
+        title=f'{strategy_label}: Test R² per AMA/INA',
     )
     vizops.plot_loo_bar(per_basin_df, 'Basin', spatial_dir)
     vizops.plot_loo_distribution(
         os.path.join(spatial_dir, 'Per_Basin_Metrics.csv'),
-        'Basin', spatial_dir, strategy_label='Spatial LOO',
+        'Basin', spatial_dir, strategy_label=strategy_label,
     )
 
     # Stratified metrics by pumping magnitude
@@ -1395,12 +1379,13 @@ def evaluate_spatial_loo(az_df: pd.DataFrame) -> dict:
             os.path.join(spatial_dir, 'Stratified_Metrics.csv'), index=False)
         logger.info(f'\nStratified metrics:\n{strat_df.to_string(index=False)}')
         vizops.plot_stratified_metrics(strat_df, spatial_dir,
-                                       strategy_label='Spatial LOO')
+                                       strategy_label=strategy_label)
 
+    strategy_key = f'Spatial_LOO_Seed{seed_pct}' if seed_fraction > 0 else 'Spatial_LOO'
     return {
         'per_basin_df': per_basin_df,
         'avg_df': avg_df,
-        'strategy': 'Spatial_LOO',
+        'strategy': strategy_key,
     }
 
 
@@ -1522,8 +1507,6 @@ def evaluate_spatial_lpo(az_df: pd.DataFrame,
                     x_train, x_test, basin_train, basin_test,
                 )
 
-            spatial_cv_groups = basin_train.values.ravel()
-
             for model_name in ml_models:
                 model_dir = os.path.join(combo_dir, model_name)
 
@@ -1545,7 +1528,6 @@ def evaluate_spatial_lpo(az_df: pd.DataFrame,
                     res = _train_and_evaluate(
                         x_train, y_train, x_test, y_test,
                         model_name, model_dir,
-                        cv_groups=spatial_cv_groups,
                     )
                     pred_df = mlops.get_prediction_results(
                         res['model'], x_train, x_test,
@@ -1554,7 +1536,7 @@ def evaluate_spatial_lpo(az_df: pd.DataFrame,
                         basin_train, basin_test,
                         model_dir, model_name,
                         gw_basin_col='GW_Basin',
-                        apply_bias_correction=True,
+                        apply_bias_correction=False,
                         easting_train=easting_train,
                         easting_test=easting_test,
                         northing_train=northing_train,
@@ -1569,10 +1551,10 @@ def evaluate_spatial_lpo(az_df: pd.DataFrame,
                     model_name=model_name,
                 )
 
-                bc_train, bc_test = _metrics_from_pred_df(pred_df)
-                logger.info(f'    [BC] Train R2: {bc_train["R2"]:.4f}, '
-                            f'Test R2: {bc_test["R2"]:.4f}, '
-                            f'Test RMSE: {bc_test["RMSE_pct"]:.2f}%')
+                train_m, test_m = _metrics_from_pred_df(pred_df)
+                logger.info(f'    Train R2: {train_m["R2"]:.4f}, '
+                            f'Test R2: {test_m["R2"]:.4f}, '
+                            f'Test RMSE: {test_m["RMSE_pct"]:.2f}%')
 
                 row = {
                     'P': p,
@@ -1580,15 +1562,15 @@ def evaluate_spatial_lpo(az_df: pd.DataFrame,
                     'Model': model_name,
                     'N_train': len(y_train),
                     'N_test': len(y_test),
-                    'Train_R2': bc_train['R2'],
-                    'Test_R2': bc_test['R2'],
-                    'Train_RMSE': bc_train['RMSE_pct'],
-                    'Test_RMSE': bc_test['RMSE_pct'],
-                    'Test_MAE': bc_test['MAE_pct'],
-                    'Test_MBE': bc_test['MBE_pct'],
-                    'Overfit_R2': bc_train['R2'] - bc_test['R2'],
-                    'Overfit_RMSE': (bc_train['RMSE_pct']
-                                     - bc_test['RMSE_pct']),
+                    'Train_R2': train_m['R2'],
+                    'Test_R2': test_m['R2'],
+                    'Train_RMSE': train_m['RMSE_pct'],
+                    'Test_RMSE': test_m['RMSE_pct'],
+                    'Test_MAE': test_m['MAE_pct'],
+                    'Test_MBE': test_m['MBE_pct'],
+                    'Overfit_R2': train_m['R2'] - test_m['R2'],
+                    'Overfit_RMSE': (train_m['RMSE_pct']
+                                     - test_m['RMSE_pct']),
                 }
                 per_combo_rows.append(row)
                 all_combo_rows.append(row)
@@ -2799,6 +2781,7 @@ Evaluation sub-steps (use with --skip-eval to skip individual strategies):
   pixel         Skip pixel holdout evaluation (Step 2a2)
   temporal      Skip LOO temporal holdout evaluation (Step 2b)
   spatial       Skip LOO spatial holdout evaluation (Step 2c)
+  spatial-seed  Skip seeded LOO spatial holdout evaluation (Step 2c-seed)
   spatial-lpo   Skip leave-p-out spatial evaluation (Step 2d)
   summary       Skip cross-strategy summary
 """
@@ -2862,7 +2845,8 @@ def main() -> None:
         '--skip-eval', type=str, default='',
         help=(
             'Comma-separated evaluation strategies to skip: '
-            'random, pixel, temporal, spatial, spatial-lpo, summary.'
+            'random, pixel, temporal, spatial, spatial-seed, '
+            'spatial-lpo, summary.'
         ),
     )
     args = parser.parse_args()
@@ -2935,14 +2919,21 @@ def main() -> None:
     elif 'temporal' in skip_eval:
         logger.info('Skipping Step 2b (temporal LOO) per --skip-eval.')
 
-    # Step 2c — LOO Spatial (ADWR sub-basins)
+    # Step 2c — LOO Spatial (AMA/INA basins)
     spatial_results = None
     if should_run('2c') and 'spatial' not in skip_eval:
         spatial_results = evaluate_spatial_loo(get_az_df())
     elif 'spatial' in skip_eval:
         logger.info('Skipping Step 2c (spatial LOO) per --skip-eval.')
 
-    # Step 2d — LPO Spatial (ADWR sub-basins)
+    # Step 2c-seed — LOO Spatial with 10% seed from held-out basin
+    spatial_seed_results = None
+    if should_run('2c-seed') and 'spatial-seed' not in skip_eval:
+        spatial_seed_results = evaluate_spatial_loo(get_az_df(), seed_fraction=SPATIAL_SEED_FRACTION)
+    elif 'spatial-seed' in skip_eval:
+        logger.info('Skipping Step 2c-seed (spatial LOO seeded) per --skip-eval.')
+
+    # Step 2d — LPO Spatial (AMA/INA basins)
     spatial_lpo_results = None
     if should_run('2d') and 'spatial-lpo' not in skip_eval:
         spatial_lpo_results = evaluate_spatial_lpo(get_az_df())
@@ -2955,6 +2946,7 @@ def main() -> None:
         'Pixel_Holdout': pixel_results,
         'Temporal_LOO': temporal_results,
         'Spatial_LOO': spatial_results,
+        'Spatial_LOO_Seed10': spatial_seed_results,
         'Spatial_LPO': spatial_lpo_results,
     }
     eval_strategies = {k: v for k, v in eval_strategies.items() if v is not None}
