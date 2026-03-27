@@ -1201,7 +1201,7 @@ def evaluate_spatial_loo(az_df: pd.DataFrame,
             logger.warning(f'No test data for basin {basin}, skipping.')
             continue
 
-        # Move a year-stratified fraction of held-out samples into training
+        # Move a random fraction of held-out samples into training as a seed
         if seed_fraction > 0:
             rng = np.random.default_rng(RANDOM_STATE)
             n_test = len(y_test)

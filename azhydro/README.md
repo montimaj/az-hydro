@@ -635,8 +635,8 @@ Comparing pure LOO (Step 2c) with seeded LOO demonstrates that the
 model captures the climate-driven temporal variability across basins but
 requires a minimal local signal to calibrate the management-driven
 pumping intensity.  Preliminary results show that adding just 10 % of
-local data improves mean test R² from approximately −0.16 (pure LOO) to
-+0.42 (seeded LOO) over the Dougles AMA, confirming that the negative R² in pure LOO is
+local data improves mean test R² from approximately −0.17 (pure LOO) to
++0.43 (seeded LOO) over the Douglas AMA, confirming that the negative R² in pure LOO is
 driven almost entirely by a basin-specific magnitude offset — not by a
 failure to capture the underlying hydrological process.  This supports
 the argument that conventional spatial LOO is overly punitive for

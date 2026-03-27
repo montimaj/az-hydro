@@ -832,6 +832,11 @@ def create_train_test_scatter(
 
     fig, axes = plt.subplots(1, 2, figsize=figsize)
 
+    # Global axis limits so train and test panels share the same scale
+    all_vals = pd.concat([pred_df[actual_col], pred_df[pred_col]], ignore_index=True)
+    global_min = float(all_vals.min())
+    global_max = float(all_vals.max())
+
     for idx, (data_type, color) in enumerate([('TRAIN', COLORS['train_shade']),
                                                ('TEST', COLORS['test_shade'])]):
         ax = axes[idx]
@@ -850,15 +855,14 @@ def create_train_test_scatter(
             linewidths=0.5
         )
 
-        # 1:1 line
-        max_val = max(df[actual_col].max(), df[pred_col].max())
-        min_val = min(df[actual_col].min(), df[pred_col].min())
-        ax.plot([min_val, max_val], [min_val, max_val], 'k--', linewidth=1.5, label='1:1 Line')
+        # 1:1 line (use global limits so both panels match)
+        ax.plot([global_min, global_max], [global_min, global_max],
+                'k--', linewidth=1.5, label='1:1 Line')
 
-        # Regression line
+        # Regression line (fit on panel data, draw over global range)
         z = np.polyfit(df[pred_col], df[actual_col], 1)
         p = np.poly1d(z)
-        x_line = np.linspace(min_val, max_val, 100)
+        x_line = np.linspace(global_min, global_max, 100)
         sign = '\u2212' if z[1] < 0 else '+'
         ax.plot(x_line, p(x_line), color='red', linewidth=1.5,
                 label=f'Fit: y={z[0]:.2f}x {sign} {abs(z[1]):.2f}')
@@ -875,6 +879,8 @@ def create_train_test_scatter(
             mae = normalized_mae(actual, pred)
             mbe = normalized_mbe(actual, pred)
 
+        ax.set_xlim(global_min, global_max)
+        ax.set_ylim(global_min, global_max)
         ax.set_xlabel('Predicted (mm)', fontweight='bold')
         ax.set_ylabel('Observed (mm)', fontweight='bold')
         ax.set_title(f'{data_type} Data', fontweight='bold')
