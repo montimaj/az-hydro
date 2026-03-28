@@ -117,6 +117,7 @@ USE_AMA_INA = True
 DROP_GW_BASINS = ()
 MAX_LPO_P = 5                   # max holdout group size for leave-p-out spatial evaluation
 MIN_SPATIAL_EVAL_SAMPLES = 30   # skip sub-basins with fewer non-zero metered samples
+SKIP_SPATIAL_BASINS = ('WILLCOX AMA',)  # basins to exclude from spatial LOO/LPO (too few samples)
 SPATIAL_SEED_FRACTION = 0.1     # fraction of held-out basin samples seeded into training
 
 DROP_ATTRS = (
@@ -1150,14 +1151,16 @@ def evaluate_spatial_loo(az_df: pd.DataFrame,
     ]
     basin_counts = filtered.groupby('GW_Basin').size()
 
-    # Exclude basins with too few valid metered samples
+    # Exclude basins with too few valid metered samples or explicitly skipped
     basins = sorted(b for b, n in basin_counts.items()
-                    if n >= MIN_SPATIAL_EVAL_SAMPLES)
+                    if n >= MIN_SPATIAL_EVAL_SAMPLES
+                    and b not in SKIP_SPATIAL_BASINS)
     excluded = sorted(b for b, n in basin_counts.items()
-                      if n < MIN_SPATIAL_EVAL_SAMPLES)
+                      if n < MIN_SPATIAL_EVAL_SAMPLES
+                      or b in SKIP_SPATIAL_BASINS)
     if excluded:
-        logger.warning(f'Excluding basins with < {MIN_SPATIAL_EVAL_SAMPLES} '
-                       f'valid samples: {excluded}')
+        logger.warning(f'Excluding basins (< {MIN_SPATIAL_EVAL_SAMPLES} '
+                       f'valid samples or in SKIP_SPATIAL_BASINS): {excluded}')
 
     logger.info(f'Basins to evaluate ({len(basins)}): {basins}')
 
@@ -1434,14 +1437,16 @@ def evaluate_spatial_lpo(az_df: pd.DataFrame,
     ]
     basin_counts = filtered.groupby('GW_Basin').size()
 
-    # Exclude basins with too few valid metered samples
+    # Exclude basins with too few valid metered samples or explicitly skipped
     basins = sorted(b for b, n in basin_counts.items()
-                    if n >= MIN_SPATIAL_EVAL_SAMPLES)
+                    if n >= MIN_SPATIAL_EVAL_SAMPLES
+                    and b not in SKIP_SPATIAL_BASINS)
     excluded = sorted(b for b, n in basin_counts.items()
-                      if n < MIN_SPATIAL_EVAL_SAMPLES)
+                      if n < MIN_SPATIAL_EVAL_SAMPLES
+                      or b in SKIP_SPATIAL_BASINS)
     if excluded:
-        logger.warning(f'Excluding basins with < {MIN_SPATIAL_EVAL_SAMPLES} '
-                       f'non-zero samples: {excluded}')
+        logger.warning(f'Excluding basins (< {MIN_SPATIAL_EVAL_SAMPLES} '
+                       f'non-zero samples or in SKIP_SPATIAL_BASINS): {excluded}')
 
     n_basins = len(basins)
     logger.info(f'Basins ({n_basins}): {basins}')
