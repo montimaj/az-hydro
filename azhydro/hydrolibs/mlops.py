@@ -3099,7 +3099,8 @@ def generate_model_visualizations(
         use_ama_ina: bool = True,
         create_basin_plots: bool = True,
         skip_aggregate_ts: bool = False,
-        n_jobs: int = -1
+        n_jobs: int = -1,
+        scatter_axis_max: float | None = None,
 ) -> None:
     """
     Generate journal-quality visualizations for a trained model.
@@ -3155,7 +3156,8 @@ def generate_model_visualizations(
         use_ama_ina=use_ama_ina,
         create_basin_plots=create_basin_plots,
         skip_aggregate_ts=skip_aggregate_ts,
-        n_jobs=n_jobs
+        n_jobs=n_jobs,
+        scatter_axis_max=scatter_axis_max,
     )
 
 

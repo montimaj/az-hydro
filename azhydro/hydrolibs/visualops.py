@@ -793,7 +793,8 @@ def create_train_test_scatter(
         actual_col: str = 'Actual_GW_mm',
         pred_col: str = 'Pred_GW_mm',
         data_col: str = 'DATA',
-        figsize: tuple[float, float] = (12, 5)
+        figsize: tuple[float, float] = (12, 5),
+        axis_max: float | None = None,
 ) -> None:
     """
     Create scatter plots comparing actual vs predicted for train and test data.
@@ -811,6 +812,8 @@ def create_train_test_scatter(
         pred_col: Name of predicted values column.
         data_col: Name of data type column (TRAIN/TEST).
         figsize: Figure size.
+        axis_max: Optional upper bound for both axes. When set, the axis
+            range is clipped to ``[global_min, axis_max * 1.05]``.
     """
     from sklearn.metrics import r2_score as _r2_score
     from hydrolibs.mlops import normalized_rmse, normalized_mae, normalized_mbe
@@ -836,6 +839,10 @@ def create_train_test_scatter(
     all_vals = pd.concat([pred_df[actual_col], pred_df[pred_col]], ignore_index=True)
     global_min = float(all_vals.min())
     global_max = float(all_vals.max())
+    if axis_max is not None:
+        padding = axis_max * 0.10
+        global_min = global_min - padding
+        global_max = axis_max + padding
 
     for idx, (data_type, color) in enumerate([('TRAIN', COLORS['train_shade']),
                                                ('TEST', COLORS['test_shade'])]):
@@ -990,7 +997,8 @@ def create_complete_model_visualization(
         use_ama_ina: bool = True,
         create_basin_plots: bool = True,
         skip_aggregate_ts: bool = False,
-        n_jobs: int = -1
+        n_jobs: int = -1,
+        scatter_axis_max: float | None = None,
 ) -> None:
     """
     Create complete visualization suite for a model.
@@ -1011,6 +1019,7 @@ def create_complete_model_visualization(
         skip_aggregate_ts: Skip the statewide aggregate time series plot
             (useful for spatial LOO where the training set dominates).
         n_jobs: Number of parallel jobs.
+        scatter_axis_max: Optional upper bound for scatter plot axes.
     """
     logger.info(f'Creating visualizations for {model_name} - {test_case}...')
     makedirs(output_dir)
@@ -1029,13 +1038,15 @@ def create_complete_model_visualization(
     logger.info('  Creating scatter plots...')
     create_train_test_scatter(
         pred_df, output_dir, model_name, test_case,
-        actual_col=actual_col, pred_col=pred_col
+        actual_col=actual_col, pred_col=pred_col,
+        axis_max=scatter_axis_max,
     )
     # 2b. Raw (non-BC) scatter plots
     if 'Pred_GW_mm_raw' in pred_df.columns:
         create_train_test_scatter(
             pred_df, output_dir, f'{model_name}_Raw', test_case,
-            actual_col=actual_col, pred_col='Pred_GW_mm_raw'
+            actual_col=actual_col, pred_col='Pred_GW_mm_raw',
+            axis_max=scatter_axis_max,
         )
 
     # 3. Residual plots

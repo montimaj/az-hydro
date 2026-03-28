@@ -1309,6 +1309,7 @@ def evaluate_spatial_loo(az_df: pd.DataFrame,
                 use_ama_ina=False,
                 create_basin_plots=True,
                 skip_aggregate_ts=True,
+                scatter_axis_max=MAX_GW,
             )
 
             train_m, test_m = _metrics_from_pred_df(pred_df)
