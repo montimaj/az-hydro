@@ -2145,26 +2145,32 @@ def create_cross_strategy_summary(all_results: dict, output_dir: str) -> None:
     # ---- Grouped bar chart ----
     apply_journal_style()
     strategies = summary_df.Strategy.unique()
-    models = summary_df.Model.unique()
+    # Order models by mean Test_RMSE across strategies (ascending)
+    model_rmse = (summary_df.groupby('Model')['Test_RMSE']
+                  .mean().sort_values())
+    models = model_rmse.index.tolist()
     n_strategies = len(strategies)
+    # Human-readable legend labels (replace underscores with spaces)
+    strategy_labels = {s: s.replace('_', ' ') for s in strategies}
 
     metrics = ['Test_R2', 'Test_RMSE', 'Test_MAE', 'Overfit_R2']
     ylabels = ['Test R²', 'Test RMSE (%)', 'Test MAE (%)', 'Overfitting (R² gap)']
-    fig, axes = plt.subplots(1, len(metrics), figsize=(6 * len(metrics), 6))
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
     width = 0.8 / n_strategies
     x = np.arange(len(models))
 
-    for ax, metric, ylabel in zip(axes, metrics, ylabels):
+    for ax, metric, ylabel in zip(axes.flat, metrics, ylabels):
         for i, strategy in enumerate(strategies):
             sub = summary_df[summary_df.Strategy == strategy]
             vals = [sub[sub.Model == m][metric].values[0]
                     if len(sub[sub.Model == m]) > 0 else 0
                     for m in models]
-            ax.bar(x + i * width, vals, width, label=strategy, alpha=0.8)
+            ax.bar(x + i * width, vals, width,
+                   label=strategy_labels[strategy], alpha=0.8)
         ax.set_xticks(x + width * (n_strategies - 1) / 2)
         ax.set_xticklabels(models, rotation=45, ha='right')
         ax.set_ylabel(ylabel, fontweight='bold')
-    axes[0].legend()
+    axes.flat[0].legend()
     plt.suptitle('Cross-Strategy Model Comparison', fontweight='bold', fontsize=14)
     plt.tight_layout()
     fig.savefig(os.path.join(output_dir, 'Cross_Strategy_Comparison.png'), dpi=600)
@@ -4600,10 +4606,11 @@ def plot_stratified_metrics(
     makedirs(output_dir)
 
     cat_order = [c for c in ['Low (<500 mm)', 'Medium (500-2000 mm)',
-                              'High (>2000 mm)']
+                              'High (>=500 mm)', 'High (>2000 mm)']
                  if c in strat_df['Category'].values]
     cat_colors = {'Low (<500 mm)': '#2ECC71',
                   'Medium (500-2000 mm)': '#F39C12',
+                  'High (>=500 mm)': '#E74C3C',
                   'High (>2000 mm)': '#E74C3C'}
 
     metric_labels = {

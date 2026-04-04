@@ -1281,8 +1281,9 @@ def split_data_yearly(
             x_train_parts.append(selected_data)
         else:
             x_test_parts.append(selected_data)
-    x_train_df = pd.concat(x_train_parts) if x_train_parts else pd.DataFrame()
-    x_test_df = pd.concat(x_test_parts) if x_test_parts else pd.DataFrame()
+    empty = pd.DataFrame(columns=input_df.columns)
+    x_train_df = pd.concat(x_train_parts) if x_train_parts else empty.copy()
+    x_test_df = pd.concat(x_test_parts) if x_test_parts else empty.copy()
     y_train_df = x_train_df[pred_attr].to_frame()
     y_test_df = x_test_df[pred_attr].to_frame()
     if shuffle:
