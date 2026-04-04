@@ -1495,25 +1495,36 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     makedirs(interp_dir)
 
     # Feature importance + permutation importance
-    mlops.compute_perm_imp(
-        model_name, x_train, x_train, y_train, y_train,
-        model, interp_dir, scoring_metric='scaled_rmse',
-        random_state=RANDOM_STATE, create_plots=True,
-        log_target=LOG_TARGET,
-    )
+    fimp_png = os.path.join(interp_dir, f'F_IMP_{model_name}.png')
+    if not os.path.isfile(fimp_png):
+        mlops.compute_perm_imp(
+            model_name, x_train, x_train, y_train, y_train,
+            model, interp_dir, scoring_metric='scaled_rmse',
+            random_state=RANDOM_STATE, create_plots=True,
+            log_target=LOG_TARGET,
+        )
+    else:
+        logger.info(f'Skipping feature importance (found {fimp_png})')
 
     # ALE plots
-    mlops.compute_ale_plots(
-        model_name, model,
-        x_train, y_train, x_train, y_train,
-        interp_dir, log_target=LOG_TARGET,
-    )
+    ale_png = os.path.join(interp_dir, f'{model_name}_ALE_Train.png')
+    if not os.path.isfile(ale_png):
+        mlops.compute_ale_plots(
+            model_name, model,
+            x_train, y_train, x_train, y_train,
+            interp_dir, log_target=LOG_TARGET,
+        )
+    else:
+        logger.info(f'Skipping ALE plots (found {ale_png})')
 
     # SHAP plots (TreeExplainer; SHAP values remain in log1p space)
-    mlops.compute_shap_plots(
-        model_name, model, x_train, interp_dir,
-        log_target=LOG_TARGET,
-    )
+    shap_png = os.path.join(interp_dir, f'{model_name}_SHAP_Summary.png')
+    if not os.path.isfile(shap_png):
+        mlops.compute_shap_plots(
+            model_name, model, x_train, interp_dir,
+        )
+    else:
+        logger.info(f'Skipping SHAP plots (found {shap_png})')
 
     # ---- 3b. Predict pumping for each year 1896-2099 ----
     logger.info('Predicting pumping for all years 1896-2099...')
