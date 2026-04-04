@@ -1475,10 +1475,13 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
 
     logger.info(f'Training {model_name} on {len(x_train)} samples '
                 f'({YEAR_LIST[0]}-{YEAR_LIST[-1]}, all years)...')
+    model_path = os.path.join(prediction_dir, 'Model')
+    cached_model = os.path.join(model_path, model_name)
     model, _ = mlops.build_ml_model_optuna(
         x_train, y_train,
-        os.path.join(prediction_dir, 'Model'),
+        model_path,
         model_name, RANDOM_STATE,
+        load_model=os.path.isfile(cached_model),
         fold_count=FOLD_COUNT,
         repeats=REPEATS,
         n_trials=N_TRIALS,
@@ -1489,6 +1492,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
 
     # ---- Model interpretability plots (on clean features, no physics col) ----
     interp_dir = os.path.join(prediction_dir, 'Model_Interpretability')
+    makedirs(interp_dir)
 
     # Feature importance + permutation importance
     mlops.compute_perm_imp(
