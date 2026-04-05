@@ -504,7 +504,7 @@ def compute_sigma_maca(
         )
         gcm_mosaic_dir = os.path.join(
             os.path.dirname(pred_data_dir.rstrip(os.sep)),
-            '..', f'GEE_Mosaics_{int(mosaic_res)}m_{gcm}'
+            f'GEE_Mosaics_{int(mosaic_res)}m_{gcm}'
         )
         dataops.mosaic_tiles(
             gcm_tile_dir, gcm_mosaic_dir,
@@ -1081,7 +1081,7 @@ def compute_sigma_lulc(
         )
         sc_mosaic_dir = os.path.join(
             os.path.dirname(pred_data_dir.rstrip(os.sep)),
-            '..', f'GEE_Mosaics_{int(mosaic_res)}m_LULC_{scenario}'
+            f'GEE_Mosaics_{int(mosaic_res)}m_LULC_{scenario}'
         )
         dataops.mosaic_tiles(
             sc_tile_dir, sc_mosaic_dir,
