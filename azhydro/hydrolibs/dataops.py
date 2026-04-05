@@ -12,9 +12,10 @@ import subprocess
 import time
 import warnings
 
-warnings.filterwarnings('ignore', category=DeprecationWarning, module='ee.*')
-warnings.filterwarnings('ignore', message='.*deprecated asset.*')
-warnings.filterwarnings('ignore', message='.*Attention required.*')
+# Suppress EE deprecation warnings — EE forces its own 'default' filter
+# (ee/deprecation.py:175) so we monkeypatch the emitter to a no-op.
+import ee.deprecation as _ee_dep  # noqa: E402
+_ee_dep._IssueAssetDeprecationWarning = lambda *a, **k: None
 
 import ee
 import geopandas as gpd
