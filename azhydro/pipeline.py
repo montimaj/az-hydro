@@ -28,6 +28,11 @@ import argparse
 import logging
 import os
 import pickle
+import warnings
+
+warnings.filterwarnings('ignore', category=DeprecationWarning, module='ee.*')
+warnings.filterwarnings('ignore', message='.*deprecated asset.*')
+warnings.filterwarnings('ignore', message='.*Attention required.*')
 
 import geopandas as gpd
 import matplotlib.pyplot as plt

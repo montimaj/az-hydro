@@ -12,7 +12,9 @@ import subprocess
 import time
 import warnings
 
-warnings.filterwarnings('ignore', category=DeprecationWarning, module='ee')
+warnings.filterwarnings('ignore', category=DeprecationWarning, module='ee.*')
+warnings.filterwarnings('ignore', message='.*deprecated asset.*')
+warnings.filterwarnings('ignore', message='.*Attention required.*')
 
 import ee
 import geopandas as gpd
