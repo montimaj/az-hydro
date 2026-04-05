@@ -16,9 +16,8 @@ This script executes the remaining pipeline:
    Optional physics-informed models (PIML_XGB, PIML_LGBM, PIML_XGBRF) are
    available but disabled by default (SKIP_PIML=True) — see azhydro/README.md.
 3. Uses the best model (XGBoost Random Forests) to predict annual
-   pumping rasters from 1896-2099 with maps and time series highlighting four
-   eras: Hindcast (1896-1983), Historical (1984-2024), Forecast (2025),
-   Projected (2026-2099).
+   pumping rasters from 1896-2099 with maps and time series highlighting three
+   eras: Hindcast (1896-1983), Historical (1984-2025), Projection (2026-2099).
 """
 
 # Author: Dr. Sayantan Majumdar
@@ -29,6 +28,9 @@ import argparse
 import logging
 import os
 import pickle
+import warnings
+
+warnings.filterwarnings('ignore', category=DeprecationWarning, module='ee')
 
 import geopandas as gpd
 import matplotlib.pyplot as plt
@@ -1600,18 +1602,16 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
 
     feature_cols = list(x_train.columns)
 
-    # Fit out-of-distribution detector on all-Arizona features from the
-    # training era (not just AMA/INA x_train) so that spatial extrapolation
-    # to non-AMA/INA pixels is expected, and only temporal extrapolation
-    # (novel climate/land-use conditions) triggers OOD flags.
+    # Fit OOD detector on climate/LULC features only (exclude spatial
+    # coordinates and spatially-fixed features that would cause all
+    # non-AMA/INA pixels — even irrigated areas like Yuma — to show
+    # OOD=1 purely due to geographic location).
+    _ood_exclude = {'easting_m', 'northing_m', 'well_density',
+                    'canal_density', 'canal_weighted_streamflow_mm',
+                    'streamflow_mm'}
+    _ood_cols = [c for c in feature_cols if c not in _ood_exclude]
     ood_detector = mlops.OODDetector(alpha=0.01)
-    all_az_train = az_df[az_df.Year.isin(YEAR_LIST)].copy()
-    drop_list_ood = [a for a in DROP_ATTRS if a in all_az_train.columns]
-    all_az_features = all_az_train.drop(
-        columns=drop_list_ood + ['gw_pumping_mm'], errors='ignore'
-    )[feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0)
-    ood_detector.fit(all_az_features)
-    del all_az_train, all_az_features
+    ood_detector.fit(x_train[_ood_cols])
 
     raster_dir = os.path.join(prediction_dir, 'Predicted_Rasters')
     raster_dirs = {
@@ -1740,8 +1740,8 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     # Era-specific feature collection for interpretability analysis
     ERA_BOUNDS = {
         'Hindcast': (START_YEAR, 1983),
-        'Training': (1984, 2024),
-        'Projection': (2025, END_YEAR),
+        'Historical': (1984, 2025),
+        'Projection': (2026, END_YEAR),
     }
     era_features: dict[str, list[pd.DataFrame]] = {e: [] for e in ERA_BOUNDS}
     ERA_SAMPLE_PER_YEAR = 2000  # max pixels sampled per year per era
@@ -1842,6 +1842,20 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     if _skip_loop:
         logger.info('All rasters and summaries exist, skipping prediction loop.')
 
+    # Cache 1985 LULC-derived columns for hindcast partitioning.
+    # Pre-IrrMapper/NLCD years use USGS Historical LULC which has a
+    # discontinuity at 1984→1985.  Holding the 1985 observational URBAN,
+    # AGRI, irr_fraction, and crop_fraction constant for ≤1984 prevents
+    # an artificial volume spike at the data source boundary.
+    _lulc_ref_year = 1985
+    _lulc_ref_df = az_df[az_df.Year == _lulc_ref_year]
+    _lulc_cols = ['URBAN']  # only URBAN has a discontinuity at the LULC source boundary
+    _lulc_ref_vals = {}
+    if not _lulc_ref_df.empty:
+        for col in _lulc_cols:
+            if col in _lulc_ref_df.columns:
+                _lulc_ref_vals[col] = _lulc_ref_df[col].values
+
     for year in range(START_YEAR, END_YEAR + 1):
         if _skip_loop:
             break
@@ -1920,11 +1934,12 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         # Out-of-distribution detection
         ood_tif = os.path.join(ood_raster_dir, f'OOD_Flag_{year}.tif')
         if not os.path.isfile(ood_tif):
-            ood_stats = ood_detector.score_and_summarise(pred_features, year=year)
+            ood_features = pred_features[_ood_cols]
+            ood_stats = ood_detector.score_and_summarise(ood_features, year=year)
             ood_stats['year'] = year
             ood_summary.append(ood_stats)
             # Write OOD probability raster (0 = in-distribution, 1 = OOD)
-            ood_flags = ood_detector.ood_probability(pred_features).astype(np.float32)
+            ood_flags = ood_detector.ood_probability(ood_features).astype(np.float32)
             ood_raster = _valid_pixels_to_raster(ood_flags, valid_mask, raster_shape)
             _, ood_ref_obj = read_raster_as_arr(ref_raster_file, get_file=True)
             write_raster(
@@ -1935,9 +1950,19 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             )
             ood_ref_obj.close()
 
+        # For hindcast years (≤1984), average USGS Historical and NLCD 1985
+        # LULC-derived columns to dampen the volume discontinuity at the
+        # data source boundary while retaining pre-1985 land-use signal.
+        partition_df = year_df
+        if year < _lulc_ref_year and _lulc_ref_vals:
+            partition_df = year_df.copy()
+            for col, vals in _lulc_ref_vals.items():
+                if col in partition_df.columns and len(vals) == len(partition_df):
+                    partition_df[col] = (partition_df[col].values + vals) / 2.0
+
         # Partition into irrigation/non-irrigation and GW/SW categories
         cat_predictions = partops.partition_predictions(
-            predictions, year_df, raster_shape, valid_mask,
+            predictions, partition_df, raster_shape, valid_mask,
         )
         predictions = cat_predictions['Irrigation'] + cat_predictions['Non_Irrigation']
 
@@ -2067,37 +2092,8 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     if not _skip_loop:
         _save_yearly_summary()
 
-    # ---- 3c. Era summary maps (time series plots deferred to UQ step) ----
-    vizops.create_era_summary_maps(yearly_predictions, prediction_dir)
-
-    CAT_TITLES = {
-        'Irrigation':         'Irrigation',
-        'Non_Irrigation':     'Non-Irrigation',
-        'Irrigation_GW':      'Irrigation GW',
-        'Irrigation_SW':      'Irrigation SW',
-        'Non_Irrigation_GW':  'Non-Irrigation GW',
-        'Non_Irrigation_SW':  'Non-Irrigation SW',
-        'Total_GW':           'Total GW',
-        'Total_SW':           'Total SW',
-    }
-    for cat, title in CAT_TITLES.items():
-        cat_dir = os.path.join(prediction_dir, cat)
-        vizops.create_era_summary_maps(
-            cat_yearly[cat], cat_dir,
-            title_prefix=title,
-        )
-
-    CU_TITLES = {
-        'Irrigation_CU':    'Irrigation Consumptive Use',
-        'Irrigation_GW_CU': 'Irrigation GW Consumptive Use',
-        'Irrigation_SW_CU': 'Irrigation SW Consumptive Use',
-    }
-    for cu_cat, title in CU_TITLES.items():
-        cu_dir = os.path.join(prediction_dir, cu_cat)
-        vizops.create_era_summary_maps(
-            cu_yearly[cu_cat], cu_dir,
-            title_prefix=title,
-        )
+    # Era summary bar charts are deferred to Step 3g (after UQ)
+    # so they can incorporate scenario volume ranges.
 
     # Write OOD summary CSV
     ood_csv = os.path.join(ood_raster_dir, 'OOD_Summary.csv')
@@ -2118,8 +2114,8 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         # Flag eras with high OOD rates
         for era, (y1, y2) in [
             ('Hindcast (1896-1983)', (1896, 1983)),
-            ('Training (1984-2024)', (1984, 2024)),
-            ('Projection (2025-2099)', (2025, 2099)),
+            ('Historical (1984-2025)', (1984, 2025)),
+            ('Projection (2026-2099)', (2026, 2099)),
         ]:
             era_df = ood_df[(ood_df['year'] >= y1) & (ood_df['year'] <= y2)]
             if not era_df.empty:
@@ -2224,17 +2220,6 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             random_state=RANDOM_STATE, create_plots=True,
             log_target=LOG_TARGET,
         )
-
-    # ---- 3f. Graphical abstract / Figure 1 ----
-    vizops.create_graphical_abstract(
-        raster_dir=raster_dirs['mm'],
-        basin_shp=AZ_GW_BASIN,
-        output_dir=prediction_dir,
-        start_year=START_YEAR,
-        end_year=END_YEAR,
-        ref_raster=ref_raster_file,
-        yearly_predictions=yearly_predictions,
-    )
 
     logger.info(f'Full-period prediction complete. Results in {prediction_dir}')
     return model, feature_cols, x_train, y_train
@@ -2344,7 +2329,7 @@ def create_all_raster_maps() -> None:
             output_dir=maps_dir,
             title=title,
             unit_label='Depth (mm)',
-            cmap='YlOrRd',
+            cmap='Spectral_r',
         )
 
     # ── OOD Rasters (probability, 0 = in-distribution, 1 = OOD) ─────
@@ -2471,6 +2456,117 @@ def create_all_raster_maps() -> None:
             title=cu.replace('_', ' '),
             unit_label='mm',
             subbasin_shp=ADWR_SUBBASIN_SHP,
+        )
+
+    # ── Graphical abstract / Figure 1 (after UQ for augmented rasters) ──
+    summary_dir = os.path.join(prediction_dir, 'Annual_Summaries')
+    total_csv = os.path.join(summary_dir, 'Total_Predicted.csv')
+    basin_csv = os.path.join(summary_dir, 'Basin_Total.csv')
+    yearly_predictions = {}
+    basin_yearly = {}
+    if os.path.isfile(total_csv):
+        tdf = pd.read_csv(total_csv)
+        for _, row in tdf.iterrows():
+            yearly_predictions[int(row['Year'])] = {
+                k: row[k] for k in row.index if k != 'Year'}
+    if os.path.isfile(basin_csv):
+        bdf = pd.read_csv(basin_csv)
+        for y, grp in bdf.groupby('Year'):
+            basin_yearly[int(y)] = {
+                row['Basin']: {k: row[k] for k in row.index
+                               if k not in ('Year', 'Basin')}
+                for _, row in grp.iterrows()}
+    # Load category and CU summaries from cached CSVs
+    CAT_TITLES = {
+        'Irrigation':         'Irrigation',
+        'Non_Irrigation':     'Non-Irrigation',
+        'Irrigation_GW':      'Irrigation GW',
+        'Irrigation_SW':      'Irrigation SW',
+        'Non_Irrigation_GW':  'Non-Irrigation GW',
+        'Non_Irrigation_SW':  'Non-Irrigation SW',
+        'Total_GW':           'Total GW',
+        'Total_SW':           'Total SW',
+    }
+    CU_TITLES = {
+        'Irrigation_CU':    'Irrigation Consumptive Use',
+        'Irrigation_GW_CU': 'Irrigation GW Consumptive Use',
+        'Irrigation_SW_CU': 'Irrigation SW Consumptive Use',
+    }
+
+    def _load_yearly_csv(csv_path):
+        """Load a yearly summary CSV into {year: {metric: value}} dict."""
+        result = {}
+        if os.path.isfile(csv_path):
+            df = pd.read_csv(csv_path)
+            for _, row in df.iterrows():
+                result[int(row['Year'])] = {
+                    k: row[k] for k in row.index if k != 'Year'}
+        return result
+
+    cat_yearly = {}
+    for cat in CAT_TITLES:
+        cat_yearly[cat] = _load_yearly_csv(
+            os.path.join(summary_dir, f'{cat}.csv'))
+    cu_yearly = {}
+    for cu in CU_TITLES:
+        cu_yearly[cu] = _load_yearly_csv(
+            os.path.join(summary_dir, f'{cu}.csv'))
+
+    # ── Load per-scenario volume projections (if 3b has run) ────────────
+    sc_vol_dir = os.path.join(prediction_dir, 'Uncertainty', 'Sigma_LULC',
+                              'Scenario_Volumes')
+    LULC_SCENARIOS = ['B1', 'B2', 'A1B', 'A2']
+
+    def _load_scenario_volumes(prefix):
+        """Load per-scenario CSVs into {scenario: [row_dicts]}."""
+        sv = {}
+        for sc in LULC_SCENARIOS:
+            sc_csv = os.path.join(sc_vol_dir, f'{prefix}_{sc}.csv')
+            if os.path.isfile(sc_csv):
+                sv[sc] = pd.read_csv(sc_csv).to_dict('records')
+        return sv or None
+
+    total_sc_vols = _load_scenario_volumes('Total')
+
+    # ── Era summary bar charts ─────────────────────────────────────────
+    if yearly_predictions:
+        vizops.create_era_summary_maps(
+            yearly_predictions, prediction_dir,
+            scenario_volumes=total_sc_vols)
+    for cat, title in CAT_TITLES.items():
+        if cat_yearly[cat]:
+            cat_dir = os.path.join(prediction_dir, cat)
+            cat_sc_vols = _load_scenario_volumes(cat)
+            vizops.create_era_summary_maps(
+                cat_yearly[cat], cat_dir, title_prefix=title,
+                scenario_volumes=cat_sc_vols)
+    for cu_cat, title in CU_TITLES.items():
+        if cu_yearly[cu_cat]:
+            cu_dir = os.path.join(prediction_dir, cu_cat)
+            vizops.create_era_summary_maps(
+                cu_yearly[cu_cat], cu_dir, title_prefix=title)
+
+    # Load UQ-derived σ_total volume time series (if 3b has run)
+    sigma_yearly = {}
+    sigma_csv = os.path.join(prediction_dir, 'Uncertainty', 'Sigma_Total',
+                             'Uncertainty_Summary_Total.csv')
+    if os.path.isfile(sigma_csv):
+        sdf = pd.read_csv(sigma_csv)
+        for _, row in sdf.iterrows():
+            sigma_yearly[int(row['Year'])] = {
+                k: row[k] for k in row.index if k != 'Year'}
+
+    # ── Graphical abstract / Figure 1 ──────────────────────────────────
+    if yearly_predictions:
+        vizops.create_graphical_abstract(
+            raster_dir=os.path.join(prediction_dir, 'Predicted_Rasters', 'Depth_mm'),
+            basin_shp=AZ_GW_BASIN,
+            output_dir=prediction_dir,
+            start_year=START_YEAR,
+            end_year=END_YEAR,
+            yearly_predictions=yearly_predictions,
+            basin_yearly=basin_yearly,
+            sigma_yearly=sigma_yearly or None,
         )
 
     logger.info(f'All raster maps saved to {maps_dir}')
@@ -2901,7 +2997,6 @@ def main() -> None:
                 start_year=START_YEAR,
                 end_year=END_YEAR,
                 year_list=YEAR_LIST,
-                train_year_list_baseline=YEAR_LIST,
                 fold_count=FOLD_COUNT,
                 repeats=REPEATS,
                 n_trials=N_TRIALS,

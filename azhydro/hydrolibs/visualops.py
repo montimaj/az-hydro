@@ -77,10 +77,40 @@ def _add_ft_twinx(ax):
 
 def _add_m3_twinx(ax):
     """Add a m³ twinx to an AF volume axis. Call after all plotting."""
+    lo, hi = ax.get_ylim()
     ax_m3 = ax.twinx()
     ax_m3.set_ylabel(r'(m$^3$)', fontweight='bold')
-    lo, hi = ax.get_ylim()
     ax_m3.set_ylim(lo * _AF_TO_M3, hi * _AF_TO_M3)
+    return ax_m3
+
+
+def _add_dual_volume_axes(ax, label: str = ''):
+    """Set up m³ (left) and acre-ft (right) on a volume axis plotted in AF.
+
+    Call after all plotting is done on *ax*.  Reformats the left axis to
+    show ×10⁶ m³ and adds a right twin showing ×1000 acre-ft.
+
+    Args:
+        ax: Primary matplotlib axis (plotted in AF).
+        label (str): Descriptive prefix for both y-axis labels
+            (e.g. 'Total Annual Withdrawal').
+    """
+    lo, hi = ax.get_ylim()
+    prefix = f'{label}\n' if label else ''
+    # Left axis: m³ (×10⁶)
+    ax_m3 = ax.twinx()
+    ax_m3.set_ylim(lo * _AF_TO_M3, hi * _AF_TO_M3)
+    ax_m3.yaxis.set_label_position('left')
+    ax_m3.yaxis.tick_left()
+    ax_m3.set_ylabel(prefix + r'(×10$^6$ m$^3$)', fontweight='bold')
+    ax_m3.yaxis.set_major_formatter(
+        ticker.FuncFormatter(lambda x, _: f'{x / 1e6:,.1f}'))
+    # Right axis: AF (×1000)
+    ax.yaxis.set_label_position('right')
+    ax.yaxis.tick_right()
+    ax.set_ylabel(prefix + '(×1000 acre-ft)', fontweight='bold')
+    ax.yaxis.set_major_formatter(
+        ticker.FuncFormatter(lambda x, _: f'{x / 1e3:,.0f}'))
     return ax_m3
 
 
@@ -1241,15 +1271,13 @@ def _clean_col_label(col: str) -> str:
 # Period definitions for era-based coloring/shading
 ERA_PERIODS = {
     'Hindcast':    (1896, 1983),
-    'Historical':  (1984, 2024),
-    'Forecast':    (2025, 2025),
+    'Historical':  (1984, 2025),
     'Projection':  (2026, 2099),
 }
 
 ERA_COLORS = {
     'Hindcast':   '#8E44AD',   # Purple
     'Historical': '#2980B9',   # Blue
-    'Forecast':   '#E67E22',   # Orange
     'Projection': '#27AE60',   # Green
 }
 
@@ -1300,8 +1328,6 @@ def explore_az_data(
 
     df = az_df.copy()
     df['Era'] = df[year_col].apply(_assign_era)
-    # Merge single-year Forecast (2025) into Historical for cleaner EDA plots
-    df['Era'] = df['Era'].replace({'Forecast': 'Historical'})
 
     basin_type_map = {0: 'AMA', 1: 'INA', 2: 'Other'}
     df['Basin_Type_Label'] = df[basin_type_col].map(basin_type_map)
@@ -1315,9 +1341,7 @@ def explore_az_data(
         if c not in (year_col, basin_type_col) and c not in skip_cols
     ]
 
-    eda_periods = {k: v for k, v in ERA_PERIODS.items() if k != 'Forecast'}
-    eda_periods['Historical'] = (ERA_PERIODS['Historical'][0], ERA_PERIODS['Forecast'][1])
-    era_order = list(eda_periods.keys())
+    era_order = list(ERA_PERIODS.keys())
 
     logger.info(f'Generating exploratory plots for {len(numeric_cols)} columns …')
 
@@ -1354,7 +1378,7 @@ def explore_az_data(
         if col not in static_cols:
             # ── 1. Time series (mean ± std per year), shaded by era ──────
             yearly = col_df.groupby(year_col)[col].agg(['mean', 'std']).reset_index()
-            yearly['Era'] = yearly[year_col].apply(_assign_era).replace({'Forecast': 'Historical'})
+            yearly['Era'] = yearly[year_col].apply(_assign_era)
 
             fig, ax = _plt.subplots(figsize=figsize_ts)
             yearly = yearly.sort_values(year_col)
@@ -1369,9 +1393,9 @@ def explore_az_data(
             ax.set_ylabel(label)
             ax.set_title(f'{label} — Annual Mean ± Std')
             if not skip_era:
-                for era, (s, e) in eda_periods.items():
+                for era, (s, e) in ERA_PERIODS.items():
                     ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
-                handles = [_mpatches.Patch(color=ERA_COLORS[e], label=f'{e} ({eda_periods[e][0]}–{eda_periods[e][1]})')
+                handles = [_mpatches.Patch(color=ERA_COLORS[e], label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
                            for e in era_order]
                 ax.legend(handles=handles, loc='best', fontsize=9)
             fig.tight_layout()
@@ -1388,11 +1412,11 @@ def explore_az_data(
             ax.set_title(f'{label} — Annual Mean by Basin Type')
             bt_handles, _ = ax.get_legend_handles_labels()
             if not skip_era:
-                for era, (s, e) in eda_periods.items():
+                for era, (s, e) in ERA_PERIODS.items():
                     ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.06)
                 bt_handles.extend([
                     _mpatches.Patch(color=ERA_COLORS[e], alpha=0.35,
-                                    label=f'{e} ({eda_periods[e][0]}–{eda_periods[e][1]})')
+                                    label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
                     for e in era_order
                 ])
             ax.legend(handles=bt_handles, loc='best', fontsize=9)
@@ -1410,7 +1434,7 @@ def explore_az_data(
                 color='#AED6F1',
             )
             if not skip_era:
-                for era, (s, e) in eda_periods.items():
+                for era, (s, e) in ERA_PERIODS.items():
                     idx_s = year_to_idx.get(s)
                     idx_e = year_to_idx.get(e)
                     if idx_s is not None and idx_e is not None:
@@ -1418,7 +1442,7 @@ def explore_az_data(
                                    color=ERA_COLORS[era], alpha=0.10)
                 handles = [
                     _mpatches.Patch(color=ERA_COLORS[e],
-                                    label=f'{e} ({eda_periods[e][0]}–{eda_periods[e][1]})')
+                                    label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
                     for e in era_order
                 ]
                 ax.legend(handles=handles, loc='best', fontsize=9)
@@ -2388,13 +2412,18 @@ def create_era_summary_maps(
         yearly_predictions: dict,
         output_dir: str,
         title_prefix: str = '',
+        scenario_volumes: dict | None = None,
 ) -> None:
-    """Bar chart of mean annual pumping per era.
+    """Bar chart of mean annual pumping per era with 95% confidence bars.
 
     Args:
         yearly_predictions (dict): {year: {'Volume_AF': ...}}.
         output_dir (str): Output directory for plots.
         title_prefix (str): Prefix for figure title.
+        scenario_volumes (dict or None):
+            ``{scenario_name: [{Year, Volume_AF, ...}, ...]}`` — per-scenario
+            volume time series for the projection era.  When provided, the
+            Projection bar shows the scenario min–max range as a hatched band.
 
     Returns:
         None.
@@ -2403,29 +2432,60 @@ def create_era_summary_maps(
     makedirs(output_dir)
 
     label = f'{title_prefix} ' if title_prefix else ''
+    is_cu = 'Consumptive Use' in title_prefix or 'CU' in title_prefix
+    ylabel_term = 'Consumptive Use' if is_cu else 'Withdrawal'
+
     era_means = {}
+    era_stds = {}
     for era, (s, e) in ERA_PERIODS.items():
         era_vals = [yearly_predictions[y]['Volume_AF']
                     for y in range(s, e + 1) if y in yearly_predictions]
         era_means[era] = np.mean(era_vals) if era_vals else 0
+        era_stds[era] = 1.96 * np.std(era_vals) / np.sqrt(len(era_vals)) if len(era_vals) > 1 else 0
 
     fig, ax = plt.subplots(figsize=(8, 5))
     bars = ax.bar(
-        era_means.keys(),
-        era_means.values(),
+        list(era_means.keys()),
+        list(era_means.values()),
+        yerr=list(era_stds.values()),
+        capsize=5,
         color=[ERA_COLORS[e] for e in era_means],
         edgecolor='black',
         linewidth=0.8,
+        error_kw={'linewidth': 1.5, 'color': 'black'},
     )
-    for bar, val in zip(bars, era_means.values()):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
-                f'{val:,.0f}', ha='center', va='bottom', fontsize=11, fontweight='bold')
 
-    ax.set_ylabel('Mean Annual Withdrawal\n(acre-ft)', fontweight='bold')
-    ax.set_title(f'Mean Annual {label}Withdrawal by Era', fontweight='bold', fontsize=14)
+    # Scenario range on the Projection bar
+    if scenario_volumes and 'Projection' in era_means:
+        proj_s, proj_e = ERA_PERIODS['Projection']
+        sc_means = []
+        for sc_rows in scenario_volumes.values():
+            sc_vals = [r['Volume_AF'] for r in sc_rows
+                       if proj_s <= r['Year'] <= proj_e]
+            if sc_vals:
+                sc_means.append(np.mean(sc_vals))
+        if len(sc_means) > 1:
+            sc_lo, sc_hi = min(sc_means), max(sc_means)
+            proj_idx = list(era_means.keys()).index('Projection')
+            proj_bar = bars[proj_idx]
+            bx = proj_bar.get_x()
+            bw = proj_bar.get_width()
+            ax.fill_between(
+                [bx, bx + bw], sc_lo, sc_hi,
+                alpha=0.25, color='gray', hatch='///',
+                label=f'Scenario range ({len(sc_means)} LULC)',
+            )
+            ax.legend(fontsize=9, loc='upper right')
+
+    for bar, val in zip(bars, era_means.values()):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() / 2,
+                f'{val / 1e3:,.0f}k', ha='center', va='center', fontsize=11,
+                fontweight='bold', color='white')
+
+    ax.set_title(f'Mean Annual {label}{ylabel_term} by Era', fontweight='bold', fontsize=14)
     ax.grid(axis='y', alpha=0.3, linestyle='--')
 
-    _add_m3_twinx(ax)
+    _add_dual_volume_axes(ax, label=f'Mean Annual {ylabel_term}')
 
     plt.tight_layout()
     fig.savefig(os.path.join(output_dir, 'Era_Summary_Bar.png'), dpi=600, bbox_inches='tight')
@@ -2869,14 +2929,17 @@ def create_graphical_abstract(
         end_year: int = 2099,
         ref_raster: str | None = None,
         yearly_predictions: dict | None = None,
+        basin_yearly: dict | None = None,
+        sigma_yearly: dict | None = None,
 ) -> None:
     """Create a publication-quality Figure 1 / graphical abstract.
 
-    Layout (2-panel figure):
+    Layout (3-panel figure):
       - **Left**: Spatial map of mean-annual predicted withdrawal depth (mm)
         with GW basin boundaries overlaid.
-      - **Right**: Time series of total annual AMA/INA withdrawals (acre-ft)
-        with era shading and an inset era bar chart.
+      - **Top-right**: Time series of total annual withdrawals (acre-ft)
+        with era shading and ±1σ UQ confidence band.
+      - **Bottom-right**: Era mean bar chart with 95% CI error bars.
 
     Args:
         raster_dir (str): Directory containing ``Total_Predicted_<year>.tif``
@@ -2890,6 +2953,14 @@ def create_graphical_abstract(
         yearly_predictions (dict or None):
             ``{year: {'Volume_AF': ..., 'Mean_Depth_mm': ...}}`` for the
             time-series panel.  If None, only the spatial panel is produced.
+        basin_yearly (dict or None):
+            ``{year: {basin_name: {'Volume_AF': ...}}}`` for computing
+            inter-basin spatial std on the time series (fallback if
+            *sigma_yearly* is not provided).
+        sigma_yearly (dict or None):
+            ``{year: {'Volume_AF': ...}}`` — per-year UQ-derived σ_total
+            in Volume_AF.  When provided, used for the ±1σ confidence
+            band instead of inter-basin variability.
 
     Returns:
         None.
@@ -2932,6 +3003,17 @@ def create_graphical_abstract(
     mean_depth = depth_sum / max(count, 1)
     mean_depth_masked = np.ma.masked_where(mean_depth == 0, mean_depth)
 
+    # Save mean annual depth as a standalone GeoTIFF
+    mean_tif = os.path.join(output_dir, 'Mean_Annual_Predicted_mm.tif')
+    with rio.open(ref_raster) as src:
+        profile = src.profile.copy()
+    profile.update(count=1, dtype='float32', nodata=np.nan)
+    mean_out = mean_depth.astype(np.float32)
+    mean_out[mean_depth == 0] = np.nan
+    with rio.open(mean_tif, 'w', **profile) as dst:
+        dst.write(mean_out, 1)
+    logger.info(f'Mean annual depth raster saved to {mean_tif}')
+
     # ---- Read basin boundaries ----
     basins_gdf = gpd.read_file(basin_shp)
     if basins_gdf.crs != crs:
@@ -2939,74 +3021,102 @@ def create_graphical_abstract(
 
     # ---- Determine layout ----
     has_ts = yearly_predictions is not None and len(yearly_predictions) > 0
-    n_cols = 2 if has_ts else 1
-    fig_width = 18 if has_ts else 9
 
-    fig, axes = plt.subplots(
-        1, n_cols, figsize=(fig_width, 9),
-        gridspec_kw={'width_ratios': [1, 1.2]} if has_ts else None,
-    )
-    if not has_ts:
-        axes = [axes]
+    if has_ts:
+        from matplotlib.gridspec import GridSpec
+        fig = plt.figure(figsize=(18, 9))
+        gs = GridSpec(2, 2, figure=fig, width_ratios=[1, 1.2],
+                      height_ratios=[1.2, 1], hspace=0.35, wspace=0.3)
+        ax_map = fig.add_subplot(gs[:, 0])  # map spans both rows
+        ax_ts = fig.add_subplot(gs[0, 1])   # time series top-right
+        ax_bar = fig.add_subplot(gs[1, 1])  # bar chart bottom-right
+    else:
+        fig, ax_map = plt.subplots(1, 1, figsize=(9, 9))
 
     # ---- Panel A: Spatial map ----
-    ax_map = axes[0]
+
+    # 2%-98% percentile colorbar range
+    valid_vals = mean_depth_masked.compressed()
+    if len(valid_vals) > 0:
+        vmin = np.percentile(valid_vals, 2)
+        vmax = np.percentile(valid_vals, 98)
+    else:
+        vmin, vmax = 0, 1
+
     im = ax_map.imshow(
         mean_depth_masked, extent=extent, origin='upper',
-        cmap='YlOrRd', interpolation='nearest',
+        cmap='Spectral_r', interpolation='nearest',
+        vmin=vmin, vmax=vmax,
     )
-    basins_gdf.boundary.plot(ax=ax_map, color='#2C3E50', linewidth=0.8)
 
-    # Label AMA/INA basins
+    # Draw all basin boundaries
+    basins_gdf.boundary.plot(ax=ax_map, color='#2C3E50', linewidth=0.5)
+
+    # Highlight AMA/INA basins with thicker boundary and semi-transparent fill
     ama_ina = get_ama_ina_basin_names()
     name_col = 'BASIN_NAME' if 'BASIN_NAME' in basins_gdf.columns else basins_gdf.columns[0]
-    for _, row in basins_gdf.iterrows():
-        bname = row[name_col]
-        if bname in ama_ina:
-            centroid = row.geometry.centroid
-            short_name = bname.replace(' AMA', '').replace(' INA', '')
-            ax_map.annotate(
-                short_name, (centroid.x, centroid.y),
-                fontsize=6, fontweight='bold', ha='center', va='center',
-                color='#2C3E50',
-                bbox=dict(boxstyle='round,pad=0.15', fc='white', alpha=0.7, lw=0),
-            )
+    ama_ina_gdf = basins_gdf[basins_gdf[name_col].isin(ama_ina)]
+    ama_ina_gdf.boundary.plot(ax=ax_map, color='black', linewidth=1.5)
 
-    cbar = fig.colorbar(im, ax=ax_map, shrink=0.75, pad=0.02)
+    # Label AMA/INA basins
+    for _, row in ama_ina_gdf.iterrows():
+        bname = row[name_col]
+        centroid = row.geometry.centroid
+        short_name = bname.replace(' AMA', '').replace(' INA', '')
+        ax_map.annotate(
+            short_name, (centroid.x, centroid.y),
+            fontsize=6, fontweight='bold', ha='center', va='center',
+            color='black',
+            bbox=dict(boxstyle='round,pad=0.15', fc='white', alpha=0.8, lw=0),
+        )
+
+    cbar = fig.colorbar(im, ax=ax_map, shrink=0.75, pad=0.02, extend='both')
     cbar.set_label('Mean Annual Withdrawal Depth (mm)', fontweight='bold')
-    ax_map.set_xlabel('Easting (m)', fontweight='bold')
-    ax_map.set_ylabel('Northing (m)', fontweight='bold')
+    ax_map.axis('off')
     ax_map.set_title(
         f'(a) Mean Annual Predicted Withdrawal ({start_year}–{end_year})',
         fontweight='bold', fontsize=13,
     )
-    ax_map.tick_params(axis='both', labelsize=9)
-
-    # ---- Panel B: Time series + era bar inset ----
+    # ---- Panel B: Time series (top-right) ----
     if has_ts:
-        ax_ts = axes[1]
         years = sorted(yearly_predictions.keys())
-        vol_af = [yearly_predictions[y]['Volume_AF'] for y in years]
+        vol_af = np.array([yearly_predictions[y]['Volume_AF'] for y in years])
+
+        # Compute ±1σ band: prefer UQ-derived σ, fall back to inter-basin std
+        vol_std = np.zeros(len(years))
+        std_label = None
+        if sigma_yearly:
+            for i, y in enumerate(years):
+                if y in sigma_yearly:
+                    val = sigma_yearly[y].get('Volume_AF', 0)
+                    vol_std[i] = val if np.isfinite(val) else 0
+            std_label = '±1σ (UQ)'
+        elif basin_yearly:
+            for i, y in enumerate(years):
+                if y in basin_yearly:
+                    basin_vols = [v['Volume_AF'] for v in basin_yearly[y].values()
+                                  if np.isfinite(v.get('Volume_AF', np.nan))]
+                    if len(basin_vols) > 1:
+                        vol_std[i] = np.std(basin_vols)
+            std_label = '±1σ (inter-basin)'
 
         for era, (s, e) in ERA_PERIODS.items():
             ax_ts.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
 
+        # ±1σ band
+        if vol_std.any():
+            ax_ts.fill_between(years, vol_af - vol_std, vol_af + vol_std,
+                               alpha=0.2, color=COLORS['predicted'], label=std_label)
+
         ax_ts.plot(years, vol_af, color=COLORS['predicted'],
                    linewidth=1.2, marker='.', markersize=2)
         ax_ts.set_xlabel('Year', fontweight='bold')
-        ax_ts.set_ylabel('Total Annual Withdrawal (acre-ft)', fontweight='bold')
         ax_ts.set_title(
-            '(b) Arizona AMA/INA Annual Withdrawal',
+            '(b) Arizona Annual Withdrawal',
             fontweight='bold', fontsize=13,
         )
         ax_ts.set_xlim(start_year - 2, end_year + 2)
 
-        # Format y-axis with comma separator
-        ax_ts.yaxis.set_major_formatter(
-            ticker.FuncFormatter(lambda x, _: f'{x:,.0f}')
-        )
-
-        # Era legend
         handles = [
             mpatches.Patch(color=ERA_COLORS[e], alpha=0.4,
                            label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
@@ -3014,31 +3124,39 @@ def create_graphical_abstract(
         ]
         ax_ts.legend(handles=handles, loc='upper left', fontsize=9, framealpha=0.7)
 
-        _add_m3_twinx(ax_ts)
+        _add_dual_volume_axes(ax_ts, label='Total Annual Withdrawal')
 
-        # Inset: era mean bar chart
-        inset_ax = ax_ts.inset_axes([0.55, 0.55, 0.42, 0.38])
+        # ---- Panel C: Era mean bar chart (bottom-right) ----
         era_means = {}
+        era_stds = {}
         for era, (s, e) in ERA_PERIODS.items():
             era_vals = [yearly_predictions[y]['Volume_AF']
                         for y in range(s, e + 1) if y in yearly_predictions]
             era_means[era] = np.mean(era_vals) if era_vals else 0
-        bars = inset_ax.bar(
-            era_means.keys(), era_means.values(),
-            color=[ERA_COLORS[e] for e in era_means],
-            edgecolor='black', linewidth=0.5,
+            era_stds[era] = 1.96 * np.std(era_vals) / np.sqrt(len(era_vals)) if len(era_vals) > 1 else 0
+        era_names = list(era_means.keys())
+        era_vals_list = list(era_means.values())
+        era_errs = list(era_stds.values())
+        x_pos = np.arange(len(era_names))
+        bars = ax_bar.bar(
+            x_pos, era_vals_list, yerr=era_errs, capsize=5,
+            color=[ERA_COLORS[e] for e in era_names],
+            edgecolor='black', linewidth=0.8,
+            error_kw={'linewidth': 1.5, 'color': 'black'},
         )
-        for bar, val in zip(bars, era_means.values()):
-            inset_ax.text(
+        ax_bar.set_xticks(x_pos)
+        ax_bar.set_xticklabels(era_names, fontsize=10)
+        for bar, val in zip(bars, era_vals_list):
+            ax_bar.text(
                 bar.get_x() + bar.get_width() / 2,
-                bar.get_height(), f'{val:,.0f}',
-                ha='center', va='bottom', fontsize=7, fontweight='bold',
+                bar.get_height() / 2, f'{val / 1e3:,.0f}k',
+                ha='center', va='center', fontsize=10, fontweight='bold',
+                color='white',
             )
-        inset_ax.set_ylabel('Mean AF', fontsize=8)
-        inset_ax.tick_params(labelsize=7)
-        inset_ax.set_title('Era Averages', fontsize=8, fontweight='bold')
+        ax_bar.set_title('(c) Era Averages', fontsize=13, fontweight='bold')
+        ax_bar.grid(axis='y', alpha=0.3, linestyle='--')
+        _add_dual_volume_axes(ax_bar, label='Mean Annual Withdrawal')
 
-    plt.tight_layout()
     out_path = os.path.join(output_dir, 'Graphical_Abstract_Fig1.png')
     fig.savefig(out_path, dpi=600, bbox_inches='tight')
     plt.close()
@@ -3064,23 +3182,21 @@ def _overlay_boundaries(
     *,
     label_fontsize: float = 5.5,
 ) -> None:
-    """Draw basin boundaries and AMA/INA labels on a map axis."""
+    """Draw basin boundaries and highlight AMA/INA basins on a map axis."""
     basins_gdf.boundary.plot(ax=ax, color='#555555', linewidth=0.4)
-    for _, row in basins_gdf.iterrows():
-        bname = row[name_col]
-        if bname in ama_ina_names:
-            basins_gdf[basins_gdf[name_col] == bname].boundary.plot(
-                ax=ax, color='#2C3E50', linewidth=1.0,
-            )
-            centroid = row.geometry.centroid
-            short = bname.replace(' AMA', '').replace(' INA', '')
-            ax.annotate(
-                short, (centroid.x, centroid.y),
-                fontsize=label_fontsize, fontweight='bold',
-                ha='center', va='center', color='#2C3E50',
-                bbox=dict(boxstyle='round,pad=0.12', fc='white',
-                          alpha=0.75, lw=0),
-            )
+    ama_ina_gdf = basins_gdf[basins_gdf[name_col].isin(ama_ina_names)]
+    ama_ina_gdf.boundary.plot(ax=ax, color='black', linewidth=1.2)
+    for _, row in ama_ina_gdf.iterrows():
+        centroid = row.geometry.centroid
+        short = row[name_col].replace(' AMA', '').replace(' INA', '')
+        ax.annotate(
+            short, (centroid.x, centroid.y),
+            fontsize=label_fontsize, fontweight='bold',
+            ha='center', va='center', color='black',
+            bbox=dict(boxstyle='round,pad=0.12', fc='white',
+                      alpha=0.8, lw=0),
+        )
+    ax.axis('off')
 
 
 def _compute_era_means(
@@ -3155,7 +3271,7 @@ def create_era_raster_maps(
     *,
     title: str = 'Predicted Annual Withdrawal',
     unit_label: str = 'Depth (mm)',
-    cmap: str = 'YlOrRd',
+    cmap: str = 'Spectral_r',
     out_filename: str | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
@@ -3166,7 +3282,7 @@ def create_era_raster_maps(
     """Create a 2×2 panel figure of era-mean raster maps.
 
     Each panel shows the mean raster value for one era (Hindcast,
-    Historical, Forecast, Projection) with groundwater basin boundaries
+    Historical, Projection) with groundwater basin boundaries
     and AMA/INA labels overlaid.  Designed for Scientific Data
     publication quality.
 
@@ -3229,22 +3345,26 @@ def create_era_raster_maps(
             logger.warning('All era means are empty for %s — skipping.', title)
             return
         if vmin is None:
-            vmin = float(np.nanpercentile(all_vals, 1))
+            vmin = float(np.nanpercentile(all_vals, 2))
         if vmax is None:
-            vmax = float(np.nanpercentile(all_vals, 99))
+            vmax = float(np.nanpercentile(all_vals, 98))
     if symmetric:
         abs_max = max(abs(vmin), abs(vmax))
         vmin, vmax = -abs_max, abs_max
 
-    # ---- Create 2×2 figure ----
+    # ---- Create figure ----
+    n_eras = len(ERA_PERIODS)
     fig, axes = plt.subplots(
-        2, 2, figsize=(14, 12), constrained_layout=True,
+        1, n_eras, figsize=(6 * n_eras, 7), constrained_layout=True,
     )
     fig.suptitle(f'{title} — Era Mean', fontsize=16, fontweight='bold')
+    if n_eras == 1:
+        axes = [axes]
 
-    panel_labels = ['(a)', '(b)', '(c)', '(d)']
+    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)']
+    axes_flat = list(axes) if isinstance(axes, np.ndarray) else axes
     for idx, (era, (y1, y2)) in enumerate(ERA_PERIODS.items()):
-        ax = axes.flat[idx]
+        ax = axes_flat[idx]
         ax.set_facecolor('#D5D5D5')  # gray for no-data
 
         era_arr = era_means.get(era)
@@ -3268,14 +3388,11 @@ def create_era_raster_maps(
             f'{panel_labels[idx]} {era} ({y1}–{y2})',
             fontsize=12, fontweight='bold',
         )
-        ax.set_xlabel('Easting (m)', fontsize=10)
-        ax.set_ylabel('Northing (m)', fontsize=10)
-        ax.tick_params(axis='both', labelsize=8)
 
     # Shared colorbar
     cbar = fig.colorbar(
-        im, ax=axes, shrink=0.6, pad=0.02,
-        orientation='horizontal', aspect=40,
+        im, ax=axes_flat, shrink=0.6, pad=0.02,
+        orientation='horizontal', aspect=40, extend='both',
     )
     cbar.set_label(unit_label, fontsize=12, fontweight='bold')
     cbar.ax.tick_params(labelsize=10)
@@ -3297,7 +3414,7 @@ def create_actual_vs_predicted_maps(
     *,
     title: str = 'Annual Withdrawal',
     unit_label: str = 'Depth (mm)',
-    cmap: str = 'YlOrRd',
+    cmap: str = 'Spectral_r',
     diff_cmap: str = 'RdBu_r',
     start_year: int = 1984,
     end_year: int = 2024,
@@ -3405,8 +3522,8 @@ def create_actual_vs_predicted_maps(
     if len(all_vals) == 0:
         logger.warning('No valid data for actual vs predicted — skipping.')
         return
-    v_min = float(np.nanpercentile(all_vals, 1))
-    v_max = float(np.nanpercentile(all_vals, 99))
+    v_min = float(np.nanpercentile(all_vals, 2))
+    v_max = float(np.nanpercentile(all_vals, 98))
 
     # Difference limits (symmetric)
     diff_vals = diff_masked.compressed()
@@ -3443,12 +3560,9 @@ def create_actual_vs_predicted_maps(
         )
         _overlay_boundaries(ax, basins_gdf, ama_ina, name_col)
         ax.set_title(panel_title, fontsize=12, fontweight='bold')
-        ax.set_xlabel('Easting (m)', fontsize=10)
-        ax.set_ylabel('Northing (m)', fontsize=10)
-        ax.tick_params(axis='both', labelsize=8)
 
         label = f'Δ {unit_label}' if 'Difference' in panel_title else unit_label
-        fig.colorbar(im, ax=ax, shrink=0.75, pad=0.02, label=label)
+        fig.colorbar(im, ax=ax, shrink=0.75, pad=0.02, label=label, extend='both')
 
     out_path = os.path.join(output_dir, out_filename)
     fig.savefig(out_path, dpi=600, bbox_inches='tight')
@@ -3636,14 +3750,12 @@ def create_trend_maps(
     apply_journal_style()
     makedirs(output_dir)
 
-    # ── Default periods: full + 3 eras (Forecast merged into Historical) ─
+    # ── Default periods: full + 3 eras ─
     if periods is None:
-        hist_start = ERA_PERIODS['Historical'][0]
-        hist_end = ERA_PERIODS['Forecast'][1]
         periods = {
             'Full (1896–2099)': (1896, 2099),
             f'Hindcast ({ERA_PERIODS["Hindcast"][0]}–{ERA_PERIODS["Hindcast"][1]})': ERA_PERIODS['Hindcast'],
-            f'Historical ({hist_start}–{hist_end})': (hist_start, hist_end),
+            f'Historical ({ERA_PERIODS["Historical"][0]}–{ERA_PERIODS["Historical"][1]})': ERA_PERIODS['Historical'],
             f'Projection ({ERA_PERIODS["Projection"][0]}–{ERA_PERIODS["Projection"][1]})': ERA_PERIODS['Projection'],
         }
 
@@ -3799,7 +3911,7 @@ def create_trend_maps(
 
         _overlay_boundaries(ax, basins_gdf, ama_ina, name_col)
 
-        cbar = fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02)
+        cbar = fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02, extend='both')
         cbar.set_label(f"Sen's slope ({unit_label}/year)", fontsize=12,
                        fontweight='bold')
         cbar.ax.tick_params(labelsize=10)
@@ -3807,9 +3919,6 @@ def create_trend_maps(
         ax.set_title(f'{title} — Trend {period_name}\n'
                      f"(stipple = not significant at α = {alpha})",
                      fontsize=13, fontweight='bold')
-        ax.set_xlabel('Easting (m)', fontsize=10)
-        ax.set_ylabel('Northing (m)', fontsize=10)
-        ax.tick_params(axis='both', labelsize=8)
 
         # ── Inset: fraction of significant pixels ───────────────────
         domain_pixels = (~all_nan).sum()

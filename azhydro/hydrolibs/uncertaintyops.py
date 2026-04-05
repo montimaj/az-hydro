@@ -1097,6 +1097,12 @@ def compute_sigma_lulc(
         c: {} for c in partops.CATEGORIES
     }
 
+    # Per-scenario volume tracking
+    scenario_volumes: dict[str, list[dict]] = {sc: [] for sc in USGS_LULC_SCENARIOS}
+    scenario_cat_volumes: dict[str, dict[str, list[dict]]] = {
+        sc: {c: [] for c in partops.CATEGORIES} for sc in USGS_LULC_SCENARIOS
+    }
+
     for year in range(MACA_FUTURE_START, end_year + 1):
         year_df = az_df[az_df.Year == year].copy()
         if year_df.empty:
@@ -1143,6 +1149,16 @@ def compute_sigma_lulc(
             scenario_preds.append(pred)
             scenario_cats.append(cat)
 
+        # Collect per-scenario volumes
+        for si, scenario in enumerate(USGS_LULC_SCENARIOS):
+            sc_stats = _pixel_stats(scenario_preds[si], mm_to_m3)
+            sc_stats['Year'] = year
+            scenario_volumes[scenario].append(sc_stats)
+            for c in partops.CATEGORIES:
+                cat_stats = _pixel_stats(scenario_cats[si][c], mm_to_m3)
+                cat_stats['Year'] = year
+                scenario_cat_volumes[scenario][c].append(cat_stats)
+
         sc_stack = np.stack(scenario_preds, axis=0)
         std = np.nanstd(sc_stack, axis=0, ddof=1)
         sigma_lulc[year] = std
@@ -1169,6 +1185,29 @@ def compute_sigma_lulc(
 
     _save_summary(yearly_stats, base_dir, 'LULC')
     _write_basin_sigma_csv(basin_accum, base_dir, 'LULC')
+
+    # Save per-scenario volume projections
+    sc_vol_dir = os.path.join(base_dir, 'Scenario_Volumes')
+    makedirs(sc_vol_dir)
+    for scenario in USGS_LULC_SCENARIOS:
+        if scenario_volumes[scenario]:
+            sc_df = pd.DataFrame(scenario_volumes[scenario])
+            sc_df.to_csv(os.path.join(sc_vol_dir, f'Total_{scenario}.csv'), index=False)
+            for c in partops.CATEGORIES:
+                if scenario_cat_volumes[scenario][c]:
+                    cat_df = pd.DataFrame(scenario_cat_volumes[scenario][c])
+                    cat_df.to_csv(os.path.join(sc_vol_dir, f'{c}_{scenario}.csv'), index=False)
+
+    # Combined scenario comparison CSV (all scenarios side by side)
+    combined_rows = []
+    for scenario in USGS_LULC_SCENARIOS:
+        for row in scenario_volumes[scenario]:
+            combined_rows.append({'Scenario': scenario, **row})
+    if combined_rows:
+        combined_df = pd.DataFrame(combined_rows)
+        combined_df.to_csv(os.path.join(sc_vol_dir, 'Scenario_Comparison.csv'), index=False)
+        logger.info(f'  Per-scenario volume projections saved to {sc_vol_dir}')
+
     logger.info('  σ_LULC complete.')
     return sigma_lulc, cat_sigma_lulc
 

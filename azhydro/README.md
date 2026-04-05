@@ -712,7 +712,7 @@ are re-computed separately for each temporal era:
 |---|---|---|
 | Hindcast | 1896–1983 | Pre-training extrapolation |
 | Training | 1984–2024 | In-distribution reference |
-| Projection | 2025–2099 | Future extrapolation |
+| Projection | 2026–2099 | Future extrapolation |
 
 Up to 2 000 pixels are subsampled per year (capped at 10 000 per era) and
 passed through SHAP, ALE, and permutation importance analysis.  Comparing
@@ -726,14 +726,22 @@ are saved to `{prediction_dir}Model_Interpretability/{Era}/`.
 #### 3b. Annual raster prediction loop (1896–2099)
 
 Before the loop begins, an **out-of-distribution (OOD) detector**
-(`mlops.OODDetector`) is fitted on **all Arizona pixels** from the training
-era (1984–2024), not just the AMA/INA training subset.  This ensures that
-spatial extrapolation to non-AMA/INA areas — which is by design — does not
-trigger OOD flags; only genuinely novel temporal conditions (pre-1984
-climate, future projections) are flagged.  The detector computes the
-Mahalanobis distance of each prediction-time pixel from the training-era
-distribution using a regularized covariance matrix.  Pixels exceeding the
-χ²(n\_features) threshold at α = 0.01 are flagged as OOD.
+(`mlops.OODDetector`) is fitted on a **climate/LULC subset** of the
+AMA/INA training features (`x_train`).  Spatially-fixed features
+(coordinates, well density, canal density, streamflow) are excluded so
+that the detector measures **temporal novelty** (unprecedented climate or
+land-use conditions) rather than geographic distance from AMA/INA.
+This ensures irrigated non-AMA/INA areas (e.g. Yuma) with similar
+climate/LULC profiles show low OOD, while pixels experiencing genuinely
+novel conditions (extreme drought, future warming) are flagged regardless
+of location.  The detector computes the Mahalanobis distance from the
+training distribution and converts it to an OOD probability via the
+χ²(n\_features) CDF.
+
+OOD features used: ET, ETo, precipitation, temperature, AGRI density,
+URBAN density, crop fraction, irrigation fraction, GW fraction, AWC,
+Ksat, soil depth.  Excluded: easting, northing, well density, canal
+density, canal-weighted streamflow, streamflow.
 
 A **prediction exceedance check** complements the OOD detector from the
 opposite direction.  While OOD flags feature-space extrapolation, the
@@ -770,12 +778,20 @@ For each year the pipeline:
    `OOD_Rasters/OOD_Summary.csv` after the loop.  An
    `OOD_TimeSeries.png` plot shows OOD percentage by year with era
    shading.  Era-level OOD rates
-   (hindcast 1896–1983, training 1984–2024, projection 2025–2099) are
+   (hindcast 1896–1983, historical 1984–2025, projection 2026–2099) are
    logged with warnings when the mean OOD rate exceeds 10 %.
 4. **Partitions** predictions into eight withdrawal categories via
    `partitionops.partition_predictions()`:
    Irrigation, Non-Irrigation, Irrigation\_GW, Irrigation\_SW,
    Non\_Irrigation\_GW, Non\_Irrigation\_SW, Total\_GW, Total\_SW.
+   Non-irrigation is weighted by the Gaussian-smoothed urban density
+   (`URBAN` column, 0–1) so that rural pixels contribute negligibly to
+   non-agricultural volumes.  The **total** raster is recomputed as
+   `Irrigation + Non_Irrigation` after urban weighting (bottom-up),
+   ensuring conservation-consistent volumes.  For hindcast years
+   (≤1984), the URBAN density is averaged with the 1985 NLCD-derived
+   value to smooth the discontinuity between USGS Historical LULC
+   (single urban class) and NLCD (four developed classes).
 5. **Computes consumptive use (CU)** using USGS NHM basin-level
    irrigation efficiencies:
    ```
@@ -820,19 +836,27 @@ Four temporal eras are distinguished in the plots:
 | Era | Years | Description |
 |---|---|---|
 | Hindcast | 1896–1983 | Pre-metered; predictions only. |
-| Historical | 1984–2024 | Metered period; predictions vs. actuals. |
-| Forecast | 2025 | Transition year. |
+| Historical | 1984–2025 | Metered period; predictions vs. actuals. |
 | Projected | 2026–2099 | Future projections. |
 
-#### 3f. Graphical abstract / Figure 1
+#### Graphical abstract / Figure 1
 
-`vizops.create_graphical_abstract()` produces a two-panel publication figure:
+Generated in Step 3g (after UQ) so that augmented rasters and UQ-derived
+σ_total are available.  `vizops.create_graphical_abstract()` produces a
+three-panel publication figure:
 
 - **Panel (a)**: Spatial map of mean-annual predicted withdrawal depth (mm)
-  across all 204 years (1896–2099), with GW basin boundaries and AMA/INA
-  labels overlaid on a YlOrRd color ramp.
-- **Panel (b)**: Time series of total annual AMA/INA withdrawals (acre-ft) with
-  era shading and an inset bar chart of era-averaged volumes.
+  across all 204 years (1896–2099), with GW basin boundaries and
+  highlighted AMA/INA regions on a Spectral\_r color ramp (2 %–98 %
+  percentile range).  Also saved as a standalone GeoTIFF
+  (`Mean_Annual_Predicted_mm.tif`).
+- **Panel (b)**: Time series of total annual withdrawals with era shading
+  and a ±1σ confidence band.  When UQ has run (Step 3b), the band uses
+  σ\_total from `Uncertainty_Summary_Total.csv`; otherwise falls back to
+  inter-basin spatial variability.  Left axis shows ×10⁶ m³, right axis
+  shows ×1000 acre-ft.
+- **Panel (c)**: Era mean bar chart with 95 % CI error bars, dual volume
+  axes (m³ left, acre-ft right), and in-bar value labels.
 
 Saved as `{prediction_dir}Graphical_Abstract_Fig1.png` (600 dpi).
 
@@ -969,6 +993,12 @@ $$\sigma_{\text{LULC}}(x, y, t) = \text{std}\bigl[\hat{y}_{B1}, \hat{y}_{B2}, \h
 Because σ_LULC re-derives the entire irrigation-fraction chain per
 scenario, it fully subsumes σ_irr for future years.
 
+In addition to the pixel-level σ, per-scenario **volume projections**
+(2026–2099) are saved for total and all 8 category products in
+`Sigma_LULC/Scenario_Volumes/`.  A combined
+`Scenario_Comparison.csv` provides all four scenarios side by side for
+plotting scenario-dependent volume trajectories.
+
 ##### σ_gw — GW fraction inter-snapshot spread (all years, 1896–2099)
 
 USGS groundwater irrigation fraction data are available at four snapshots
@@ -1044,6 +1074,10 @@ Full_Prediction_XGB/Uncertainty/
 │   └── Uncertainty_Summary_Irr.csv
 ├── Sigma_LULC/
 │   ├── Rasters/Sigma_LULC_mm_{year}.tif
+│   ├── Scenario_Volumes/              # Per-scenario volume projections
+│   │   ├── Total_{B1,B2,A1B,A2}.csv  #   Per-scenario total volumes
+│   │   ├── {Category}_{scenario}.csv  #   Per-scenario category volumes
+│   │   └── Scenario_Comparison.csv    #   All scenarios combined
 │   ├── Basin_Sigma_LULC.csv
 │   ├── Subbasin_Sigma_LULC.csv
 │   └── Uncertainty_Summary_LULC.csv
@@ -1241,7 +1275,7 @@ product in the pipeline.  Three types of maps are produced:
 
 **Era-mean maps** (`vizops.create_era_raster_maps()`) — A 2×2 panel figure
 for each raster category showing the temporal mean within each of the four
-eras (Hindcast, Historical, Forecast, Projection).  Groundwater basin
+eras (Hindcast, Historical, Projection).  Groundwater basin
 boundaries (thin gray) and AMA/INA basins (bold dark + labels) are overlaid
 on every panel.  No-data pixels appear as gray background.
 
@@ -1279,7 +1313,7 @@ per-era).  Each figure shows:
 
 Trend maps are generated for: total predicted withdrawal, 8 partition categories,
 and 3 CU categories — each with up to 5 periods (full +
-4 eras), yielding ~60 trend figures.
+3 eras), yielding ~60 trend figures.
 
 **Zonal trend statistics** — For each category × period, per-basin and
 per-sub-basin CSV files are written alongside the trend maps.  Each CSV
@@ -1529,11 +1563,13 @@ Key functions:
 - **`generate_model_visualizations()`** — Scatter, residual, and time series
   plots per model.
 - **`OODDetector`** — Mahalanobis distance-based out-of-distribution
-  detector.  Fitted on training features, it flags prediction-time pixels
-  whose feature vectors exceed the χ²(n\_features) threshold at α = 0.01.
-  Used in `predict_full_period()` to write per-year OOD probability
-  rasters (continuous [0, 1] via χ² CDF), a summary CSV with era-level
-  OOD rate diagnostics, and a time-series plot.
+  detector.  Fitted on a climate/LULC subset of AMA/INA training features
+  (excluding coordinates, well/canal density, streamflow), it produces
+  per-pixel OOD probabilities (continuous [0, 1] via χ² CDF) that
+  measure temporal novelty — how different a pixel's climate and land-use
+  conditions are from the 1984–2025 training era.  Used in
+  `predict_full_period()` to write per-year OOD rasters, a summary CSV
+  with era-level diagnostics, and a time-series plot.
 
 ### `visualops.py` — Visualisation
 
@@ -1549,7 +1585,7 @@ Key functions:
 - **`create_full_period_time_series()`** — Annual withdrawal line plot (1896–
   2099) with era shading and optional observed-data overlay.
 - **`create_era_summary_maps()`** — Spatial maps of mean depth for each era
-  (Hindcast, Historical, Forecast, Projected).
+  (Hindcast, Historical, Projection).
 - **`create_basin_time_series()`** / **`create_subbasin_time_series()`** —
   Per-basin and per-sub-basin annual trends with AMA/INA color coding.
 - **`plot_loo_heatmap()`** / **`plot_loo_bar()`** — Heatmaps and bar plots
@@ -1557,7 +1593,7 @@ Key functions:
 - **`create_cross_strategy_summary()`** — Side-by-side comparison of Random,
   Temporal LOO, and Spatial LOO results with R², RMSE, MAE, MBE, and
   Overfit R².  Produces CSV, LaTeX (`booktabs`), and grouped bar chart.
-- **`create_graphical_abstract()`** — Two-panel Figure 1: (a) mean-annual
+- **`create_graphical_abstract()`** — Three-panel Figure 1: (a) mean-annual
   withdrawal depth map with GW basin boundaries, (b) annual withdrawal time series
   with era shading and inset bar chart.
 - **`create_era_raster_maps()`** — 2×2 panel era-mean spatial maps with
@@ -1633,7 +1669,8 @@ ancillary data already in the predictor stack:
 | Category | Derivation |
 |---|---|
 | **Irrigation** | `total × irr_fraction` (USGS irrigation-fraction raster) |
-| **Non_Irrigation** | `total − Irrigation` |
+| **Non_Irrigation** | `(total − Irrigation) × URBAN` (Gaussian-smoothed urban density, 0–1) |
+| **Total** | `Irrigation + Non_Irrigation` (recomputed after urban weighting) |
 | **Irrigation_GW** | `Irrigation × gw_fraction` (USGS GW-fraction snapshots) |
 | **Irrigation_SW** | `Irrigation − Irrigation_GW` |
 
@@ -1927,7 +1964,7 @@ Data/Outputs/
         ├── Model_Interpretability/          # SHAP, ALE, permutation importance
         │   ├── Hindcast/                    #   Era-specific plots (1896-1983)
         │   ├── Training/                    #   Era-specific plots (1984-2024)
-        │   └── Projection/                  #   Era-specific plots (2025-2099)
+        │   └── Projection/                  #   Era-specific plots (2026-2099)
         ├── Predicted_Rasters/               # Total annual withdrawal (4 units, 6-band)
         │   ├── Depth_mm/
         │   ├── Depth_ft/
@@ -1955,7 +1992,8 @@ Data/Outputs/
         │   ├── Sigma_Total/                 #   Quadrature combination (σ, CV, per-category σ)
         │   ├── Sigma_CU/                    #   CU error-propagation σ
         │   └── Plots/                       #   Time-series plots
-        ├── Graphical_Abstract_Fig1.png         # Publication Figure 1 (map + time series)
+        ├── Graphical_Abstract_Fig1.png         # Publication Figure 1 (map + ts + bar)
+        ├── Mean_Annual_Predicted_mm.tif        # Mean-annual depth GeoTIFF (1896–2099)
         ├── Prediction_Exceedance_Summary.csv   # Per-year exceedance stats
         ├── Raster_Maps/                     # Step 3g — spatial maps for all products
         │   ├── Era_Maps_*.png               #   2×2 era-mean panels per category

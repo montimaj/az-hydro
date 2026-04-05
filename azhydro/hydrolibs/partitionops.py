@@ -163,6 +163,21 @@ def partition_predictions(
     irr = predictions * irr_frac if irr_frac is not None else predictions.copy()
     nonirr = predictions - irr
 
+    # ---- Urban density weighting for non-irrigation ----
+    # Non-irrigation (municipal/industrial) withdrawal is weighted by the
+    # Gaussian-smoothed urban density (URBAN column, 0–1) so that rural
+    # pixels contribute negligibly to non-ag volumes.  Falls back to a
+    # binary LULC == 2 mask if URBAN is unavailable.
+    urban_dens = year_df['URBAN'].values if 'URBAN' in year_df.columns else None
+    if urban_dens is not None:
+        urban_dens = np.clip(np.nan_to_num(urban_dens, nan=0.0), 0, 1)
+        nonirr = nonirr * urban_dens
+    else:
+        lulc = year_df['lulc'].values if 'lulc' in year_df.columns else None
+        if lulc is not None:
+            non_urban = (lulc != 2) | np.isnan(lulc)
+            nonirr[non_urban] = 0.0
+
     # ---- GW / SW split of irrigation ----
     gw_frac = year_df['annual_gw_fraction'].values if 'annual_gw_fraction' in year_df.columns else None
     if gw_frac is not None:
