@@ -10,6 +10,9 @@ import pickle
 import shutil
 import subprocess
 import time
+import warnings
+
+warnings.filterwarnings('ignore', category=DeprecationWarning, module='ee')
 
 import ee
 import geopandas as gpd
