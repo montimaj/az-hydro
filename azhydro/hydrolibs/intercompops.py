@@ -1587,7 +1587,7 @@ def run_intercomparison(
     if ref_raster is None:
         search_patterns = [
             (ml_pred_dir, 'pred_{yr}.tif'),
-            (ml_pred_dir, 'Predicted_GW_{yr}_mm.tif'),
+            (ml_pred_dir, 'Total_Predicted_{yr}_mm.tif'),
         ]
         if irr_gw_dir:
             search_patterns.append((irr_gw_dir, 'Irrigation_GW_{yr}_mm.tif'))

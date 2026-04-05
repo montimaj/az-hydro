@@ -1475,7 +1475,7 @@ def compute_sigma_total(
             {year: 1-D std array}.
             E.g. {'MACA': {...}, 'Model': {...}, 'Irr': {...}, 'GW': {...}}
         prediction_raster_dir (str): Directory containing total-pumping prediction rasters named
-            ``Predicted_GW_{year}_mm.tif``.  Required for CV computation.
+            ``Total_Predicted_{year}_mm.tif``.  Required for CV computation.
         cat_sigma_components (dict or None): Mapping of component name to
             {category: {year: 1-D std array}}.
             When provided, per-category sigma_total is computed via quadrature
@@ -1584,7 +1584,7 @@ def compute_sigma_total(
         sigma_grid = sigma_grid.reshape(raster_shape)
 
         # Compute CV grid from prediction raster
-        pred_file = os.path.join(prediction_raster_dir, f'Predicted_GW_{year}_mm.tif')
+        pred_file = os.path.join(prediction_raster_dir, f'Total_Predicted_{year}_mm.tif')
         if os.path.exists(pred_file):
             pred_arr = read_raster_as_arr(pred_file, get_file=False)
             with np.errstate(invalid='ignore', divide='ignore'):
@@ -2174,7 +2174,7 @@ def augment_prediction_rasters(
     """
     Augment each annual prediction raster with uncertainty bands.
 
-    Rewrites each ``Predicted_GW_{year}_{unit}.tif`` (for mm, ft, m³, AF)
+    Rewrites each ``Total_Predicted_{year}_{unit}.tif`` (for mm, ft, m³, AF)
     as a 6-band GeoTIFF:
 
         1. Prediction (unit)
@@ -2230,7 +2230,7 @@ def augment_prediction_rasters(
         ]
 
         for year in range(start_year, end_year + 1):
-            pred_file = os.path.join(pred_dir, f'Predicted_GW_{year}_{unit}.tif')
+            pred_file = os.path.join(pred_dir, f'Total_Predicted_{year}_{unit}.tif')
             sigma_file = os.path.join(
                 sigma_total_raster_dir, f'Sigma_Total_mm_{year}.tif'
             )
@@ -2935,7 +2935,7 @@ def _replot_from_augmented_rasters(
     _process_group(
         'Total Annual Withdrawal',
         os.path.join(prediction_dir, 'Predicted_Rasters/Depth_mm'),
-        'Predicted_GW_{year}_mm.tif',
+        'Total_Predicted_{year}_mm.tif',
         '',
     )
 

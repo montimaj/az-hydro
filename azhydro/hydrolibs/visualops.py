@@ -2879,7 +2879,7 @@ def create_graphical_abstract(
         with era shading and an inset era bar chart.
 
     Args:
-        raster_dir (str): Directory containing ``Predicted_GW_<year>.tif``
+        raster_dir (str): Directory containing ``Total_Predicted_<year>.tif``
             depth rasters (mm).
         basin_shp (str): Path to GW basin boundary shapefile.
         output_dir (str): Where to save the figure.
@@ -2902,7 +2902,7 @@ def create_graphical_abstract(
     # ---- Compute mean-annual depth from raster stack ----
     raster_files = sorted(
         f for f in os.listdir(raster_dir)
-        if f.startswith('Predicted_GW_') and f.endswith('.tif')
+        if f.startswith('Total_Predicted_') and f.endswith('.tif')
     )
     if not raster_files:
         logger.warning('No rasters found in %s — skipping graphical abstract.', raster_dir)

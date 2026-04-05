@@ -84,7 +84,8 @@ python pipeline.py --steps 0,1,2a         # run only steps 0, 1, and 2a
 python pipeline.py --steps 3              # prediction only
 python pipeline.py --steps 3,3b           # prediction + uncertainty quantification
 python pipeline.py --download --recreate  # force fresh GEE download and file recreation
-python pipeline.py --skip-eda            # skip EDA plot generation
+python pipeline.py --skip-eda            # skip EDA plot generation (auto-skipped when Step 1 not selected)
+python pipeline.py --steps 2s            # regenerate cross-strategy summary from saved results
 ```
 
 Step 0 supports fine-grained sub-step control via `--skip-prep`:
@@ -159,7 +160,7 @@ python pipeline.py --skip-eval pixel,temporal,summary # skip multiple strategies
 | `--download` | — | Force GEE tile download. |
 | `--load-files` | `True` | Skip recreating intermediate files that already exist. |
 | `--recreate` | — | Force recreation of intermediate files. |
-| `--skip-eda` | `False` | Skip EDA plot generation in Step 1. |
+| `--skip-eda` | `False` | Skip EDA plot generation in Step 1. EDA is auto-skipped when Step 1 is not explicitly selected. |
 | `--skip-prep` | — | Comma-separated Step 0 sub-steps to skip. |
 | `--skip-eval` | — | Comma-separated evaluation strategies to skip. |
 | `-v`, `--verbose` | `False` | Enable verbose (DEBUG-level) logging. |
@@ -493,7 +494,7 @@ where α = 0.1 and β = 0.05.
 
 #### Linear bias correction (evaluation)
 
-All four evaluation strategies attempt a **global linear bias correction**
+All five evaluation strategies attempt a **global linear bias correction**
 after prediction for all tree-based models (XGB, LGBM, RF, XGBRF, ETR,
 HGBR, GBR, ADA, BAG, CAT, and PIML variants).  Linear models (LR,
 RIDGE, LASSO) are excluded since a post-hoc linear correction is
@@ -725,12 +726,14 @@ are saved to `{prediction_dir}Model_Interpretability/{Era}/`.
 #### 3b. Annual raster prediction loop (1896–2099)
 
 Before the loop begins, an **out-of-distribution (OOD) detector**
-(`mlops.OODDetector`) is fitted on the training feature matrix.  The
-detector computes the Mahalanobis distance of each prediction-time pixel
-from the training distribution using a regularized covariance matrix.
-Pixels exceeding the χ²(n\_features) threshold at α = 0.01 are flagged as
-OOD — i.e., their feature vector lies outside the region spanned by the
-1984–2024 training data.
+(`mlops.OODDetector`) is fitted on **all Arizona pixels** from the training
+era (1984–2024), not just the AMA/INA training subset.  This ensures that
+spatial extrapolation to non-AMA/INA areas — which is by design — does not
+trigger OOD flags; only genuinely novel temporal conditions (pre-1984
+climate, future projections) are flagged.  The detector computes the
+Mahalanobis distance of each prediction-time pixel from the training-era
+distribution using a regularized covariance matrix.  Pixels exceeding the
+χ²(n\_features) threshold at α = 0.01 are flagged as OOD.
 
 A **prediction exceedance check** complements the OOD detector from the
 opposite direction.  While OOD flags feature-space extrapolation, the
@@ -745,23 +748,28 @@ exceedance statistics are accumulated and written to
 Before the loop, a **global linear bias correction** is learned from all
 AMA/INA training data using `fit_linear_bc()`: `y_corrected = |m × y_pred + b|`,
 where `m` and `b` are fit via OLS on training predictions vs observed values.
-Because the identity (`m=1, b=0`) is in the OLS solution space, the
-correction can only improve or match raw predictions.  A single correction
-is learned from all basins, so it generalizes to non-AMA/INA basins during
-prediction.
+The correction is **only applied if it improves all three metrics** (R²,
+RMSE, and MAE) on the training data, matching the same conditional logic
+used in the LOO evaluation strategies.  A `Global_BC_Summary.csv` records
+before/after metrics and a `BC_Applied` flag.
 
 For each year the pipeline:
 
 1. **Predicts** total annual withdrawals (mm) across all valid pixels.
-1. **Applies global linear bias correction** via `apply_linear_bc()`.
+1. **Applies global linear bias correction** via `apply_linear_bc()` (only
+   if the correction improved R², RMSE, and MAE on training data).
 2. **Checks prediction exceedance** against the training-era per-pixel
    maximum and P99 withdrawal depth.  Pixels exceeding these thresholds are
    counted per year.
 3. **Flags out-of-distribution pixels** via the OOD detector.  Per-year
-   binary flag rasters (`OOD_Flag_{year}.tif`, 1 = OOD, 0 = in-distribution)
-   are written to `OOD_Rasters/`.  Per-year statistics (n\_ood, pct\_ood,
+   probability rasters (`OOD_Flag_{year}.tif`, continuous values in [0, 1]
+   where 0 = in-distribution and 1 = OOD) are written to `OOD_Rasters/`.
+   Probabilities are derived from the χ²(n\_features) CDF of the squared
+   Mahalanobis distance.  Per-year statistics (n\_ood, pct\_ood,
    mean/max Mahalanobis d²) are accumulated and written to
-   `OOD_Rasters/OOD_Summary.csv` after the loop.  Era-level OOD rates
+   `OOD_Rasters/OOD_Summary.csv` after the loop.  An
+   `OOD_TimeSeries.png` plot shows OOD percentage by year with era
+   shading.  Era-level OOD rates
    (hindcast 1896–1983, training 1984–2024, projection 2025–2099) are
    logged with warnings when the mean OOD rate exceeds 10 %.
 4. **Partitions** predictions into eight withdrawal categories via
@@ -782,10 +790,10 @@ For each year the pipeline:
 
 | Product | Units written | File naming |
 |---|---|---|
-| Total annual withdrawal | mm, ft, m³, AF | `Predicted_GW_{year}_{unit}.tif` |
+| Total annual withdrawal | mm, ft, m³, AF | `Total_Predicted_{year}_{unit}.tif` |
 | 8 withdrawal categories | mm, ft, m³, AF | `{Category}_{year}_{unit}.tif` |
 | 3 CU categories | mm, ft, m³, AF | `{CU_Category}_{year}_{unit}.tif` |
-| OOD flags | binary (0/1) | `OOD_Flag_{year}.tif` |
+| OOD probability | continuous [0, 1] | `OOD_Flag_{year}.tif` |
 
 7. **Accumulates statistics** for AZ-wide, per-basin, and per-sub-basin
    totals (volume in m³ and AF, mean depth in mm) for every category.
@@ -1240,7 +1248,7 @@ on every panel.  No-data pixels appear as gray background.
 | Category group | Colormap | Count |
 |---|---|---|
 | Total predicted withdrawal + 8 partition categories + 3 CU | `YlOrRd` | 12 figures |
-| OOD flags (mean fraction) | `RdYlGn_r` | 1 figure |
+| OOD probability (mean) | `RdYlGn_r` | 1 figure |
 | 6 sigma components — band 1 (σ in mm) | `Purples` | 6 figures |
 | 6 sigma components — band 2 (CV) | `inferno` | 6 figures |
 | Augmented prediction CV (band 3) and SNR (band 4) | `inferno` / `viridis` | 2 figures |
@@ -1523,8 +1531,9 @@ Key functions:
 - **`OODDetector`** — Mahalanobis distance-based out-of-distribution
   detector.  Fitted on training features, it flags prediction-time pixels
   whose feature vectors exceed the χ²(n\_features) threshold at α = 0.01.
-  Used in `predict_full_period()` to write per-year OOD flag rasters and
-  a summary CSV with era-level OOD rate diagnostics.
+  Used in `predict_full_period()` to write per-year OOD probability
+  rasters (continuous [0, 1] via χ² CDF), a summary CSV with era-level
+  OOD rate diagnostics, and a time-series plot.
 
 ### `visualops.py` — Visualisation
 
@@ -1926,9 +1935,17 @@ Data/Outputs/
         │   └── Volume_AF/
         ├── {Category}_Rasters/              # 8 withdrawal categories (4 units, 6-band)
         ├── Irrigation_CU_Rasters/           # CU (4 units, 6-band)
+        ├── Annual_Summaries/                # Cached per-year stats (for fast re-runs)
+        │   ├── Total_Predicted.csv          #   AZ-wide total predicted stats
+        │   ├── {Category}.csv               #   Per-category stats
+        │   ├── {CU_Category}.csv            #   Consumptive use stats
+        │   ├── Actual.csv                   #   Metered actual stats (1984–2024)
+        │   ├── Basin_Total.csv              #   Per-basin stats
+        │   └── Subbasin_Total.csv           #   Per-sub-basin stats
         ├── OOD_Rasters/                     # Out-of-distribution detection
-        │   ├── OOD_Flag_{year}.tif          #   Binary flag (1=OOD, 0=in-distribution)
-        │   └── OOD_Summary.csv              #   Per-year OOD statistics
+        │   ├── OOD_Flag_{year}.tif          #   OOD probability [0,1] (χ² CDF)
+        │   ├── OOD_Summary.csv              #   Per-year OOD statistics
+        │   └── OOD_TimeSeries.png           #   OOD % by year with era shading
         ├── Uncertainty/                     # Hybrid uncertainty quantification
         │   ├── Sigma_MACA/                  #   Inter-GCM climate spread
         │   ├── Sigma_Model/                 #   Seed ensemble spread

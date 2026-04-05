@@ -31,6 +31,7 @@ import os
 import pickle
 
 import geopandas as gpd
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import hydrolibs.dataops as dataops
@@ -1429,6 +1430,7 @@ def _write_multi_unit_rasters(
             grid, raster_file_obj,
             raster_file_obj.transform, out_path,
             no_data_value=np.nan,
+            num_bands=1,
         )
         raster_file_obj.close()
 
@@ -1529,10 +1531,6 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     # ---- 3b. Predict pumping for each year 1896-2099 ----
     logger.info('Predicting pumping for all years 1896-2099...')
 
-    # Fit out-of-distribution detector on training features
-    ood_detector = mlops.OODDetector(alpha=0.01)
-    ood_detector.fit(x_train)
-
     # Per-pixel prediction range check — training-era ceiling.
     # Modern pump infrastructure sets a physical upper bound on per-pixel
     # withdrawal rates.  Predictions exceeding the training-era maximum
@@ -1560,25 +1558,61 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     makedirs(bc_dir)
 
     bc_m, bc_b = mlops.fit_linear_bc(train_preds, y_train_orig)
-
-    raw_rmse = float(np.sqrt(np.mean((y_train_orig - train_preds) ** 2)))
     linear_corrected = mlops.apply_linear_bc(train_preds, bc_m, bc_b)
-    linear_rmse = float(np.sqrt(np.mean((y_train_orig - linear_corrected) ** 2)))
+
+    # Check if BC improves R2, RMSE, and MAE (same logic as LOO)
+    from sklearn.metrics import r2_score
+    raw_r2 = r2_score(y_train_orig, train_preds)
+    bc_r2 = r2_score(y_train_orig, linear_corrected)
+    raw_rmse = mlops.normalized_rmse(y_train_orig, train_preds)
+    bc_rmse = mlops.normalized_rmse(y_train_orig, linear_corrected)
+    raw_mae = mlops.normalized_mae(y_train_orig, train_preds)
+    bc_mae = mlops.normalized_mae(y_train_orig, linear_corrected)
+
+    bc_improved = (bc_r2 >= raw_r2 and bc_rmse <= raw_rmse and bc_mae <= raw_mae)
 
     bc_summary = pd.DataFrame([{
         'Slope': round(bc_m, 4),
         'Intercept': round(bc_b, 4),
         'N_Samples': len(train_preds),
+        'Raw_R2': round(raw_r2, 4),
+        'BC_R2': round(bc_r2, 4),
         'Raw_RMSE': round(raw_rmse, 4),
-        'Linear_RMSE': round(linear_rmse, 4),
+        'BC_RMSE': round(bc_rmse, 4),
+        'Raw_MAE': round(raw_mae, 4),
+        'BC_MAE': round(bc_mae, 4),
+        'BC_Applied': bc_improved,
     }])
     bc_summary.to_csv(os.path.join(bc_dir, 'Global_BC_Summary.csv'), index=False)
-    logger.info(
-        'Raw RMSE=%.4f, Linear RMSE=%.4f, N=%d',
-        raw_rmse, linear_rmse, len(train_preds),
-    )
+
+    if bc_improved:
+        logger.info(
+            'BC improved all metrics — will apply. '
+            'R2: %.4f->%.4f, RMSE: %.2f->%.2f, MAE: %.2f->%.2f',
+            raw_r2, bc_r2, raw_rmse, bc_rmse, raw_mae, bc_mae,
+        )
+    else:
+        logger.warning(
+            'BC did NOT improve all metrics — skipping. '
+            'R2: %.4f->%.4f, RMSE: %.2f->%.2f, MAE: %.2f->%.2f',
+            raw_r2, bc_r2, raw_rmse, bc_rmse, raw_mae, bc_mae,
+        )
 
     feature_cols = list(x_train.columns)
+
+    # Fit out-of-distribution detector on all-Arizona features from the
+    # training era (not just AMA/INA x_train) so that spatial extrapolation
+    # to non-AMA/INA pixels is expected, and only temporal extrapolation
+    # (novel climate/land-use conditions) triggers OOD flags.
+    ood_detector = mlops.OODDetector(alpha=0.01)
+    all_az_train = az_df[az_df.Year.isin(YEAR_LIST)].copy()
+    drop_list_ood = [a for a in DROP_ATTRS if a in all_az_train.columns]
+    all_az_features = all_az_train.drop(
+        columns=drop_list_ood + ['gw_pumping_mm'], errors='ignore'
+    )[feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0)
+    ood_detector.fit(all_az_features)
+    del all_az_train, all_az_features
+
     raster_dir = os.path.join(prediction_dir, 'Predicted_Rasters')
     raster_dirs = {
         'mm': os.path.join(raster_dir, 'Depth_mm'),
@@ -1663,7 +1697,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         pixels), so "no data" is distinguishable from "zero pumping".
         """
         n = len(pred_vals)
-        if n == 0:
+        if n == 0 or np.all(np.isnan(pred_vals)):
             return {
                 'Mean_Depth_mm': np.nan,
                 'Mean_Depth_ft': np.nan,
@@ -1712,7 +1746,111 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     era_features: dict[str, list[pd.DataFrame]] = {e: [] for e in ERA_BOUNDS}
     ERA_SAMPLE_PER_YEAR = 2000  # max pixels sampled per year per era
 
+    # CSV paths for cached annual summaries
+    _summary_dir = os.path.join(prediction_dir, 'Annual_Summaries')
+    makedirs(_summary_dir)
+    _total_csv = os.path.join(_summary_dir, 'Total_Predicted.csv')
+    _cat_csvs = {cat: os.path.join(_summary_dir, f'{cat}.csv') for cat in partops.CATEGORIES}
+    _cu_csvs = {cu: os.path.join(_summary_dir, f'{cu}.csv') for cu in CU_CATEGORIES}
+    _actual_csv = os.path.join(_summary_dir, 'Actual.csv')
+    _basin_csv = os.path.join(_summary_dir, 'Basin_Total.csv')
+    _subbasin_csv = os.path.join(_summary_dir, 'Subbasin_Total.csv')
+
+    def _save_yearly_summary():
+        """Save all yearly summary dicts to CSVs."""
+        # Total
+        rows = [{'Year': y, **v} for y, v in sorted(yearly_predictions.items())]
+        if rows:
+            pd.DataFrame(rows).to_csv(_total_csv, index=False)
+        # Categories
+        for cat in partops.CATEGORIES:
+            rows = [{'Year': y, **v} for y, v in sorted(cat_yearly[cat].items())]
+            if rows:
+                pd.DataFrame(rows).to_csv(_cat_csvs[cat], index=False)
+        # CU
+        for cu in CU_CATEGORIES:
+            rows = [{'Year': y, **v} for y, v in sorted(cu_yearly[cu].items())]
+            if rows:
+                pd.DataFrame(rows).to_csv(_cu_csvs[cu], index=False)
+        # Actuals
+        rows = [{'Year': y, **v} for y, v in sorted(actual_yearly.items())]
+        if rows:
+            pd.DataFrame(rows).to_csv(_actual_csv, index=False)
+        # Basin totals (flat: Year, Basin, metrics)
+        b_rows = []
+        for y, btotals in sorted(basin_yearly.items()):
+            for b, metrics in btotals.items():
+                b_rows.append({'Year': y, 'Basin': b, **metrics})
+        if b_rows:
+            pd.DataFrame(b_rows).to_csv(_basin_csv, index=False)
+        # Sub-basin totals
+        sb_rows = []
+        for y, sbtotals in sorted(subbasin_yearly.items()):
+            for sb, metrics in sbtotals.items():
+                sb_rows.append({'Year': y, 'Subbasin': sb, **metrics})
+        if sb_rows:
+            pd.DataFrame(sb_rows).to_csv(_subbasin_csv, index=False)
+        logger.info('Annual summaries saved to %s', _summary_dir)
+
+    def _load_yearly_summary() -> bool:
+        """Load yearly summary dicts from CSVs. Returns True if loaded."""
+        if not os.path.isfile(_total_csv):
+            return False
+        df = pd.read_csv(_total_csv)
+        for _, row in df.iterrows():
+            yearly_predictions[int(row['Year'])] = {
+                k: row[k] for k in row.index if k != 'Year'}
+        for cat in partops.CATEGORIES:
+            if os.path.isfile(_cat_csvs[cat]):
+                cdf = pd.read_csv(_cat_csvs[cat])
+                for _, row in cdf.iterrows():
+                    cat_yearly[cat][int(row['Year'])] = {
+                        k: row[k] for k in row.index if k != 'Year'}
+        for cu in CU_CATEGORIES:
+            if os.path.isfile(_cu_csvs[cu]):
+                cudf = pd.read_csv(_cu_csvs[cu])
+                for _, row in cudf.iterrows():
+                    cu_yearly[cu][int(row['Year'])] = {
+                        k: row[k] for k in row.index if k != 'Year'}
+        if os.path.isfile(_actual_csv):
+            adf = pd.read_csv(_actual_csv)
+            for _, row in adf.iterrows():
+                actual_yearly[int(row['Year'])] = {
+                    k: row[k] for k in row.index if k != 'Year'}
+        if os.path.isfile(_basin_csv):
+            bdf = pd.read_csv(_basin_csv)
+            for y, grp in bdf.groupby('Year'):
+                basin_yearly[int(y)] = {
+                    row['Basin']: {k: row[k] for k in row.index
+                                   if k not in ('Year', 'Basin')}
+                    for _, row in grp.iterrows()}
+        if os.path.isfile(_subbasin_csv):
+            sbdf = pd.read_csv(_subbasin_csv)
+            for y, grp in sbdf.groupby('Year'):
+                subbasin_yearly[int(y)] = {
+                    row['Subbasin']: {k: row[k] for k in row.index
+                                      if k not in ('Year', 'Subbasin')}
+                    for _, row in grp.iterrows()}
+        logger.info('Loaded annual summaries from %s', _summary_dir)
+        return True
+
+    # Check if all rasters already exist — load summaries from CSV
+    _first_tif = os.path.join(raster_dirs['mm'], f'Total_Predicted_{START_YEAR}_mm.tif')
+    _last_tif = os.path.join(raster_dirs['mm'], f'Total_Predicted_{END_YEAR}_mm.tif')
+    _all_tifs_exist = os.path.isfile(_first_tif) and os.path.isfile(_last_tif)
+    _skip_loop = _all_tifs_exist and _load_yearly_summary()
+    if _skip_loop:
+        logger.info('All rasters and summaries exist, skipping prediction loop.')
+
     for year in range(START_YEAR, END_YEAR + 1):
+        if _skip_loop:
+            break
+        # Skip year if raster already exists
+        year_tif = os.path.join(raster_dirs['mm'], f'Total_Predicted_{year}_mm.tif')
+        if os.path.isfile(year_tif):
+            logger.info(f'  Year {year}: rasters exist, skipping.')
+            continue
+
         year_df = az_df[az_df.Year == year].copy()
         if year_df.empty:
             logger.warning(f'No data for year {year}, skipping.')
@@ -1760,8 +1898,9 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             predictions = np.expm1(predictions)
         predictions = np.abs(predictions)
 
-        # Apply global linear bias correction
-        predictions = mlops.apply_linear_bc(predictions, bc_m, bc_b)
+        # Apply global linear bias correction (only if it improved all metrics)
+        if bc_improved:
+            predictions = mlops.apply_linear_bc(predictions, bc_m, bc_b)
 
         # Per-pixel prediction range check against training-era ceiling
         n_pixels = len(predictions)
@@ -1779,20 +1918,22 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         })
 
         # Out-of-distribution detection
-        ood_stats = ood_detector.score_and_summarise(pred_features, year=year)
-        ood_stats['year'] = year
-        ood_summary.append(ood_stats)
-        # Write OOD flag raster (1 = OOD, 0 = in-distribution)
-        ood_flags = ood_detector.is_ood(pred_features).astype(np.float32)
-        ood_raster = _valid_pixels_to_raster(ood_flags, valid_mask, raster_shape)
-        _, ood_ref_obj = read_raster_as_arr(ref_raster_file, get_file=True)
-        write_raster(
-            ood_raster, ood_ref_obj,
-            ood_ref_obj.transform,
-            os.path.join(ood_raster_dir, f'OOD_Flag_{year}.tif'),
-            no_data_value=np.nan,
-        )
-        ood_ref_obj.close()
+        ood_tif = os.path.join(ood_raster_dir, f'OOD_Flag_{year}.tif')
+        if not os.path.isfile(ood_tif):
+            ood_stats = ood_detector.score_and_summarise(pred_features, year=year)
+            ood_stats['year'] = year
+            ood_summary.append(ood_stats)
+            # Write OOD probability raster (0 = in-distribution, 1 = OOD)
+            ood_flags = ood_detector.ood_probability(pred_features).astype(np.float32)
+            ood_raster = _valid_pixels_to_raster(ood_flags, valid_mask, raster_shape)
+            _, ood_ref_obj = read_raster_as_arr(ref_raster_file, get_file=True)
+            write_raster(
+                ood_raster, ood_ref_obj,
+                ood_ref_obj.transform, ood_tif,
+                no_data_value=np.nan,
+                num_bands=1,
+            )
+            ood_ref_obj.close()
 
         # Partition into irrigation/non-irrigation and GW/SW categories
         cat_predictions = partops.partition_predictions(
@@ -1804,7 +1945,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         # the 'OUTSIDE AZ' filter in create_az_data_parquet.
         pred_mm = _valid_pixels_to_raster(predictions, valid_mask, raster_shape)
         _write_multi_unit_rasters(
-            pred_mm, raster_dirs, 'Predicted_GW', year,
+            pred_mm, raster_dirs, 'Total_Predicted', year,
             ref_raster_file, mm_to_ft, mm_to_m3, m3_to_af,
         )
 
@@ -1922,6 +2063,10 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                 f'  |  CU = {cu_af:,.0f} AF'
             )
 
+    # Save annual summaries to CSV for fast reload on re-runs
+    if not _skip_loop:
+        _save_yearly_summary()
+
     # ---- 3c. Era summary maps (time series plots deferred to UQ step) ----
     vizops.create_era_summary_maps(yearly_predictions, prediction_dir)
 
@@ -1955,10 +2100,15 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         )
 
     # Write OOD summary CSV
+    ood_csv = os.path.join(ood_raster_dir, 'OOD_Summary.csv')
     if ood_summary:
         ood_df = pd.DataFrame(ood_summary)
-        ood_csv = os.path.join(ood_raster_dir, 'OOD_Summary.csv')
         ood_df.to_csv(ood_csv, index=False)
+    elif os.path.isfile(ood_csv):
+        ood_df = pd.read_csv(ood_csv)
+        ood_summary = ood_df.to_dict('records')
+        logger.info('Loaded existing OOD summary from %s', ood_csv)
+    if ood_summary:
         total_ood_pct = ood_df['pct_ood'].mean()
         logger.info(
             'OOD summary: mean %.1f%% OOD pixels across %d years. '
@@ -1982,6 +2132,24 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                     )
                 else:
                     logger.info('OOD %s: %.1f%% mean OOD rate', era, era_pct)
+
+        # Time-series plot of OOD percentage by year with era shading
+        vizops.apply_journal_style()
+        fig, ax = plt.subplots(figsize=(12, 4))
+        ax.plot(ood_df['year'], ood_df['pct_ood'], linewidth=1, color='#d62728')
+        ax.set_xlabel('Year', fontweight='bold')
+        ax.set_ylabel('OOD Pixels (%)', fontweight='bold')
+        ax.set_title('Out-of-Distribution Pixel Fraction by Year', fontweight='bold')
+        era_colors = {'Hindcast': '#2ca02c', 'Training': '#1f77b4', 'Projection': '#ff7f0e'}
+        for era_name, (y1, y2) in ERA_BOUNDS.items():
+            ax.axvspan(y1, y2, alpha=0.1, color=era_colors.get(era_name, 'gray'),
+                       label=era_name)
+        ax.legend(loc='upper right')
+        ax.set_xlim(START_YEAR, END_YEAR)
+        plt.tight_layout()
+        fig.savefig(os.path.join(ood_raster_dir, 'OOD_TimeSeries.png'), dpi=600)
+        plt.close()
+        logger.info('OOD time-series plot saved to %s', ood_raster_dir)
 
     # Write prediction exceedance summary CSV
     if exceedance_summary:
@@ -2037,7 +2205,6 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         # SHAP plots (TreeExplainer; SHAP values remain in log1p space)
         mlops.compute_shap_plots(
             model_name, model, era_df, era_dir,
-            log_target=LOG_TARGET,
         )
 
         # ALE plots (use era features for both train/test since we only
@@ -2180,15 +2347,15 @@ def create_all_raster_maps() -> None:
             cmap='YlOrRd',
         )
 
-    # ── OOD Rasters (binary flags) ──────────────────────────────────
+    # ── OOD Rasters (probability, 0 = in-distribution, 1 = OOD) ─────
     ood_dir = os.path.join(prediction_dir, 'OOD_Rasters')
     if os.path.isdir(ood_dir):
         vizops.create_era_raster_maps(
             raster_dir=ood_dir,
             basin_shp=AZ_GW_BASIN,
             output_dir=maps_dir,
-            title='Out-of-Distribution Flag',
-            unit_label='Mean OOD Fraction',
+            title='Out-of-Distribution Probability',
+            unit_label='Mean OOD Probability',
             cmap='RdYlGn_r',
         )
 

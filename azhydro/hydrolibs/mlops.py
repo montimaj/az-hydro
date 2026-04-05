@@ -3318,6 +3318,23 @@ class OODDetector:
         """
         return self.mahalanobis(x) > self.threshold_
 
+    def ood_probability(self, x: np.ndarray | pd.DataFrame) -> np.ndarray:
+        """Compute OOD probability for each sample.
+
+        Converts the squared Mahalanobis distance to a probability using
+        the survival function of the χ²(n_features) distribution.
+        Values near 0 indicate in-distribution; values near 1 indicate OOD.
+
+        Args:
+            x: Feature matrix of shape (n_samples, n_features).
+
+        Returns:
+            np.ndarray: OOD probabilities in [0, 1] of shape (n_samples,).
+        """
+        from scipy.stats import chi2
+        d2 = self.mahalanobis(x)
+        return chi2.cdf(d2, df=self.n_features_)
+
     def score_and_summarise(
         self,
         x: np.ndarray | pd.DataFrame,

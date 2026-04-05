@@ -274,7 +274,7 @@ def create_well_package(
     mm_to_m3 = pixel_area_m2 / 1000
 
     # ---- Pre-allocate output array ----
-    cat_mm_info = [('Total', raster_dirs['mm'], 'Predicted_GW')]
+    cat_mm_info = [('Total', raster_dirs['mm'], 'Total_Predicted')]
     for cat in CATEGORIES:
         cat_mm_info.append((cat, cat_raster_dirs[cat]['mm'], cat))
     if cu_raster_dirs:
