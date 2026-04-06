@@ -1879,6 +1879,14 @@ def create_train_test_data(
         drop_attr = list(drop_attr)
         if year_list and year_col in input_df.columns:
             input_df = input_df[input_df[year_col].isin(year_list)]
+        # Drop partitioning-only columns early (before dropna) so that
+        # columns with intentional NaN (e.g. sw_access_year) don't cause
+        # valid training rows to be discarded.
+        early_drop = [c for c in drop_attr
+                      if c in input_df.columns and c not in
+                      (year_col, gw_basin_col, 'easting_m', 'northing_m')]
+        if early_drop:
+            input_df = input_df.drop(columns=early_drop)
         cols_before = set(input_df.columns)
         input_df = input_df.replace([np.inf, -np.inf], np.nan).dropna(axis=1, how='all')
         dropped_cols = sorted(cols_before - set(input_df.columns))

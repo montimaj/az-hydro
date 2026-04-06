@@ -1303,7 +1303,6 @@ def explore_az_data(
         skip_cols: tuple[str, ...] = ('easting_m', 'northing_m'),
         static_cols: tuple[str, ...] = (
             'soil_depth_mm', 'awc_mm', 'ksat_mean_micromps',
-            'canal_density', 'well_density',
         ),
         figsize_ts: tuple[float, float] = (14, 5),
         figsize_box: tuple[float, float] = (14, 6),
