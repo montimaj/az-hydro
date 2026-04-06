@@ -60,7 +60,7 @@ import pandas as pd
 import rasterio as rio
 
 from hydrolibs.partitionops import CATEGORIES
-from hydrolibs.sysops import makedirs
+from hydrolibs.sysops import NON_CONSUMPTIVE_USES, derive_well_start_year, makedirs
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +201,10 @@ def create_well_package(
 
     # ---- Load well registry ----
     wells = gpd.read_file(well_registry_file)
+    # Drop non-consumptive wells (monitoring, test, dewatering, etc.)
+    pattern = '|'.join(NON_CONSUMPTIVE_USES)
+    has_use = wells['WATER_USE'].notna()
+    wells = wells[has_use & ~wells['WATER_USE'].str.contains(pattern, na=False)]
     if water_use:
         wells = wells[wells['WATER_USE'] == water_use]
     wells = wells[wells.geometry.notnull()].copy()
@@ -248,20 +252,7 @@ def create_well_package(
     pixel_keys = pixel_rc[:, 0] * 1_000_000 + pixel_rc[:, 1]
 
     # ---- Derive well start year (INSTALLED → APPLICATIO → conservative) ----
-    # 1899 is a sentinel value in the ADWR registry meaning "unknown"
-    _SENTINEL_YEAR = 1899
-    well_start_year = np.full(n_wells, start_year, dtype=np.int32)
-    for date_col in ('INSTALLED', 'APPLICATIO'):
-        if date_col not in wells.columns:
-            continue
-        dates = pd.to_datetime(wells[date_col], errors='coerce')
-        years = dates.dt.year
-        fill_mask = ((well_start_year == start_year) & dates.notnull()
-                     & (years != _SENTINEL_YEAR))
-        well_start_year[fill_mask] = years[fill_mask].values
-    n_fallback = (well_start_year == start_year).sum()
-    logger.info(f'  Well start years: {n_wells - n_fallback} from registry dates, '
-                f'{n_fallback} using conservative default ({start_year})')
+    well_start_year = derive_well_start_year(wells, default_year=start_year)
 
     # ---- Base capacity weights (before year-filtering) ----
     raw_weight = _compute_capacity_weights(wells, pixel_keys, gw_vector_dir,

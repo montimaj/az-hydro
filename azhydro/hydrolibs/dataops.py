@@ -289,6 +289,7 @@ def download_gee_tif(
         'ksat_mean_micromps': 800,
         'annual_gw_fraction': 60,
         'annual_crop_fraction': 30 if 1985 <= year <= 2025 else 250,
+        'annual_urban_fraction': 30 if 1985 <= year <= 2025 else 250,
         'annual_irr_fraction': 30
     }
     data_img = data_bands[0].rename(data_band_name_list[0])
@@ -308,7 +309,7 @@ def download_gee_tif(
         if gee_scale > 30:
             if band_name == 'lulc':
                 reducer = ee.Reducer.mode(maxRaw=max_pixels)
-            elif band_name in ['annual_irr_fraction', 'annual_crop_fraction']:
+            elif band_name in ['annual_irr_fraction', 'annual_crop_fraction', 'annual_urban_fraction']:
                 reducer = ee.Reducer.count()
             elif band_scale < 1000:
                 reducer = ee.Reducer.mean()
@@ -328,7 +329,7 @@ def download_gee_tif(
                     crs=crs,
                     scale=band_scale
                 ).reproject(crs, scale=gee_scale)
-        if band_name in ['annual_irr_fraction', 'annual_crop_fraction']:
+        if band_name in ['annual_irr_fraction', 'annual_crop_fraction', 'annual_urban_fraction']:
             band = band.multiply(band_scale ** 2).divide(gee_scale ** 2)
             band = band.where(band.gt(1), 1)
         if 'precip' in band_name:
@@ -691,6 +692,9 @@ def download_gee_tile(
         # calculate crop fraction from lulc
         crop_mask = lulc.eq(1)
         crop_mask = lulc.updateMask(crop_mask).rename('annual_crop_fraction')
+        # calculate urban fraction from lulc (physical density, for partitioning)
+        urban_mask = lulc.eq(2)
+        urban_mask = lulc.updateMask(urban_mask).rename('annual_urban_fraction')
         data_bands = [
             actual_et,
             annual_eto,
@@ -705,6 +709,7 @@ def download_gee_tile(
             ksat_mean,
             gw_fraction,
             crop_mask,
+            urban_mask,
             irr_mask
         ]
         download_gee_tif(
@@ -782,6 +787,7 @@ def download_gee_data(
         'ksat_mean_micromps',
         'annual_gw_fraction',
         'annual_crop_fraction',
+        'annual_urban_fraction',
         'annual_irr_fraction'
     ]
     if not skip_download:
@@ -969,6 +975,212 @@ def reproject_gee_mosaics(
             )
 
 
+def _apply_basin_scale_lulc_delta(
+        data_df: pd.DataFrame,
+        nlcd_hist_year: int = 1985,
+        nlcd_proj_year: int = 2025,
+        usgs_hist_baseline_year: int = 1984,
+        foresce_baseline_year: int = 2026,
+        csv_output_path: str | None = None,
+) -> pd.DataFrame:
+    """Apply basin-scale multiplicative delta correction to LULC-derived
+    columns for off-NLCD years (hindcast <1985 and projection >2025).
+
+    Bias-corrects URBAN/AGRI/annual_crop_fraction/annual_urban_fraction so
+    that their temporal trajectory reflects USGS (for <1985) and FORE-SCE
+    (for >2025) basin-scale relative change, anchored to NLCD's pixel-level
+    spatial pattern at the training-period boundaries (1985 for hindcast,
+    2025 for projection). URBAN and annual_urban_fraction use delta from
+    LULC class 2 (urban); AGRI and annual_crop_fraction use delta from
+    LULC class 1 (ag). Years in [nlcd_hist_year, nlcd_proj_year] are
+    untouched.
+
+    The baseline year is the USGS/FORE-SCE year that **lines up with** the
+    NLCD anchor (1984 pairs with NLCD 1985; 2026 pairs with NLCD 2025),
+    so delta(boundary_year, B) = 1 exactly and the sign of relative change
+    is physically correct: a growing basin has delta(earlier year) < 1
+    (giving smaller values than the anchor) and delta(later year) > 1.
+
+    Analogous to the existing climate bias-correction approach (gridMET
+    factors on MACA future, Hargreaves/gridMET ratio on PRISM historical).
+
+    Args:
+        data_df: Arizona predictor DataFrame, after GW_Basin name mapping
+            (so OUTSIDE AZ pixels are removed and each year has identical
+            pixel layout).
+        nlcd_hist_year: Start year of NLCD era (pattern anchor for hindcast).
+        nlcd_proj_year: End year of NLCD era (pattern anchor for projection).
+        usgs_hist_baseline_year: USGS Historical year paired with NLCD
+            hist anchor (must be the year immediately before
+            nlcd_hist_year — defaults to 1984).
+        foresce_baseline_year: FORE-SCE year paired with NLCD proj anchor
+            (must be the year immediately after nlcd_proj_year — defaults
+            to 2026).
+        csv_output_path: If provided, write per-basin, per-year, per-class
+            delta values to this CSV for diagnostic inspection.
+
+    Returns:
+        Modified data_df with corrected URBAN/AGRI/crop_fraction/
+        urban_fraction columns for off-NLCD years.
+    """
+    required = {'lulc', 'GW_Basin', 'Year'}
+    if not required.issubset(data_df.columns):
+        logger.warning(
+            'Skipping basin-delta correction: missing %s',
+            required - set(data_df.columns),
+        )
+        return data_df
+
+    cols_cls = {
+        'URBAN': 2,
+        'annual_urban_fraction': 2,
+        'AGRI': 1,
+        'annual_crop_fraction': 1,
+    }
+    present_cols = {c: k for c, k in cols_cls.items() if c in data_df.columns}
+    if not present_cols:
+        logger.warning('Skipping basin-delta: no target columns present.')
+        return data_df
+
+    # Sanity: NLCD-anchor years must be present
+    years_in_df = set(int(y) for y in data_df['Year'].unique())
+    if nlcd_hist_year not in years_in_df or nlcd_proj_year not in years_in_df:
+        logger.warning(
+            'Skipping basin-delta: anchor years %d/%d not in data_df.',
+            nlcd_hist_year, nlcd_proj_year,
+        )
+        return data_df
+
+    logger.info('Applying basin-scale LULC delta correction...')
+
+    # --- Compute yearly basin class fractions from raw lulc column ---
+    # {year: {class: {basin: frac}}}
+    basin_class_fractions: dict[int, dict[int, dict[str, float]]] = {}
+    for year, year_df in data_df.groupby('Year'):
+        y = int(year)
+        basin_class_fractions[y] = {}
+        basin_groups = year_df.groupby('GW_Basin')['lulc']
+        for cls in (1, 2):
+            basin_class_fractions[y][cls] = basin_groups.apply(
+                lambda x, c=cls: float((x == c).mean())
+            ).to_dict()
+
+    basins = sorted(data_df['GW_Basin'].unique())
+
+    # Single-year baselines paired with their respective NLCD anchors so
+    # that delta(baseline_year, B) = 1 exactly. In a growing basin,
+    # delta(earlier year) < 1 < delta(later year).
+    if (usgs_hist_baseline_year not in basin_class_fractions
+            or foresce_baseline_year not in basin_class_fractions):
+        logger.warning(
+            'Skipping basin-delta: baseline years %d/%d not in data_df.',
+            usgs_hist_baseline_year, foresce_baseline_year,
+        )
+        return data_df
+    hist_baseline = {
+        cls: {b: basin_class_fractions[usgs_hist_baseline_year][cls].get(b, 0.0)
+              for b in basins}
+        for cls in (1, 2)
+    }
+    proj_baseline = {
+        cls: {b: basin_class_fractions[foresce_baseline_year][cls].get(b, 0.0)
+              for b in basins}
+        for cls in (1, 2)
+    }
+
+    # After OUTSIDE AZ filter, each year has identical pixel count and
+    # identical per-row GW_Basin membership (same raster grid every year).
+    n_pixels_hist = int((data_df['Year'] == nlcd_hist_year).sum())
+    n_pixels_proj = int((data_df['Year'] == nlcd_proj_year).sum())
+    if n_pixels_hist != n_pixels_proj or n_pixels_hist == 0:
+        logger.warning(
+            'Skipping basin-delta: anchor-year pixel counts differ (%d vs %d).',
+            n_pixels_hist, n_pixels_proj,
+        )
+        return data_df
+
+    # Reference: per-row basin membership for any single year (same across years)
+    ref_basins_series = data_df.loc[
+        data_df['Year'] == nlcd_hist_year, 'GW_Basin'
+    ].reset_index(drop=True)
+
+    # Pre-cache NLCD anchor column values for fast lookup
+    anchor_vals = {
+        'hist': {c: data_df.loc[data_df['Year'] == nlcd_hist_year, c]
+                 .reset_index(drop=True).values
+                 for c in present_cols},
+        'proj': {c: data_df.loc[data_df['Year'] == nlcd_proj_year, c]
+                 .reset_index(drop=True).values
+                 for c in present_cols},
+    }
+
+    # Diagnostics accumulator
+    delta_rows = []
+
+    # Apply correction year by year
+    target_years = sorted(
+        y for y in basin_class_fractions
+        if y < nlcd_hist_year or y > nlcd_proj_year
+    )
+    for y in target_years:
+        is_hist = y < nlcd_hist_year
+        baseline_cls = hist_baseline if is_hist else proj_baseline
+        anchor_set = 'hist' if is_hist else 'proj'
+
+        # Per-basin delta for each class
+        basin_delta_cls = {}
+        for cls in (1, 2):
+            base = baseline_cls[cls]
+            cur = basin_class_fractions[y][cls]
+            basin_delta_cls[cls] = {
+                b: (cur.get(b, 0.0) / base[b]) if base[b] > 0 else 1.0
+                for b in basins
+            }
+            if csv_output_path is not None:
+                for b in basins:
+                    delta_rows.append({
+                        'Year': y,
+                        'GW_Basin': b,
+                        'lulc_class': cls,
+                        'delta': basin_delta_cls[cls][b],
+                        'baseline_frac': base[b],
+                        'year_frac': cur.get(b, 0.0),
+                    })
+
+        # Apply each column × class
+        y_mask = (data_df['Year'] == y).values
+        if y_mask.sum() != n_pixels_hist:
+            logger.warning(
+                'Skipping year %d: row count %d != %d.',
+                y, y_mask.sum(), n_pixels_hist,
+            )
+            continue
+
+        for col, cls in present_cols.items():
+            basin_delta = basin_delta_cls[cls]
+            pixel_delta = ref_basins_series.map(basin_delta).values
+            corrected = anchor_vals[anchor_set][col] * pixel_delta
+            # All four target columns are bounded in [0, 1] (URBAN and AGRI
+            # are per-year min-max normalized; annual_crop_fraction and
+            # annual_urban_fraction are physical densities). Clip to keep
+            # runaway deltas from producing unphysical values.
+            corrected = np.clip(corrected, 0.0, 1.0)
+            data_df.loc[y_mask, col] = corrected
+
+    # Optional diagnostic CSV
+    if csv_output_path is not None and delta_rows:
+        pd.DataFrame(delta_rows).to_csv(csv_output_path, index=False)
+        logger.info('  Basin-delta diagnostics saved: %s', csv_output_path)
+
+    logger.info(
+        '  Corrected %s for %d off-NLCD years (hindcast baseline year %d, '
+        'projection baseline year %d).',
+        ', '.join(present_cols), len(target_years),
+        usgs_hist_baseline_year, foresce_baseline_year,
+    )
+    return data_df
+
+
 def create_az_data_parquet(
         input_file_dir: str,
         gw_data_dir: str,
@@ -1018,8 +1230,19 @@ def create_az_data_parquet(
             'Streamflow',
             'Canal_Weighted_Streamflow',
             'Canal_Density',
-            'Well_Density'
+            'Well_Density',
+            'Irr_Capacity_Fraction',
+            'Irr_SW_Rights_Density',
+            'NonIrr_SW_Rights_Density',
         ]
+        # Static raster: SW access year (earliest irrigation SW priority
+        # date per pixel from HarDWR).  Loaded once and reused per year.
+        sw_access_year_file = os.path.join(input_file_dir, 'SW_Access_Year.tif')
+        sw_access_year_arr = None
+        if os.path.exists(sw_access_year_file):
+            sw_access_year_arr = read_raster_as_arr(
+                sw_access_year_file, get_file=False,
+            ).ravel()
         for year in range(start_year, end_year + 1):
             df = pd.DataFrame()
             if year not in exclude_years:
@@ -1038,6 +1261,9 @@ def create_az_data_parquet(
                                         df, raster_arr,
                                         smoothing=lu_smoothing
                                     )
+                                    # Keep raw LULC class for basin-scale delta
+                                    # correction (1=AGRI, 2=URBAN, 3=SW).
+                                    df['lulc'] = raster_arr.ravel()
                                 else:
                                     df[band_name] = raster_arr.ravel()
                             except IndexError:
@@ -1057,6 +1283,19 @@ def create_az_data_parquet(
                         elif var_name == 'Well_Density':
                             raster_arr[np.isnan(raster_arr)] = 0
                             df['well_density'] = raster_arr
+                        elif var_name == 'Irr_Capacity_Fraction':
+                            raster_arr[np.isnan(raster_arr)] = 0
+                            df['irr_capacity_fraction'] = np.clip(raster_arr, 0, 1)
+                        elif var_name == 'Irr_SW_Rights_Density':
+                            raster_arr[np.isnan(raster_arr)] = 0
+                            df['irr_sw_rights_density'] = raster_arr
+                        elif var_name == 'NonIrr_SW_Rights_Density':
+                            raster_arr[np.isnan(raster_arr)] = 0
+                            df['nonirr_sw_rights_density'] = raster_arr
+                            # Combined ML predictor: all consumptive SW
+                            # rights (irr + non-irr, excl. environmental)
+                            irr_rd = df.get('irr_sw_rights_density', 0)
+                            df['sw_rights_density'] = irr_rd + raster_arr
                         elif var_name == 'GW':
                             raster_arr[np.isnan(raster_arr)] = 0
                         else:
@@ -1069,26 +1308,14 @@ def create_az_data_parquet(
                 df['easting_m'] = lon_grid.ravel()
                 df['northing_m'] = lat_grid.ravel()
                 df['Year'] = year
+                if sw_access_year_arr is not None:
+                    df['sw_access_year'] = sw_access_year_arr
                 data_df_parts.append(df)
         data_df = pd.concat(data_df_parts, ignore_index=True) if data_df_parts else pd.DataFrame()
-        # Set annual_irr_fraction to 0 where annual_crop_fraction is 0
-        data_df.loc[data_df.annual_crop_fraction == 0, 'annual_irr_fraction'] = 0.0
-        # Fit a linear regression of annual_irr_fraction on annual_crop_fraction using
-        # 1985-2025 IrrMapper data (non-zero crop fraction only), then predict for years
-        # outside that range. Where crop fraction is zero, irr fraction is set to zero.
-        irr_mask = data_df.Year.between(1985, 2025)
-        train = data_df.loc[irr_mask].dropna(subset=['annual_irr_fraction', 'annual_crop_fraction'])
-        train = train[train.annual_crop_fraction > 0]
-        irr_reg = LinearRegression().fit(
-            train[['annual_crop_fraction']].values,
-            train['annual_irr_fraction'].values
-        )
-        for mask in [data_df.Year < 1985, data_df.Year > 2025]:
-            data_df.loc[mask, 'annual_irr_fraction'] = 0.0
-            nonzero = mask & (data_df.annual_crop_fraction > 0)
-            pred = irr_reg.predict(data_df.loc[nonzero, ['annual_crop_fraction']].values)
-            data_df.loc[nonzero, 'annual_irr_fraction'] = np.clip(pred, 0, 1)
 
+        # Map GW_Basin OBJECTID → basin name (moved earlier so the basin-
+        # scale LULC delta correction can operate on named basins before
+        # the irr-fraction regression consumes the corrected crop_fraction).
         gw_basin_gdf = gpd.read_file(gw_basin_vector)
         gw_basin_dict = {}
         ama_ina_basins = get_ama_ina_basin_names()
@@ -1118,6 +1345,52 @@ def create_az_data_parquet(
             )
             logger.debug('GW_Subbasin unique values: %s',
                         sorted(data_df.GW_Subbasin.unique()))
+
+        # Basin-scale LULC delta correction for off-NLCD years (analog to
+        # climate bias correction; see _apply_basin_scale_lulc_delta docs).
+        data_df = _apply_basin_scale_lulc_delta(
+            data_df,
+            csv_output_path=os.path.join(output_dir, 'Basin_LULC_Deltas.csv'),
+        )
+
+        # Set annual_irr_fraction to 0 where annual_crop_fraction is 0
+        data_df.loc[data_df.annual_crop_fraction == 0, 'annual_irr_fraction'] = 0.0
+        # Fit a linear regression of annual_irr_fraction on annual_crop_fraction using
+        # 1985-2025 IrrMapper data (non-zero crop fraction only), then predict for years
+        # outside that range using the DELTA-CORRECTED crop_fraction for those years.
+        # Where crop fraction is zero, irr fraction is set to zero.
+        irr_mask = data_df.Year.between(1985, 2025)
+        train = data_df.loc[irr_mask].dropna(subset=['annual_irr_fraction', 'annual_crop_fraction'])
+        train = train[train.annual_crop_fraction > 0]
+        irr_reg = LinearRegression().fit(
+            train[['annual_crop_fraction']].values,
+            train['annual_irr_fraction'].values
+        )
+        for mask in [data_df.Year < 1985, data_df.Year > 2025]:
+            data_df.loc[mask, 'annual_irr_fraction'] = 0.0
+            nonzero = mask & (data_df.annual_crop_fraction > 0)
+            pred = irr_reg.predict(data_df.loc[nonzero, ['annual_crop_fraction']].values)
+            data_df.loc[nonzero, 'annual_irr_fraction'] = np.clip(pred, 0, 1)
+
+        # Store 2024 (well-registry reference year) crop and urban fractions
+        # as static columns for time-varying irr/non-irr capacity scaling.
+        # partition_predictions uses these to adjust the static
+        # irr_capacity_fraction by temporal crop/urban area changes.
+        _well_reg_ref_year = 2024
+        _ref_df = data_df[data_df.Year == _well_reg_ref_year]
+        if not _ref_df.empty:
+            for col, ref_col in [
+                ('annual_crop_fraction', 'crop_frac_ref'),
+                ('annual_urban_fraction', 'urban_frac_ref'),
+            ]:
+                if col in _ref_df.columns:
+                    ref_vals = _ref_df[col].reset_index(drop=True).values
+                    # Broadcast to all years (same pixel layout per year)
+                    n_pixels = len(ref_vals)
+                    n_years = len(data_df) // n_pixels
+                    data_df[ref_col] = np.tile(ref_vals, n_years)
+                    logger.info(f'  Added {ref_col} (from {_well_reg_ref_year}) '
+                                f'— mean {data_df[ref_col].mean():.4f}')
 
         # Cap ET at Kc_max × ETo — ET can exceed ETo (high-Kc crops,
         # urban oasis effect, riparian/open water) but not without bound.

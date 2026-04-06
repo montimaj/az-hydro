@@ -129,6 +129,10 @@ The export pipeline harmonizes multiple heterogeneous data sources into temporal
 - **1985–2025:** IrrMapper for irrigation classification and [NLCD (USGS, 2024](https://doi.org/10.5066/P94UXNTS); [Fleckenstein et al., 2026)](https://doi.org/10.1016/j.rse.2026.115347) for urban/developed areas provide observational LULC.
 - **2026–2099:** Four USGS LULC projection scenarios ([Sohl et al., 2014](https://doi.org/10.1890/13-1245.1); B1, B2, A1B, A2) are combined via pixel-wise mode to create a single consensus ensemble. Exported as integer (categorical) data.
 
+For each year, two derived bands — `annual_crop_fraction` (LULC class 1 / ag) and `annual_urban_fraction` (LULC class 2 / urban) — are computed at the native LULC resolution and aggregated to the 2 km predictor grid via a count reducer. These give physical per-pixel area fractions (0–1), suitable for mass-conserving volume partitioning downstream.
+
+**Basin-scale delta bias-correction (downstream):** Because NLCD (30 m) and USGS (250 m) produce systematically different basin-level urban/ag fractions after 2 km aggregation, the azhydro pipeline applies a multiplicative basin-scale delta correction to the four LULC-derived columns (`URBAN`, `AGRI`, `annual_crop_fraction`, `annual_urban_fraction`) for off-NLCD years (≤1984 and ≥2026). This is the LULC analog of the climate bias correction described above: use the non-NLCD source (USGS Historical or FORE-SCE) to provide *basin-scale relative change*, anchored to NLCD's *pixel-level spatial pattern* at the 1985/2025 training-period boundaries. See `azhydro/README.md` for details.
+
 ### Join Strategy
 
 All ratio computations use `ee.Join.inner()` with paired filters on **both** `month` **and** `year` properties. This prevents many-to-many cross-joins that would occur if matching on `month` alone (e.g., January 2005 OpenET gridMET would incorrectly pair with January 2010 PRISM). The final climatological ratios are then produced by averaging across years within each calendar month.

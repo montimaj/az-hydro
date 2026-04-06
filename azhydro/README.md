@@ -136,8 +136,9 @@ python pipeline.py --skip-eval pixel,temporal,summary # skip multiple strategies
 | `gw-csv` | GW CSV → per-year shapefiles |
 | `vectors` | Reproject vectors |
 | `gw-rasters` | GW volume → depth → cropped rasters |
-| `streamflow` | Canal density & streamflow rasters |
-| `basin-rasters` | GW basin, sub-basin & well density rasters |
+| `streamflow` | Canal density (temporally scaled via HarDWR v2.0) & streamflow rasters |
+| `basin-rasters` | GW basin, sub-basin, well density & irr capacity fraction rasters |
+| `rights-rasters` | HarDWR v2.0 SW access year, irr/non-irr SW rights density rasters |
 | `reproject` | Reproject GEE mosaics to match GW grid |
 
 #### Evaluation sub-steps
@@ -175,7 +176,7 @@ The project builds a spatially explicit, multi-decadal (1896–2099) dataset for
 
 ### Google Earth Engine (GEE) predictor bands
 
-The [`download_gee_data()`](hydrolibs/dataops.py) function downloads 14 bands of geospatial data from GEE ([Gorelick et al., 2017](https://doi.org/10.1016/j.rse.2017.06.031); [Roy et al., 2025](https://doi.org/10.5281/zenodo.17641528)) as tiled GeoTIFFs at 2 km resolution over Arizona. Data are harmonized across three temporal eras using overlap-period bias-correction ratios to ensure continuity.
+The [`download_gee_data()`](hydrolibs/dataops.py) function downloads 15 bands of geospatial data from GEE ([Gorelick et al., 2017](https://doi.org/10.1016/j.rse.2017.06.031); [Roy et al., 2025](https://doi.org/10.5281/zenodo.17641528)) as tiled GeoTIFFs at 2 km resolution over Arizona. Data are harmonized across three temporal eras using overlap-period bias-correction ratios to ensure continuity.
 
 | Band | Description | Units | Source |
 |------|-------------|-------|--------|
@@ -187,7 +188,8 @@ The [`download_gee_data()`](hydrolibs/dataops.py) function downloads 14 bands of
 | `annual_tmmx_K` | Annual mean daily max temperature | K | [PRISM (Daly et al., 2008)](https://doi.org/10.1002/joc.1688) (1896–2025), [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) (2026–2099) |
 | `annual_tmmn_K` | Annual mean daily min temperature | K | [PRISM (Daly et al., 2008)](https://doi.org/10.1002/joc.1688) (1896–2025), [MACA v2 (Abatzoglou & Brown, 2012)](https://doi.org/10.1002/joc.2312) (2026–2099) |
 | `lulc` | Land use/land cover (1=Agriculture, 2=Urban, 3=Surface Water) | categorical | [USGS historical (Sohl et al., 2016)](https://doi.org/10.1080/1747423X.2016.1147619) (≤1984), [NLCD (USGS, 2024](https://doi.org/10.5066/P94UXNTS); [Fleckenstein et al., 2026)](https://doi.org/10.1016/j.rse.2026.115347) (1985–2025), [USGS LULC Projections (Sohl et al., 2014)](https://doi.org/10.1890/13-1245.1) projections (2026–2099) |
-| `annual_crop_fraction` | Cropland fraction | fraction | Derived from USGS LULC |
+| `annual_crop_fraction` | Cropland fraction (physical density) | fraction | Derived from LULC at native resolution (30 m NLCD 1985–2025, 250 m USGS elsewhere), aggregated to 2 km; basin-delta corrected for off-NLCD years |
+| `annual_urban_fraction` | Urban/developed fraction (physical density) | fraction | Derived from LULC at native resolution, aggregated to 2 km; basin-delta corrected for off-NLCD years |
 | `annual_irr_fraction` | Irrigated area fraction | fraction | [IrrMapper (Ketchum et al., 2020](https://doi.org/10.3390/rs12142328); [2023)](https://doi.org/10.1038/s43247-023-01152-2) RF v1.2 (1985–2025), LULC-derived outside |
 | `annual_gw_fraction` | Groundwater irrigation fraction | fraction | [Hung et al., 2025](https://doi.org/10.1038/s41597-025-05920-x) snapshots (2000, 2005, 2010, 2015) |
 | `soil_depth_mm` | Soil depth | mm | [CSRL (Walkinshaw et al., 2022)](https://casoilresource.lawr.ucdavis.edu/soil-properties/) (static) |
@@ -200,7 +202,9 @@ The pipeline stitches disparate sources into a consistent 1896–2099 time serie
 
 - **ET**: Reitz ensemble (1896–1999) → OpenET v2.0/v2.1 (2000–2025) → MACA × EToF crop coefficients (2026–2099)
 - **ETo**: PRISM Hargreaves (1896–1978) → OpenET gridMET (1979–2025) → MACA 20-model ensemble (2026–2099)
-- **LULC**: USGS historical scenario (≤1984) → NLCD (1985–2025) → USGS 4-scenario mode ensemble (2026–2099)
+- **LULC**: USGS historical scenario (≤1984) → NLCD (1985–2025) → USGS 4-scenario mode ensemble (2026–2099).
+  - **Basin-scale delta correction** (analog to the climate bias correction approach): USGS and NLCD disagree on urban/ag classification at the 2 km grid because NLCD's 30 m resolution captures roads, small towns, and fragmented urban/ag pixels that USGS at 250 m misses. At the basin scale these classification noises average out, so for off-NLCD years we compute per-basin relative change from USGS/FORE-SCE and apply it as a multiplicative delta to NLCD-anchor pixel values (1985 for hindcast, 2025 for projection). Four LULC-derived columns are corrected — `URBAN`, `AGRI`, `annual_crop_fraction`, `annual_urban_fraction`. Baseline years are the non-NLCD years paired with the NLCD anchors: 1984 (USGS Historical, immediately before NLCD era) for hindcast, 2026 (FORE-SCE ensemble, immediately after NLCD era) for projection. This guarantees `delta(1984, B) = 1.0` and `delta(2026, B) = 1.0` exactly, so the sign of relative change is physically correct (a growing basin has `delta(earlier year) < 1` and `delta(later year) > 1`). Per-basin, per-year, per-class multipliers are exported to `Basin_LULC_Deltas.csv` for inspection. `create_az_data_parquet` bakes the correction into the parquet, so ML training, inference, and uncertainty all see consistent NLCD-anchored LULC features.
+- **Streamflow**: USGS NWIS observations (variable start dates through 2025) → USBR ensemble projections (2026–2099). Per-month multiplicative **bias-correction factors** (`USGS_mean / USBR_mean` per calendar month) are computed from the USGS/USBR overlap period and applied to all USBR-filled months (both pre-USGS and post-2025). For sites without USBR data, monthly ratios to the nearest USBR-gauged reference site are applied on top of the already-bias-corrected reference projections. This eliminates the systematic +79% step-jump previously observed at the 2025→2026 boundary.
 - **Climate projections**: MACA v2 daily data across 20 GCMs × 2 RCPs (RCP 4.5, RCP 8.5) = 40-member ensemble. All MACA queries use a flat-pipeline approach (single filter + reduce) to keep GEE computation graphs small: ETo uses `.sum().divide(40)` per month (computed per-image to preserve nonlinearity), precip uses `.sum().divide(40)`, and temperature uses `.mean()`.
 
 Per-pixel, per-month bias-correction ratios are computed from overlapping observation periods and applied to extend each variable seamlessly. See [`gee/README.md`](../gee/README.md) for asset export details and equations.
@@ -274,7 +278,7 @@ Sites with USBR IDs (9 sites) have direct modeled projections. The remaining 11 
 #### Gap-filling strategy
 
 1. **USGS observations** take priority within their available record
-2. **USBR ensemble mean** (or ratio-scaled synthetic) fills months outside the USGS range
+2. **USBR ensemble mean** (or ratio-scaled synthetic) fills months outside the USGS range. Per-month **multiplicative bias-correction factors** (`USGS_mean / USBR_mean` per calendar month) are computed from the USGS/USBR overlap period and applied to all USBR-filled months, eliminating the step-jump at the USGS→USBR boundary. For non-USBR sites using the ratio method, the reference site's USBR data is already bias-corrected before ratios are applied, so the correction propagates transitively.
 3. **Monthly climatology** (mean of each calendar month from all available data) fills any remaining gaps in the 1896–2099 range
 
 #### Streamflow raster creation
@@ -380,10 +384,34 @@ Downloads, mosaics, and aligns all input datasets to a common 2 km grid.
 3. **Streamflow & canal density** — `streamflowops.create_canal_density_raster()`
    and `streamflowops.create_streamflow_rasters()` build predictor layers
    from USGS/USBR gauge data and GRAIN canal geometry ([Suresh et al., 2026](https://doi.org/10.5194/essd-18-1855-2026)).
-4. **Basin & well rasters** — `gwops.create_gw_basin_rasters()` and
-   `gwops.create_well_density_raster()` rasterize ADWR basins, sub-basins,
-   and the well registry.
-5. **GEE reprojection** — `dataops.reproject_gee_mosaics()` aligns all GEE
+   Canal density is **temporally scaled** using watershed-level SW rights
+   build-out from HarDWR v2.0 ([Lisk et al., 2024](https://doi.org/10.57931/2475303)).
+4. **Basin & well rasters** — `gwops.create_gw_basin_rasters()`,
+   `gwops.create_well_density_raster()`, and
+   `gwops.create_irr_capacity_fraction_raster()` rasterize ADWR basins,
+   sub-basins, per-year well counts, and per-year irrigation pump-capacity
+   fractions from the Well Registry. Non-consumptive wells (monitoring,
+   test, dewatering, drainage, remediation, mineral exploration, etc.) are
+   excluded. Both well density and capacity fraction rasters are
+   **temporally varying**: for each year, only wells installed by that year
+   are included, based on `INSTALLED` / `APPLICATIO` dates.  Wells with
+   missing PUMPRATE are imputed using the per-`WATER_USE` category median.
+5. **HarDWR v2.0 water-rights rasters** — `gwops.create_sw_access_year_raster()`,
+   `create_irr_sw_rights_density_raster()`, and
+   `create_nonirr_sw_rights_density_raster()` produce rasters from the
+   HarDWR v2.0 harmonized water rights dataset
+   ([Lisk et al., 2024](https://doi.org/10.57931/2475303)).
+   `sw_rights_density` (cumulative count of all consumptive SW PODs per
+   pixel — irrigation + domestic + industrial + livestock, excluding
+   environmental in-stream flow rights) is a time-varying ML predictor
+   capturing surface-water availability build-out.
+   `sw_access_year` (earliest irrigation SW priority year per pixel)
+   temporally adjusts the Hung et al. `gw_frac` — pixels without SW access
+   yet are set to 100 % groundwater.  `nonirr_sw_rights_density` (cumulative
+   non-irrigation SW POD count, excluding environmental in-stream flow
+   rights) provides a temporally varying proxy for the non-irrigation
+   GW/SW split, replacing the static canal-density proxy.
+6. **GEE reprojection** — `dataops.reproject_gee_mosaics()` aligns all GEE
    mosaics to the GW depth raster grid.
 
 **Outputs:**
@@ -784,14 +812,27 @@ For each year the pipeline:
    `partitionops.partition_predictions()`:
    Irrigation, Non-Irrigation, Irrigation\_GW, Irrigation\_SW,
    Non\_Irrigation\_GW, Non\_Irrigation\_SW, Total\_GW, Total\_SW.
-   Non-irrigation is weighted by the Gaussian-smoothed urban density
-   (`URBAN` column, 0–1) so that rural pixels contribute negligibly to
-   non-agricultural volumes.  The **total** raster is recomputed as
-   `Irrigation + Non_Irrigation` after urban weighting (bottom-up),
-   ensuring conservation-consistent volumes.  For hindcast years
-   (≤1984), the URBAN density is averaged with the 1985 NLCD-derived
-   value to smooth the discontinuity between USGS Historical LULC
-   (single urban class) and NLCD (four developed classes).
+   The irrigation / non-irrigation split uses **pump-capacity-weighted
+   fractions** derived from the ADWR Well Registry. For each 2 km pixel
+   and year, only wells installed by that year contribute:
+   `irr_capacity_fraction = sum(PUMPRATE for IRRIGATION wells) /
+   sum(PUMPRATE for all consumptive wells)`. Non-consumptive wells
+   (monitoring, test, dewatering, drainage, remediation, mineral
+   exploration, etc.) are excluded. Wells with missing pump rates are
+   imputed using the per-`WATER_USE` category median (e.g. IRRIGATION
+   ~900 gal/min, DOMESTIC ~15 gal/min), giving ~72% irrigation statewide.
+   The per-year fraction is further adjusted at partition time by scaling
+   each side by its area-fraction change relative to 2024:
+   `irr_weight = irr_cap × (crop_frac / crop_frac_2024)`,
+   `mi_weight = mi_cap × (urban_frac / urban_frac_2024)`,
+   `irr_frac(y) = irr_weight / (irr_weight + mi_weight)`.
+   This captures the 1950s ag boom (higher crop fraction → higher irr
+   share) and future urbanisation (higher urban fraction → higher M&I
+   share). Conservation is guaranteed: `Irrigation + Non_Irrigation =
+   Total`. The **total** raster is recomputed bottom-up. The LULC
+   source-mismatch (1984↔1985 USGS→NLCD and 2025↔2026 NLCD→USGS) is
+   handled upstream via basin-scale delta correction baked into the
+   parquet (see "Data harmonization" above).
 5. **Computes consumptive use (CU)** using USGS NHM basin-level
    irrigation efficiencies:
    ```
@@ -981,10 +1022,19 @@ instead.  For each of the 4 scenarios:
 
 1. Per-scenario GEE tiles are downloaded via
    `download_gee_data(lulc_scenario=scenario)`.
-2. The LULC class, crop fraction, and irrigation fraction are re-derived
-   end-to-end (LULC → AGRI/URBAN via `gwops.create_land_use_data()` →
-   `crop_frac` → `irr_frac` via the regression model).
-3. The XGBRF model predicts total annual withdrawals under each scenario.
+2. Per-scenario basin-level urban and ag fractions are computed from each
+   year's scenario LULC, and per-basin **delta factors** are derived
+   relative to each scenario's own 2026 baseline (the FORE-SCE year
+   paired with the NLCD 2025 anchor).
+3. Each scenario's `URBAN`, `AGRI`, `annual_crop_fraction`, and
+   `annual_urban_fraction` columns are set to the **NLCD 2025** pixel
+   values × the scenario's basin-scale delta for that year. This keeps
+   the spatial pattern consistent with NLCD while capturing the
+   scenario's own temporal trajectory (same correction methodology as the
+   main pipeline).
+4. `annual_irr_fraction` is re-derived from the corrected crop_fraction
+   via the regression model.
+5. The XGBRF model predicts total annual withdrawals under each scenario.
 
 σ_LULC is the sample standard deviation across the 4 scenario predictions:
 
@@ -1631,22 +1681,31 @@ Key functions:
   choice:** The density features are independently min–max normalized to
   [0, 1] within each year, so the model sees only within-year spatial
   patterns, not temporal magnitude trends.  This is partially mitigated by
-  `annual_crop_fraction` and `annual_irr_fraction`, which provide
-  year-to-year magnitude signals.
-- **`create_well_density_raster()`** — Creates a well-count-per-pixel
-  raster from the Well Registry.  **Known limitation:** A single raster
-  is computed from the current (2024) ADWR Well Registry and replicated
-  for all years (1896–2099).  In reality, well density has changed over
-  time — fewer wells existed in early hindcast years, and future
-  projections may see wells retired, decommissioned, or newly drilled.
-  Because the pipeline uses well density primarily as a spatial
-  mask (pixels with zero wells are set to NaN in the partitioning step),
-  the main effect is that hindcast years may include predictions at pixels
-  where wells did not yet exist, while projection years may retain
-  predictions at pixels where wells have been retired, or miss pixels
-  where new wells are drilled.  If historical well drilling records or
-  future well siting projections become available, time-varying well
-  density rasters could be created.
+  `annual_crop_fraction`, `annual_urban_fraction`, and
+  `annual_irr_fraction`, which provide year-to-year magnitude signals.
+- **`create_well_density_raster()`** — Creates per-year well-count-per-pixel
+  rasters from the Well Registry.  Non-consumptive wells (monitoring, test,
+  dewatering, drainage, remediation, mineral exploration, unknown, reserved,
+  and wells with no `WATER_USE` attribute) are excluded.  For each year,
+  only wells installed by that year are included, using `INSTALLED` date
+  (with `APPLICATIO` date fallback; wells missing both dates default to
+  `start_year`).  The well density raster is used as a spatial mask in
+  partitioning — pixels with zero wells are set to NaN.  The temporal
+  filtering ensures that hindcast years do not include predictions at
+  pixels where wells did not yet exist.  **Remaining limitation:**
+  projection years (post-2024) use the 2024 well inventory, so they
+  cannot account for future well retirement or new drilling.
+- **`create_irr_capacity_fraction_raster()`** — Creates per-year per-pixel
+  irrigation pump-capacity fraction rasters from the Well Registry.
+  For each pixel and year, only consumptive wells installed by that year
+  contribute: `frac = sum(PUMPRATE for IRRIGATION wells) / sum(PUMPRATE
+  for all consumptive wells)`. Wells with missing PUMPRATE are imputed
+  using the per-`WATER_USE` category median (~900 gal/min for IRRIGATION,
+  ~15 gal/min for DOMESTIC), giving ~72% irrigation statewide.  The
+  per-year fraction is further adjusted at partition time by scaling each
+  side by its temporal crop/urban area-fraction change relative to 2024
+  (see Step 3 partitioning).  **Remaining limitation:** same as well
+  density — projection years use the 2024 well inventory.
 
 ### `streamflowops.py` — Streamflow & canal data
 
@@ -1674,18 +1733,18 @@ ancillary data already in the predictor stack:
 | **Irrigation_GW** | `Irrigation × gw_fraction` (USGS GW-fraction snapshots) |
 | **Irrigation_SW** | `Irrigation − Irrigation_GW` |
 
-**Known limitation (GW fraction frozen at 2015):** `annual_gw_fraction` uses
-the 2015 USGS Hung et al. snapshot for all years ≥ 2015.  This freezes the
-irrigation GW/SW partitioning for 84 years of projections regardless of
-scenario-driven changes in water supply.  A GW-fraction sensitivity analysis
-(`run_gw_fraction_sensitivity`, ±0.2 perturbation) quantifies the volume
-impact of this assumption across all years (1896–2099); results are in
-`Uncertainty/Sigma_GW/GW_Fraction_Sensitivity.csv`.  If future USGS
-snapshots or scenario-driven GW fraction projections become available,
-they can be integrated to make the partition dynamic.
+**Temporal GW fraction adjustment:** The Hung et al. snapshots capture the
+post-infrastructure steady state (~0.37 statewide).  Before canal systems
+were built, irrigation was 100 % groundwater.  Using HarDWR v2.0 surface-water
+rights priority dates ([Lisk et al., 2024](https://doi.org/10.57931/2475303)),
+the pipeline determines when each pixel first gained irrigation surface-water
+access.  For years before that date, `gw_frac` is set to 1.0.  A
+GW-fraction sensitivity analysis (`run_gw_fraction_sensitivity`, ±0.2
+perturbation) quantifies the volume impact of the equilibrium assumption;
+results are in `Uncertainty/Sigma_GW/GW_Fraction_Sensitivity.csv`.
 
 | **Non_Irrigation_GW** | `Non_Irrigation × (1 − sw_fraction)` |
-| **Non_Irrigation_SW** | `Non_Irrigation × sw_fraction` (canal-density proxy) |
+| **Non_Irrigation_SW** | `Non_Irrigation × sw_fraction` (HarDWR v2.0 non-irr SW rights density, temporally varying; falls back to canal density if unavailable) |
 | **Total_GW** | `Irrigation_GW + Non_Irrigation_GW` |
 | **Total_SW** | `Irrigation_SW + Non_Irrigation_SW` |
 

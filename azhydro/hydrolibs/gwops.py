@@ -20,7 +20,8 @@ from joblib import Parallel, delayed
 
 import hydrolibs.rasterops as rops
 import hydrolibs.vectorops as vops
-from hydrolibs.sysops import copy_file, makedirs
+from hydrolibs.sysops import (NON_CONSUMPTIVE_USES, copy_file,
+                              derive_well_start_year, makedirs)
 
 logger = logging.getLogger(__name__)
 
@@ -587,10 +588,12 @@ def create_well_density_raster(
         already_created: bool = False
 ) -> str:
     """
-    Create well density rasters (well count per pixel) from the ADWR Well Registry.
+    Create per-year well density rasters (well count per pixel) from the ADWR
+    Well Registry, filtered by installation date.
 
-    A single raster is computed from the well registry and then replicated for
-    each year to maintain consistency with the per-year predictor file pattern.
+    For each year, only wells installed by that year are included, producing
+    temporally varying density rasters that reflect the actual build-out of
+    well infrastructure over time.
 
     Args:
         well_registry_file (str): Path to the ADWR Well Registry shapefile.
@@ -614,37 +617,552 @@ def create_well_density_raster(
 
     makedirs(output_dir)
 
-    # Load well registry
+    # Load well registry and drop non-consumptive wells
     gdf = gpd.read_file(well_registry_file)
+    pattern = '|'.join(NON_CONSUMPTIVE_USES)
+    has_use = gdf['WATER_USE'].notna()
+    gdf = gdf[has_use & ~gdf['WATER_USE'].str.contains(pattern, na=False)]
     if water_use:
         gdf = gdf[gdf['WATER_USE'] == water_use]
-    logger.info(f'Using {len(gdf)} wells for density rasterization')
-
-    # Add count attribute
     gdf = gdf.copy()
+
+    well_start_year = derive_well_start_year(gdf, default_year=start_year)
     gdf['_count'] = 1.0
 
-    # Save as temp shapefile
     tmp_dir = os.path.join(output_dir, '_well_temp')
     makedirs(tmp_dir)
     tmp_shp = os.path.join(tmp_dir, 'wells.shp')
-    gdf[['_count', 'geometry']].to_file(tmp_shp)
 
-    # Rasterize: well count per pixel
-    vops.shp2raster(
-        tmp_shp, base_raster,
-        value_field='_count',
-        xres=xres, yres=yres,
-        add_value=True
-    )
+    logger.info(f'Creating well density rasters ({start_year}-{end_year}) '
+                f'from {len(gdf)} consumptive wells...')
 
-    # Copy for each year
-    for year in range(start_year + 1, end_year + 1):
+    prev_raster = None
+    prev_mask = np.zeros(len(gdf), dtype=bool)
+    for year in range(start_year, end_year + 1):
         out_file = os.path.join(output_dir, f'Well_Density_{year}.tif')
-        copy_file(base_raster, out_file, verbose=False)
+        active = well_start_year <= year
 
-    # Clean up temp files
+        # Skip rasterization if the active set hasn't changed
+        if np.array_equal(active, prev_mask) and prev_raster is not None:
+            copy_file(prev_raster, out_file, verbose=False)
+        else:
+            gdf.loc[~active, '_count'] = 0.0
+            gdf.loc[active, '_count'] = 1.0
+            gdf[['_count', 'geometry']].to_file(tmp_shp)
+            vops.shp2raster(
+                tmp_shp, out_file,
+                value_field='_count',
+                xres=xres, yres=yres,
+                add_value=True,
+            )
+            prev_mask = active.copy()
+            prev_raster = out_file
+
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
     logger.info(f'Created well density rasters ({start_year}-{end_year}) in {output_dir}')
+    return base_raster
+
+
+def create_irr_capacity_fraction_raster(
+        well_registry_file: str,
+        output_dir: str,
+        xres: float = 2000,
+        yres: float = 2000,
+        start_year: int = 1896,
+        end_year: int = 2099,
+        already_created: bool = False,
+) -> str:
+    """Create per-year irrigation pump-capacity fraction rasters.
+
+    For each 2 km pixel and each year, computes the fraction of total pump
+    capacity (PUMPRATE, gal/min) that belongs to wells with 'IRRIGATION' in
+    their ``WATER_USE`` attribute, considering only wells installed by that
+    year.  The complement (1 − fraction) is the non-irrigation (M&I) share.
+
+    This replaces the area-based ``annual_irr_fraction`` for the
+    irr / non-irr volume split in ``partitionops.partition_predictions``,
+    giving a physically meaningful withdrawal fraction (AZ is ~72 % ag by
+    pump capacity, matching ADWR 2017 statewide estimates).
+
+    Args:
+        well_registry_file: Path to the ADWR Well Registry shapefile.
+        output_dir: Output directory for the fraction rasters.
+        xres: X-resolution in map units (default 2000 m = 2 km).
+        yres: Y-resolution in map units (default 2000 m = 2 km).
+        start_year: First year (default 1896).
+        end_year: Last year (default 2099).
+        already_created: If True, skip creation.
+
+    Returns:
+        str: Path to the base irrigation capacity fraction raster.
+    """
+    base_raster = os.path.join(output_dir, f'Irr_Capacity_Fraction_{start_year}.tif')
+    if already_created:
+        logger.info('Irr capacity fraction rasters already created, skipping...')
+        return base_raster
+
+    makedirs(output_dir)
+
+    gdf = gpd.read_file(well_registry_file)
+
+    # Filter to consumptive-use wells. Drop wells whose WATER_USE is
+    # missing or contains any non-consumptive keyword.  Using keyword
+    # matching instead of exact strings handles the combinatorial
+    # comma-separated labels in the ADWR registry.
+    pattern = '|'.join(NON_CONSUMPTIVE_USES)
+    has_use = gdf['WATER_USE'].notna()
+    is_non_consumptive = gdf['WATER_USE'].str.contains(pattern, na=False)
+    gdf = gdf[has_use & ~is_non_consumptive].copy()
+
+    # Impute missing PUMPRATE using per-WATER_USE median.
+    # Only ~42 % of active wells have a reported pump rate; dropping
+    # the rest would bias toward irrigation wells (62 % coverage vs 39 %
+    # for domestic). Imputing by category preserves the physical reality
+    # that ag pumps are larger (~900 gal/min median) while domestic are
+    # smaller (~15 gal/min median).
+    gdf['PUMPRATE'] = pd.to_numeric(gdf['PUMPRATE'], errors='coerce')
+    has_rate = gdf['PUMPRATE'].notna() & (gdf['PUMPRATE'] > 0)
+    n_with_rate = has_rate.sum()
+    medians = gdf.loc[has_rate].groupby('WATER_USE')['PUMPRATE'].median()
+    for use, med in medians.items():
+        missing = (gdf['WATER_USE'] == use) & ~has_rate
+        gdf.loc[missing, 'PUMPRATE'] = med
+    # Fallback: categories with no reported rates → overall median
+    overall_median = gdf.loc[has_rate, 'PUMPRATE'].median()
+    still_missing = gdf['PUMPRATE'].isna() | (gdf['PUMPRATE'] <= 0)
+    gdf.loc[still_missing, 'PUMPRATE'] = overall_median
+    logger.info(
+        f'Using {len(gdf)} active wells for irrigation capacity fraction '
+        f'({n_with_rate} with reported PUMPRATE, '
+        f'{len(gdf) - n_with_rate} imputed by WATER_USE median)'
+    )
+
+    well_start_year = derive_well_start_year(gdf, default_year=start_year)
+
+    is_irr = gdf['WATER_USE'].str.contains('IRRIGATION', na=False)
+    gdf['_irr_cap'] = 0.0
+    gdf.loc[is_irr, '_irr_cap'] = gdf.loc[is_irr, 'PUMPRATE'].astype(float)
+    gdf['_total_cap'] = gdf['PUMPRATE'].astype(float)
+
+    tmp_dir = os.path.join(output_dir, '_irr_cap_temp')
+    makedirs(tmp_dir)
+    irr_shp = os.path.join(tmp_dir, 'irr_cap.shp')
+    total_shp = os.path.join(tmp_dir, 'total_cap.shp')
+    irr_raster = os.path.join(tmp_dir, 'irr_cap.tif')
+    total_raster = os.path.join(tmp_dir, 'total_cap.tif')
+
+    import rasterio as rio
+    profile = None
+    prev_mask = np.zeros(len(gdf), dtype=bool)
+    prev_raster = None
+
+    logger.info(f'Creating irr capacity fraction rasters ({start_year}-{end_year})...')
+
+    for year in range(start_year, end_year + 1):
+        out_file = os.path.join(output_dir, f'Irr_Capacity_Fraction_{year}.tif')
+        active = well_start_year <= year
+
+        # Skip rasterization if the active set hasn't changed
+        if np.array_equal(active, prev_mask) and prev_raster is not None:
+            copy_file(prev_raster, out_file, verbose=False)
+            continue
+
+        # Zero out inactive wells' contributions
+        gdf.loc[~active, '_irr_cap'] = 0.0
+        gdf.loc[~active, '_total_cap'] = 0.0
+        active_irr = active & is_irr
+        gdf.loc[active_irr, '_irr_cap'] = gdf.loc[active_irr, 'PUMPRATE'].astype(float)
+        gdf.loc[active & ~is_irr, '_irr_cap'] = 0.0
+        gdf.loc[active, '_total_cap'] = gdf.loc[active, 'PUMPRATE'].astype(float)
+
+        # Rasterize irrigation and total capacity
+        gdf[['_irr_cap', 'geometry']].to_file(irr_shp)
+        vops.shp2raster(
+            irr_shp, irr_raster,
+            value_field='_irr_cap',
+            xres=xres, yres=yres,
+            add_value=True,
+        )
+        gdf[['_total_cap', 'geometry']].to_file(total_shp)
+        vops.shp2raster(
+            total_shp, total_raster,
+            value_field='_total_cap',
+            xres=xres, yres=yres,
+            add_value=True,
+        )
+
+        with rio.open(irr_raster) as irr_src, rio.open(total_raster) as tot_src:
+            irr_arr = irr_src.read(1)
+            tot_arr = tot_src.read(1)
+            if profile is None:
+                profile = irr_src.profile.copy()
+                profile.update(dtype='float32', nodata=np.nan)
+
+        with np.errstate(invalid='ignore', divide='ignore'):
+            frac = np.where(tot_arr > 0, irr_arr / tot_arr, 0.0)
+        frac = np.clip(frac, 0.0, 1.0).astype(np.float32)
+
+        with rio.open(out_file, 'w', **profile) as dst:
+            dst.write(frac, 1)
+
+        prev_mask = active.copy()
+        prev_raster = out_file
+
+    # Clean up
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # Log statewide summary for final year
+    if profile is not None:
+        with rio.open(prev_raster) as src:
+            final_frac = src.read(1)
+        valid = final_frac > 0
+        if valid.sum() > 0:
+            mean_frac = float(np.mean(final_frac[valid]))
+            logger.info(
+                f'Created irr capacity fraction rasters ({start_year}-{end_year}). '
+                f'Final-year mean irr fraction = {mean_frac:.3f} '
+                f'({valid.sum()} pixels with wells)'
+            )
+    return base_raster
+
+
+# ---------------------------------------------------------------------------
+# HarDWR water-rights raster functions
+# ---------------------------------------------------------------------------
+
+_POD_SHAPEFILE_COLS = ['primarySe0', 'source', 'priorityD0', 'AF', 'geometry']
+
+# Non-irrigation sectors for the non-irr SW fraction (exclude environmental
+# in-stream flow rights which represent legal river protections, not actual
+# M&I surface water diversions).
+_NONIRR_SW_SECTORS = {'domestic', 'industrial', 'livestock', 'other'}
+
+
+def _load_pod_points(
+        pod_shapefile: str,
+        ref_raster: str,
+        source_filter: str | None = None,
+        sector_filter: str | set[str] | None = None,
+        require_af: bool = False,
+) -> tuple:
+    """Load and project HarDWR PODs, returning arrays for rasterization.
+
+    Args:
+        pod_shapefile: Path to arizonaStatePOD.shp.
+        ref_raster: Reference raster for CRS, transform, shape.
+        source_filter: 'Surface Water' or 'Groundwater' (None = all).
+        sector_filter: Single sector string or set of sectors to include.
+        require_af: If True, drop records with AF <= 0.
+
+    Returns:
+        (rows, cols, priority_years, af_values, raster_shape, transform, profile)
+        All arrays are for valid (in-bounds) PODs only.
+    """
+    import rasterio as rio
+
+    gdf = gpd.read_file(pod_shapefile, include_fields=_POD_SHAPEFILE_COLS)
+    if source_filter:
+        gdf = gdf[gdf['source'] == source_filter]
+    if sector_filter:
+        if isinstance(sector_filter, str):
+            gdf = gdf[gdf['primarySe0'] == sector_filter]
+        else:
+            gdf = gdf[gdf['primarySe0'].isin(sector_filter)]
+    if require_af:
+        gdf['AF'] = pd.to_numeric(gdf['AF'], errors='coerce')
+        gdf = gdf[gdf['AF'].notna() & (gdf['AF'] > 0)]
+
+    with rio.open(ref_raster) as src:
+        crs = src.crs
+        transform = src.transform
+        shape = (src.height, src.width)
+        profile = src.profile.copy()
+
+    gdf = gdf.to_crs(crs)
+    gdf['_year'] = pd.to_datetime(gdf['priorityD0'], errors='coerce').dt.year
+    gdf = gdf[gdf['_year'].notna()].copy()
+    gdf['_year'] = gdf['_year'].astype(int)
+
+    xs = gdf.geometry.x.values
+    ys = gdf.geometry.y.values
+    cols, rows = ~transform * (xs, ys)
+    rows = np.floor(rows).astype(int)
+    cols = np.floor(cols).astype(int)
+    valid = (rows >= 0) & (rows < shape[0]) & (cols >= 0) & (cols < shape[1])
+
+    af_vals = pd.to_numeric(gdf['AF'], errors='coerce').fillna(0).values
+    return (rows[valid], cols[valid], gdf['_year'].values[valid],
+            af_vals[valid], shape, transform, profile)
+
+
+def create_sw_access_year_raster(
+        pod_shapefile: str,
+        output_dir: str,
+        ref_raster: str,
+        already_created: bool = False,
+) -> str:
+    """Create a raster of the earliest irrigation SW priority year per pixel.
+
+    For each 2 km pixel, stores the minimum priority date year across all
+    irrigation surface-water PODs in that pixel.  Used to temporally adjust
+    the Hung et al. ``annual_gw_fraction`` — pixels whose SW access had
+    not yet been established are set to ``gw_frac = 1.0`` at partition time.
+
+    Args:
+        pod_shapefile: Path to HarDWR arizonaStatePOD.shp.
+        output_dir: Output directory for the raster.
+        ref_raster: Reference raster for CRS/grid alignment.
+        already_created: Skip if True.
+
+    Returns:
+        Path to SW_Access_Year.tif.
+    """
+    import rasterio as rio
+
+    out_file = os.path.join(output_dir, 'SW_Access_Year.tif')
+    if already_created:
+        logger.info('SW access year raster already created, skipping...')
+        return out_file
+
+    makedirs(output_dir)
+    rows, cols, years, _, shape, transform, profile = _load_pod_points(
+        pod_shapefile, ref_raster,
+        source_filter='Surface Water',
+        sector_filter='irrigation',
+    )
+    logger.info(f'Creating SW access year raster from {len(rows)} '
+                f'irrigation SW PODs...')
+
+    # Compute min year per pixel
+    grid = np.full(shape, np.nan, dtype=np.float32)
+    for r, c, y in zip(rows, cols, years):
+        if np.isnan(grid[r, c]) or y < grid[r, c]:
+            grid[r, c] = y
+
+    n_pixels = int(np.isfinite(grid).sum())
+    profile.update(dtype='float32', count=1, nodata=np.nan)
+    with rio.open(out_file, 'w', **profile) as dst:
+        dst.write(grid, 1)
+
+    logger.info(f'Created SW_Access_Year.tif: {n_pixels} pixels with '
+                f'irrigation SW rights')
+    return out_file
+
+
+def create_irr_sw_rights_density_raster(
+        pod_shapefile: str,
+        output_dir: str,
+        ref_raster: str,
+        start_year: int = 1896,
+        end_year: int = 2099,
+        already_created: bool = False,
+) -> str:
+    """Create per-year cumulative irrigation SW rights count rasters.
+
+    For each year and pixel, counts the number of irrigation surface-water
+    PODs with ``priority_year ≤ year``.  This is an ML predictor capturing
+    irrigation surface-water availability build-out over time.
+
+    Args:
+        pod_shapefile: Path to HarDWR arizonaStatePOD.shp.
+        output_dir: Output directory.
+        ref_raster: Reference raster for CRS/grid.
+        start_year: First year (default 1896).
+        end_year: Last year (default 2099).
+        already_created: Skip if True.
+
+    Returns:
+        Path to the base raster (first year).
+    """
+    import rasterio as rio
+
+    base_raster = os.path.join(output_dir,
+                               f'Irr_SW_Rights_Density_{start_year}.tif')
+    if already_created:
+        logger.info('Irr SW rights density rasters already created, skipping...')
+        return base_raster
+
+    makedirs(output_dir)
+    rows, cols, years, _, shape, transform, profile = _load_pod_points(
+        pod_shapefile, ref_raster,
+        source_filter='Surface Water',
+        sector_filter='irrigation',
+    )
+    logger.info(f'Creating Irr SW rights density rasters ({start_year}-{end_year}) '
+                f'from {len(rows)} irrigation SW PODs...')
+
+    profile.update(dtype='float32', count=1, nodata=np.nan)
+    pixel_keys = rows * shape[1] + cols
+
+    prev_raster = None
+    prev_count = -1
+    for year in range(start_year, end_year + 1):
+        out_file = os.path.join(output_dir,
+                                f'Irr_SW_Rights_Density_{year}.tif')
+        active = years <= year
+        n_active = int(active.sum())
+
+        if n_active == prev_count and prev_raster is not None:
+            copy_file(prev_raster, out_file, verbose=False)
+        else:
+            grid = np.zeros(shape, dtype=np.float32)
+            np.add.at(grid.ravel(), pixel_keys[active], 1)
+            with rio.open(out_file, 'w', **profile) as dst:
+                dst.write(grid, 1)
+            prev_raster = out_file
+            prev_count = n_active
+
+    logger.info(f'Created Irr SW rights density rasters ({start_year}-{end_year})')
+    return base_raster
+
+
+def create_gw_allocation_density_raster(
+        pod_shapefile: str,
+        output_dir: str,
+        ref_raster: str,
+        start_year: int = 1896,
+        end_year: int = 2099,
+        already_created: bool = False,
+) -> str:
+    """Create per-year cumulative irrigation GW allocation depth rasters.
+
+    For each year and pixel, sums AF allocations of irrigation groundwater
+    rights with ``priority_year ≤ year`` and converts to mm depth using the
+    pixel area (consistent with the pumping depth rasters).  This is an ML
+    predictor representing legally permitted groundwater demand.
+
+    Conversion: ``mm = AF × 1233.48 / pixel_area_m² × 1000``
+
+    Args:
+        pod_shapefile: Path to HarDWR arizonaStatePOD.shp.
+        output_dir: Output directory.
+        ref_raster: Reference raster for CRS/grid.
+        start_year: First year (default 1896).
+        end_year: Last year (default 2099).
+        already_created: Skip if True.
+
+    Returns:
+        Path to the base raster (first year).
+    """
+    import rasterio as rio
+
+    base_raster = os.path.join(output_dir,
+                               f'GW_Allocation_Density_{start_year}.tif')
+    if already_created:
+        logger.info('GW allocation density rasters already created, skipping...')
+        return base_raster
+
+    makedirs(output_dir)
+    rows, cols, years, af_vals, shape, transform, profile = _load_pod_points(
+        pod_shapefile, ref_raster,
+        source_filter='Groundwater',
+        sector_filter='irrigation',
+        require_af=True,
+    )
+
+    # Convert AF to mm: AF × 1233.48 m³/AF / pixel_area_m² × 1000 mm/m
+    pixel_area_m2 = abs(transform.a * transform.e)
+    af_to_mm = 1233.48 / pixel_area_m2 * 1000
+    af_vals_mm = af_vals * af_to_mm
+
+    logger.info(f'Creating GW allocation density rasters ({start_year}-{end_year}) '
+                f'from {len(rows)} irrigation GW rights with AF > 0 '
+                f'(total {af_vals.sum():,.0f} AF = '
+                f'{af_vals_mm.sum():,.0f} mm·pixels)...')
+
+    profile.update(dtype='float32', count=1, nodata=np.nan)
+    pixel_keys = rows * shape[1] + cols
+
+    prev_raster = None
+    prev_count = -1
+    for year in range(start_year, end_year + 1):
+        out_file = os.path.join(output_dir,
+                                f'GW_Allocation_Density_{year}.tif')
+        active = years <= year
+        n_active = int(active.sum())
+
+        if n_active == prev_count and prev_raster is not None:
+            copy_file(prev_raster, out_file, verbose=False)
+        else:
+            grid = np.zeros(shape, dtype=np.float32)
+            np.add.at(grid.ravel(), pixel_keys[active], af_vals_mm[active])
+            with rio.open(out_file, 'w', **profile) as dst:
+                dst.write(grid, 1)
+            prev_raster = out_file
+            prev_count = n_active
+
+    logger.info(f'Created GW allocation density rasters ({start_year}-{end_year})')
+    return base_raster
+
+
+def create_nonirr_sw_rights_density_raster(
+        pod_shapefile: str,
+        output_dir: str,
+        ref_raster: str,
+        start_year: int = 1896,
+        end_year: int = 2099,
+        already_created: bool = False,
+) -> str:
+    """Create per-year cumulative non-irrigation SW rights count rasters.
+
+    For each year and pixel, counts non-irrigation surface-water PODs
+    (domestic, industrial, livestock, other — excluding environmental
+    in-stream flow rights) with ``priority_year ≤ year``.  Used in
+    ``partitionops`` as a temporally varying proxy for the non-irrigation
+    GW/SW split.
+
+    Args:
+        pod_shapefile: Path to HarDWR arizonaStatePOD.shp.
+        output_dir: Output directory.
+        ref_raster: Reference raster for CRS/grid.
+        start_year: First year (default 1896).
+        end_year: Last year (default 2099).
+        already_created: Skip if True.
+
+    Returns:
+        Path to the base raster (first year).
+    """
+    import rasterio as rio
+
+    base_raster = os.path.join(output_dir,
+                               f'NonIrr_Irr_SW_Rights_Density_{start_year}.tif')
+    if already_created:
+        logger.info('Non-irr Irr SW rights density rasters already created, '
+                    'skipping...')
+        return base_raster
+
+    makedirs(output_dir)
+    rows, cols, years, _, shape, transform, profile = _load_pod_points(
+        pod_shapefile, ref_raster,
+        source_filter='Surface Water',
+        sector_filter=_NONIRR_SW_SECTORS,
+    )
+    logger.info(f'Creating non-irr Irr SW rights density rasters '
+                f'({start_year}-{end_year}) from {len(rows)} PODs '
+                f'(domestic/industrial/livestock/other)...')
+
+    profile.update(dtype='float32', count=1, nodata=np.nan)
+    pixel_keys = rows * shape[1] + cols
+
+    prev_raster = None
+    prev_count = -1
+    for year in range(start_year, end_year + 1):
+        out_file = os.path.join(output_dir,
+                                f'NonIrr_Irr_SW_Rights_Density_{year}.tif')
+        active = years <= year
+        n_active = int(active.sum())
+
+        if n_active == prev_count and prev_raster is not None:
+            copy_file(prev_raster, out_file, verbose=False)
+        else:
+            grid = np.zeros(shape, dtype=np.float32)
+            np.add.at(grid.ravel(), pixel_keys[active], 1)
+            with rio.open(out_file, 'w', **profile) as dst:
+                dst.write(grid, 1)
+            prev_raster = out_file
+            prev_count = n_active
+
+    logger.info(f'Created non-irr Irr SW rights density rasters '
+                f'({start_year}-{end_year})')
     return base_raster

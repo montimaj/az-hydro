@@ -49,6 +49,7 @@ Author: Dr. Sayantan Majumdar (sayantan.majumdar@dri.edu)
 import logging
 import os
 import pickle
+import warnings
 
 import geopandas as gpd
 import numpy as np
@@ -104,8 +105,9 @@ M3_TO_AF = 1 / 1233.48
 USGS_LULC_SCENARIOS = ['B1', 'B2', 'A1B', 'A2']
 
 # 1-based band indices in Predictor_{year}.tif for LULC-derived columns
-LULC_BAND_INDEX = 8            # integer LULC class
-CROP_FRACTION_BAND_INDEX = 13  # annual_crop_fraction
+LULC_BAND_INDEX = 8             # integer LULC class
+CROP_FRACTION_BAND_INDEX = 13   # annual_crop_fraction
+URBAN_FRACTION_BAND_INDEX = 14  # annual_urban_fraction
 
 # ── 95 % CI multiplier and t-distribution corrections ────────────────────
 # The normal approximation z = 1.96 is the default 95 % CI multiplier.
@@ -176,6 +178,23 @@ def _build_pred_features(
     return pred.replace([np.inf, -np.inf], np.nan).fillna(0)
 
 
+def _safe_nanstd(stack, axis=0, ddof=1):
+    """np.nanstd with the DOF RuntimeWarning suppressed.
+
+    Pixels where all ensemble members are NaN (e.g. no-well pixels masked by
+    partition_predictions) or have only one non-NaN member make numpy warn
+    "Degrees of freedom <= 0 for slice". The resulting NaN is the intended
+    value, so we silence only that specific warning.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            'ignore',
+            message='Degrees of freedom <= 0 for slice',
+            category=RuntimeWarning,
+        )
+        return np.nanstd(stack, axis=axis, ddof=ddof)
+
+
 def _predict_total(model, pred_features, year_df, partops,
                    raster_shape, valid_mask):
     """Predict and partition, returning total pumping and category dict.
@@ -224,7 +243,7 @@ def _compute_category_sigmas(
             stack = np.stack(
                 [mc[cat_name] for mc in member_cats], axis=0,
             )
-            cat_sigmas[cat_name] = np.nanstd(
+            cat_sigmas[cat_name] = _safe_nanstd(
                 stack, axis=0, ddof=1,
             ).astype(np.float32)
     return cat_sigmas
@@ -511,7 +530,13 @@ def compute_sigma_maca(
             MACA_FUTURE_START, end_year,
             already_mosaicked=skip_download,
         )
-        gcm_mosaic_dirs[gcm] = gcm_mosaic_dir
+        # Reproject to match the reference predictor grid so valid_mask aligns
+        gcm_mosaic_reproj_dir = gcm_mosaic_dir + '_Reproj'
+        dataops.reproject_gee_mosaics(
+            gcm_mosaic_dir, gcm_mosaic_reproj_dir, pred_data_dir,
+            already_reprojected=skip_download,
+        )
+        gcm_mosaic_dirs[gcm] = gcm_mosaic_reproj_dir
 
     sigma_maca = {}
     yearly_stats = {}
@@ -550,7 +575,7 @@ def compute_sigma_maca(
             gcm_cats.append(cat)
 
         gcm_stack = np.stack(gcm_preds, axis=0)
-        std = np.nanstd(gcm_stack, axis=0, ddof=1)
+        std = _safe_nanstd(gcm_stack, axis=0, ddof=1)
         sigma_maca[year] = std
 
         cat_std = _compute_category_sigmas(gcm_cats)
@@ -771,7 +796,7 @@ def compute_sigma_model(
             seed_cats.append(cat)
 
         seed_stack = np.stack(seed_preds, axis=0)
-        std = np.nanstd(seed_stack, axis=0, ddof=1)
+        std = _safe_nanstd(seed_stack, axis=0, ddof=1)
         sigma_model[year] = std
 
         cat_std = _compute_category_sigmas(seed_cats)
@@ -1036,7 +1061,6 @@ def compute_sigma_lulc(
 
     import hydrolibs.dataops as dataops
     import hydrolibs.partitionops as partops
-    from hydrolibs.gwops import create_land_use_data
     from hydrolibs.rasterops import read_raster_as_arr, write_raster
     from hydrolibs.sysops import makedirs
 
@@ -1088,7 +1112,13 @@ def compute_sigma_lulc(
             MACA_FUTURE_START, end_year,
             already_mosaicked=skip_download,
         )
-        scenario_mosaic_dirs[scenario] = sc_mosaic_dir
+        # Reproject to match the reference predictor grid so valid_mask aligns
+        sc_mosaic_reproj_dir = sc_mosaic_dir + '_Reproj'
+        dataops.reproject_gee_mosaics(
+            sc_mosaic_dir, sc_mosaic_reproj_dir, pred_data_dir,
+            already_reprojected=skip_download,
+        )
+        scenario_mosaic_dirs[scenario] = sc_mosaic_reproj_dir
 
     sigma_lulc = {}
     yearly_stats = {}
@@ -1103,6 +1133,67 @@ def compute_sigma_lulc(
         sc: {c: [] for c in partops.CATEGORIES} for sc in USGS_LULC_SCENARIOS
     }
 
+    # --- Per-scenario basin-delta baselines (FORE-SCE 2026 per scenario) ---
+    # Mirrors the main pipeline's basin-scale delta correction so that each
+    # scenario's URBAN/AGRI/crop_fraction/urban_fraction columns are anchored
+    # to NLCD 2025's pixel-level spatial pattern, scaled by the scenario's
+    # own basin-level relative change. Baseline is the single FORE-SCE year
+    # paired with NLCD 2025 (i.e. 2026) so delta(2026, B) = 1 exactly and
+    # later years grow from there.
+    foresce_baseline_year = MACA_FUTURE_START  # 2026
+    valid_basins = az_df.loc[az_df.Year == 2025, 'GW_Basin'].reset_index(drop=True).values
+    unique_basins = np.unique(valid_basins)
+    nlcd_anchor_2025 = {}
+    for col in ('URBAN', 'AGRI', 'annual_crop_fraction', 'annual_urban_fraction'):
+        if col in az_df.columns:
+            nlcd_anchor_2025[col] = az_df.loc[
+                az_df.Year == 2025, col
+            ].reset_index(drop=True).values
+    scenario_baselines: dict[str, dict[int, dict]] = {}
+    for scenario in USGS_LULC_SCENARIOS:
+        sc_raster = os.path.join(
+            scenario_mosaic_dirs[scenario],
+            f'Predictor_{foresce_baseline_year}.tif',
+        )
+        lulc_b = read_raster_as_arr(
+            sc_raster, band=LULC_BAND_INDEX, get_file=False
+        )
+        lulc_valid = lulc_b.ravel()[valid_mask]
+        scenario_baselines[scenario] = {cls: {} for cls in (1, 2)}
+        for b in unique_basins:
+            m = valid_basins == b
+            if m.sum() == 0:
+                scenario_baselines[scenario][1][b] = 0.0
+                scenario_baselines[scenario][2][b] = 0.0
+                continue
+            scenario_baselines[scenario][1][b] = float((lulc_valid[m] == 1).mean())
+            scenario_baselines[scenario][2][b] = float((lulc_valid[m] == 2).mean())
+
+    def _scenario_pixel_deltas(sc_lulc_valid, scenario):
+        """Return (pixel_delta_ag, pixel_delta_urban) arrays."""
+        y_frac_1 = {}
+        y_frac_2 = {}
+        for b in unique_basins:
+            m = valid_basins == b
+            if m.sum() == 0:
+                y_frac_1[b] = 0.0
+                y_frac_2[b] = 0.0
+                continue
+            y_frac_1[b] = float((sc_lulc_valid[m] == 1).mean())
+            y_frac_2[b] = float((sc_lulc_valid[m] == 2).mean())
+        base = scenario_baselines[scenario]
+        basin_delta_1 = {
+            b: (y_frac_1[b] / base[1][b]) if base[1][b] > 0 else 1.0
+            for b in unique_basins
+        }
+        basin_delta_2 = {
+            b: (y_frac_2[b] / base[2][b]) if base[2][b] > 0 else 1.0
+            for b in unique_basins
+        }
+        pixel_d_ag = np.array([basin_delta_1[b] for b in valid_basins])
+        pixel_d_urban = np.array([basin_delta_2[b] for b in valid_basins])
+        return pixel_d_ag, pixel_d_urban
+
     for year in range(MACA_FUTURE_START, end_year + 1):
         year_df = az_df[az_df.Year == year].copy()
         if year_df.empty:
@@ -1114,25 +1205,42 @@ def compute_sigma_lulc(
             sc_raster = os.path.join(scenario_mosaic_dirs[scenario], f'Predictor_{year}.tif')
             sc_year_df = year_df.copy()
 
-            # Read per-scenario LULC class and crop fraction bands
+            # Read per-scenario LULC class band for basin-delta computation
             lulc_arr = read_raster_as_arr(
                 sc_raster, band=LULC_BAND_INDEX, get_file=False
             )
-            crop_frac_arr = read_raster_as_arr(
-                sc_raster, band=CROP_FRACTION_BAND_INDEX, get_file=False
+            lulc_valid = lulc_arr.ravel()[valid_mask]
+
+            # Compute per-scenario pixel-level deltas for ag and urban
+            pixel_d_ag, pixel_d_urban = _scenario_pixel_deltas(
+                lulc_valid, scenario,
             )
 
-            # Re-derive Gaussian-smoothed AGRI, SW, URBAN from LULC class
-            lu_df = pd.DataFrame()
-            lu_df = create_land_use_data(lu_df, lulc_arr)
-            sc_year_df['AGRI'] = lu_df['AGRI'].values[valid_mask]
-            sc_year_df['URBAN'] = lu_df['URBAN'].values[valid_mask]
+            # Apply per-scenario basin-delta correction to NLCD 2025 anchors.
+            # All four columns are bounded in [0, 1] so clip after scaling.
+            if 'URBAN' in nlcd_anchor_2025:
+                sc_year_df['URBAN'] = np.clip(
+                    nlcd_anchor_2025['URBAN'] * pixel_d_urban, 0.0, 1.0,
+                )
+            if 'AGRI' in nlcd_anchor_2025:
+                sc_year_df['AGRI'] = np.clip(
+                    nlcd_anchor_2025['AGRI'] * pixel_d_ag, 0.0, 1.0,
+                )
+            if 'annual_urban_fraction' in nlcd_anchor_2025:
+                sc_year_df['annual_urban_fraction'] = np.clip(
+                    nlcd_anchor_2025['annual_urban_fraction'] * pixel_d_urban,
+                    0.0, 1.0,
+                )
+            if 'annual_crop_fraction' in nlcd_anchor_2025:
+                sc_year_df['annual_crop_fraction'] = np.clip(
+                    nlcd_anchor_2025['annual_crop_fraction'] * pixel_d_ag,
+                    0.0, 1.0,
+                )
+            # Expose raw scenario lulc class for partitioning fallbacks
+            sc_year_df['lulc'] = lulc_valid
 
-            # Update crop fraction
-            crop_frac_valid = crop_frac_arr.ravel()[valid_mask]
-            sc_year_df['annual_crop_fraction'] = crop_frac_valid
-
-            # Re-derive irr fraction from crop fraction via regression
+            # Re-derive irr fraction from CORRECTED crop fraction via regression
+            crop_frac_valid = sc_year_df['annual_crop_fraction'].values
             irr_frac = np.zeros_like(crop_frac_valid)
             nonzero = crop_frac_valid > 0
             if nonzero.any():
@@ -1160,7 +1268,7 @@ def compute_sigma_lulc(
                 scenario_cat_volumes[scenario][c].append(cat_stats)
 
         sc_stack = np.stack(scenario_preds, axis=0)
-        std = np.nanstd(sc_stack, axis=0, ddof=1)
+        std = _safe_nanstd(sc_stack, axis=0, ddof=1)
         sigma_lulc[year] = std
 
         cat_std = _compute_category_sigmas(scenario_cats)
@@ -1314,7 +1422,7 @@ def compute_sigma_gw(
             snapshot_cats.append(cat)
 
         snap_stack = np.stack(snapshot_preds, axis=0)
-        std = np.nanstd(snap_stack, axis=0, ddof=1)
+        std = _safe_nanstd(snap_stack, axis=0, ddof=1)
         sigma_gw[year] = std
 
         cat_std = _compute_category_sigmas(snapshot_cats)

@@ -92,6 +92,33 @@ def focal_fill_irr_fraction(
     return filled
 
 
+def adjust_gw_fraction_temporal(
+        gw_frac: np.ndarray,
+        sw_access_year: np.ndarray,
+        year: int,
+) -> np.ndarray:
+    """Adjust Hung et al. GW fraction for pre-canal years.
+
+    Pixels that had not yet gained surface-water access (based on the
+    earliest irrigation SW water-right priority date from HarDWR) are
+    set to ``gw_frac = 1.0`` (100 % groundwater).
+
+    Args:
+        gw_frac: Static GW fraction (1-D, valid pixels).
+        sw_access_year: Per-pixel earliest irrigation SW priority year
+            (NaN for pixels with no irrigation SW rights).
+        year: Target prediction year.
+
+    Returns:
+        Adjusted GW fraction array (clipped to [0, 1]).
+    """
+    adjusted = gw_frac.copy()
+    has_sw = np.isfinite(sw_access_year)
+    pre_sw = has_sw & (year < sw_access_year)
+    adjusted[pre_sw] = 1.0
+    return adjusted
+
+
 def compute_sw_fraction(
         canal_dens: np.ndarray,
         raster_shape: tuple,
@@ -156,41 +183,110 @@ def partition_predictions(
         predictions[no_well] = np.nan
 
     # ---- Irrigation / Non-irrigation split ----
-    irr_frac = year_df['annual_irr_fraction'].values if 'annual_irr_fraction' in year_df.columns else None
-    if irr_frac is not None and well_dens is not None:
-        irr_frac = focal_fill_irr_fraction(irr_frac, well_dens, raster_shape, valid_mask)
+    # Use pump-capacity-weighted irrigation fraction when available:
+    # irr_capacity_fraction = (sum of PUMPRATE for IRRIGATION wells) /
+    #                         (sum of PUMPRATE for all active wells)
+    # per 2 km pixel. This gives a physically meaningful withdrawal split
+    # (~65% ag statewide after PUMPRATE imputation) unlike the area-based
+    # irr_fraction which is geometrically small at 2 km resolution.
+    #
+    # The static well-registry fraction is made time-varying by scaling
+    # each side by its respective area-fraction change relative to the
+    # well-registry reference year (2024):
+    #   irr_weight  = irr_cap_static  × (crop_frac / crop_frac_2024)
+    #   mi_weight   = mi_cap_static   × (urban_frac / urban_frac_2024)
+    #   irr_frac(y) = irr_weight / (irr_weight + mi_weight)
+    # This captures the 1950s ag boom (more crop → higher irr share) and
+    # future urbanisation (more urban → higher M&I share).
+    #
+    # Falls back to the area-based annual_irr_fraction for older parquets.
+    irr_cap_frac = year_df['irr_capacity_fraction'].values \
+        if 'irr_capacity_fraction' in year_df.columns else None
+    if irr_cap_frac is not None:
+        irr_cap_frac = np.clip(np.nan_to_num(irr_cap_frac, nan=0.0), 0, 1)
+        mi_cap_frac = 1.0 - irr_cap_frac
 
-    irr = predictions * irr_frac if irr_frac is not None else predictions.copy()
-    nonirr = predictions - irr
+        # Temporal scaling by crop/urban area changes
+        crop_frac = year_df['annual_crop_fraction'].values \
+            if 'annual_crop_fraction' in year_df.columns else None
+        urban_frac = year_df['annual_urban_fraction'].values \
+            if 'annual_urban_fraction' in year_df.columns else None
+        crop_ref = year_df['crop_frac_ref'].values \
+            if 'crop_frac_ref' in year_df.columns else None
+        urban_ref = year_df['urban_frac_ref'].values \
+            if 'urban_frac_ref' in year_df.columns else None
 
-    # ---- Urban density weighting for non-irrigation ----
-    # Non-irrigation (municipal/industrial) withdrawal is weighted by the
-    # Gaussian-smoothed urban density (URBAN column, 0–1) so that rural
-    # pixels contribute negligibly to non-ag volumes.  Falls back to a
-    # binary LULC == 2 mask if URBAN is unavailable.
-    urban_dens = year_df['URBAN'].values if 'URBAN' in year_df.columns else None
-    if urban_dens is not None:
-        urban_dens = np.clip(np.nan_to_num(urban_dens, nan=0.0), 0, 1)
-        nonirr = nonirr * urban_dens
+        if (crop_frac is not None and urban_frac is not None
+                and crop_ref is not None and urban_ref is not None):
+            with np.errstate(invalid='ignore', divide='ignore'):
+                crop_ratio = np.where(crop_ref > 0, crop_frac / crop_ref, 1.0)
+                urban_ratio = np.where(urban_ref > 0, urban_frac / urban_ref, 1.0)
+            irr_weight = irr_cap_frac * crop_ratio
+            mi_weight = mi_cap_frac * urban_ratio
+            total_weight = irr_weight + mi_weight
+            with np.errstate(invalid='ignore', divide='ignore'):
+                irr_cap_frac = np.where(
+                    total_weight > 0, irr_weight / total_weight, irr_cap_frac,
+                )
+            irr_cap_frac = np.clip(np.nan_to_num(irr_cap_frac, nan=0.0), 0, 1)
+
+        irr = predictions * irr_cap_frac
+        nonirr = predictions * (1 - irr_cap_frac)
     else:
-        lulc = year_df['lulc'].values if 'lulc' in year_df.columns else None
-        if lulc is not None:
-            non_urban = (lulc != 2) | np.isnan(lulc)
-            nonirr[non_urban] = 0.0
+        irr_frac = year_df['annual_irr_fraction'].values \
+            if 'annual_irr_fraction' in year_df.columns else None
+        if irr_frac is not None and well_dens is not None:
+            irr_frac = focal_fill_irr_fraction(
+                irr_frac, well_dens, raster_shape, valid_mask,
+            )
+        irr = predictions * irr_frac if irr_frac is not None else predictions.copy()
+        nonirr = predictions - irr
+
+    # ---- Urban-fraction weighting for non-irrigation outside AMA/INAs ----
+    # AMA/INA basins (GW_Basin_Type 0 or 1) are managed groundwater areas
+    # where M&I withdrawal is well-established — keep full nonirr value.
+    # Outside AMA/INAs (GW_Basin_Type 2), non-irrigation withdrawals are
+    # sparse and concentrated in small towns. Scale by the physical
+    # urban-area fraction to zero out rural pixels with no real M&I demand.
+    basin_type = year_df['GW_Basin_Type'].values \
+        if 'GW_Basin_Type' in year_df.columns else None
+    urban_frac_col = year_df['annual_urban_fraction'].values \
+        if 'annual_urban_fraction' in year_df.columns else None
+    if basin_type is not None and urban_frac_col is not None:
+        is_other = basin_type == 2
+        uf = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
+        nonirr[is_other] = nonirr[is_other] * uf[is_other]
 
     # ---- GW / SW split of irrigation ----
     gw_frac = year_df['annual_gw_fraction'].values if 'annual_gw_fraction' in year_df.columns else None
     if gw_frac is not None:
         gw_frac = np.clip(np.nan_to_num(gw_frac, nan=1.0), 0, 1)
+        # Temporal adjustment: pre-canal pixels → 100 % GW
+        sw_access_yr = year_df['sw_access_year'].values \
+            if 'sw_access_year' in year_df.columns else None
+        if sw_access_yr is not None:
+            year_val = int(year_df['Year'].iloc[0])
+            gw_frac = adjust_gw_fraction_temporal(
+                gw_frac, sw_access_yr, year_val,
+            )
         irr_gw = irr * gw_frac
         irr_sw = irr - irr_gw
     else:
         irr_gw = irr.copy()
         irr_sw = np.zeros_like(irr)
 
-    # ---- GW / SW split of non-irrigation (canal density proxy) ----
-    canal_dens = year_df['canal_density'].values if 'canal_density' in year_df.columns else None
-    if canal_dens is not None:
+    # ---- GW / SW split of non-irrigation ----
+    # Prefer HarDWR non-irrigation SW rights density (temporally varying)
+    # over static canal density when available.
+    nonirr_sw_dens = year_df['nonirr_sw_rights_density'].values \
+        if 'nonirr_sw_rights_density' in year_df.columns else None
+    canal_dens = year_df['canal_density'].values \
+        if 'canal_density' in year_df.columns else None
+    if nonirr_sw_dens is not None:
+        sw_frac = compute_sw_fraction(nonirr_sw_dens, raster_shape, valid_mask)
+        nonirr_sw = nonirr * sw_frac
+        nonirr_gw = nonirr - nonirr_sw
+    elif canal_dens is not None:
         sw_frac = compute_sw_fraction(canal_dens, raster_shape, valid_mask)
         nonirr_sw = nonirr * sw_frac
         nonirr_gw = nonirr - nonirr_sw

@@ -161,21 +161,72 @@ def download_streamflow(
         if usbr_monthly is not None and verbose:
             logger.info(f'Loaded USBR data for site {site_id}')
 
-        # Store for ratio computation
+        # Store for ratio computation (Pass 2 uses these)
         if usgs_monthly is not None:
             usgs_data[site_id] = usgs_monthly
         if usbr_monthly is not None:
             usbr_data[site_id] = usbr_monthly
+        # Will be updated with bias-corrected version after merge below
 
-        # Merge: USGS takes priority, USBR fills the rest
+        # Merge: USGS takes priority, USBR fills the rest.
+        # Where both sources overlap, compute per-month multiplicative
+        # bias-correction factors (USGS_mean / USBR_mean per calendar month)
+        # and apply them to all USBR-filled months. This eliminates the
+        # step-jump at USGS→USBR boundaries — same delta-method approach
+        # used for climate and LULC bias correction in this pipeline.
         if usgs_monthly is not None and usbr_monthly is not None:
             usgs_start = usgs_monthly.index.min()
             usgs_end = usgs_monthly.index.max()
+
+            # Compute per-month bias-correction factors from overlap
+            overlap_idx = usgs_monthly.index.intersection(usbr_monthly.index)
+            bc_factors = {}  # month → factor
+            if len(overlap_idx) > 0:
+                overlap_usgs = usgs_monthly.loc[overlap_idx, 'discharge_cfs']
+                overlap_usbr = usbr_monthly.loc[overlap_idx, 'discharge_cfs']
+                bc_df = pd.DataFrame({
+                    'usgs': overlap_usgs, 'usbr': overlap_usbr,
+                    'month': overlap_idx.month,
+                }).dropna()
+                bc_df = bc_df[bc_df['usbr'] > 0]
+                for m, grp in bc_df.groupby('month'):
+                    usbr_mean = grp['usbr'].mean()
+                    if usbr_mean > 0:
+                        bc_factors[m] = grp['usgs'].mean() / usbr_mean
+                if verbose and bc_factors:
+                    bc_vals = list(bc_factors.values())
+                    logger.info(
+                        f'  Site {site_id}: USBR bias-correction factors '
+                        f'({len(overlap_idx)} overlap months): '
+                        f'mean={np.mean(bc_vals):.3f}, '
+                        f'range=[{min(bc_vals):.3f}, {max(bc_vals):.3f}]'
+                    )
+
+            # Apply BC to USBR months outside the USGS record
             usbr_fill = usbr_monthly[
                 (usbr_monthly.index < usgs_start) | (usbr_monthly.index > usgs_end)
-            ]
+            ].copy()
+            if bc_factors and not usbr_fill.empty:
+                month_factor = usbr_fill.index.month.map(
+                    lambda m: bc_factors.get(m, 1.0)
+                )
+                usbr_fill['discharge_cfs'] = usbr_fill['discharge_cfs'] * month_factor
+
             monthly = pd.concat([usgs_monthly, usbr_fill]).sort_index()
             monthly = monthly[~monthly.index.duplicated(keep='first')]
+
+            # Update usbr_data with bias-corrected version so Pass 2
+            # (non-USBR sites using ratio method) inherits the correction
+            # when referencing this site's USBR projections.
+            if bc_factors and usbr_monthly is not None:
+                corrected_usbr = usbr_monthly.copy()
+                month_factor = corrected_usbr.index.month.map(
+                    lambda m: bc_factors.get(m, 1.0)
+                )
+                corrected_usbr['discharge_cfs'] = (
+                    corrected_usbr['discharge_cfs'] * month_factor
+                )
+                usbr_data[site_id] = corrected_usbr
         elif usgs_monthly is not None:
             monthly = usgs_monthly
         elif usbr_monthly is not None:
@@ -511,29 +562,72 @@ def create_streamflow_rasters(
         cap_arr = cap_arr_native
     cap_file.close()
 
-    # Read and align canal density raster if provided
-    canal_arr = None
+    # Determine canal density source: per-year files or single static file
+    _canal_dir = None
+    _canal_static_arr = None
     if canal_density_file and os.path.exists(canal_density_file):
-        from rasterio.warp import Resampling, reproject
-        cd_file = rio.open(canal_density_file)
-        cd_arr_native = cd_file.read(1).astype(np.float32)
-        if cd_file.shape != ws_shape or cd_file.transform != ws_transform:
-            canal_arr = np.zeros(ws_shape, dtype=np.float32)
-            reproject(
-                source=cd_arr_native,
-                destination=canal_arr,
-                src_transform=cd_file.transform,
-                src_crs=cd_file.crs,
-                dst_transform=ws_transform,
-                dst_crs=ws_file.crs,
-                resampling=Resampling.nearest
-            )
+        # Check if per-year canal density files exist (time-varying)
+        canal_base_dir = os.path.dirname(canal_density_file)
+        canal_prefix = os.path.basename(canal_density_file).rsplit('_', 1)[0]
+        test_file = os.path.join(canal_base_dir,
+                                 f'{canal_prefix}_{start_year + 1}.tif')
+        if os.path.exists(test_file):
+            _canal_dir = canal_base_dir
+            _canal_prefix = canal_prefix
+            if verbose:
+                logger.info('Using per-year canal density rasters for '
+                            'weighted streamflow')
         else:
-            canal_arr = cd_arr_native
-        cd_file.close()
-        canal_arr[np.isnan(canal_arr)] = 0.0
-        if verbose:
-            logger.info('Loaded canal density raster for weighted streamflow')
+            # Single static file — load once
+            from rasterio.warp import Resampling, reproject
+            cd_file = rio.open(canal_density_file)
+            cd_arr_native = cd_file.read(1).astype(np.float32)
+            if cd_file.shape != ws_shape or cd_file.transform != ws_transform:
+                _canal_static_arr = np.zeros(ws_shape, dtype=np.float32)
+                reproject(
+                    source=cd_arr_native,
+                    destination=_canal_static_arr,
+                    src_transform=cd_file.transform,
+                    src_crs=cd_file.crs,
+                    dst_transform=ws_transform,
+                    dst_crs=ws_file.crs,
+                    resampling=Resampling.nearest
+                )
+            else:
+                _canal_static_arr = cd_arr_native
+            cd_file.close()
+            _canal_static_arr[np.isnan(_canal_static_arr)] = 0.0
+            if verbose:
+                logger.info('Loaded static canal density raster for '
+                            'weighted streamflow')
+
+    def _load_canal_arr_for_year(year):
+        """Load canal density array for a given year."""
+        if _canal_dir:
+            cd_path = os.path.join(_canal_dir,
+                                   f'{_canal_prefix}_{year}.tif')
+            if os.path.exists(cd_path):
+                cd_f = rio.open(cd_path)
+                arr = cd_f.read(1).astype(np.float32)
+                cd_f.close()
+                arr[np.isnan(arr)] = 0.0
+                if arr.shape != ws_shape:
+                    from rasterio.warp import Resampling, reproject
+                    aligned = np.zeros(ws_shape, dtype=np.float32)
+                    reproject(
+                        source=arr,
+                        destination=aligned,
+                        src_transform=cd_f.transform,
+                        src_crs=cd_f.crs,
+                        dst_transform=ws_transform,
+                        dst_crs=ws_file.crs,
+                        resampling=Resampling.nearest,
+                    )
+                    return aligned
+                return arr
+        return _canal_static_arr
+
+    canal_arr = _load_canal_arr_for_year(start_year)
 
     # Step 3: Map gauges to watersheds and compute watershed areas (m²)
     ws_sites = _get_site_watershed_map(sites_csv, watershed_geojson)
@@ -620,7 +714,17 @@ def create_streamflow_rasters(
         )
 
         # Canal-weighted streamflow: redistribute flow proportionally to canal density
-        if canal_arr is not None:
+        # Reload canal density per year (may vary when HarDWR scaling is applied)
+        yr_canal_arr = _load_canal_arr_for_year(year)
+        if yr_canal_arr is not None:
+            # Recompute per-watershed canal sums for this year
+            yr_ws_canal_sum = {}
+            for oid in unique_oids:
+                mask = ws_arr == oid
+                yr_ws_canal_sum[oid] = float(yr_canal_arr[mask].sum())
+            yr_cap_mask = cap_arr > 0
+            yr_cap_canal_sum = float(yr_canal_arr[yr_cap_mask].sum())
+
             cw_arr = np.full(ws_shape, 0.0, dtype=np.float32)
             for oid in unique_oids:
                 if oid not in ws_annual:
@@ -630,11 +734,11 @@ def create_streamflow_rasters(
                 else:
                     flow_mm = ws_annual[oid].mean()
                 mask = ws_arr == oid
-                total_canal = ws_canal_sum.get(oid, 0.0)
+                total_canal = yr_ws_canal_sum.get(oid, 0.0)
                 n_pixels = ws_pixel_count.get(oid, 1)
                 if total_canal > 0:
                     # Redistribute: total volume preserved, weighted by canal density
-                    cw_arr[mask] = flow_mm * n_pixels * (canal_arr[mask] / total_canal)
+                    cw_arr[mask] = flow_mm * n_pixels * (yr_canal_arr[mask] / total_canal)
                 else:
                     # No canals in watershed: fall back to uniform
                     cw_arr[mask] = flow_mm
@@ -645,9 +749,9 @@ def create_streamflow_rasters(
                 co_flow = co_annual.loc[year]
             else:
                 co_flow = co_annual.mean() if not co_annual.empty else 0.0
-            if cap_canal_sum > 0:
+            if yr_cap_canal_sum > 0:
                 n_cap = int(cap_mask.sum())
-                cw_arr[cap_mask] += co_flow * n_cap * (canal_arr[cap_mask] / cap_canal_sum)
+                cw_arr[cap_mask] += co_flow * n_cap * (yr_canal_arr[cap_mask] / yr_cap_canal_sum)
             else:
                 cw_arr[cap_mask] += co_flow
 
@@ -675,16 +779,20 @@ def create_canal_density_raster(
         yres: float = 2000,
         start_year: int = 1896,
         end_year: int = 2099,
-        already_created: bool = False
+        already_created: bool = False,
+        pod_shapefile: str | None = None,
+        watershed_file: str | None = None,
 ) -> str:
     """
-    Create canal density rasters (segment count per pixel) from the GRAIN dataset.
+    Create per-year canal density rasters (segment count per pixel) from GRAIN.
 
-    A single raster is computed from all GRAIN canal segments clipped to AZ and
-    then replicated for each year to maintain consistency with the per-year
-    predictor file pattern. No filtering by canal use is applied here;
-    irrigation vs. non-agricultural partitioning is handled downstream
-    using the irrigation fraction for each basin.
+    A base raster is computed from all GRAIN canal segments clipped to AZ.
+    When ``pod_shapefile`` and ``watershed_file`` are provided, the base
+    density is scaled per year using HarDWR surface-water rights priority
+    dates at the **watershed level**: for each watershed, the modern canal
+    density is multiplied by the fraction of SW rights established by that
+    year.  This captures the progressive build-out of canal infrastructure
+    (SRP expansion, CAP completion, etc.).
 
     Args:
         grain_parquet (str): Path to the GRAIN GeoParquet file.
@@ -695,6 +803,9 @@ def create_canal_density_raster(
         start_year (int): Start year. Defaults to 1896.
         end_year (int): End year. Defaults to 2099.
         already_created (bool): If True, skip creation.
+        pod_shapefile (str or None): Path to HarDWR arizonaStatePOD.shp.
+            When provided with watershed_file, enables temporal scaling.
+        watershed_file (str or None): Path to Surface_Watershed.geojson.
 
     Returns:
         str: Path to the base canal density raster.
@@ -724,7 +835,7 @@ def create_canal_density_raster(
     tmp_shp = os.path.join(tmp_dir, 'canals.shp')
     gdf[['_count', 'geometry']].to_file(tmp_shp)
 
-    # Rasterize: segment count per pixel
+    # Rasterize: segment count per pixel (modern/full density)
     shp2raster(
         tmp_shp, base_raster,
         value_field='_count',
@@ -732,28 +843,142 @@ def create_canal_density_raster(
         add_value=True
     )
 
-    # Copy for each year
-    # NOTE: Canal density is static — a single raster from current GRAIN data is
-    # replicated for all years (1896–2099).  Arizona's canal infrastructure evolved
-    # significantly over this period (early canals 1860s–1920s, SRP expansion
-    # 1900s–1950s, CAP completion ~1993).  This assumption affects both
-    # canal-weighted streamflow redistribution and the non-irrigation SW fraction
-    # proxy in partitionops.  If historical canal construction dates become
-    # available in GRAIN or NHD metadata, time-varying rasters can be created.
-    logger.warning(
-        'Canal density is static for all years (%d-%d): modern GRAIN canal '
-        'network is applied uniformly across the full period. Canal '
-        'infrastructure changed substantially over this timespan '
-        '(pre-SRP, SRP expansion, CAP completion ~1993). This affects '
-        'canal-weighted streamflow and non-irrigation SW fraction proxy.',
-        start_year, end_year,
-    )
-    for year in range(start_year + 1, end_year + 1):
-        out_file = os.path.join(output_dir, f'Canal_Density_{year}.tif')
-        copy_file(base_raster, out_file, verbose=False)
+    # Read the base raster for scaling
+    base_file = rio.open(base_raster)
+    base_arr = base_file.read(1).astype(np.float32)
+    base_arr[np.isnan(base_arr)] = 0.0
+    no_data = base_file.nodata
+    base_file.close()
+
+    # ---- Temporal scaling via HarDWR SW rights ----
+    ws_scale = None
+    if pod_shapefile and watershed_file and os.path.exists(pod_shapefile):
+        ws_scale = _compute_watershed_sw_scale(
+            pod_shapefile, watershed_file, base_raster,
+            start_year, end_year,
+        )
+
+    if ws_scale is not None:
+        logger.info(
+            'Scaling canal density per year using watershed-level SW '
+            'rights build-out from HarDWR (%d-%d).', start_year, end_year,
+        )
+        # Read watershed raster for per-pixel watershed assignment
+        ws_raster = os.path.join(
+            os.path.dirname(output_dir), 'Streamflow', 'watershed_template.tif',
+        )
+        if not os.path.exists(ws_raster):
+            # Fallback: replicate if watershed template not yet created
+            ws_raster = None
+
+        ws_arr = None
+        if ws_raster:
+            ws_f = rio.open(ws_raster)
+            ws_arr_raw = ws_f.read(1).astype(np.float32)
+            ws_f.close()
+            # Align to base raster shape if needed
+            if ws_arr_raw.shape == base_arr.shape:
+                ws_arr = ws_arr_raw
+
+        prev_raster = None
+        prev_year_scales = None
+        for year in range(start_year, end_year + 1):
+            out_file = os.path.join(output_dir, f'Canal_Density_{year}.tif')
+
+            # Build per-pixel scale array from watershed scales
+            year_scales = ws_scale.get(year, {})
+            if year_scales == prev_year_scales and prev_raster is not None:
+                copy_file(prev_raster, out_file, verbose=False)
+            else:
+                if ws_arr is not None:
+                    scale_arr = np.ones_like(base_arr)
+                    for oid, s in year_scales.items():
+                        scale_arr[ws_arr == oid] = s
+                    scaled = base_arr * scale_arr
+                else:
+                    # No watershed raster: use statewide mean scale
+                    mean_s = (np.mean(list(year_scales.values()))
+                              if year_scales else 1.0)
+                    scaled = base_arr * mean_s
+
+                scaled = np.where(
+                    base_arr == (no_data if no_data else -32767.0),
+                    no_data if no_data else -32767.0,
+                    scaled,
+                )
+                with rio.open(base_raster) as ref:
+                    profile = ref.profile.copy()
+                with rio.open(out_file, 'w', **profile) as dst:
+                    dst.write(scaled.astype(np.float32), 1)
+
+                prev_raster = out_file
+                prev_year_scales = year_scales
+    else:
+        logger.warning(
+            'Canal density is static for all years (%d-%d): no HarDWR '
+            'POD data provided for temporal scaling.',
+            start_year, end_year,
+        )
+        for year in range(start_year + 1, end_year + 1):
+            out_file = os.path.join(output_dir, f'Canal_Density_{year}.tif')
+            copy_file(base_raster, out_file, verbose=False)
 
     # Clean up temp files
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    logger.info(f'Created canal density rasters ({start_year}-{end_year}) in {output_dir}')
+    logger.info(f'Created canal density rasters ({start_year}-{end_year}) '
+                f'in {output_dir}')
     return base_raster
+
+
+def _compute_watershed_sw_scale(
+        pod_shapefile: str,
+        watershed_file: str,
+        ref_raster: str,
+        start_year: int,
+        end_year: int,
+) -> dict[int, dict[int, float]]:
+    """Compute per-watershed, per-year SW rights scaling factors.
+
+    For each watershed (OBJECTID) and year, computes the fraction of all
+    surface-water PODs (all sectors) that have ``priority_year ≤ year``.
+
+    Returns:
+        dict mapping year → {watershed_oid → scale_fraction}.
+    """
+    pod_gdf = gpd.read_file(pod_shapefile)
+    pod_gdf = pod_gdf[pod_gdf['source'] == 'Surface Water'].copy()
+    pod_gdf['_year'] = pd.to_datetime(
+        pod_gdf['priorityD0'], errors='coerce',
+    ).dt.year
+    pod_gdf = pod_gdf[pod_gdf['_year'].notna()].copy()
+
+    # Spatial join: assign each POD to a watershed
+    ws_gdf = gpd.read_file(watershed_file)
+    pod_gdf = pod_gdf.to_crs(ws_gdf.crs)
+    joined = gpd.sjoin(pod_gdf, ws_gdf[['OBJECTID', 'geometry']],
+                       how='inner', predicate='within')
+
+    # Count total PODs per watershed
+    total_per_ws = joined.groupby('OBJECTID').size()
+
+    # Build year → {oid → scale} mapping
+    result = {}
+    prev_counts = None
+    for year in range(start_year, end_year + 1):
+        active = joined[joined['_year'] <= year]
+        active_per_ws = active.groupby('OBJECTID').size()
+
+        # Compute fraction, defaulting to 1.0 for watersheds with all
+        # rights already established and 0.0 for no rights yet.
+        year_dict = {}
+        for oid in total_per_ws.index:
+            n_total = total_per_ws[oid]
+            n_active = active_per_ws.get(oid, 0)
+            year_dict[int(oid)] = n_active / n_total if n_total > 0 else 1.0
+        result[year] = year_dict
+
+    logger.info(f'Computed watershed SW scaling factors '
+                f'({start_year}-{end_year}) for {len(total_per_ws)} '
+                f'watersheds')
+    return result

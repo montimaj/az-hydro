@@ -11,7 +11,49 @@ import os
 import shutil
 from glob import glob
 
+import numpy as np
+import pandas as pd
+
 logger = logging.getLogger(__name__)
+
+# Keywords identifying non-consumptive well uses in the ADWR Well Registry.
+# Used to filter wells before pump-capacity and well-package calculations.
+# Matched via str.contains to handle comma-separated combo labels.
+NON_CONSUMPTIVE_USES = [
+    'MONITORING', 'NO WATER USE', 'TEST', 'UNKNOWN', 'RESERVED',
+    'NO USE CODE ON NOI', 'REMEDIATION', 'DEWATERING', 'DRAINAGE',
+    'OTHER - MINERAL EXPLORE',
+]
+
+
+def derive_well_start_year(gdf, default_year: int = 1896) -> np.ndarray:
+    """Derive installation year for each well in *gdf*.
+
+    Priority: ``INSTALLED`` date → ``APPLICATIO`` date → *default_year*.
+    The ADWR sentinel value 1899 (meaning "unknown") is treated as missing.
+
+    Args:
+        gdf: GeoDataFrame with optional ``INSTALLED`` / ``APPLICATIO`` columns.
+        default_year: Fallback year for wells with no date information.
+
+    Returns:
+        1-D int32 array of start years, same length as *gdf*.
+    """
+    _SENTINEL_YEAR = 1899
+    n = len(gdf)
+    start_year = np.full(n, default_year, dtype=np.int32)
+    for date_col in ('INSTALLED', 'APPLICATIO'):
+        if date_col not in gdf.columns:
+            continue
+        dates = pd.to_datetime(gdf[date_col], errors='coerce')
+        years = dates.dt.year
+        fill_mask = ((start_year == default_year) & dates.notnull()
+                     & (years != _SENTINEL_YEAR))
+        start_year[fill_mask] = years[fill_mask].values
+    n_fallback = (start_year == default_year).sum()
+    logger.info(f'Well start years: {n - n_fallback} from registry dates, '
+                f'{n_fallback} using conservative default ({default_year})')
+    return start_year
 
 
 def az_nodata() -> float:

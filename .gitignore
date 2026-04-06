@@ -168,11 +168,8 @@ AZ_Polygons*
 
 Data/Outputs/GW*/
 Data/Outputs/*.parquet
-Data/Outputs/GEE_Mosaics_804m
-Data/Outputs/GEE_Mosaics_2000m
-Data/Outputs/Predictor_Data_804m
 *.xml
-Data/Outputs/ML_Model_Irr_Wells_2000m/Model_Evaluation/
+Data/Outputs*
 js/
 USBR/
 AZ_Data.parquet
@@ -183,3 +180,5 @@ Data/Outputs
 catboost_info/
 .claude/
 paper/
+Data/Inputs/GEE_Data*
+Data/Inputs/GW_Data/Water Rights

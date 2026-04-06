@@ -1239,9 +1239,13 @@ def get_variable_name_dict() -> dict[str, str]:
         'ksat_mean_micromps': 'Mean Saturated Hydraulic Conductivity (µm/s)',
         'annual_gw_fraction': 'Annual Groundwater Irrigation Fraction',
         'annual_crop_fraction': 'Annual Crop Fraction',
+        'annual_urban_fraction': 'Annual Urban Fraction',
         'annual_irr_fraction': 'Annual Irrigated Fraction',
         'well_density': 'Well Density (count/pixel)',
         'canal_density': 'Canal Density (segments/pixel)',
+        'sw_rights_density': 'SW Rights Density (count/pixel)',
+        'irr_sw_rights_density': 'Irrigation SW Rights Density (count/pixel)',
+        'nonirr_sw_rights_density': 'Non-Irrigation SW Rights Density (count/pixel)',
         'lulc': 'Land Use / Land Cover Class',
     }
     return var_name_dict

@@ -71,6 +71,7 @@ MONOTONE_CONSTRAINT_MAP: dict[str, int] = {
     'URBAN': 0,
     'annual_peff_mm': 0,
     'canal_weighted_streamflow_mm': 0,
+    'sw_rights_density': -1,
 }
 
 # Interaction constraint groups (overlapping allowed in XGBoost)
@@ -81,9 +82,10 @@ INTERACTION_GROUPS: list[list[str]] = [
     ['annual_et_ensemble_mm', 'annual_eto_mm', 'annual_tmmx_K', 'annual_tmmn_K',
      'annual_peff_mm', 'annual_precip_mm'],
     # Pumping infrastructure
-    ['well_density', 'AGRI', 'URBAN', 'annual_crop_fraction'],
+    ['well_density', 'AGRI', 'URBAN', 'annual_crop_fraction', 'annual_urban_fraction'],
     # Water source
-    ['streamflow_mm', 'canal_weighted_streamflow_mm', 'canal_density', 'annual_gw_fraction'],
+    ['streamflow_mm', 'canal_weighted_streamflow_mm', 'canal_density', 'annual_gw_fraction',
+     'sw_rights_density'],
     # Soil properties
     ['soil_depth_mm', 'awc_mm', 'ksat_mean_micromps'],
 ]
@@ -774,11 +776,13 @@ def get_feature_dict(get_units: bool = False) -> dict[str, str] | tuple[dict[str
         'annual_tmmn_K': '$T_{min}$',
         'annual_gw_fraction': 'GW Irrigation Fraction',
         'annual_crop_fraction': 'Crop Fraction',
+        'annual_urban_fraction': 'Urban Fraction',
         'annual_irr_fraction': 'Irrigation Fraction',
         'streamflow_mm': 'Streamflow',
         'canal_weighted_streamflow_mm': 'Canal-Weighted Streamflow',
         'canal_density': 'Canal Density',
         'well_density': 'Well Density',
+        'sw_rights_density': 'Irrigation SW Rights Density',
         'soil_depth_mm': 'Soil Depth',
         'awc_mm': 'Available Water Capacity',
         'ksat_mean_micromps': '$K_{sat}$',
@@ -799,6 +803,7 @@ def get_feature_dict(get_units: bool = False) -> dict[str, str] | tuple[dict[str
         'canal_weighted_streamflow_mm': 'mm',
         'canal_density': 'segments/pixel',
         'well_density': 'count/pixel',
+        'sw_rights_density': 'count/pixel',
         'soil_depth_mm': 'mm',
         'awc_mm': 'mm',
         'ksat_mean_micromps': r'$\mu$m/s',
@@ -1137,18 +1142,26 @@ def compute_shap_plots(
     logger.info(f'  {n_dependence} dependence plots saved to {dep_dir}')
 
     # 4. Waterfall plot for a representative sample (median prediction)
+    # Append units to feature names so value labels in the waterfall plot
+    # show physical units. Dimensionless features get '[-]'.
+    display_cols_with_units = [
+        f'{c} [{_display_units.get(c, "-")}]' for c in display_cols
+    ]
     explanation = shap.Explanation(
         values=shap_values,
         base_values=np.full(len(x_sub), explainer.expected_value),
         data=x_display.values,
-        feature_names=display_cols,
+        feature_names=display_cols_with_units,
     )
     pred_vals = shap_values.sum(axis=1) + explainer.expected_value
     median_idx = np.argmin(np.abs(pred_vals - np.median(pred_vals)))
 
+    # Create a wider figure BEFORE calling waterfall_plot so the SHAP
+    # internal layout uses the larger canvas and the grey feature-value
+    # text at the top no longer overlaps with the black f(x) annotation.
+    plt.figure(figsize=(14, 9))
     shap.waterfall_plot(explanation[median_idx], max_display=max_display, show=False)
-    plt.gcf().set_size_inches(12, 8)
-    plt.tight_layout()
+    plt.subplots_adjust(top=0.90, right=0.82, left=0.28)
     plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Waterfall{suffix}.png'), dpi=600)
     plt.close('all')
 

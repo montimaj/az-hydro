@@ -128,7 +128,17 @@ DROP_ATTRS = (
     'GW_Subbasin',
     'SW',
     'GW_Basin_Type',
-    'annual_peff_pcml_mm'
+    'annual_peff_pcml_mm',
+    'lulc',  # raw LULC class kept for partitionops fallback; AGRI/URBAN/SW provide
+             # Gaussian-smoothed land-use signal, annual_urban_fraction and
+             # annual_crop_fraction provide physical densities
+    'irr_capacity_fraction',  # pump-capacity-weighted irrigation fraction for
+                              # partitioning only, not an ML feature
+    'crop_frac_ref',   # 2024 reference crop fraction for temporal capacity scaling
+    'urban_frac_ref',  # 2024 reference urban fraction for temporal capacity scaling
+    'sw_access_year',  # earliest irrigation SW priority year (Part A)
+    'irr_sw_rights_density',  # intermediate; combined into sw_rights_density
+    'nonirr_sw_rights_density',  # non-irr SW rights density (Part B)
 )
 
 # # Temporal holdout configurations
@@ -259,6 +269,10 @@ def prepare_data(
 
     # Canal density & streamflow rasters
     skip_streamflow = load_files or 'streamflow' in skip_prep
+    pod_shapefile = os.path.join(
+        VECTOR_DIR, 'Water Rights', 'stateWaterRightsHarmonized',
+        'arizona', 'arizonaStatePOD.shp',
+    )
     canal_density_file = streamflowops.create_canal_density_raster(
         grain_parquet=grain_parquet,
         az_boundary_file=az_state,
@@ -268,6 +282,8 @@ def prepare_data(
         start_year=START_YEAR,
         end_year=END_YEAR,
         already_created=skip_streamflow,
+        pod_shapefile=pod_shapefile,
+        watershed_file=az_sw_watershed,
     )
     streamflowops.create_streamflow_rasters(
         watershed_geojson=az_sw_watershed,
@@ -304,6 +320,33 @@ def prepare_data(
         start_year=START_YEAR,
         end_year=END_YEAR,
         already_created=skip_basin,
+    )
+    gwops.create_irr_capacity_fraction_raster(
+        well_reg_file,
+        GEE_MOSAIC_DIR,
+        xres=MOSAIC_RASTER_RES,
+        yres=MOSAIC_RASTER_RES,
+        start_year=START_YEAR,
+        end_year=END_YEAR,
+        already_created=skip_basin,
+    )
+
+    # HarDWR v2.0 water-rights rasters
+    skip_rights = load_files or 'rights-rasters' in skip_prep
+    ref_raster = os.path.join(GEE_MOSAIC_DIR, f'GW_Basin_{START_YEAR}.tif')
+    gwops.create_sw_access_year_raster(
+        pod_shapefile, GEE_MOSAIC_DIR, ref_raster,
+        already_created=skip_rights,
+    )
+    gwops.create_irr_sw_rights_density_raster(
+        pod_shapefile, GEE_MOSAIC_DIR, ref_raster,
+        start_year=START_YEAR, end_year=END_YEAR,
+        already_created=skip_rights,
+    )
+    gwops.create_nonirr_sw_rights_density_raster(
+        pod_shapefile, GEE_MOSAIC_DIR, ref_raster,
+        start_year=START_YEAR, end_year=END_YEAR,
+        already_created=skip_rights,
     )
 
     # Reproject GEE mosaics to match GW raster grid
@@ -1844,19 +1887,9 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     if _skip_loop:
         logger.info('All rasters and summaries exist, skipping prediction loop.')
 
-    # Cache 1985 LULC-derived columns for hindcast partitioning.
-    # Pre-IrrMapper/NLCD years use USGS Historical LULC which has a
-    # discontinuity at 1984→1985.  Holding the 1985 observational URBAN,
-    # AGRI, irr_fraction, and crop_fraction constant for ≤1984 prevents
-    # an artificial volume spike at the data source boundary.
-    _lulc_ref_year = 1985
-    _lulc_ref_df = az_df[az_df.Year == _lulc_ref_year]
-    _lulc_cols = ['URBAN']  # only URBAN has a discontinuity at the LULC source boundary
-    _lulc_ref_vals = {}
-    if not _lulc_ref_df.empty:
-        for col in _lulc_cols:
-            if col in _lulc_ref_df.columns:
-                _lulc_ref_vals[col] = _lulc_ref_df[col].values
+    # LULC source-mismatch smoothing is now handled upstream in
+    # dataops._apply_basin_scale_lulc_delta (baked into the parquet). No
+    # partition-time URBAN mutation needed here.
 
     for year in range(START_YEAR, END_YEAR + 1):
         if _skip_loop:
@@ -1952,19 +1985,12 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             )
             ood_ref_obj.close()
 
-        # For hindcast years (≤1984), average USGS Historical and NLCD 1985
-        # LULC-derived columns to dampen the volume discontinuity at the
-        # data source boundary while retaining pre-1985 land-use signal.
-        partition_df = year_df
-        if year < _lulc_ref_year and _lulc_ref_vals:
-            partition_df = year_df.copy()
-            for col, vals in _lulc_ref_vals.items():
-                if col in partition_df.columns and len(vals) == len(partition_df):
-                    partition_df[col] = (partition_df[col].values + vals) / 2.0
-
-        # Partition into irrigation/non-irrigation and GW/SW categories
+        # Partition into irrigation/non-irrigation and GW/SW categories.
+        # year_df already carries basin-delta-corrected LULC columns (URBAN,
+        # AGRI, annual_crop_fraction, annual_urban_fraction) from the
+        # parquet; no partition-time smoothing needed.
         cat_predictions = partops.partition_predictions(
-            predictions, partition_df, raster_shape, valid_mask,
+            predictions, year_df, raster_shape, valid_mask,
         )
         predictions = cat_predictions['Irrigation'] + cat_predictions['Non_Irrigation']
 
