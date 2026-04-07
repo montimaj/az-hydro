@@ -696,6 +696,8 @@ def compute_sigma_model(
         end_year: int,
         year_list: list[int],
         mosaic_res: int,
+        prediction_model: str = 'XGBRF',
+        model_dir: str | None = None,
         fold_count: int = 5,
         repeats: int = 3,
         n_trials: int = 100,
@@ -704,7 +706,11 @@ def compute_sigma_model(
 ) -> tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]:
     """
     Compute σ_model: per-pixel std of predictions across a 10-seed
-    XGBoost ensemble.
+    ensemble of the prediction model.
+
+    Each seed model reuses the Optuna-tuned hyperparameters from the
+    full-prediction step (no re-tuning), varying only the random seed
+    to isolate stochastic model uncertainty.
 
     Args:
         x_train (pd.DataFrame): Training feature matrix.
@@ -718,9 +724,14 @@ def compute_sigma_model(
         end_year (int): Last year of prediction period.
         year_list (list[int]): Full list of prediction years.
         mosaic_res (int): Raster resolution in metres.
+        prediction_model (str): Model name (e.g. 'XGBRF'). Default 'XGBRF'.
+        model_dir (str or None): Base model directory containing
+            ``Full_Prediction_{model}/`` with the Optuna study DB.
+            When provided, tuned hyperparameters are reused for each seed.
         fold_count (int): Number of folds for KFold. Default is 5.
         repeats (int): Number of repeats for RepeatedKFold. Default is 3.
-        n_trials (int): Number of Optuna trials per seed.
+        n_trials (int): Number of Optuna trials (used only if tuning_dir
+            is unavailable). Default is 100.
         n_dask_workers (int): Number of Dask workers.
         use_dask (bool): If True, use Dask for parallel tuning.
 
@@ -749,19 +760,28 @@ def compute_sigma_model(
     pixel_area_m2 = mosaic_res ** 2
     mm_to_m3 = pixel_area_m2 / 1000
 
-    # Train (or load) 10 XGBoost models with different seeds
+    # Train (or load) seed-ensemble models using the same model type
+    # and tuned hyperparameters as the full prediction
     models = []
-    model_name = 'XGB'
+    model_name = prediction_model
+    tuning_dir = None
+    if model_dir is not None:
+        td = os.path.join(model_dir, f'Full_Prediction_{model_name}')
+        if os.path.exists(os.path.join(td, f'optuna_study_{model_name}.db')):
+            tuning_dir = td
+            logger.info(f'  Reusing tuned {model_name} hyperparameters '
+                        f'from {tuning_dir}')
+
     for seed in MODEL_SEEDS:
         seed_dir = os.path.join(base_dir, f'Model_seed{seed}')
         makedirs(seed_dir)
         model_file = os.path.join(seed_dir, f'{model_name}')
         if os.path.exists(model_file):
-            logger.info(f'  Loading seed={seed} model...')
+            logger.info(f'  Loading seed={seed} {model_name} model...')
             with open(model_file, 'rb') as f:
                 m = pickle.load(f)
         else:
-            logger.info(f'  Training seed={seed} model...')
+            logger.info(f'  Training seed={seed} {model_name} model...')
             m, _ = mlops.build_ml_model_optuna(
                 x_train, y_train, seed_dir,
                 model_name, seed,
@@ -770,6 +790,7 @@ def compute_sigma_model(
                 n_trials=n_trials,
                 n_dask_workers=n_dask_workers,
                 use_dask=use_dask,
+                tuning_dir=tuning_dir,
             )
         models.append(m)
 
@@ -2182,6 +2203,8 @@ def run_uncertainty_quantification(
         x_train, y_train, feature_cols, az_df,
         drop_attrs, pred_data_dir, unc_dir,
         start_year, end_year, year_list, mosaic_res,
+        prediction_model=prediction_model,
+        model_dir=model_dir,
         fold_count=fold_count, repeats=repeats,
         n_trials=n_trials, n_dask_workers=n_dask_workers,
         use_dask=use_dask,

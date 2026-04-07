@@ -1092,15 +1092,16 @@ diverge across the 5 GCMs before they propagate through the XGBRF model.
 ##### σ_model — XGBRF seed ensemble (all years, 1896–2099)
 
 Ten XGBRF models are trained on the full metered dataset (1984–2024) with
-identical Optuna-tuned hyperparameters but different random seeds:
+different random seeds, reusing the Optuna-tuned hyperparameters from the
+full-prediction step (no re-tuning per seed):
 
 ```
 Seeds: 42, 123, 456, 789, 1024, 2048, 3072, 4096, 5120, 6144
 ```
 
-Training is parallelized across Dask workers (100 Optuna trials per seed).
-For each year and pixel, σ_model is the sample standard deviation of the
-10 seed predictions:
+This isolates stochastic model uncertainty (random initialization, bagging
+sampling) from hyperparameter uncertainty.  For each year and pixel,
+σ_model is the sample standard deviation of the 10 seed predictions:
 
 $$\sigma_{\text{model}}(x, y, t) = \text{std}\bigl[\hat{y}_{s_1}, \ldots, \hat{y}_{s_{10}}\bigr]$$
 
