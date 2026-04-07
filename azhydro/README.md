@@ -916,6 +916,11 @@ Representative statewide volumes (million acre-feet):
 
 | Year | Total | Irrigation | Non-Irrigation | Total GW | Total SW | Irr % | GW % |
 |------|-------|------------|----------------|----------|----------|-------|------|
+| 1900 | 0.10 | 0.04 | 0.06 | 0.08 | 0.02 | 38 % | 81 % |
+| 1910 | 0.13 | 0.05 | 0.08 | 0.09 | 0.03 | 40 % | 75 % |
+| 1920 | 0.23 | 0.12 | 0.12 | 0.16 | 0.07 | 50 % | 71 % |
+| 1930 | 0.42 | 0.24 | 0.18 | 0.29 | 0.14 | 56 % | 68 % |
+| 1940 | 0.78 | 0.53 | 0.26 | 0.49 | 0.30 | 67 % | 62 % |
 | 1950 | 1.65 | 1.25 | 0.40 | 0.98 | 0.67 | 76 % | 59 % |
 | 1960 | 2.52 | 2.00 | 0.52 | 1.42 | 1.10 | 79 % | 56 % |
 | 1970 | 3.10 | 2.49 | 0.61 | 1.66 | 1.44 | 80 % | 54 % |
@@ -948,10 +953,11 @@ Key trends:
 - **GW share** rises from 52–54 % (historical) to ~61 % by 2099 as
   non-irrigation demand — predominantly groundwater-sourced outside
   canal service areas — grows faster than irrigation.
-- **Total withdrawals** grow from 1.65 MAF (1950) to 4.79 MAF (2024)
-  and are projected to reach 6.16 MAF by 2099.  Historical growth is
-  driven by agricultural expansion (1950s–1980s); projected growth is
-  driven by urbanization and increasing M&I demand.
+- **Total withdrawals** grow from 0.10 MAF (1900) to 4.79 MAF (2024)
+  and are projected to reach 6.16 MAF by 2099.  Early growth (1900–1950)
+  reflects the build-out of well and canal infrastructure; mid-century
+  growth (1950s–1980s) is driven by agricultural expansion; projected
+  growth is driven by urbanization and increasing M&I demand.
 - **Irrigation** remains relatively stable in the projections (3.45 →
   3.72 MAF, +8 % by 2099), while **non-irrigation** nearly doubles
   (1.34 → 2.44 MAF) reflecting continued urban and industrial growth
@@ -966,6 +972,11 @@ USGS NHM basin-level irrigation efficiency (million acre-feet):
 
 | Year | Irrigation | Irrigation CU | Irrigation GW CU | Irrigation SW CU | IE |
 |------|------------|---------------|-------------------|------------------|----|
+| 1900 | 0.04 | 0.02 | 0.01 | 0.01 | 60 % |
+| 1910 | 0.05 | 0.03 | 0.01 | 0.02 | 60 % |
+| 1920 | 0.12 | 0.07 | 0.03 | 0.04 | 61 % |
+| 1930 | 0.24 | 0.14 | 0.07 | 0.08 | 61 % |
+| 1940 | 0.53 | 0.32 | 0.15 | 0.17 | 61 % |
 | 1950 | 1.25 | 0.76 | 0.37 | 0.39 | 61 % |
 | 1960 | 2.00 | 1.22 | 0.58 | 0.64 | 61 % |
 | 1970 | 2.49 | 1.51 | 0.67 | 0.84 | 61 % |
