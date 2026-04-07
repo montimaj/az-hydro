@@ -643,7 +643,7 @@ def _plot_climate_input_spread(
     labels = {
         'annual_et_ensemble_mm': 'ET (mm)',
         'annual_eto_mm': 'ETo (mm)',
-        'annual_peff_mm': 'P_eff (mm)',
+        'annual_peff_mm': 'Peff (mm)',
     }
     gcm_colors = ['#2980B9', '#27AE60', '#E74C3C', '#8E44AD', '#E67E22']
 
