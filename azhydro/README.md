@@ -2080,15 +2080,95 @@ Key functions:
 
 ---
 
-## Note on physics-informed (PIML) models
+## Physics-constrained approach
+
+Rather than embedding physics directly into the ML loss function (see
+[PIML models](#note-on-piml-models) below), the pipeline enforces physical
+knowledge at two natural boundary points — **input-side feature engineering**
+and **output-side post-processing** — while leaving the ML model free to
+learn flexible nonlinear mappings from physically meaningful features to
+total withdrawal depth.
+
+### Input side — hydrology-aware feature engineering
+
+Physical and infrastructure knowledge is encoded into the predictor features
+before the model sees the data:
+
+- **Temporally varying well density** — per-year well counts gated by
+  ADWR Well Registry `INSTALLED` / `APPLICATIO` dates, with non-consumptive
+  wells (monitoring, test, dewatering, drainage, remediation, mineral
+  exploration) excluded via keyword matching.
+- **Pump-capacity-weighted irrigation fraction** — per-year
+  `irr_capacity_fraction` from registry PUMPRATE, temporally scaled by
+  crop/urban area-fraction changes relative to 2024.
+- **HarDWR v2.0 surface-water rights density** — cumulative SW POD count
+  per pixel (all consumptive sectors, excluding environmental in-stream
+  flow rights), capturing the progressive build-out of surface-water
+  infrastructure over 200 years.
+- **Watershed-scaled canal density** — modern GRAIN canal density scaled
+  backward in time using per-watershed SW rights build-out from HarDWR v2.0.
+- **Multi-era climate harmonization** — no single ET or ETo dataset covers
+  1896–2099, so overlapping-period bias-correction ratios stitch together
+  three eras for each variable (see [gee/README.md](../gee/README.md)):
+  - *ET*: USGS Reitz Ensemble (1896–1999) → OpenET Ensemble (2000–2025)
+    → MACA EToF × ETo (2026–2099).  Reitz ET is scaled to OpenET using
+    per-pixel, per-month ratios from the 2000–2018 overlap (228 paired
+    images).  Future ET uses climatological crop coefficients (EToF)
+    applied to scenario-driven ETo.
+  - *ETo*: PRISM Hargreaves (1896–1978) → OpenET gridMET (1979–2025)
+    → MACA ensemble (2026–2099).  PRISM Hargreaves is corrected to
+    Penman-Monteith scale using 1979–2025 overlap ratios (564 paired
+    images).  MACA ETo is computed per-GCM via `openet.refetgee` and
+    bias-corrected with OpenET gridMET ratios.
+  - *Streamflow*: USGS NWIS observations (priority) → USBR CMIP
+    ensemble (post-USGS gap-fill, 1950–2099, 112 runs) → monthly
+    climatology (remaining gaps).  USBR projections receive per-site,
+    per-month multiplicative bias correction from the USGS/USBR overlap.
+- **Bias-corrected LULC features** — basin-scale delta correction ensures
+  temporal continuity across LULC source transitions (USGS historical →
+  NLCD → USGS projections).  Off-NLCD years use the non-NLCD source for
+  basin-scale relative change, anchored to NLCD's pixel-level spatial
+  pattern at the 1985/2025 training-period boundaries.  Gaussian-smoothed
+  agricultural, urban, and surface-water density layers provide spatially
+  diffused signals for the ML model.
+
+### Output side — conservation-consistent post-processing
+
+Physical constraints that must hold exactly are enforced after prediction:
+
+- **Conservation-consistent partitioning** — `Irrigation + Non-Irrigation =
+  Total` and `GW + SW = Total` hold exactly for every pixel and year.
+- **Temporal GW fraction adjustment** — pre-canal pixels set to 100 % GW
+  using HarDWR v2.0 irrigation SW priority dates, ensuring the irrigation
+  GW/SW split reflects actual infrastructure availability.
+- **Non-irrigation GW/SW split** — temporally varying HarDWR v2.0 non-irrigation
+  SW rights density (domestic, industrial, livestock) replaces the static
+  canal-density proxy.
+- **Well-density masking** — pixels with zero wells in a given year receive
+  NaN predictions, preventing spurious withdrawals at uninstrumented locations.
+- **Urban-fraction weighting** — non-irrigation withdrawals outside AMA/INAs
+  scaled by physical urban area fraction.
+- **Consumptive use** — `CU = IE × Irrigation_Withdrawal` using USGS NHM
+  basin-level irrigation efficiencies, with physics-based error propagation
+  `σ_CU = √((IE·σ_wd)² + (wd·σ_IE)²)`.
+
+This separation of concerns is advantageous: each component can be described,
+validated, and modified independently.  The ML model does not need to "learn"
+conservation (guaranteed structurally), temporal infrastructure changes
+(encoded in the data), or that pre-canal pixels are 100 % GW (in the
+partitioning logic).  The result is a system where the physics is transparent
+and exact where it matters, while the statistical model retains full
+flexibility where physical laws are insufficient — namely, predicting the
+magnitude of human water-use decisions.
+
+### Note on PIML models
 
 The codebase includes optional physics-informed ML wrappers (`PIML_XGB`,
 `PIML_LGBM`, `PIML_XGBRF`) that embed domain knowledge into the training
 objective via two tiers: (1) monotone constraints enforcing physically
-expected directional relationships (e.g., withdrawals increase with ET, well
-density, and irrigation fraction; decreases with effective precipitation),
-and (2) a custom loss function with a one-sided irrigation-demand floor
-penalty that keeps predictions at or above the physics-estimated demand
+expected directional relationships, and (2) a custom loss function with a
+one-sided irrigation-demand floor penalty that keeps predictions at or
+above the physics-estimated demand
 `(ET − Peff) × irr_frac × gw_frac / IE`, with penalty strength tuned by
 Optuna.
 
