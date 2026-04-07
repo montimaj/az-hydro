@@ -2808,6 +2808,14 @@ Evaluation sub-steps (use with --skip-eval to skip individual strategies):
   spatial       Skip LOO spatial holdout evaluation (Step 2c)
   spatial-seed  Skip seeded LOO spatial holdout evaluation (Step 2c-seed)
   summary       Skip cross-strategy summary
+
+UQ sub-steps (use with --skip-uq to skip individual σ components):
+  sigma-maca       Skip σ_MACA (inter-GCM climate spread)
+  sigma-model      Skip σ_model (seed ensemble)
+  sigma-irr        Skip σ_irr (irrigation fraction uncertainty)
+  sigma-lulc       Skip σ_LULC (LULC projection spread)
+  sigma-gw         Skip σ_gw (GW fraction snapshot spread)
+  gw-sensitivity   Skip GW fraction ±0.2 sensitivity analysis
 """
 
 
@@ -2873,6 +2881,14 @@ def main() -> None:
             'summary.'
         ),
     )
+    parser.add_argument(
+        '--skip-uq', type=str, default='',
+        help=(
+            'Comma-separated UQ sub-steps to skip: '
+            'sigma-maca, sigma-model, sigma-irr, sigma-lulc, '
+            'sigma-gw, gw-sensitivity.'
+        ),
+    )
     args = parser.parse_args()
 
     if args.verbose:
@@ -2884,6 +2900,7 @@ def main() -> None:
     load_files = args.load_files
     skip_prep = set(s.strip().lower() for s in args.skip_prep.split(',') if s.strip())
     skip_eval = set(s.strip().lower() for s in args.skip_eval.split(',') if s.strip())
+    skip_uq = set(s.strip().lower() for s in args.skip_uq.split(',') if s.strip())
 
     data_band_names = None
 
@@ -3035,6 +3052,7 @@ def main() -> None:
                 ama_code_map=AMA_CODE_MAP,
                 basin_shp=AZ_GW_BASIN,
                 prediction_model=PREDICTION_MODEL,
+                skip_uq_steps=skip_uq or None,
             )
 
     # Step 3e — Well package (after UQ so augmented rasters include σ)

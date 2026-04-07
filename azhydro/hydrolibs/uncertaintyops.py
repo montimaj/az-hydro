@@ -2148,6 +2148,7 @@ def run_uncertainty_quantification(
         ama_code_map: dict | None = None,
         basin_shp: str = '',
         prediction_model: str = 'XGB',
+        skip_uq_steps: set[str] | None = None,
 ) -> None:
     """
     Run the full hybrid uncertainty quantification pipeline.
@@ -2199,56 +2200,83 @@ def run_uncertainty_quantification(
     unc_dir = os.path.join(model_dir, pred_base, 'Uncertainty')
     makedirs(unc_dir)
 
+    skip = skip_uq_steps or set()
+    if skip:
+        logger.info(f'Skipping UQ sub-steps: {skip}')
+
     # ── σ_MACA ──
-    sigma_maca, cat_sigma_maca, gcm_mosaic_dirs = compute_sigma_maca(
-        model, feature_cols, az_df, drop_attrs,
-        pred_data_dir, unc_dir, input_dir, vector_dir,
-        mosaic_res, gcloud_project, gcloud_bucket,
-        tile_size, end_year, year_list,
-        skip_download=skip_download,
-    )
+    sigma_maca = cat_sigma_maca = {}
+    if 'sigma-maca' not in skip:
+        sigma_maca, cat_sigma_maca, gcm_mosaic_dirs = compute_sigma_maca(
+            model, feature_cols, az_df, drop_attrs,
+            pred_data_dir, unc_dir, input_dir, vector_dir,
+            mosaic_res, gcloud_project, gcloud_bucket,
+            tile_size, end_year, year_list,
+            skip_download=skip_download,
+        )
+    else:
+        logger.info('  σ_MACA skipped.')
 
     # ── σ_model ──
-    sigma_model, cat_sigma_model = compute_sigma_model(
-        x_train, y_train, feature_cols, az_df,
-        drop_attrs, pred_data_dir, unc_dir,
-        start_year, end_year, year_list, mosaic_res,
-        prediction_model=prediction_model,
-        model_dir=model_dir,
-        fold_count=fold_count, repeats=repeats,
-        n_trials=n_trials, n_dask_workers=n_dask_workers,
-        use_dask=use_dask,
-    )
+    sigma_model = cat_sigma_model = {}
+    if 'sigma-model' not in skip:
+        sigma_model, cat_sigma_model = compute_sigma_model(
+            x_train, y_train, feature_cols, az_df,
+            drop_attrs, pred_data_dir, unc_dir,
+            start_year, end_year, year_list, mosaic_res,
+            prediction_model=prediction_model,
+            model_dir=model_dir,
+            fold_count=fold_count, repeats=repeats,
+            n_trials=n_trials, n_dask_workers=n_dask_workers,
+            use_dask=use_dask,
+        )
+    else:
+        logger.info('  σ_model skipped.')
 
     # ── σ_irr (historical only, 1896-2025) ──
-    sigma_irr, cat_sigma_irr = compute_sigma_irr(
-        model, feature_cols, az_df, drop_attrs,
-        pred_data_dir, unc_dir, start_year, end_year,
-        year_list, mosaic_res,
-    )
+    sigma_irr = cat_sigma_irr = {}
+    if 'sigma-irr' not in skip:
+        sigma_irr, cat_sigma_irr = compute_sigma_irr(
+            model, feature_cols, az_df, drop_attrs,
+            pred_data_dir, unc_dir, start_year, end_year,
+            year_list, mosaic_res,
+        )
+    else:
+        logger.info('  σ_irr skipped.')
 
     # ── σ_LULC (future only, 2026-2099 — subsumes σ_irr) ──
-    sigma_lulc, cat_sigma_lulc = compute_sigma_lulc(
-        model, feature_cols, az_df, drop_attrs,
-        pred_data_dir, unc_dir, input_dir, vector_dir,
-        mosaic_res, gcloud_project, gcloud_bucket,
-        tile_size, end_year, year_list,
-        skip_download=skip_download,
-    )
+    sigma_lulc = cat_sigma_lulc = {}
+    if 'sigma-lulc' not in skip:
+        sigma_lulc, cat_sigma_lulc = compute_sigma_lulc(
+            model, feature_cols, az_df, drop_attrs,
+            pred_data_dir, unc_dir, input_dir, vector_dir,
+            mosaic_res, gcloud_project, gcloud_bucket,
+            tile_size, end_year, year_list,
+            skip_download=skip_download,
+        )
+    else:
+        logger.info('  σ_LULC skipped.')
 
     # ── σ_gw ──
-    sigma_gw, cat_sigma_gw = compute_sigma_gw(
-        model, feature_cols, az_df, drop_attrs,
-        pred_data_dir, unc_dir, start_year, end_year,
-        year_list, mosaic_res,
-    )
+    sigma_gw = cat_sigma_gw = {}
+    if 'sigma-gw' not in skip:
+        sigma_gw, cat_sigma_gw = compute_sigma_gw(
+            model, feature_cols, az_df, drop_attrs,
+            pred_data_dir, unc_dir, start_year, end_year,
+            year_list, mosaic_res,
+        )
+    else:
+        logger.info('  σ_gw skipped.')
 
     # ── GW fraction sensitivity (±0.2) ──
-    run_gw_fraction_sensitivity(
-        model, feature_cols, az_df, drop_attrs,
-        pred_data_dir, unc_dir, start_year, end_year,
-        year_list, mosaic_res,
-    )
+    if 'gw-sensitivity' not in skip:
+        run_gw_fraction_sensitivity(
+            model, feature_cols, az_df, drop_attrs,
+            pred_data_dir, unc_dir, start_year, end_year,
+            year_list, mosaic_res,
+        )
+    else:
+        logger.info('  GW fraction sensitivity skipped.')
 
     # ── σ_total ──
     sigma_components = {

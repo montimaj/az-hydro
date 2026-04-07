@@ -106,6 +106,14 @@ python pipeline.py --skip-eval summary                # skip cross-strategy summ
 python pipeline.py --skip-eval pixel,temporal,summary # skip multiple strategies
 ```
 
+UQ components (Step 3b) support `--skip-uq`:
+
+```bash
+python pipeline.py --steps 3b --skip-uq sigma-maca,sigma-lulc   # skip GEE-dependent components
+python pipeline.py --steps 3b --skip-uq sigma-maca              # skip only inter-GCM spread
+python pipeline.py --steps 3b --skip-uq sigma-model,gw-sensitivity # skip seed ensemble + GW sensitivity
+```
+
 #### Available steps
 
 | Step | Description |
@@ -152,6 +160,17 @@ python pipeline.py --skip-eval pixel,temporal,summary # skip multiple strategies
 | `spatial-seed` | Skip seeded LOO spatial holdout evaluation (Step 2c-seed) |
 | `summary` | Skip cross-strategy summary |
 
+#### UQ sub-steps
+
+| Sub-step | Description |
+|----------|-------------|
+| `sigma-maca` | Skip σ_MACA — inter-GCM climate spread (requires GEE download) |
+| `sigma-model` | Skip σ_model — seed ensemble spread |
+| `sigma-irr` | Skip σ_irr — irrigation fraction uncertainty |
+| `sigma-lulc` | Skip σ_LULC — LULC projection spread (requires GEE download) |
+| `sigma-gw` | Skip σ_gw — GW fraction snapshot spread |
+| `gw-sensitivity` | Skip GW fraction ±0.2 sensitivity analysis |
+
 #### CLI flags
 
 | Flag | Default | Description |
@@ -164,6 +183,7 @@ python pipeline.py --skip-eval pixel,temporal,summary # skip multiple strategies
 | `--skip-eda` | `False` | Skip EDA plot generation in Step 1. EDA is auto-skipped when Step 1 is not explicitly selected. |
 | `--skip-prep` | — | Comma-separated Step 0 sub-steps to skip. |
 | `--skip-eval` | — | Comma-separated evaluation strategies to skip. |
+| `--skip-uq` | — | Comma-separated UQ sub-steps to skip. |
 | `-v`, `--verbose` | `False` | Enable verbose (DEBUG-level) logging. |
 
 The pipeline executes the selected steps in sequence (details below).
