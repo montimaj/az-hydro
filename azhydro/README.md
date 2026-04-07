@@ -927,20 +927,35 @@ Representative statewide volumes (million acre-feet):
 | 2017 | 4.76 | 3.53 | 1.23 | 2.54 | 2.22 | 74 % | 53 % |
 | 2020 | 4.77 | 3.48 | 1.29 | 2.57 | 2.20 | 73 % | 54 % |
 | 2024 | 4.79 | 3.45 | 1.34 | 2.60 | 2.19 | 72 % | 54 % |
+| 2030 | 4.78 | 3.36 | 1.42 | 2.63 | 2.15 | 70 % | 55 % |
+| 2040 | 4.91 | 3.37 | 1.54 | 2.75 | 2.16 | 69 % | 56 % |
+| 2050 | 5.17 | 3.46 | 1.72 | 2.94 | 2.23 | 67 % | 57 % |
+| 2060 | 5.39 | 3.52 | 1.87 | 3.12 | 2.27 | 65 % | 58 % |
+| 2070 | 5.65 | 3.59 | 2.06 | 3.33 | 2.32 | 64 % | 59 % |
+| 2080 | 5.79 | 3.62 | 2.17 | 3.44 | 2.34 | 63 % | 60 % |
+| 2090 | 5.99 | 3.67 | 2.32 | 3.61 | 2.38 | 61 % | 60 % |
+| 2099 | 6.16 | 3.72 | 2.44 | 3.75 | 2.42 | 60 % | 61 % |
 
 Key trends:
 - **Irrigation share** declines from ~80 % (1960s–1980s) to ~72 % (2024)
-  as urbanization increases M&I demand — consistent with ADWR's 74 % estimate
-  for recent years.  Note that the irrigation category implicitly includes
-  aquaculture and turf irrigation (e.g. golf courses) where the same wells
-  registered as ``IRRIGATION`` in the ADWR Well Registry serve multiple
-  end uses, which may contribute to the irrigation GW share being slightly
-  higher than agriculture-only estimates.
-- **GW share** is relatively stable at 52–59 %, reflecting Arizona's heavy
-  reliance on groundwater throughout the study period.
-- **Total withdrawals** grow from 1.65 MAF (1950) to 4.79 MAF (2024),
-  driven by agricultural expansion (1950s–1980s) and subsequent
-  urbanization.
+  and continues to ~60 % by 2099 as urbanization increases M&I demand —
+  consistent with ADWR's 74 % estimate for recent years.  Note that the
+  irrigation category implicitly includes aquaculture and turf irrigation
+  (e.g. golf courses) where the same wells registered as ``IRRIGATION``
+  in the ADWR Well Registry serve multiple end uses, which may contribute
+  to the irrigation GW share being slightly higher than agriculture-only
+  estimates.
+- **GW share** rises from 52–54 % (historical) to ~61 % by 2099 as
+  non-irrigation demand — predominantly groundwater-sourced outside
+  canal service areas — grows faster than irrigation.
+- **Total withdrawals** grow from 1.65 MAF (1950) to 4.79 MAF (2024)
+  and are projected to reach 6.16 MAF by 2099.  Historical growth is
+  driven by agricultural expansion (1950s–1980s); projected growth is
+  driven by urbanization and increasing M&I demand.
+- **Irrigation** remains relatively stable in the projections (3.45 →
+  3.72 MAF, +8 % by 2099), while **non-irrigation** nearly doubles
+  (1.34 → 2.44 MAF) reflecting continued urban and industrial growth
+  including data center and energy-sector water demand.
 - **Pre-CAP era** (before 1985): lower total volumes and slightly higher
   GW share, as CAP Colorado River deliveries had not yet begun.
 - **Conservation**: Irrigation + Non-Irrigation = Total and GW + SW = Total
@@ -962,6 +977,14 @@ USGS NHM basin-level irrigation efficiency (million acre-feet):
 | 2017 | 3.53 | 2.13 | 0.86 | 1.27 | 60 % |
 | 2020 | 3.48 | 2.09 | 0.84 | 1.25 | 60 % |
 | 2024 | 3.45 | 2.08 | 0.83 | 1.25 | 60 % |
+| 2030 | 3.36 | 2.03 | 0.80 | 1.22 | 60 % |
+| 2040 | 3.37 | 2.03 | 0.81 | 1.23 | 60 % |
+| 2050 | 3.46 | 2.08 | 0.83 | 1.26 | 60 % |
+| 2060 | 3.52 | 2.13 | 0.85 | 1.28 | 60 % |
+| 2070 | 3.59 | 2.17 | 0.87 | 1.30 | 60 % |
+| 2080 | 3.62 | 2.19 | 0.88 | 1.31 | 60 % |
+| 2090 | 3.67 | 2.22 | 0.89 | 1.32 | 60 % |
+| 2099 | 3.72 | 2.25 | 0.91 | 1.34 | 60 % |
 
 The statewide mean IE is ~60 %, meaning roughly 40 % of applied irrigation
 water returns to aquifers as deep percolation or runs off as return flow.
