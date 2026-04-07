@@ -782,7 +782,7 @@ def get_feature_dict(get_units: bool = False) -> dict[str, str] | tuple[dict[str
         'canal_weighted_streamflow_mm': 'Canal-Weighted Streamflow',
         'canal_density': 'Canal Density',
         'well_density': 'Well Density',
-        'sw_rights_density': 'Irrigation SW Rights Density',
+        'sw_rights_density': 'SW Rights Density',
         'soil_depth_mm': 'Soil Depth',
         'awc_mm': 'Available Water Capacity',
         'ksat_mean_micromps': '$K_{sat}$',
