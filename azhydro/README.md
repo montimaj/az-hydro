@@ -912,6 +912,33 @@ ADWR Well Registry.  ADWR reports total statewide water use of ~7.0 MAF
 (2017), of which irrigated agriculture consumes approximately 74 %
 ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
 
+**Water budget reconciliation (2017):** The model predicts 4.76 MAF vs.
+ADWR's 7.0 MAF total, a gap of ~2.25 MAF.  This gap is accounted for by
+water sources outside the ADWR Well Registry:
+
+| Source | MAF | Notes |
+|--------|-----|-------|
+| CAP direct deliveries | 0.71 | Excludes recharge; from CAP delivery records |
+| SRP surface water | 0.40 | Phoenix AMA; from ADWR SRP delivery records |
+| Yuma-area federal diversions | ~0.79 | Bureau of Reclamation Yuma and Gila Project irrigation districts (WMIDD: 278,000 AF, YCWUA: 254,200 AF, Gila Project Yuma Mesa Division: 250,000 AF, Unit B: 6,800 AF); gravity canal diversions from the Colorado River via the All-American Canal and Gila Gravity Main Canal ([Noble et al., 2015](https://www.agwateryuma.com)) |
+| Reclaimed/effluent water | ~0.35 | ~5 % of total state water supply ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)) |
+| **Total gap** | **~2.25** | |
+
+The model thus captures ~68 % of Arizona's total water use — specifically,
+the portion that flows through registered well and diversion infrastructure.
+The remaining ~32 % is delivered by large-scale federal water projects,
+(CAP aqueduct, SRP canal system, Yuma-area Colorado River diversions) and
+reclaimed water systems that operate outside the ADWR Well Registry.
+The Yuma-area irrigation districts hold some of the oldest and most senior
+water rights on the Lower Colorado River (dating to the Reclamation Act of
+1902) and collectively divert ~0.79 MAF/yr through federal canal infrastructure
+with application efficiencies of 80–90 % — substantially higher than the
+statewide NHM average of ~60 % used in this pipeline
+([Noble et al., 2015](https://www.azwater.gov/sites/default/files/2022-11/Final%20Yuma%20Report%20021715.pdf)).
+Combining the model's 4.76 MAF with the estimated non-well sources
+(~2.25 MAF) yields ~7.0 MAF, consistent with ADWR's reported total
+([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
+
 Representative statewide volumes (million acre-feet):
 
 | Year | Total | Irrigation | Non-Irrigation | Total GW | Total SW | Irr % | GW % |
