@@ -901,6 +901,74 @@ three-panel publication figure:
 
 Saved as `{prediction_dir}Graphical_Abstract_Fig1.png` (600 dpi).
 
+#### Statewide volume summary
+
+The pipeline estimates **well-based withdrawals** — groundwater pumping plus
+locally diverted surface water that passes through registered well/diversion
+infrastructure.  This is a subset of Arizona's total water supply, which also
+includes Colorado River imports (CAP aqueduct deliveries, Yuma-area
+diversions), reclaimed/effluent water, and other sources not captured by the
+ADWR Well Registry.  ADWR reports total statewide water use of ~7.0 MAF
+(2017), of which irrigated agriculture consumes approximately 74 %
+([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
+
+Representative statewide volumes (million acre-feet):
+
+| Year | Total | Irrigation | Non-Irrigation | Total GW | Total SW | Irr % | GW % |
+|------|-------|------------|----------------|----------|----------|-------|------|
+| 1950 | 1.65 | 1.25 | 0.40 | 0.98 | 0.67 | 76 % | 59 % |
+| 1960 | 2.52 | 2.00 | 0.52 | 1.42 | 1.10 | 79 % | 56 % |
+| 1970 | 3.10 | 2.49 | 0.61 | 1.66 | 1.44 | 80 % | 54 % |
+| 1980 | 3.74 | 2.99 | 0.76 | 1.96 | 1.78 | 80 % | 52 % |
+| 1985 | 4.14 | 3.25 | 0.89 | 2.15 | 1.98 | 79 % | 52 % |
+| 1990 | 4.15 | 3.23 | 0.92 | 2.17 | 1.98 | 78 % | 52 % |
+| 2000 | 4.31 | 3.22 | 1.09 | 2.31 | 2.00 | 75 % | 54 % |
+| 2010 | 4.17 | 3.05 | 1.13 | 2.23 | 1.94 | 73 % | 54 % |
+| 2017 | 4.76 | 3.53 | 1.23 | 2.54 | 2.22 | 74 % | 53 % |
+| 2020 | 4.77 | 3.48 | 1.29 | 2.57 | 2.20 | 73 % | 54 % |
+| 2024 | 4.79 | 3.45 | 1.34 | 2.60 | 2.19 | 72 % | 54 % |
+
+Key trends:
+- **Irrigation share** declines from ~80 % (1960s–1980s) to ~72 % (2024)
+  as urbanization increases M&I demand — consistent with ADWR's 74 % estimate
+  for recent years.  Note that the irrigation category implicitly includes
+  aquaculture and turf irrigation (e.g. golf courses) where the same wells
+  registered as ``IRRIGATION`` in the ADWR Well Registry serve multiple
+  end uses, which may contribute to the irrigation GW share being slightly
+  higher than agriculture-only estimates.
+- **GW share** is relatively stable at 52–59 %, reflecting Arizona's heavy
+  reliance on groundwater throughout the study period.
+- **Total withdrawals** grow from 1.65 MAF (1950) to 4.79 MAF (2024),
+  driven by agricultural expansion (1950s–1980s) and subsequent
+  urbanization.
+- **Pre-CAP era** (before 1985): lower total volumes and slightly higher
+  GW share, as CAP Colorado River deliveries had not yet begun.
+- **Conservation**: Irrigation + Non-Irrigation = Total and GW + SW = Total
+  hold exactly for all years.
+
+Consumptive use (CU = IE × Irrigation Withdrawal) volumes, where IE is the
+USGS NHM basin-level irrigation efficiency (million acre-feet):
+
+| Year | Irrigation | Irrigation CU | Irrigation GW CU | Irrigation SW CU | IE |
+|------|------------|---------------|-------------------|------------------|----|
+| 1950 | 1.25 | 0.76 | 0.37 | 0.39 | 61 % |
+| 1960 | 2.00 | 1.22 | 0.58 | 0.64 | 61 % |
+| 1970 | 2.49 | 1.51 | 0.67 | 0.84 | 61 % |
+| 1980 | 2.99 | 1.81 | 0.78 | 1.03 | 61 % |
+| 1985 | 3.25 | 1.96 | 0.82 | 1.15 | 60 % |
+| 1990 | 3.23 | 1.95 | 0.81 | 1.14 | 60 % |
+| 2000 | 3.22 | 1.94 | 0.80 | 1.14 | 60 % |
+| 2010 | 3.05 | 1.84 | 0.73 | 1.10 | 60 % |
+| 2017 | 3.53 | 2.13 | 0.86 | 1.27 | 60 % |
+| 2020 | 3.48 | 2.09 | 0.84 | 1.25 | 60 % |
+| 2024 | 3.45 | 2.08 | 0.83 | 1.25 | 60 % |
+
+The statewide mean IE is ~60 %, meaning roughly 40 % of applied irrigation
+water returns to aquifers as deep percolation or runs off as return flow.
+IE varies by basin (NHM HUC12-level values) but the statewide aggregate is
+stable across years because the same NHM efficiency map is applied to
+changing withdrawal volumes.
+
 #### 3d. Hybrid uncertainty quantification (`uncertaintyops.run_uncertainty_quantification()`)
 
 Pixel-level uncertainty is quantified for every year (1896–2099) by
