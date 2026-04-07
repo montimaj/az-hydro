@@ -1096,7 +1096,7 @@ different random seeds, reusing the Optuna-tuned hyperparameters from the
 full-prediction step (no re-tuning per seed):
 
 ```
-Seeds: 42, 123, 456, 789, 1024, 2048, 3072, 4096, 5120, 6144
+Seeds: 7, 123, 456, 789, 1024, 2048, 3072, 4096, 5120, 6144
 ```
 
 This isolates stochastic model uncertainty (random initialization, bagging

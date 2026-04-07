@@ -89,7 +89,7 @@ MACA_CLIMATE_BAND_INDICES = [1, 2, 3, 4, 6, 7]
 _INPUT_SPREAD_COLS = ['annual_et_ensemble_mm', 'annual_eto_mm', 'annual_peff_mm']
 
 # 10-seed ensemble for model uncertainty
-MODEL_SEEDS = [42, 123, 456, 789, 1024, 2048, 3072, 4096, 5120, 6144]
+MODEL_SEEDS = [7, 123, 456, 789, 1024, 2048, 3072, 4096, 5120, 6144]
 
 # GW fraction band index in Predictor_{year}.tif (1-based)
 GW_FRACTION_BAND_INDEX = 12
@@ -525,16 +525,18 @@ def compute_sigma_maca(
             os.path.dirname(pred_data_dir.rstrip(os.sep)),
             f'GEE_Mosaics_{int(mosaic_res)}m_{gcm}'
         )
+        gcm_mosaic_reproj_dir = gcm_mosaic_dir + '_Reproj'
+        # Skip mosaic/reproject only if reproj rasters already exist
+        reproj_exists = os.path.exists(os.path.join(
+            gcm_mosaic_reproj_dir, f'Predictor_{MACA_FUTURE_START}.tif'))
         dataops.mosaic_tiles(
             gcm_tile_dir, gcm_mosaic_dir,
             MACA_FUTURE_START, end_year,
-            already_mosaicked=skip_download,
+            already_mosaicked=skip_download or reproj_exists,
         )
-        # Reproject to match the reference predictor grid so valid_mask aligns
-        gcm_mosaic_reproj_dir = gcm_mosaic_dir + '_Reproj'
         dataops.reproject_gee_mosaics(
             gcm_mosaic_dir, gcm_mosaic_reproj_dir, pred_data_dir,
-            already_reprojected=skip_download,
+            already_reprojected=reproj_exists,
         )
         gcm_mosaic_dirs[gcm] = gcm_mosaic_reproj_dir
 
@@ -766,11 +768,17 @@ def compute_sigma_model(
     model_name = prediction_model
     tuning_dir = None
     if model_dir is not None:
-        td = os.path.join(model_dir, f'Full_Prediction_{model_name}')
-        if os.path.exists(os.path.join(td, f'optuna_study_{model_name}.db')):
-            tuning_dir = td
-            logger.info(f'  Reusing tuned {model_name} hyperparameters '
-                        f'from {tuning_dir}')
+        # Search for the Optuna study DB in the full prediction directory
+        for subdir in ['Model', '']:
+            td = os.path.join(model_dir, f'Full_Prediction_{model_name}', subdir)
+            if os.path.exists(os.path.join(td, f'optuna_study_{model_name}.db')):
+                tuning_dir = td
+                logger.info(f'  Reusing tuned {model_name} hyperparameters '
+                            f'from {tuning_dir}')
+                break
+        if tuning_dir is None:
+            logger.warning(f'  No Optuna study found for {model_name} — '
+                           f'will run full tuning per seed')
 
     for seed in MODEL_SEEDS:
         seed_dir = os.path.join(base_dir, f'Model_seed{seed}')
@@ -1128,16 +1136,18 @@ def compute_sigma_lulc(
             os.path.dirname(pred_data_dir.rstrip(os.sep)),
             f'GEE_Mosaics_{int(mosaic_res)}m_LULC_{scenario}'
         )
+        sc_mosaic_reproj_dir = sc_mosaic_dir + '_Reproj'
+        # Skip mosaic/reproject only if reproj rasters already exist
+        reproj_exists = os.path.exists(os.path.join(
+            sc_mosaic_reproj_dir, f'Predictor_{MACA_FUTURE_START}.tif'))
         dataops.mosaic_tiles(
             sc_tile_dir, sc_mosaic_dir,
             MACA_FUTURE_START, end_year,
-            already_mosaicked=skip_download,
+            already_mosaicked=skip_download or reproj_exists,
         )
-        # Reproject to match the reference predictor grid so valid_mask aligns
-        sc_mosaic_reproj_dir = sc_mosaic_dir + '_Reproj'
         dataops.reproject_gee_mosaics(
             sc_mosaic_dir, sc_mosaic_reproj_dir, pred_data_dir,
-            already_reprojected=skip_download,
+            already_reprojected=reproj_exists,
         )
         scenario_mosaic_dirs[scenario] = sc_mosaic_reproj_dir
 
