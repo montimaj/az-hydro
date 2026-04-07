@@ -270,7 +270,8 @@ def _write_std_raster(std_vals, basin_flat, valid_mask, raster_shape,
     grid[valid_mask] = std_vals.astype(np.float32)
     grid = grid.reshape(raster_shape)
     _, rfile = read_raster_as_arr(ref_raster_file, get_file=True)
-    write_raster(grid, rfile, rfile.transform, out_path, no_data_value=np.nan)
+    write_raster(grid, rfile, rfile.transform, out_path,
+                 no_data_value=np.nan, num_bands=1)
     rfile.close()
 
 
