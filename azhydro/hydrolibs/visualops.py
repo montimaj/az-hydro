@@ -2402,7 +2402,7 @@ def create_full_period_time_series(
         'Mean_Depth_mm': depth_mm,
         'Mean_Depth_ft': [yearly_predictions[y]['Mean_Depth_ft'] for y in years],
         'Volume_m3': [yearly_predictions[y]['Volume_m3'] for y in years],
-        'Volume_AF': vol_af,
+        'Volume_AF': [yearly_predictions[y]['Volume_AF'] for y in years],
     })
     # Merge actual data into the CSV if available
     if actual_data:

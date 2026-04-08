@@ -3307,25 +3307,31 @@ def _replot_from_augmented_rasters(
             ama_ina_names = set(get_ama_ina_basin_names())
             ama_preds = {}
             ama_sigma = {}
+            pixel_area_m2 = mosaic_res ** 2
+            _mm_to_m3 = pixel_area_m2 / 1000
             for year in sorted(basin_yearly.keys()):
                 vol_m3 = 0.0
                 vol_af = 0.0
                 sigma_af_sq = 0.0
                 # Area-weighted depth: total_volume / total_area
-                depth_sum = 0.0  # sum of (mean_depth × basin_vol)
+                total_npix = 0.0
                 for bname, metrics in basin_yearly[year].items():
                     if bname not in ama_ina_names:
                         continue
                     bv_m3 = metrics.get('Volume_m3', 0)
+                    bd_mm = metrics.get('Mean_Depth_mm', 0)
                     vol_m3 += bv_m3
                     vol_af += metrics.get('Volume_AF', 0)
-                    depth_sum += metrics.get('Mean_Depth_mm', 0) * bv_m3
+                    # Derive pixel count: vol = depth × n_pixels × mm_to_m3
+                    if bd_mm > 0 and _mm_to_m3 > 0:
+                        total_npix += bv_m3 / (bd_mm * _mm_to_m3)
                     bsig = sigma_basin_yearly.get(year, {}).get(bname, {})
                     sigma_af_sq += bsig.get('Sigma_Volume_AF', 0) ** 2
                 if vol_af == 0 and vol_m3 == 0:
                     continue
-                # Volume-weighted mean depth
-                mean_depth_mm = depth_sum / vol_m3 if vol_m3 > 0 else 0
+                # Area-weighted mean depth = total_volume / total_area
+                mean_depth_mm = (vol_m3 / (total_npix * _mm_to_m3)
+                                 if total_npix > 0 else 0)
                 ama_preds[year] = {
                     'Mean_Depth_mm': mean_depth_mm,
                     'Mean_Depth_ft': mean_depth_mm * MM_TO_FT,
