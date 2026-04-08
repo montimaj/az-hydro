@@ -279,25 +279,45 @@ def create_well_package(
     all_sigma_mm = np.full((n_years, n_wells, n_cats), np.nan, dtype=np.float64)
     has_sigma = False
 
-    years_sampled = []
-    for yi, year in enumerate(range(start_year, end_year + 1)):
-        # Only include wells installed by this year
+    # ---- Vectorised per-pixel weight normalization ----
+    # Pre-compute per-pixel group boundaries for fast normalization.
+    # Sort wells by pixel key so each pixel's wells are contiguous.
+    sort_idx = np.argsort(pixel_keys)
+    sorted_weight = raw_weight[sort_idx]
+    sorted_start_year = well_start_year[sort_idx]
+    # unsort_idx maps sorted position back to original well order
+    unsort_idx = np.argsort(sort_idx)
+
+    # Pre-compute sorted inverse (maps each sorted well to its pixel group index)
+    sorted_inverse = inverse[sort_idx]
+
+    def _compute_well_share(year):
+        """Fully vectorized per-pixel capacity weight normalization."""
+        active_sorted = (sorted_start_year <= year).astype(np.float64)
+        wa = sorted_weight * active_sorted  # zero out inactive wells
+        # Sum active weights per pixel group using np.bincount
+        group_sums = np.bincount(sorted_inverse, weights=wa,
+                                 minlength=len(unique_keys))
+        # Per-well normalization: wa[i] / group_sum[group_of_i]
+        per_well_sum = group_sums[sorted_inverse]
+        with np.errstate(invalid='ignore', divide='ignore'):
+            share = np.where(per_well_sum > 0, wa / per_well_sum, 0.0)
+        return share[unsort_idx]
+
+    def _process_year(yi_year):
+        """Sample one year's rasters and return (yi, year, mm, sigma_mm, has_sig)."""
+        yi, year = yi_year
         active = well_start_year <= year
         if not active.any():
-            continue
+            return None
 
-        # Per-year capacity weights: normalise within each pixel
-        # using only active wells
-        well_share = np.zeros(n_wells, dtype=np.float64)
-        for ui in range(len(unique_keys)):
-            pix_mask = inverse == ui
-            pix_active = pix_mask & active
-            if not pix_active.any():
-                continue
-            w = raw_weight[pix_active]
-            well_share[pix_active] = w / w.sum()
+        well_share = _compute_well_share(year)
 
+        yr_mm = np.full((n_wells, n_cats), np.nan, dtype=np.float64)
+        yr_sigma = np.full((n_wells, n_cats), np.nan, dtype=np.float64)
+        yr_has_sigma = False
         sampled_any = False
+
         for ci, (cat, mm_dir, prefix) in enumerate(cat_mm_info):
             raster_path = os.path.join(mm_dir, f'{prefix}_{year}_mm.tif')
             try:
@@ -306,22 +326,42 @@ def create_well_package(
                         list(src.sample(coords, indexes=1)),
                         dtype=np.float64,
                     ).ravel()
-                    all_mm[yi, :, ci] = vals * well_share
+                    yr_mm[:, ci] = vals * well_share
                     sampled_any = True
-                    # Read σ from band 2 if augmented (6-band) raster
                     if src.count >= 6:
                         sigma_vals = np.array(
                             list(src.sample(coords, indexes=2)),
                             dtype=np.float64,
                         ).ravel()
-                        all_sigma_mm[yi, :, ci] = sigma_vals * well_share
-                        has_sigma = True
+                        yr_sigma[:, ci] = sigma_vals * well_share
+                        yr_has_sigma = True
             except FileNotFoundError:
                 pass
-        if sampled_any:
+
+        if not sampled_any:
+            return None
+        return yi, year, yr_mm, yr_sigma, yr_has_sigma
+
+    # ---- Parallel year processing ----
+    from concurrent.futures import ThreadPoolExecutor
+
+    year_args = [(yi, year) for yi, year in enumerate(range(start_year, end_year + 1))]
+
+    years_sampled = []
+    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as executor:
+        for result in executor.map(_process_year, year_args):
+            if result is None:
+                continue
+            yi, year, yr_mm, yr_sigma, yr_has_sigma = result
+            all_mm[yi] = yr_mm
+            all_sigma_mm[yi] = yr_sigma
+            if yr_has_sigma:
+                has_sigma = True
             years_sampled.append(year)
-        if year % 50 == 0 or year == end_year:
-            logger.info(f'  Well package sampled through {year}')
+            if year % 50 == 0 or year == end_year:
+                logger.info(f'  Well package sampled through {year}')
+
+    years_sampled.sort()
 
     if not years_sampled:
         logger.warning('No raster data found for well package.')
