@@ -173,6 +173,8 @@ python pipeline.py --steps 3b --skip-uq sigma-model,gw-sensitivity # skip seed e
 | `sigma-total` | Skip σ_total quadrature, basin σ, visualizations, and raster augmentation |
 | `sigma-cu` | Skip σ_CU — consumptive use uncertainty (IE × Withdrawal error propagation) |
 
+> **Note on skipping individual σ components:** Per-category σ arrays (e.g., σ_model for Irrigation, Non_Irrigation, etc.) are only held in memory during computation and are never written to disk as separate rasters. When `sigma-total` runs, it can reload *total-level* per-component σ from disk (e.g., `Sigma_Model_mm_{year}.tif`), but the per-category σ_total rasters (`Sigma_Total_{cat}_mm_{year}.tif`) will be zero if the individual σ steps were skipped. This causes downstream augmented category rasters to have zero σ, which in turn makes σ_CU zero. To get correct per-category uncertainty, run all individual σ components (σ_MACA through σ_gw) without skipping. Only `gw-sensitivity` can be safely skipped without affecting downstream products.
+
 #### CLI flags
 
 | Flag | Default | Description |
