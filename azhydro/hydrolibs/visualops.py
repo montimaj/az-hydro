@@ -84,6 +84,15 @@ def _add_m3_twinx(ax):
     return ax_m3
 
 
+def _add_af_twinx(ax):
+    """Add an AF twinx to a m³ volume axis. Call after all plotting."""
+    lo, hi = ax.get_ylim()
+    ax_af = ax.twinx()
+    ax_af.set_ylabel('(acre-ft)', fontweight='bold')
+    ax_af.set_ylim(lo / _AF_TO_M3, hi / _AF_TO_M3)
+    return ax_af
+
+
 def _add_dual_volume_axes(ax, label: str = ''):
     """Set up m³ (left) and acre-ft (right) on a volume axis plotted in AF.
 
@@ -2315,7 +2324,7 @@ def create_full_period_time_series(
     label = f'{title_prefix} ' if title_prefix else ''
 
     years = sorted(yearly_predictions.keys())
-    vol_af = [yearly_predictions[y]['Volume_AF'] for y in years]
+    vol_m3 = [yearly_predictions[y]['Volume_m3'] for y in years]
     depth_mm = [yearly_predictions[y]['Mean_Depth_mm'] for y in years]
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 9), sharex=True)
@@ -2331,10 +2340,10 @@ def create_full_period_time_series(
                   fontweight='bold', fontsize=14)
     ax1.grid(True, alpha=0.3, linestyle='--')
 
-    ax2.plot(years, vol_af, color=COLORS['predicted'], linewidth=1.5, marker='.',
+    ax2.plot(years, vol_m3, color=COLORS['predicted'], linewidth=1.5, marker='.',
              markersize=3, label='Predicted')
     ax2.set_xlabel('Year', fontweight='bold')
-    ax2.set_ylabel('Total Volume (acre-ft)', fontweight='bold')
+    ax2.set_ylabel(r'Total Volume (m$^3$)', fontweight='bold')
     ax2.grid(True, alpha=0.3, linestyle='--')
 
     # 95% CI from model uncertainty
@@ -2342,20 +2351,21 @@ def create_full_period_time_series(
         ci_years = [y for y in years if y in sigma_data]
         ci_depth = np.array([yearly_predictions[y]['Mean_Depth_mm']
                              for y in ci_years])
-        ci_vol = np.array([yearly_predictions[y]['Volume_AF']
-                           for y in ci_years])
+        ci_vol_m3 = np.array([yearly_predictions[y]['Volume_m3']
+                              for y in ci_years])
         s_depth = np.array([sigma_data[y]['Mean_Depth_mm']
                             for y in ci_years])
-        s_vol = np.array([sigma_data[y]['Volume_AF']
-                          for y in ci_years])
+        s_vol_m3 = np.array([sigma_data[y].get('Volume_m3',
+                             sigma_data[y]['Volume_AF'] * _AF_TO_M3)
+                             for y in ci_years])
         ax1.fill_between(ci_years,
                          np.maximum(ci_depth - 1.96 * s_depth, 0),
                          ci_depth + 1.96 * s_depth,
                          alpha=0.35, color=COLORS['ci_predicted'],
                          label='95% CI', zorder=1)
         ax2.fill_between(ci_years,
-                         np.maximum(ci_vol - 1.96 * s_vol, 0),
-                         ci_vol + 1.96 * s_vol,
+                         np.maximum(ci_vol_m3 - 1.96 * s_vol_m3, 0),
+                         ci_vol_m3 + 1.96 * s_vol_m3,
                          alpha=0.35, color=COLORS['ci_predicted'],
                          label='95% CI', zorder=1)
 
@@ -2363,10 +2373,12 @@ def create_full_period_time_series(
     if actual_data:
         act_years = sorted(actual_data.keys())
         act_depth = [actual_data[y]['Mean_Depth_mm'] for y in act_years]
-        act_vol = [actual_data[y]['Volume_AF'] for y in act_years]
+        act_vol_m3 = [actual_data[y].get('Volume_m3',
+                      actual_data[y]['Volume_AF'] * _AF_TO_M3)
+                      for y in act_years]
         ax1.plot(act_years, act_depth, color=COLORS['actual'], linewidth=1.5,
                  marker='o', markersize=4, label='Observed (ADWR Meter)', zorder=5)
-        ax2.plot(act_years, act_vol, color=COLORS['actual'], linewidth=1.5,
+        ax2.plot(act_years, act_vol_m3, color=COLORS['actual'], linewidth=1.5,
                  marker='o', markersize=4, label='Observed (ADWR Meter)', zorder=5)
 
     handles = [
@@ -2379,7 +2391,7 @@ def create_full_period_time_series(
     ax2.set_xlim(start_year - 1, end_year + 1)
 
     _add_ft_twinx(ax1)
-    _add_m3_twinx(ax2)
+    _add_af_twinx(ax2)
 
     plt.tight_layout()
     fig.savefig(os.path.join(output_dir, 'Full_Period_Time_Series.png'), dpi=600, bbox_inches='tight')
@@ -2653,7 +2665,7 @@ def create_basin_time_series(
         bdf = df[df.Basin == basin].sort_values('Year')
         years = bdf.Year.values
         depth_mm = bdf.Mean_Depth_mm.values
-        vol_af = bdf.Volume_AF.values
+        vol_m3 = bdf.Volume_m3.values if 'Volume_m3' in bdf.columns else bdf.Volume_AF.values * _AF_TO_M3
 
         std_depth = None
         std_vol = None
@@ -2664,14 +2676,16 @@ def create_basin_time_series(
                 sigma_basin_yearly.get(y, {}).get(basin, {}).get('CV', 0)
                 for y in years
             ])
-            sigma_af = np.array([
+            sigma_m3 = np.array([
                 sigma_basin_yearly.get(y, {}).get(basin, {}).get(
-                    'Sigma_Volume_AF', 0)
+                    'Sigma_Volume_m3',
+                    sigma_basin_yearly.get(y, {}).get(basin, {}).get(
+                        'Sigma_Volume_AF', 0) * _AF_TO_M3)
                 for y in years
             ])
-            if np.any(sigma_af > 0):
+            if np.any(sigma_m3 > 0):
                 std_depth = 1.96 * cv_arr * np.abs(depth_mm)
-                std_vol = 1.96 * sigma_af
+                std_vol = 1.96 * sigma_m3
                 sigma_label = '95% CI'
         else:
             logger.warning('No σ data for basin %s — CI band omitted', basin)
@@ -2683,9 +2697,9 @@ def create_basin_time_series(
                       fontweight='bold', fontsize=13)
         ax1.grid(True, alpha=0.3, linestyle='--')
 
-        era_shaded_ts(ax2, years, vol_af, std_vol, color=single_color)
+        era_shaded_ts(ax2, years, vol_m3, std_vol, color=single_color)
         ax2.set_xlabel('Year', fontweight='bold')
-        ax2.set_ylabel('Volume (acre-ft)', fontweight='bold')
+        ax2.set_ylabel(r'Volume (m$^3$)', fontweight='bold')
         ax2.grid(True, alpha=0.3, linestyle='--')
 
         # Overlay actual data for this basin
@@ -2695,7 +2709,8 @@ def create_basin_time_series(
                 ax1.plot(abdf.Year, abdf.Actual_Depth_mm, color=COLORS['actual'],
                          linewidth=1.5, marker='o', markersize=4,
                          label='Observed (ADWR Meter)', zorder=5)
-                ax2.plot(abdf.Year, abdf.Actual_Volume_AF, color=COLORS['actual'],
+                act_vol_m3 = abdf.Actual_Volume_AF.values * _AF_TO_M3
+                ax2.plot(abdf.Year, act_vol_m3, color=COLORS['actual'],
                          linewidth=1.5, marker='o', markersize=4,
                          label='Observed (ADWR Meter)', zorder=5)
 
@@ -2714,7 +2729,7 @@ def create_basin_time_series(
         ax1.legend(handles=handles, fontsize=8, loc='upper left', framealpha=0.7)
         ax2.set_xlim(start_year - 1, end_year + 1)
         _add_ft_twinx(ax1)
-        _add_m3_twinx(ax2)
+        _add_af_twinx(ax2)
         plt.tight_layout()
         safe = basin.replace(' ', '_')
         fig.savefig(os.path.join(ts_dir, f'{safe}_Time_Series.png'), dpi=600, bbox_inches='tight')
@@ -2848,7 +2863,7 @@ def create_subbasin_time_series(
         sdf = df[df.Subbasin == sb].sort_values('Year')
         years = sdf.Year.values
         depth_mm = sdf.Mean_Depth_mm.values
-        vol_af = sdf.Volume_AF.values
+        vol_m3 = sdf.Volume_m3.values if 'Volume_m3' in sdf.columns else sdf.Volume_AF.values * _AF_TO_M3
         std_depth = None
         std_vol = None
         sigma_label = None
@@ -2858,14 +2873,16 @@ def create_subbasin_time_series(
                 sigma_subbasin_yearly.get(y, {}).get(sb, {}).get('CV', 0)
                 for y in years
             ])
-            sigma_af = np.array([
+            sigma_m3 = np.array([
                 sigma_subbasin_yearly.get(y, {}).get(sb, {}).get(
-                    'Sigma_Volume_AF', 0)
+                    'Sigma_Volume_m3',
+                    sigma_subbasin_yearly.get(y, {}).get(sb, {}).get(
+                        'Sigma_Volume_AF', 0) * _AF_TO_M3)
                 for y in years
             ])
-            if np.any(sigma_af > 0):
+            if np.any(sigma_m3 > 0):
                 std_depth = 1.96 * cv_arr * np.abs(depth_mm)
-                std_vol = 1.96 * sigma_af
+                std_vol = 1.96 * sigma_m3
                 sigma_label = '95% CI'
         else:
             logger.warning('No σ data for sub-basin %s — CI band omitted', sb)
@@ -2879,9 +2896,9 @@ def create_subbasin_time_series(
                       fontweight='bold', fontsize=13)
         ax1.grid(True, alpha=0.3, linestyle='--')
 
-        era_shaded_ts(ax2, years, vol_af, std_vol, color=single_color)
+        era_shaded_ts(ax2, years, vol_m3, std_vol, color=single_color)
         ax2.set_xlabel('Year', fontweight='bold')
-        ax2.set_ylabel('Volume (acre-ft)', fontweight='bold')
+        ax2.set_ylabel(r'Volume (m$^3$)', fontweight='bold')
         ax2.grid(True, alpha=0.3, linestyle='--')
 
         # Overlay actual data for this sub-basin
@@ -2891,7 +2908,8 @@ def create_subbasin_time_series(
                 ax1.plot(asdf.Year, asdf.Actual_Depth_mm, color=COLORS['actual'],
                          linewidth=1.5, marker='o', markersize=4,
                          label='Observed (ADWR Meter)', zorder=5)
-                ax2.plot(asdf.Year, asdf.Actual_Volume_AF, color=COLORS['actual'],
+                act_vol_m3 = asdf.Actual_Volume_AF.values * _AF_TO_M3
+                ax2.plot(asdf.Year, act_vol_m3, color=COLORS['actual'],
                          linewidth=1.5, marker='o', markersize=4,
                          label='Observed (ADWR Meter)', zorder=5)
 
@@ -2910,7 +2928,7 @@ def create_subbasin_time_series(
         ax1.legend(handles=handles, fontsize=8, loc='upper left', framealpha=0.7)
         ax2.set_xlim(start_year - 1, end_year + 1)
         _add_ft_twinx(ax1)
-        _add_m3_twinx(ax2)
+        _add_af_twinx(ax2)
         plt.tight_layout()
         safe = sb.replace(' ', '_').replace('.', '')
         fig.savefig(os.path.join(ts_dir, f'{safe}_Time_Series.png'), dpi=600, bbox_inches='tight')
