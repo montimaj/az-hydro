@@ -2327,7 +2327,7 @@ def create_full_period_time_series(
     ax1.plot(years, depth_mm, color=COLORS['predicted'], linewidth=1.5, marker='.',
              markersize=3, label='Predicted')
     ax1.set_ylabel('Mean Depth (mm)', fontweight='bold')
-    ax1.set_title(f'{label}AMA/INA Annual Withdrawals (1896–2099)',
+    ax1.set_title(f'{label}Annual Withdrawals (1896–2099)',
                   fontweight='bold', fontsize=14)
     ax1.grid(True, alpha=0.3, linestyle='--')
 

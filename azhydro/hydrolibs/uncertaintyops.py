@@ -3088,6 +3088,7 @@ def _replot_from_augmented_rasters(
     from shapely.geometry import mapping
 
     import hydrolibs.visualops as vizops
+    from hydrolibs.sysops import makedirs
 
     logger.info('Re-plotting time series from augmented rasters '
                 'via zonal statistics...')
@@ -3300,6 +3301,75 @@ def _replot_from_augmented_rasters(
                 actual_basin_yearly=actual_basin,
                 sigma_basin_yearly=sigma_basin_yearly,
             )
+
+            # ── AMA/INA aggregate time series ──
+            from hydrolibs.visualops import get_ama_ina_basin_names
+            ama_ina_names = set(get_ama_ina_basin_names())
+            ama_preds = {}
+            ama_sigma = {}
+            for year in sorted(basin_yearly.keys()):
+                vol_m3 = 0.0
+                vol_af = 0.0
+                sigma_af_sq = 0.0
+                for bname, metrics in basin_yearly[year].items():
+                    if bname not in ama_ina_names:
+                        continue
+                    vol_m3 += metrics.get('Volume_m3', 0)
+                    vol_af += metrics.get('Volume_AF', 0)
+                    bsig = sigma_basin_yearly.get(year, {}).get(bname, {})
+                    sigma_af_sq += bsig.get('Sigma_Volume_AF', 0) ** 2
+                if vol_af == 0 and vol_m3 == 0:
+                    continue
+                ama_preds[year] = {
+                    'Mean_Depth_mm': vol_m3 / (vol_af / M3_TO_AF) if vol_af else 0,
+                    'Mean_Depth_ft': (vol_m3 / (vol_af / M3_TO_AF) * MM_TO_FT
+                                      if vol_af else 0),
+                    'Volume_m3': vol_m3,
+                    'Volume_AF': vol_af,
+                }
+                s_af = np.sqrt(sigma_af_sq)
+                ama_sigma[year] = {
+                    'Mean_Depth_mm': (s_af / abs(vol_af) * abs(
+                        ama_preds[year]['Mean_Depth_mm'])
+                        if vol_af else 0),
+                    'Volume_AF': s_af,
+                    'Volume_m3': s_af / M3_TO_AF,
+                    'Mean_Depth_ft': (s_af / abs(vol_af) * abs(
+                        ama_preds[year]['Mean_Depth_ft'])
+                        if vol_af else 0),
+                }
+            if ama_preds:
+                ama_dir = os.path.join(out_dir, 'AMA_INA_Time_Series')
+                makedirs(ama_dir)
+                actual_ama = None
+                if actual_basin:
+                    actual_ama_preds = {}
+                    for year, basins in actual_basin.items():
+                        a_vol_af = 0.0
+                        a_depth = 0.0
+                        n = 0
+                        for bname, metrics in basins.items():
+                            if bname not in ama_ina_names:
+                                continue
+                            a_vol_af += metrics.get('Volume_AF', 0)
+                            a_depth += metrics.get('Mean_Depth_mm', 0)
+                            n += 1
+                        if n > 0:
+                            actual_ama_preds[year] = {
+                                'Mean_Depth_mm': a_depth / n,
+                                'Volume_AF': a_vol_af,
+                            }
+                    if actual_ama_preds:
+                        actual_ama = actual_ama_preds
+                ama_title = f'{title_prefix} ' if title_prefix else ''
+                ama_title += 'AMA/INA'
+                vizops.create_full_period_time_series(
+                    ama_preds, ama_dir,
+                    start_year=start_year, end_year=end_year,
+                    actual_data=actual_ama,
+                    title_prefix=ama_title,
+                    sigma_data=ama_sigma,
+                )
 
         if subbasin_yearly and subbasin_shp:
             vizops.create_subbasin_time_series(
