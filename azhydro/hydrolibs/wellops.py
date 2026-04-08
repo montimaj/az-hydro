@@ -358,7 +358,7 @@ def create_well_package(
             if yr_has_sigma:
                 has_sigma = True
             years_sampled.append(year)
-            if year % 50 == 0 or year == end_year:
+            if year % 10 == 0 or year == end_year:
                 logger.info(f'  Well package sampled through {year}')
 
     years_sampled.sort()
