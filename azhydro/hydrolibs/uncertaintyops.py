@@ -3311,32 +3311,34 @@ def _replot_from_augmented_rasters(
                 vol_m3 = 0.0
                 vol_af = 0.0
                 sigma_af_sq = 0.0
+                # Area-weighted depth: total_volume / total_area
+                depth_sum = 0.0  # sum of (mean_depth × basin_vol)
                 for bname, metrics in basin_yearly[year].items():
                     if bname not in ama_ina_names:
                         continue
-                    vol_m3 += metrics.get('Volume_m3', 0)
+                    bv_m3 = metrics.get('Volume_m3', 0)
+                    vol_m3 += bv_m3
                     vol_af += metrics.get('Volume_AF', 0)
+                    depth_sum += metrics.get('Mean_Depth_mm', 0) * bv_m3
                     bsig = sigma_basin_yearly.get(year, {}).get(bname, {})
                     sigma_af_sq += bsig.get('Sigma_Volume_AF', 0) ** 2
                 if vol_af == 0 and vol_m3 == 0:
                     continue
+                # Volume-weighted mean depth
+                mean_depth_mm = depth_sum / vol_m3 if vol_m3 > 0 else 0
                 ama_preds[year] = {
-                    'Mean_Depth_mm': vol_m3 / (vol_af / M3_TO_AF) if vol_af else 0,
-                    'Mean_Depth_ft': (vol_m3 / (vol_af / M3_TO_AF) * MM_TO_FT
-                                      if vol_af else 0),
+                    'Mean_Depth_mm': mean_depth_mm,
+                    'Mean_Depth_ft': mean_depth_mm * MM_TO_FT,
                     'Volume_m3': vol_m3,
                     'Volume_AF': vol_af,
                 }
                 s_af = np.sqrt(sigma_af_sq)
+                cv = s_af / abs(vol_af) if vol_af else 0
                 ama_sigma[year] = {
-                    'Mean_Depth_mm': (s_af / abs(vol_af) * abs(
-                        ama_preds[year]['Mean_Depth_mm'])
-                        if vol_af else 0),
+                    'Mean_Depth_mm': cv * abs(mean_depth_mm),
+                    'Mean_Depth_ft': cv * abs(mean_depth_mm) * MM_TO_FT,
                     'Volume_AF': s_af,
                     'Volume_m3': s_af / M3_TO_AF,
-                    'Mean_Depth_ft': (s_af / abs(vol_af) * abs(
-                        ama_preds[year]['Mean_Depth_ft'])
-                        if vol_af else 0),
                 }
             if ama_preds:
                 ama_dir = os.path.join(out_dir, 'AMA_INA_Time_Series')
