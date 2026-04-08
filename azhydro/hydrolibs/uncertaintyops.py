@@ -312,7 +312,7 @@ def _write_augmented_raster(pred_arr, sigma_arr, out_path, profile,
         snr = np.where(
             sigma_arr > 0, abs_pred / sigma_arr, np.nan,
         ).astype(np.float32)
-    lower_ci = (pred_arr - CI_Z * sigma_arr).astype(np.float32)
+    lower_ci = np.maximum(pred_arr - CI_Z * sigma_arr, 0).astype(np.float32)
     upper_ci = (pred_arr + CI_Z * sigma_arr).astype(np.float32)
 
     profile.update(count=6, dtype=np.float32, nodata=np.nan)
@@ -2635,7 +2635,7 @@ def augment_prediction_rasters(
                     sigma_arr > 0, abs_pred / sigma_arr, np.nan,
                 ).astype(np.float32)
 
-            lower_ci = (pred_arr - CI_Z * sigma_arr).astype(np.float32)
+            lower_ci = np.maximum(pred_arr - CI_Z * sigma_arr, 0).astype(np.float32)
             upper_ci = (pred_arr + CI_Z * sigma_arr).astype(np.float32)
 
             # Read spatial metadata from the original prediction raster

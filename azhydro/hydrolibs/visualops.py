@@ -58,7 +58,7 @@ COLORS = {
     'train_shade': '#3498DB',  # Light blue for training period
     'test_shade': '#F39C12',   # Orange for test period
     'ci_actual': '#FADBD8',    # Light red for CI
-    'ci_predicted': '#D5DBDB', # Light gray for CI
+    'ci_predicted': '#2980B9', # Blue for CI (matching prediction tone)
 }
 
 # ── Unit-conversion constants for twinx axes ─────────────────────────────
@@ -2327,7 +2327,7 @@ def create_full_period_time_series(
     ax1.plot(years, depth_mm, color=COLORS['predicted'], linewidth=1.5, marker='.',
              markersize=3, label='Predicted')
     ax1.set_ylabel('Mean Depth (mm)', fontweight='bold')
-    ax1.set_title(f'XGBoost {label}AMA/INA Annual Withdrawals (1896–2099)',
+    ax1.set_title(f'{label}AMA/INA Annual Withdrawals (1896–2099)',
                   fontweight='bold', fontsize=14)
     ax1.grid(True, alpha=0.3, linestyle='--')
 
@@ -2348,13 +2348,15 @@ def create_full_period_time_series(
                             for y in ci_years])
         s_vol = np.array([sigma_data[y]['Volume_AF']
                           for y in ci_years])
-        ax1.fill_between(ci_years, ci_depth - 1.96 * s_depth,
+        ax1.fill_between(ci_years,
+                         np.maximum(ci_depth - 1.96 * s_depth, 0),
                          ci_depth + 1.96 * s_depth,
-                         alpha=0.2, color=COLORS['ci_predicted'],
+                         alpha=0.35, color=COLORS['ci_predicted'],
                          label='95% CI', zorder=1)
-        ax2.fill_between(ci_years, ci_vol - 1.96 * s_vol,
+        ax2.fill_between(ci_years,
+                         np.maximum(ci_vol - 1.96 * s_vol, 0),
                          ci_vol + 1.96 * s_vol,
-                         alpha=0.2, color=COLORS['ci_predicted'],
+                         alpha=0.35, color=COLORS['ci_predicted'],
                          label='95% CI', zorder=1)
 
     # Overlay actual meter data for available years
