@@ -2816,6 +2816,8 @@ UQ sub-steps (use with --skip-uq to skip individual σ components):
   sigma-lulc       Skip σ_LULC (LULC projection spread)
   sigma-gw         Skip σ_gw (GW fraction snapshot spread)
   gw-sensitivity   Skip GW fraction ±0.2 sensitivity analysis
+  sigma-total      Skip σ_total quadrature, basin σ, visualisations, and raster augmentation
+  sigma-cu         Skip σ_CU (consumptive use uncertainty)
 """
 
 

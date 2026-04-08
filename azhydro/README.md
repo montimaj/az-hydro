@@ -170,6 +170,8 @@ python pipeline.py --steps 3b --skip-uq sigma-model,gw-sensitivity # skip seed e
 | `sigma-lulc` | Skip σ_LULC — LULC projection spread (requires GEE download) |
 | `sigma-gw` | Skip σ_gw — GW fraction snapshot spread |
 | `gw-sensitivity` | Skip GW fraction ±0.2 sensitivity analysis |
+| `sigma-total` | Skip σ_total quadrature, basin σ, visualizations, and raster augmentation |
+| `sigma-cu` | Skip σ_CU — consumptive use uncertainty (IE × Withdrawal error propagation) |
 
 #### CLI flags
 

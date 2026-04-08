@@ -1826,16 +1826,37 @@ def compute_sigma_total(
     return sigma_total, cat_sigma_total
 
 
-def compute_basin_sigma_total(output_dir: str) -> None:
+def compute_basin_sigma_total(output_dir: str, prediction_dir: str = '') -> None:
     """Combine per-component basin/sub-basin σ CSVs via quadrature.
 
     Reads ``{Basin|Subbasin}_Sigma_{comp}.csv`` from each
     ``Sigma_{comp}/`` directory, joins on ``(Year, Region)``, and
     writes ``Basin_Sigma_Total.csv`` / ``Subbasin_Sigma_Total.csv``
     into ``Sigma_Total/``.
+
+    Args:
+        output_dir: Uncertainty base directory (contains Sigma_*/ subdirs).
+        prediction_dir: Full prediction directory containing
+            ``Annual_Summaries/{Basin|Subbasin}_Total.csv``.  If provided,
+            the actual prediction volumes are used as the mean (instead of
+            averaging per-component ensemble means).
     """
     component_labels = ('MACA', 'Model', 'Irr', 'LULC', 'GW')
     total_dir = os.path.join(output_dir, 'Sigma_Total')
+
+    # Load actual prediction volumes from output rasters if available
+    pred_volumes = {}  # {('Basin'|'Subbasin'): DataFrame with Year, Region, Volume_m3, Volume_AF}
+    for level, fname in (('Basin', 'Basin_Total.csv'), ('Subbasin', 'Subbasin_Total.csv')):
+        csv_path = os.path.join(prediction_dir, 'Annual_Summaries', fname)
+        if prediction_dir and os.path.exists(csv_path):
+            df = pd.read_csv(csv_path)
+            region_col = 'Basin' if level == 'Basin' else 'Subbasin'
+            if region_col in df.columns and 'Volume_m3' in df.columns:
+                pred_volumes[level] = df.rename(
+                    columns={region_col: 'Region'}
+                )[['Year', 'Region', 'Volume_m3', 'Volume_AF']]
+                logger.info(f'  Loaded actual {level} prediction volumes '
+                            f'from {csv_path}')
 
     for level in ('Basin', 'Subbasin'):
         merged = None
@@ -1886,13 +1907,25 @@ def compute_basin_sigma_total(output_dir: str) -> None:
             scaled_var_m3.sum(axis=1)
         ).round(2)
 
-        # Mean volume: average of component means (they should be similar)
-        mean_af_cols = [f'Mean_{c}_AF' for c in found_components]
-        mean_m3_cols = [f'Mean_{c}_m3' for c in found_components]
-        merged[mean_af_cols] = merged[mean_af_cols].fillna(0)
-        merged[mean_m3_cols] = merged[mean_m3_cols].fillna(0)
-        merged['Mean_Volume_AF'] = merged[mean_af_cols].mean(axis=1).round(2)
-        merged['Mean_Volume_m3'] = merged[mean_m3_cols].mean(axis=1).round(2)
+        # Mean volume: use actual prediction volumes from output rasters
+        # when available; fall back to averaging component means.
+        if level in pred_volumes:
+            merged = merged.merge(
+                pred_volumes[level].rename(columns={
+                    'Volume_m3': 'Mean_Volume_m3',
+                    'Volume_AF': 'Mean_Volume_AF',
+                }),
+                on=['Year', 'Region'], how='left',
+            )
+            merged['Mean_Volume_m3'] = merged['Mean_Volume_m3'].fillna(0).round(2)
+            merged['Mean_Volume_AF'] = merged['Mean_Volume_AF'].fillna(0).round(2)
+        else:
+            mean_af_cols = [f'Mean_{c}_AF' for c in found_components]
+            mean_m3_cols = [f'Mean_{c}_m3' for c in found_components]
+            merged[mean_af_cols] = merged[mean_af_cols].fillna(0)
+            merged[mean_m3_cols] = merged[mean_m3_cols].fillna(0)
+            merged['Mean_Volume_AF'] = merged[mean_af_cols].mean(axis=1).round(2)
+            merged['Mean_Volume_m3'] = merged[mean_m3_cols].mean(axis=1).round(2)
 
         with np.errstate(invalid='ignore', divide='ignore'):
             merged['CV'] = np.where(
@@ -2028,6 +2061,7 @@ def compute_sigma_cu(
 
     # Rasterize basin labels
     from rasterio.features import rasterize
+    from shapely.geometry import mapping
     shapes = [
         (mapping(row.geometry), basin_to_idx[row['BASIN_NAME']])
         for _, row in basin_reproj.iterrows()
@@ -2279,83 +2313,90 @@ def run_uncertainty_quantification(
     else:
         logger.info('  GW fraction sensitivity skipped.')
 
-    # ── σ_total ──
-    sigma_components = {
-        'MACA': sigma_maca,
-        'Model': sigma_model,
-        'Irr': sigma_irr,
-        'LULC': sigma_lulc,
-        'GW': sigma_gw,
-    }
-    cat_sigma_components = {
-        'MACA': cat_sigma_maca,
-        'Model': cat_sigma_model,
-        'Irr': cat_sigma_irr,
-        'LULC': cat_sigma_lulc,
-        'GW': cat_sigma_gw,
-    }
-    prediction_raster_dir = (
-        os.path.join(model_dir, pred_base, 'Predicted_Rasters', 'Depth_mm')
-    )
-    compute_sigma_total(
-        sigma_components, pred_data_dir, unc_dir,
-        start_year, end_year, year_list, mosaic_res,
-        prediction_raster_dir=prediction_raster_dir,
-        cat_sigma_components=cat_sigma_components,
-    )
-
-    # ── Basin / sub-basin σ_total (quadrature of per-component CSVs) ──
-    compute_basin_sigma_total(unc_dir)
-    _plot_basin_sigma_time_series(unc_dir)
-
-    # ── Visualisations ──
-    _plot_uncertainty_time_series(
-        sigma_components, unc_dir, mosaic_res, vizops,
-    )
-
-    # ── Augment prediction rasters with uncertainty bands ──
-    prediction_base_dir = (
-        os.path.join(model_dir, pred_base, 'Predicted_Rasters')
-    )
+    # ── σ_total + augmentation ──
     full_pred_dir = os.path.join(model_dir, pred_base)
-    augment_prediction_rasters(
-        sigma_total_raster_dir=os.path.join(unc_dir, 'Sigma_Total', 'Rasters'),
-        prediction_base_dir=prediction_base_dir,
-        start_year=start_year,
-        end_year=end_year,
-        mosaic_res=mosaic_res,
-    )
+    if 'sigma-total' not in skip:
+        sigma_components = {
+            'MACA': sigma_maca,
+            'Model': sigma_model,
+            'Irr': sigma_irr,
+            'LULC': sigma_lulc,
+            'GW': sigma_gw,
+        }
+        cat_sigma_components = {
+            'MACA': cat_sigma_maca,
+            'Model': cat_sigma_model,
+            'Irr': cat_sigma_irr,
+            'LULC': cat_sigma_lulc,
+            'GW': cat_sigma_gw,
+        }
+        prediction_raster_dir = (
+            os.path.join(model_dir, pred_base, 'Predicted_Rasters', 'Depth_mm')
+        )
+        compute_sigma_total(
+            sigma_components, pred_data_dir, unc_dir,
+            start_year, end_year, year_list, mosaic_res,
+            prediction_raster_dir=prediction_raster_dir,
+            cat_sigma_components=cat_sigma_components,
+        )
 
-    # ── Augment category rasters (Irrigation, Non_Irrigation, …) ──
-    augment_category_rasters(
-        prediction_dir=full_pred_dir,
-        sigma_total_raster_dir=os.path.join(
-            unc_dir, 'Sigma_Total/Rasters/',
-        ),
-        start_year=start_year,
-        end_year=end_year,
-        mosaic_res=mosaic_res,
-    )
+        # ── Basin / sub-basin σ_total (quadrature of per-component CSVs) ──
+        full_prediction_dir = os.path.join(model_dir, pred_base)
+        compute_basin_sigma_total(unc_dir, prediction_dir=full_prediction_dir)
+        _plot_basin_sigma_time_series(unc_dir)
+
+        # ── Visualisations ──
+        _plot_uncertainty_time_series(
+            sigma_components, unc_dir, mosaic_res, vizops,
+        )
+
+        # ── Augment prediction rasters with uncertainty bands ──
+        prediction_base_dir = (
+            os.path.join(model_dir, pred_base, 'Predicted_Rasters')
+        )
+        augment_prediction_rasters(
+            sigma_total_raster_dir=os.path.join(unc_dir, 'Sigma_Total', 'Rasters'),
+            prediction_base_dir=prediction_base_dir,
+            start_year=start_year,
+            end_year=end_year,
+            mosaic_res=mosaic_res,
+        )
+
+        # ── Augment category rasters (Irrigation, Non_Irrigation, …) ──
+        augment_category_rasters(
+            prediction_dir=full_pred_dir,
+            sigma_total_raster_dir=os.path.join(
+                unc_dir, 'Sigma_Total/Rasters/',
+            ),
+            start_year=start_year,
+            end_year=end_year,
+            mosaic_res=mosaic_res,
+        )
+    else:
+        logger.info('  σ_total + augmentation skipped.')
 
     # ── σ_CU (error propagation: CU = IE × Withdrawal) ──
-    compute_sigma_cu(
-        prediction_dir=full_pred_dir,
-        output_dir=unc_dir,
-        basin_shp=basin_shp,
-        input_dir=input_dir,
-        start_year=start_year,
-        end_year=end_year,
-        mosaic_res=mosaic_res,
-    )
+    if 'sigma-cu' not in skip:
+        compute_sigma_cu(
+            prediction_dir=full_pred_dir,
+            output_dir=unc_dir,
+            basin_shp=basin_shp,
+            input_dir=input_dir,
+            start_year=start_year,
+            end_year=end_year,
+            mosaic_res=mosaic_res,
+        )
 
-    # ── Augment CU rasters ──
-    augment_cu_rasters(
-        sigma_cu_raster_dir=os.path.join(unc_dir, 'Sigma_CU', 'Rasters'),
-        prediction_dir=full_pred_dir,
-        start_year=start_year,
-        end_year=end_year,
-        mosaic_res=mosaic_res,
-    )
+        # ── Augment CU rasters ──
+        augment_cu_rasters(
+            sigma_cu_raster_dir=os.path.join(unc_dir, 'Sigma_CU', 'Rasters'),
+            prediction_dir=full_pred_dir,
+            start_year=start_year,
+            end_year=end_year,
+            mosaic_res=mosaic_res,
+        )
+    else:
+        logger.info('  σ_CU skipped.')
 
     # ── Re-plot prediction time series with uncertainty bounds ──
     # Derive all uncertainty data directly from the augmented 6-band
@@ -2973,6 +3014,8 @@ def _replot_from_augmented_rasters(
             zone_reproj = zone_gdf.to_crs(src.crs)
             for _, row in zone_reproj.iterrows():
                 name = row[zone_col]
+                if row.geometry is None:
+                    continue
                 geom = [mapping(row.geometry)]
                 try:
                     out_img, _ = rio_mask(
@@ -3551,5 +3594,94 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
             dpi=600, bbox_inches='tight',
         )
         plt.close()
+
+    # ── AZ-wide σ_total time series (sum of basin volumes) ──
+    basin_csv = os.path.join(unc_dir, 'Sigma_Total', 'Basin_Sigma_Total.csv')
+    if os.path.exists(basin_csv):
+        bdf = pd.read_csv(basin_csv)
+        if not bdf.empty:
+            az_df = bdf.groupby('Year').agg(
+                Mean_Volume_m3=('Mean_Volume_m3', 'sum'),
+                Mean_Volume_AF=('Mean_Volume_AF', 'sum'),
+                Sigma_Total_m3=('Sigma_Total_m3', lambda x: np.sqrt((x ** 2).sum())),
+                Sigma_Total_AF=('Sigma_Total_AF', lambda x: np.sqrt((x ** 2).sum())),
+            ).reset_index().sort_values('Year')
+
+            az_df['Lower_95CI_m3'] = az_df['Mean_Volume_m3'] - CI_Z * az_df['Sigma_Total_m3']
+            az_df['Upper_95CI_m3'] = az_df['Mean_Volume_m3'] + CI_Z * az_df['Sigma_Total_m3']
+            az_df['Lower_95CI_AF'] = az_df['Mean_Volume_AF'] - CI_Z * az_df['Sigma_Total_AF']
+            az_df['Upper_95CI_AF'] = az_df['Mean_Volume_AF'] + CI_Z * az_df['Sigma_Total_AF']
+
+            years = az_df['Year'].values
+            mean_m3 = az_df['Mean_Volume_m3'].values
+            sigma_m3 = az_df['Sigma_Total_m3'].values
+
+            fig, axes = plt.subplots(2, 1, figsize=(16, 9), sharex=True)
+
+            # --- Panel 1: Mean volume with 95% CI ---
+            ax1 = axes[0]
+            for era, (s, e) in ERA_PERIODS.items():
+                ax1.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
+            ax1.fill_between(
+                years,
+                az_df['Lower_95CI_m3'].values,
+                az_df['Upper_95CI_m3'].values,
+                alpha=0.25, color='#2980B9', label='95 % CI',
+            )
+            ax1.plot(years, mean_m3, color='#2980B9', linewidth=1.5,
+                     marker='.', markersize=2, label='Mean volume')
+            ax1.set_ylabel('Volume (m\u00b3)', fontweight='bold')
+            ax1.set_title(
+                'Arizona \u2014 Mean Prediction \u00b1 95 % CI',
+                fontweight='bold', fontsize=14,
+            )
+            ax1.grid(True, alpha=0.3, linestyle='--')
+
+            ax1r = ax1.twinx()
+            ax1r.set_ylim(
+                ax1.get_ylim()[0] * M3_TO_AF,
+                ax1.get_ylim()[1] * M3_TO_AF,
+            )
+            ax1r.set_ylabel('Volume (AF)', fontweight='bold')
+
+            handles1 = ax1.get_legend_handles_labels()[0]
+            era_handles = [
+                mpatches.Patch(
+                    color=ERA_COLORS[e], alpha=0.4,
+                    label=f'{e} ({ERA_PERIODS[e][0]}\u2013{ERA_PERIODS[e][1]})',
+                )
+                for e in ERA_PERIODS
+            ]
+            ax1.legend(
+                handles=handles1 + era_handles,
+                loc='upper left', framealpha=0.9, fontsize=9,
+            )
+
+            # --- Panel 2: σ_total ---
+            ax2 = axes[1]
+            for era, (s, e) in ERA_PERIODS.items():
+                ax2.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
+            ax2.plot(years, sigma_m3, color='#E74C3C', linewidth=1.5,
+                     marker='.', markersize=2, label='\u03c3_total')
+            ax2.set_xlabel('Year', fontweight='bold')
+            ax2.set_ylabel('\u03c3 (m\u00b3)', fontweight='bold')
+            ax2.grid(True, alpha=0.3, linestyle='--')
+
+            ax2r = ax2.twinx()
+            ax2r.set_ylim(
+                ax2.get_ylim()[0] * M3_TO_AF,
+                ax2.get_ylim()[1] * M3_TO_AF,
+            )
+            ax2r.set_ylabel('\u03c3 (AF)', fontweight='bold')
+
+            ax2.set_xlim(years.min() - 1, years.max() + 1)
+            plt.tight_layout()
+
+            fig.savefig(
+                os.path.join(plot_dir, 'Arizona_Sigma_Total.png'),
+                dpi=600, bbox_inches='tight',
+            )
+            plt.close()
+            logger.info(f'  AZ-wide σ_total time-series plot saved to {plot_dir}')
 
     logger.info(f'  Basin/sub-basin σ time-series plots saved to {plot_dir}')
