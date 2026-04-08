@@ -1607,8 +1607,10 @@ def run_gw_fraction_sensitivity(
     sens_df.to_csv(out_csv, index=False)
     logger.info('GW-fraction sensitivity results saved to %s', out_csv)
 
-    # Log summary for key categories
-    for cat in ('Irrigation_GW', 'Irrigation_SW', 'Total_GW', 'Total_SW'):
+    # Log summary for key categories (non-irrigation GW/SW excluded
+    # because gw_fraction only governs the irrigation GW/SW split)
+    plot_cats = ('Irrigation_GW', 'Irrigation_SW', 'Total_GW', 'Total_SW')
+    for cat in plot_cats:
         cdf = sens_df[sens_df.Category == cat]
         if cdf.empty:
             continue
@@ -1618,6 +1620,85 @@ def run_gw_fraction_sensitivity(
             '  %s: mean %%Δ = %+.1f%% (gw+%.1f), %+.1f%% (gw−%.1f)',
             cat, mean_pct_plus, delta, mean_pct_minus, delta,
         )
+
+    # --- Plot: GW fraction sensitivity time series ---
+    import matplotlib.patches as mpatches
+    import matplotlib.pyplot as plt
+
+    from hydrolibs.visualops import (
+        ERA_COLORS,
+        ERA_PERIODS,
+        apply_journal_style,
+    )
+
+    apply_journal_style()
+
+    cat_titles = {
+        'Irrigation_GW': 'Irrigation GW',
+        'Irrigation_SW': 'Irrigation SW',
+        'Total_GW': 'Total GW',
+        'Total_SW': 'Total SW',
+    }
+    cat_colors = {
+        'Irrigation_GW': '#2980B9',
+        'Irrigation_SW': '#27AE60',
+        'Total_GW': '#2C3E50',
+        'Total_SW': '#E74C3C',
+    }
+
+    n_cats = len(plot_cats)
+    fig, axes = plt.subplots(n_cats, 1, figsize=(16, 4 * n_cats), sharex=True)
+    if n_cats == 1:
+        axes = [axes]
+
+    for ax, cat in zip(axes, plot_cats):
+        cdf = sens_df[sens_df.Category == cat].sort_values('Year')
+        if cdf.empty:
+            continue
+        years = cdf['Year'].values
+        baseline = cdf['Baseline_AF'].values
+        plus_af = cdf['Plus_AF'].values
+        minus_af = cdf['Minus_AF'].values
+        color = cat_colors.get(cat, '#2C3E50')
+
+        for era, (s, e) in ERA_PERIODS.items():
+            ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.08)
+
+        ax.fill_between(years, minus_af, plus_af,
+                        alpha=0.20, color=color,
+                        label=f'\u00b1{delta} GW fraction range')
+        ax.plot(years, baseline, color=color, linewidth=1.4,
+                marker='.', markersize=2, label='Baseline')
+        ax.plot(years, plus_af, color=color, linewidth=0.8,
+                linestyle='--', alpha=0.6)
+        ax.plot(years, minus_af, color=color, linewidth=0.8,
+                linestyle='--', alpha=0.6)
+
+        ax.set_ylabel('Volume (AF)', fontweight='bold')
+        ax.set_title(f'{cat_titles.get(cat, cat)}', fontweight='bold',
+                     fontsize=12)
+        ax.grid(True, alpha=0.3, linestyle='--')
+
+        handles = ax.get_legend_handles_labels()[0]
+        era_handles = [
+            mpatches.Patch(
+                color=ERA_COLORS[e], alpha=0.4,
+                label=f'{e} ({ERA_PERIODS[e][0]}\u2013{ERA_PERIODS[e][1]})',
+            )
+            for e in ERA_PERIODS
+        ]
+        ax.legend(handles=handles + era_handles,
+                  loc='upper left', framealpha=0.9, fontsize=8)
+
+    axes[-1].set_xlabel('Year', fontweight='bold')
+    axes[-1].set_xlim(start_year - 1, end_year + 1)
+    fig.suptitle(f'GW Fraction Sensitivity (\u00b1{delta})',
+                 fontweight='bold', fontsize=14, y=1.001)
+    plt.tight_layout()
+    fig.savefig(os.path.join(sens_dir, 'GW_Fraction_Sensitivity.png'),
+                dpi=600, bbox_inches='tight')
+    plt.close()
+    logger.info('  GW-fraction sensitivity plot saved to %s', sens_dir)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1683,6 +1764,58 @@ def compute_sigma_total(
 
     pixel_area_m2 = mosaic_res ** 2
     mm_to_m3 = pixel_area_m2 / 1000
+
+    # Reload per-component σ from disk when in-memory dicts are empty
+    # (e.g. when individual σ steps were skipped).
+    comp_names = list(sigma_components.keys())
+    any_empty = any(not comp for comp in sigma_components.values())
+    if any_empty:
+        logger.info('  Some σ components are empty in memory; '
+                     'reloading from existing rasters on disk...')
+        for name in comp_names:
+            if sigma_components[name]:
+                continue  # already populated
+            comp_raster_dir = os.path.join(output_dir, f'Sigma_{name}', 'Rasters')
+            if not os.path.isdir(comp_raster_dir):
+                continue
+            for year in range(start_year, end_year + 1):
+                raster_file = os.path.join(
+                    comp_raster_dir, f'Sigma_{name}_mm_{year}.tif')
+                if not os.path.exists(raster_file):
+                    continue
+                arr = read_raster_as_arr(raster_file, get_file=False)
+                vals = arr.ravel()[valid_mask]
+                sigma_components[name][year] = vals
+            if sigma_components[name]:
+                logger.info(f'    Reloaded σ_{name}: {len(sigma_components[name])} years')
+
+        # Also reload per-category σ if needed
+        if cat_sigma_components:
+            import hydrolibs.partitionops as _partops
+            for name in comp_names:
+                cat_comp = cat_sigma_components.get(name, {})
+                any_cat_empty = not cat_comp or all(
+                    (not v if isinstance(v, dict) else len(v) == 0)
+                    for v in cat_comp.values())
+                if not any_cat_empty:
+                    continue
+                comp_raster_dir = os.path.join(
+                    output_dir, f'Sigma_{name}', 'Rasters')
+                if not os.path.isdir(comp_raster_dir):
+                    continue
+                if name not in cat_sigma_components:
+                    cat_sigma_components[name] = {}
+                for cat in _partops.CATEGORIES:
+                    cat_sigma_components[name].setdefault(cat, {})
+                    for year in range(start_year, end_year + 1):
+                        raster_file = os.path.join(
+                            comp_raster_dir,
+                            f'Sigma_{name}_{cat}_mm_{year}.tif')
+                        if not os.path.exists(raster_file):
+                            continue
+                        arr = read_raster_as_arr(raster_file, get_file=False)
+                        vals = arr.ravel()[valid_mask]
+                        cat_sigma_components[name][cat][year] = vals
 
     all_years = set()
     for comp in sigma_components.values():

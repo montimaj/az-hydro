@@ -2351,11 +2351,11 @@ def create_full_period_time_series(
         ax1.fill_between(ci_years, ci_depth - 1.96 * s_depth,
                          ci_depth + 1.96 * s_depth,
                          alpha=0.2, color=COLORS['ci_predicted'],
-                         label='95% CI (model σ)', zorder=1)
+                         label='95% CI', zorder=1)
         ax2.fill_between(ci_years, ci_vol - 1.96 * s_vol,
                          ci_vol + 1.96 * s_vol,
                          alpha=0.2, color=COLORS['ci_predicted'],
-                         label='95% CI (model σ)', zorder=1)
+                         label='95% CI', zorder=1)
 
     # Overlay actual meter data for available years
     if actual_data:
@@ -2646,6 +2646,7 @@ def create_basin_time_series(
     plt.close()
 
     # --- Individual basin plots (2-panel: depth + volume) -------------------
+    single_color = '#2C3E50'
     for i, basin in enumerate(basins):
         bdf = df[df.Basin == basin].sort_values('Year')
         years = bdf.Year.values
@@ -2669,18 +2670,18 @@ def create_basin_time_series(
             if np.any(sigma_af > 0):
                 std_depth = 1.96 * cv_arr * np.abs(depth_mm)
                 std_vol = 1.96 * sigma_af
-                sigma_label = '95% CI (model σ)'
+                sigma_label = '95% CI'
         else:
             logger.warning('No σ data for basin %s — CI band omitted', basin)
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-        era_shaded_ts(ax1, years, depth_mm, std_depth, color=palette[i])
+        era_shaded_ts(ax1, years, depth_mm, std_depth, color=single_color)
         ax1.set_ylabel('Mean Depth (mm)', fontweight='bold')
         ax1.set_title(f'{basin} — Annual {label}Withdrawal (1896–2099)',
                       fontweight='bold', fontsize=13)
         ax1.grid(True, alpha=0.3, linestyle='--')
 
-        era_shaded_ts(ax2, years, vol_af, std_vol, color=palette[i])
+        era_shaded_ts(ax2, years, vol_af, std_vol, color=single_color)
         ax2.set_xlabel('Year', fontweight='bold')
         ax2.set_ylabel('Volume (acre-ft)', fontweight='bold')
         ax2.grid(True, alpha=0.3, linestyle='--')
@@ -2702,7 +2703,7 @@ def create_basin_time_series(
             for e in ERA_PERIODS
         ]
         if sigma_label is not None:
-            handles.append(mpatches.Patch(color=palette[i], alpha=0.25,
+            handles.append(mpatches.Patch(color=single_color, alpha=0.25,
                                            label=sigma_label))
         if actual_df is not None:
             from matplotlib.lines import Line2D
@@ -2840,8 +2841,7 @@ def create_subbasin_time_series(
     plt.close()
 
     # --- Individual sub-basin plots (2-panel: depth + volume) ---------------
-    n_sb = len(subbasins)
-    palette_all = sns.color_palette('husl', n_sb)
+    single_color = '#2C3E50'
     for i, sb in enumerate(subbasins):
         sdf = df[df.Subbasin == sb].sort_values('Year')
         years = sdf.Year.values
@@ -2864,20 +2864,20 @@ def create_subbasin_time_series(
             if np.any(sigma_af > 0):
                 std_depth = 1.96 * cv_arr * np.abs(depth_mm)
                 std_vol = 1.96 * sigma_af
-                sigma_label = '95% CI (model σ)'
+                sigma_label = '95% CI'
         else:
             logger.warning('No σ data for sub-basin %s — CI band omitted', sb)
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
         parent = sub_to_parent.get(sb, '')
-        era_shaded_ts(ax1, years, depth_mm, std_depth, color=palette_all[i])
+        era_shaded_ts(ax1, years, depth_mm, std_depth, color=single_color)
         ax1.set_ylabel('Mean Depth (mm)', fontweight='bold')
         title_suffix = f' ({parent})' if parent else ''
         ax1.set_title(f'{sb}{title_suffix} — Annual {label}Withdrawal (1896–2099)',
                       fontweight='bold', fontsize=13)
         ax1.grid(True, alpha=0.3, linestyle='--')
 
-        era_shaded_ts(ax2, years, vol_af, std_vol, color=palette_all[i])
+        era_shaded_ts(ax2, years, vol_af, std_vol, color=single_color)
         ax2.set_xlabel('Year', fontweight='bold')
         ax2.set_ylabel('Volume (acre-ft)', fontweight='bold')
         ax2.grid(True, alpha=0.3, linestyle='--')
@@ -2899,7 +2899,7 @@ def create_subbasin_time_series(
             for e in ERA_PERIODS
         ]
         if sigma_label is not None:
-            handles.append(mpatches.Patch(color=palette_all[i], alpha=0.25,
+            handles.append(mpatches.Patch(color=single_color, alpha=0.25,
                                            label=sigma_label))
         if actual_df is not None:
             from matplotlib.lines import Line2D
