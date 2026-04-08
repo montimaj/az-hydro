@@ -440,3 +440,262 @@ def create_well_package(
     del all_mm, all_sigma_mm
 
     return out_parquets[0]
+
+
+def verify_well_package(
+        parquet_path: str,
+        raster_dirs: dict[str, str],
+        cat_raster_dirs: dict[str, dict[str, str]],
+        ref_raster_file: str,
+        output_dir: str,
+        *,
+        cu_raster_dirs: dict[str, dict[str, str]] | None = None,
+        sample_years: list[int] | None = None,
+        rtol: float = 1e-3,
+        unit: str = 'mm',
+) -> bool:
+    """Verify well package by reconstructing pixel values from well sums.
+
+    For each sampled year and category, wells are grouped by pixel and
+    their values summed.  The per-pixel sums are compared against the
+    original raster band 1 values.  A summary CSV is written.
+
+    Args:
+        parquet_path: Path to the GeoParquet well package for the given unit.
+        raster_dirs: ``{'mm': dir}`` mapping for total predicted rasters.
+        cat_raster_dirs: ``{cat: {'mm': dir}}`` for category rasters.
+        ref_raster_file: Reference raster for grid shape and transform.
+        output_dir: Directory for verification outputs.
+        cu_raster_dirs: Optional ``{cu_cat: {'mm': dir}}`` for CU rasters.
+        sample_years: Years to verify (default: all years).
+        rtol: Relative tolerance for pixel-level comparison (default 0.1%).
+        unit: Unit label (mm, ft, m3, AF) for column names and output files.
+
+    Returns:
+        True if all checks pass, False otherwise.
+    """
+    import pyarrow.parquet as pq
+    from shapely import wkb as shapely_wkb
+
+    logger.info(f'Verifying well package ({unit}) against source rasters...')
+    makedirs(output_dir)
+
+    # ---- Load reference grid ----
+    with rio.open(ref_raster_file) as src:
+        transform_inv = ~src.transform
+        ref_shape = (src.height, src.width)
+        ref_profile = src.profile.copy()
+        ref_profile.update(count=1, dtype=np.float32, nodata=np.nan)
+
+    # ---- Build category → raster dir mapping ----
+    cat_info = [('Total', raster_dirs['mm'], 'Total_Predicted')]
+    for cat in CATEGORIES:
+        if cat in cat_raster_dirs:
+            cat_info.append((cat, cat_raster_dirs[cat]['mm'], cat))
+    if cu_raster_dirs:
+        for cu_cat, unit_dirs in cu_raster_dirs.items():
+            cat_info.append((cu_cat, unit_dirs['mm'], cu_cat))
+
+    # ---- Read parquet metadata to get years ----
+    pf = pq.ParquetFile(parquet_path)
+    # Read Year column from first row group to discover available years
+    year_col = pf.read_row_group(0, columns=['Year'])['Year'].to_pylist()
+    all_years = sorted(set(year_col))
+    # Read all row groups for full year list
+    for i in range(1, pf.metadata.num_row_groups):
+        rg_years = pf.read_row_group(i, columns=['Year'])['Year'].to_pylist()
+        all_years = sorted(set(all_years) | set(rg_years))
+
+    if sample_years is None:
+        sample_years = sorted(all_years)
+
+    logger.info(f'  Verifying {len(sample_years)} years: '
+                f'{sample_years[0]}–{sample_years[-1]}')
+
+    # ---- Pre-compute pixel row/col from first year's geometry ----
+    first_year_df = pd.read_parquet(
+        parquet_path, filters=[('Year', '==', sample_years[0])],
+    )
+    geom_wkb_first = first_year_df['geometry'].values
+    coords_x = np.array([shapely_wkb.loads(g).x for g in geom_wkb_first])
+    coords_y = np.array([shapely_wkb.loads(g).y for g in geom_wkb_first])
+    cols_arr, rows_arr = transform_inv * (coords_x, coords_y)
+    pix_rows = rows_arr.astype(int)
+    pix_cols = cols_arr.astype(int)
+    del first_year_df, geom_wkb_first, coords_x, coords_y
+
+    # ---- Helper: compare reconstructed vs original ----
+    def _compare(recon_arr, orig_arr, year, cat, band_label):
+        v = np.isfinite(recon_arr) & np.isfinite(orig_arr)
+        if not v.any():
+            return None
+        rv = recon_arr[v]
+        ov = orig_arr[v]
+        abs_diff = np.abs(rv - ov)
+        # Relative difference: |diff| / max(|orig|, 1e-10)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            rel_diff = abs_diff / np.maximum(np.abs(ov), 1e-10)
+        mx_abs = float(np.nanmax(abs_diff))
+        mn_abs = float(np.nanmean(abs_diff))
+        mx_rel = float(np.nanmax(rel_diff))
+        mn_rel = float(np.nanmean(rel_diff))
+        n = int(v.sum())
+        np_ = int((rel_diff <= rtol).sum())
+        pct = 100.0 * np_ / n if n > 0 else 0.0
+        ok = mx_rel <= rtol
+        return {
+            'Year': year, 'Category': cat, 'Band': band_label,
+            'N_Pixels': n,
+            f'Max_Abs_Diff_{unit}': round(mx_abs, 6),
+            f'Mean_Abs_Diff_{unit}': round(mn_abs, 6),
+            'Max_Rel_Diff': round(mx_rel, 6),
+            'Mean_Rel_Diff': round(mn_rel, 6),
+            'Pct_Pass': round(pct, 2), 'Pass': ok,
+        }
+
+    # ---- Helper: reconstruct pixel grid from well values ----
+    def _reconstruct(values, p_rows, p_cols):
+        grid = np.full(ref_shape, np.nan, dtype=np.float64)
+        # Group by pixel and sum (min_count=1 so all-NaN pixels stay NaN)
+        df_tmp = pd.DataFrame({
+            'r': p_rows, 'c': p_cols, 'v': values,
+        })
+        for (r, c), val in df_tmp.groupby(['r', 'c'])['v'].sum(
+                min_count=1).items():
+            if 0 <= r < ref_shape[0] and 0 <= c < ref_shape[1]:
+                grid[r, c] = val
+        return grid
+
+    # ---- Process one year (for parallel execution) ----
+    def _verify_year(year):
+        ydf = pd.read_parquet(
+            parquet_path, filters=[('Year', '==', year)],
+        )
+        if ydf.empty:
+            return []
+
+        year_results = []
+
+        for cat, cat_dir, prefix in cat_info:
+            col_name = f'{cat}_{unit}'
+            if col_name not in ydf.columns:
+                continue
+
+            raster_path = os.path.join(cat_dir, f'{prefix}_{year}_{unit}.tif')
+            if not os.path.exists(raster_path):
+                continue
+
+            with rio.open(raster_path) as src:
+                n_bands = src.count
+                orig_pred = src.read(1).astype(np.float64)
+                orig_sigma = src.read(2).astype(np.float64) if n_bands >= 6 else None
+                orig_cv = src.read(3).astype(np.float64) if n_bands >= 6 else None
+                orig_snr = src.read(4).astype(np.float64) if n_bands >= 6 else None
+                orig_lower = src.read(5).astype(np.float64) if n_bands >= 6 else None
+                orig_upper = src.read(6).astype(np.float64) if n_bands >= 6 else None
+
+            # Prediction (band 1)
+            reconstructed = _reconstruct(
+                ydf[col_name].values, pix_rows, pix_cols)
+            valid = np.isfinite(reconstructed)
+            if not valid.any():
+                continue
+
+            r = _compare(reconstructed[valid], orig_pred[valid],
+                         year, cat, 'Prediction')
+            if r:
+                year_results.append(r)
+
+            # Sigma (band 2)
+            sigma_col = f'{cat}_{unit}_sigma'
+            if sigma_col in ydf.columns and orig_sigma is not None:
+                recon_sigma = _reconstruct(
+                    ydf[sigma_col].values, pix_rows, pix_cols)
+
+                r = _compare(recon_sigma[valid], orig_sigma[valid],
+                             year, cat, 'Sigma')
+                if r:
+                    year_results.append(r)
+
+                # CV (band 3)
+                if orig_cv is not None:
+                    with np.errstate(invalid='ignore', divide='ignore'):
+                        recon_cv = np.where(
+                            np.abs(reconstructed) > 0,
+                            recon_sigma / np.abs(reconstructed), np.nan)
+                    r = _compare(recon_cv[valid], orig_cv[valid],
+                                 year, cat, 'CV')
+                    if r:
+                        year_results.append(r)
+
+                # SNR (band 4)
+                if orig_snr is not None:
+                    with np.errstate(invalid='ignore', divide='ignore'):
+                        recon_snr = np.where(
+                            recon_sigma > 0,
+                            np.abs(reconstructed) / recon_sigma, np.nan)
+                    r = _compare(recon_snr[valid], orig_snr[valid],
+                                 year, cat, 'SNR')
+                    if r:
+                        year_results.append(r)
+
+                # Lower 95% CI (band 5)
+                if orig_lower is not None:
+                    recon_lower = np.maximum(
+                        reconstructed - 1.96 * recon_sigma, 0)
+                    r = _compare(recon_lower[valid], orig_lower[valid],
+                                 year, cat, 'Lower_95CI')
+                    if r:
+                        year_results.append(r)
+
+                # Upper 95% CI (band 6)
+                if orig_upper is not None:
+                    recon_upper = reconstructed + 1.96 * recon_sigma
+                    r = _compare(recon_upper[valid], orig_upper[valid],
+                                 year, cat, 'Upper_95CI')
+                    if r:
+                        year_results.append(r)
+
+        return year_results
+
+    # ---- Parallel verification across all years ----
+    from concurrent.futures import ThreadPoolExecutor
+
+    results = []
+    all_pass = True
+
+    with ThreadPoolExecutor(max_workers=min(40, os.cpu_count() or 4)) as executor:
+        futures = {executor.submit(_verify_year, y): y for y in sample_years}
+        for future in futures:
+            year_results = future.result()
+            for r in year_results:
+                if not r['Pass']:
+                    all_pass = False
+                results.append(r)
+
+            year = futures[future]
+            if year % 20 == 0 or year == sample_years[-1]:
+                logger.info(f'    Verified year {year}')
+
+    # ---- Write summary ----
+    summary_df = pd.DataFrame(results)
+    summary_csv = os.path.join(output_dir, f'Well_Package_Verification_{unit}.csv')
+    summary_df.to_csv(summary_csv, index=False)
+
+    n_total = len(summary_df)
+    n_passed = summary_df['Pass'].sum() if not summary_df.empty else 0
+    n_failed = n_total - n_passed
+    max_rel = summary_df['Max_Rel_Diff'].max() if not summary_df.empty else 0
+
+    logger.info(f'  Verification ({unit}) complete: {n_passed}/{n_total} checks passed '
+                f'(max rel diff = {max_rel:.6f}, tol = {rtol})')
+    if n_failed > 0:
+        failed = summary_df[~summary_df['Pass']]
+        for _, row in failed.head(10).iterrows():
+            logger.warning(f'    FAIL: Year={row.Year}, Cat={row.Category}, '
+                           f'Band={row.Band}, '
+                           f'MaxRelDiff={row.Max_Rel_Diff:.6f}, '
+                           f'PctPass={row.Pct_Pass:.1f}%')
+    logger.info(f'  Summary saved to {summary_csv}')
+
+    return all_pass

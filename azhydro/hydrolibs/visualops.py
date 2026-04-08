@@ -3515,12 +3515,34 @@ def create_actual_vs_predicted_maps(
     actual_mean, actual_count = _accumulate(actual_dir, actual_files, shape_actual)
     pred_mean, pred_count = _accumulate(predicted_dir, predicted_files, shape_pred)
 
-    # Mask: actual pixels with no data across ALL years → gray
-    actual_masked = np.ma.masked_where(actual_count == 0, actual_mean)
-    pred_masked = np.ma.masked_where(pred_count == 0, pred_mean)
+    # Build AZ boundary mask from predicted rasters (any pixel with data is inside AZ)
+    az_mask_pred = pred_count > 0
+    # For actual grid, build AZ mask from the predicted grid (resample if needed)
+    if shape_actual != shape_pred:
+        from scipy.ndimage import zoom
+        zoom_factors_az = (shape_actual[0] / shape_pred[0],
+                           shape_actual[1] / shape_pred[1])
+        az_mask_actual = zoom(az_mask_pred.astype(np.float64),
+                              zoom_factors_az, order=0) > 0.5
+    else:
+        az_mask_actual = az_mask_pred
 
-    # Difference: only where actual has data
-    # Resample predicted to actual grid if shapes differ
+    # Mask: outside AZ = NaN (white background), inside AZ no-data = special gray
+    # For actual: pixels inside AZ but with no meter data → set to a sentinel
+    # that will be rendered as gray via a custom colormap treatment
+    actual_display = actual_mean.copy()
+    actual_display[~az_mask_actual] = np.nan  # outside AZ → white
+    actual_masked = np.ma.masked_where(np.isnan(actual_display), actual_display)
+    # Mark inside-AZ no-meter pixels as masked (will show as gray facecolor)
+    actual_no_meter = az_mask_actual & (actual_count == 0)
+    actual_masked = np.ma.masked_where(
+        np.isnan(actual_display) | actual_no_meter, actual_display)
+
+    pred_display = pred_mean.copy()
+    pred_display[~az_mask_pred] = np.nan  # outside AZ → white
+    pred_masked = np.ma.masked_where(np.isnan(pred_display), pred_display)
+
+    # Difference: only where actual has meter data
     if shape_actual != shape_pred:
         from scipy.ndimage import zoom
         zoom_factors = (shape_actual[0] / shape_pred[0],
@@ -3530,7 +3552,10 @@ def create_actual_vs_predicted_maps(
         pred_for_diff = pred_mean
 
     diff = pred_for_diff - actual_mean
-    diff_masked = np.ma.masked_where(actual_count == 0, diff)
+    diff_display = diff.copy()
+    diff_display[~az_mask_actual] = np.nan
+    diff_masked = np.ma.masked_where(
+        np.isnan(diff_display) | (actual_count == 0), diff_display)
 
     # ---- Load basin boundaries ----
     basins_gdf = gpd.read_file(basin_shp)
@@ -3566,26 +3591,36 @@ def create_actual_vs_predicted_maps(
         fontsize=15, fontweight='bold',
     )
 
+    # Build AZ-interior gray underlay images
+    az_gray_actual = np.where(az_mask_actual, 0.82, np.nan)  # light gray inside AZ
+    az_gray_pred = np.where(az_mask_pred, 0.82, np.nan)
+
     panels = [
         ('(a) Actual (Metered)', actual_masked, extent_actual,
-         cmap, v_min, v_max),
+         cmap, v_min, v_max, az_gray_actual),
         ('(b) Predicted (ML)', pred_masked, extent_pred,
-         cmap, v_min, v_max),
-        ('(c) Difference (Predicted − Actual)', diff_masked, extent_actual,
-         diff_cmap, -d_abs, d_abs),
+         cmap, v_min, v_max, az_gray_pred),
+        ('(c) Difference (Predicted \u2212 Actual)', diff_masked, extent_actual,
+         diff_cmap, -d_abs, d_abs, az_gray_actual),
     ]
 
-    for ax, (panel_title, data, ext, cm, lo, hi) in zip(axes, panels):
-        ax.set_facecolor('#D5D5D5')  # gray for no-data
+    for ax, (panel_title, data, ext, cm, lo, hi, az_gray) in zip(axes, panels):
+        ax.set_facecolor('white')  # outside AZ = white
+        # Draw gray AZ interior (no-meter areas visible as gray)
+        ax.imshow(
+            az_gray, extent=ext, origin='upper',
+            cmap='Greys', vmin=0, vmax=1,
+            interpolation='nearest', zorder=0,
+        )
         im = ax.imshow(
             data, extent=ext, origin='upper',
             cmap=cm, vmin=lo, vmax=hi,
-            interpolation='nearest',
+            interpolation='nearest', zorder=1,
         )
         _overlay_boundaries(ax, basins_gdf, ama_ina, name_col)
         ax.set_title(panel_title, fontsize=12, fontweight='bold')
 
-        label = f'Δ {unit_label}' if 'Difference' in panel_title else unit_label
+        label = f'\u0394 {unit_label}' if 'Difference' in panel_title else unit_label
         fig.colorbar(im, ax=ax, shrink=0.75, pad=0.02, label=label, extend='both')
 
     out_path = os.path.join(output_dir, out_filename)

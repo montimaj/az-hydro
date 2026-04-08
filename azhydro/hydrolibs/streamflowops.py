@@ -429,6 +429,9 @@ def _get_site_watershed_map(sites_csv, watershed_geojson):
         crs='EPSG:4326'
     )
     ws = gpd.read_file(watershed_geojson)
+    # Reproject sites to match watershed CRS to avoid silent sjoin failures
+    if site_gdf.crs != ws.crs:
+        site_gdf = site_gdf.to_crs(ws.crs)
     joined = gpd.sjoin(site_gdf, ws[['OBJECTID', 'WATERSHED', 'geometry']],
                        how='left', predicate='within')
     # Map: watershed OBJECTID -> list of site_no in that watershed

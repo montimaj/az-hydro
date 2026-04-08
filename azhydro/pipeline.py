@@ -2300,19 +2300,45 @@ def create_well_package_step() -> None:
     )
     gw_vector_dir = os.path.join(OUTPUT_DIR, f'GW/Vectors/{WNAME}')
 
-    wellops.create_well_package(
+    well_pkg_dir = os.path.join(prediction_dir, 'Well_Package')
+    well_parquet = wellops.create_well_package(
         well_registry_file,
         raster_dirs=raster_dirs,
         cat_raster_dirs=cat_raster_dirs,
-        output_dir=os.path.join(prediction_dir, 'Well_Package'),
+        output_dir=well_pkg_dir,
         ref_raster_file=ref_raster_file,
         pixel_area_m2=pixel_area_m2,
         start_year=START_YEAR,
         end_year=END_YEAR,
-        water_use='All' if WATER_USE == 'All' else 'IRRIGATION',
+        water_use='All',
         gw_vector_dir=gw_vector_dir,
         cu_raster_dirs=cu_raster_dirs,
     )
+
+    # Verify well package against source rasters (all units)
+    for unit in ('mm', 'ft', 'm3', 'AF'):
+        unit_parquet = os.path.join(well_pkg_dir, f'Well_Package_{unit}.parquet')
+        if not os.path.exists(unit_parquet):
+            continue
+        # Build unit-specific raster dir mappings
+        unit_raster_dirs = {'mm': raster_dirs.get(unit, raster_dirs['mm'])}
+        unit_cat_dirs = {}
+        for cat, udirs in cat_raster_dirs.items():
+            unit_cat_dirs[cat] = {'mm': udirs.get(unit, udirs['mm'])}
+        unit_cu_dirs = None
+        if cu_raster_dirs:
+            unit_cu_dirs = {}
+            for cu_cat, udirs in cu_raster_dirs.items():
+                unit_cu_dirs[cu_cat] = {'mm': udirs.get(unit, udirs['mm'])}
+        wellops.verify_well_package(
+            parquet_path=unit_parquet,
+            raster_dirs=unit_raster_dirs,
+            cat_raster_dirs=unit_cat_dirs,
+            ref_raster_file=ref_raster_file,
+            output_dir=os.path.join(well_pkg_dir, 'Verification'),
+            cu_raster_dirs=unit_cu_dirs,
+            unit=unit,
+        )
 
 
 def create_all_raster_maps() -> None:

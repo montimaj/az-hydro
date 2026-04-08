@@ -272,7 +272,7 @@ The [`streamflowops`](hydrolibs/streamflowops.py) module handles streamflow data
 - **USBR CMIP Ensemble**: Monthly modeled streamflow ([Gangopadhyay & Pruitt, 2011](https://www.usbr.gov/watersmart/docs/west-wide-climate-risk-assessments.pdf); [USBR, 2025](https://rise-usbr.opendata.arcgis.com/)) averaged across ~112 climate model runs (scenarios a1b, a2, b1), spanning 1950–2099
 - **Historical Ratio Method**: For sites without USBR projections, per-calendar-month scaling ratios are computed against the nearest USBR-gauged reference site and applied to generate synthetic 1950–2099 projections
 
-#### Gauge network (20 sites)
+#### Gauge network (19 sites)
 
 | USGS ID | USBR ID | Site Name | Watershed |
 |---------|---------|-----------|----------|
@@ -292,7 +292,6 @@ The [`streamflowops`](hydrolibs/streamflowops.py) module handles streamflow data
 | 09489000 | — | Santa Cruz River near Laveen | Santa Cruz River |
 | 09471000 | — | San Pedro River at Charleston | San Pedro River |
 | 09520500 | — | Lower Gila River near Dome | Lower Gila River |
-| 09535300 | — | Vamori Wash at Kom Vo | San Simon River |
 | 09537500 | — | Whitewater Draw near Douglas | White Water Draw |
 | 09537200 | — | Leslie Creek near McNeal | White Water Draw / Rio Yaqui |
 | 09426650 | — | CAP Canal at Havasu Pumping Plant | CAP Diversion |
@@ -491,6 +490,14 @@ All models use Optuna + Dask hyperparameter optimisation (50 TPE trials,
 (% of mean), and normalized MBE (%).  All three normalized metrics use
 the mean of observed values as the denominator, giving a physically
 interpretable percentage error relative to the average withdrawal magnitude.
+
+> **Note on R²:** The R² reported throughout this pipeline uses scikit-learn's
+> `r2_score`, which is mathematically equivalent to the Nash–Sutcliffe
+> Efficiency (NSE): R² = 1 − Σ(yᵢ − ŷᵢ)² / Σ(yᵢ − ȳ)².  Unlike the
+> squared Pearson correlation coefficient (which ranges from 0 to 1), this
+> formulation ranges from −∞ to 1.  A value of 1 indicates perfect
+> prediction, 0 means the model performs no better than predicting the mean,
+> and negative values indicate the model is worse than the mean baseline.
 
 Permutation importance, ALE, and SHAP plots are generated for both train
 and test data.  For random and pixel holdout evaluations (which sweep
@@ -1901,6 +1908,15 @@ results are in `Uncertainty/Sigma_GW/GW_Fraction_Sensitivity.csv`.
 | **Non_Irrigation_SW** | `Non_Irrigation × sw_fraction` (HarDWR v2.0 non-irr SW rights density, temporally varying; falls back to canal density if unavailable) |
 | **Total_GW** | `Irrigation_GW + Non_Irrigation_GW` |
 | **Total_SW** | `Irrigation_SW + Non_Irrigation_SW` |
+
+**Zero-streamflow constraint:** At pixels where both `streamflow_mm`
+and `canal_weighted_streamflow_mm` are zero for a given year, there is
+no surface water available via any pathway (direct river access or canal
+delivery).  In this case, `gw_frac` is forced to 1.0 for irrigation and
+`sw_frac` is forced to 0.0 for non-irrigation, so all withdrawals are
+assigned to groundwater.  This is applied per-year, so if a pixel gains
+surface water access in a later year (e.g., canal infrastructure reaches
+it), SW allocation resumes.
 
 **Known limitation (SW fraction proxy):** `compute_sw_fraction()` uses
 canal density normalized by the local maximum as a proxy for the

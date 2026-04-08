@@ -257,6 +257,24 @@ def partition_predictions(
         uf = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
         nonirr[is_other] = nonirr[is_other] * uf[is_other]
 
+    # ---- Zero-streamflow mask: pixels with no surface water access ----
+    # If both streamflow and canal-weighted streamflow are zero at a pixel,
+    # there is no surface water available via any pathway (river or canal),
+    # so all withdrawals are groundwater.
+    streamflow = year_df['streamflow_mm'].values \
+        if 'streamflow_mm' in year_df.columns else None
+    cw_streamflow = year_df['canal_weighted_streamflow_mm'].values \
+        if 'canal_weighted_streamflow_mm' in year_df.columns else None
+    zero_sw_mask = None
+    if streamflow is not None and cw_streamflow is not None:
+        zero_sw_mask = (streamflow == 0) & (cw_streamflow == 0)
+        if not np.any(zero_sw_mask):
+            zero_sw_mask = None
+    elif streamflow is not None:
+        zero_sw_mask = streamflow == 0
+        if not np.any(zero_sw_mask):
+            zero_sw_mask = None
+
     # ---- GW / SW split of irrigation ----
     gw_frac = year_df['annual_gw_fraction'].values if 'annual_gw_fraction' in year_df.columns else None
     if gw_frac is not None:
@@ -269,6 +287,9 @@ def partition_predictions(
             gw_frac = adjust_gw_fraction_temporal(
                 gw_frac, sw_access_yr, year_val,
             )
+        # Force 100% GW where streamflow is zero
+        if zero_sw_mask is not None:
+            gw_frac[zero_sw_mask] = 1.0
         irr_gw = irr * gw_frac
         irr_sw = irr - irr_gw
     else:
@@ -284,10 +305,15 @@ def partition_predictions(
         if 'canal_density' in year_df.columns else None
     if nonirr_sw_dens is not None:
         sw_frac = compute_sw_fraction(nonirr_sw_dens, raster_shape, valid_mask)
+        # Force zero SW where streamflow is zero
+        if zero_sw_mask is not None:
+            sw_frac[zero_sw_mask] = 0.0
         nonirr_sw = nonirr * sw_frac
         nonirr_gw = nonirr - nonirr_sw
     elif canal_dens is not None:
         sw_frac = compute_sw_fraction(canal_dens, raster_shape, valid_mask)
+        if zero_sw_mask is not None:
+            sw_frac[zero_sw_mask] = 0.0
         nonirr_sw = nonirr * sw_frac
         nonirr_gw = nonirr - nonirr_sw
     else:
