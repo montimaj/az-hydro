@@ -205,7 +205,7 @@ def create_well_package(
     pattern = '|'.join(NON_CONSUMPTIVE_USES)
     has_use = wells['WATER_USE'].notna()
     wells = wells[has_use & ~wells['WATER_USE'].str.contains(pattern, na=False)]
-    if water_use:
+    if water_use and water_use != 'All':
         wells = wells[wells['WATER_USE'] == water_use]
     wells = wells[wells.geometry.notnull()].copy()
     wells = wells.reset_index(drop=True)
