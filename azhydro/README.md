@@ -128,7 +128,7 @@ python pipeline.py --steps 3b --skip-uq sigma-model,gw-sensitivity # skip seed e
 | `2s` | Cross-strategy summary (can run standalone from saved results) |
 | `3`  | Full-period XGBRF prediction (1896–2099) |
 | `3b` | Hybrid uncertainty quantification |
-| `3e` | Well package (per-well GeoPackage with uncertainty) |
+| `3e` | Well package (per-well Parquet + GPKG locations with uncertainty) |
 | `3g` | Raster maps, actual vs predicted, and trend analysis for all output categories |
 | `4`  | USGS intercomparison |
 | `4b` | CU intercomparison |
@@ -339,7 +339,7 @@ Step 0   ─  Data Preparation
 Step 1   ─  Create AZ Predictor DataFrame
 Step 2   ─  Model Evaluation (5 strategies: Random, Pixel Holdout, Temporal LOO, Spatial LOO, Seeded Spatial LOO)
 Step 3   ─  Full-Period XGBRF Prediction (1896–2099)
-Step 3e  ─  Well Package (per-well GeoPackage with uncertainty)
+Step 3e  ─  Well Package (per-well Parquet + GPKG locations with uncertainty)
 Step 3g  ─  Raster Maps & Trend Analysis for All Output Categories
 Step 4   ─  USGS Intercomparison (Withdrawals, CU, Peff)
 ```
@@ -1535,11 +1535,14 @@ actual vs predicted) and `{prediction_dir}Raster_Maps/Trend_Analysis/`
 #### 3e. Well package (`create_well_package_step()`)
 
 `wellops.create_well_package()` disaggregates pixel-level prediction
-rasters to individual wells from the ADWR Well Registry and writes a
-GeoPackage (`Well_Package.gpkg`).  For each year, only wells that existed
-by that year are included (see temporal filtering below).  See the
-`wellops` module description below for the capacity-proportional
-distribution logic.
+rasters to individual wells from the ADWR Well Registry and writes four
+GeoParquet files — one per unit (mm, ft, m³, AF).  Each file stores
+per-well withdrawal predictions and uncertainty with WKB point geometry,
+readable by QGIS (≥ 3.28) and GeoPandas.  Writing is chunked (10 years
+per batch via PyArrow's `ParquetWriter`) to avoid out-of-memory errors
+on the ~35M row dataset.  For each year, only wells that existed by that
+year are included (see temporal filtering below).  See the `wellops`
+module description below for the capacity-proportional distribution logic.
 
 This step runs **after** UQ augmentation (Step 3b) so that the 6-band
 augmented rasters are available.  When augmented rasters are present,
@@ -1549,12 +1552,9 @@ per-well uncertainty columns are included:
 |---|---|
 | `{Cat}_{unit}` | Prediction (capacity-weighted share of pixel value) |
 | `{Cat}_{unit}_sigma` | σ (capacity-weighted share of pixel σ) |
-| `{Cat}_{unit}_ci_lower` | Lower 95 % CI = max(pred − 1.96·σ, 0) |
-| `{Cat}_{unit}_ci_upper` | Upper 95 % CI = pred + 1.96·σ |
 
 Categories include 9 withdrawal categories (Total + 8 partitions) and
-3 CU categories (Irrigation_CU, Irrigation_GW_CU, Irrigation_SW_CU),
-each in 4 units (mm, ft, m³, AF).
+3 CU categories (Irrigation_CU, Irrigation_GW_CU, Irrigation_SW_CU).
 
 **Caveat:** Per-well σ assumes pixel-level uncertainty distributes
 proportionally to capacity weight.  This is a simplification — true
@@ -1987,7 +1987,9 @@ Key functions:
 ### `wellops.py` — Well-level withdrawal package
 
 Disaggregates pixel-level withdrawal and CU rasters to individual wells
-from the ADWR Well Registry and writes a GeoPackage (`Well_Package.gpkg`).
+from the ADWR Well Registry and writes four GeoParquet files — one per
+unit (`Well_Package_mm.parquet`, `_ft`, `_m3`, `_AF`) — with WKB point
+geometry, compatible with QGIS and GeoPandas.
 
 **Sampling**: Only the **mm** rasters are read (12 categories per year:
 9 withdrawal + 3 CU); ft, m³, and acre-ft values are computed
@@ -2296,8 +2298,11 @@ Data/Outputs/
         │       ├── Basin_Trend_*.csv        #   Per-basin zonal trend statistics
         │       └── Subbasin_Trend_*.csv     #   Per-sub-basin zonal trend statistics
         ├── Visualizations/                  # Time series & era summary maps
-        ├── Well_Package/                    # Step 3e — per-well GeoPackage
-        │   └── Well_Package.gpkg           #   12 categories × 4 units × (pred + σ + CI)
+        ├── Well_Package/                    # Step 3e — per-well package
+        │   ├── Well_Package_mm.parquet     #   GeoParquet: 12 categories (mm + σ_mm)
+        │   ├── Well_Package_ft.parquet     #   GeoParquet: 12 categories (ft + σ_ft)
+        │   ├── Well_Package_m3.parquet     #   GeoParquet: 12 categories (m³ + σ_m³)
+        │   └── Well_Package_AF.parquet     #   GeoParquet: 12 categories (AF + σ_AF)
         ├── Intercomparison/                 # Step 4a — withdrawal comparison
         │   └── Temporal_Agreement/          #   Heatmaps, box/violin, Taylor, r-vs-NSE
         ├── CU_Intercomparison/              # Step 4b — CU comparison

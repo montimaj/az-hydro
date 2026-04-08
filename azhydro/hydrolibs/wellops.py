@@ -304,64 +304,36 @@ def create_well_package(
             share = np.where(per_well_sum > 0, wa / per_well_sum, 0.0)
         return share[unsort_idx]
 
-    def _process_year(yi_year):
-        """Sample one year's rasters and return (yi, year, mm, sigma_mm, has_sig)."""
-        yi, year = yi_year
+    years_sampled = []
+    for yi, year in enumerate(range(start_year, end_year + 1)):
         active = well_start_year <= year
         if not active.any():
-            return None
+            continue
 
         well_share = _compute_well_share(year)
 
-        yr_mm = np.full((n_wells, n_cats), np.nan, dtype=np.float64)
-        yr_sigma = np.full((n_wells, n_cats), np.nan, dtype=np.float64)
-        yr_has_sigma = False
         sampled_any = False
-
+        rows_idx = pixel_rc[:, 0]
+        cols_idx = pixel_rc[:, 1]
         for ci, (cat, mm_dir, prefix) in enumerate(cat_mm_info):
             raster_path = os.path.join(mm_dir, f'{prefix}_{year}_mm.tif')
             try:
                 with rio.open(raster_path) as src:
-                    vals = np.array(
-                        list(src.sample(coords, indexes=1)),
-                        dtype=np.float64,
-                    ).ravel()
-                    yr_mm[:, ci] = vals * well_share
+                    band = src.read(1).astype(np.float64)
+                    vals = band[rows_idx, cols_idx]
+                    all_mm[yi, :, ci] = vals * well_share
                     sampled_any = True
                     if src.count >= 6:
-                        sigma_vals = np.array(
-                            list(src.sample(coords, indexes=2)),
-                            dtype=np.float64,
-                        ).ravel()
-                        yr_sigma[:, ci] = sigma_vals * well_share
-                        yr_has_sigma = True
+                        sigma_band = src.read(2).astype(np.float64)
+                        sigma_vals = sigma_band[rows_idx, cols_idx]
+                        all_sigma_mm[yi, :, ci] = sigma_vals * well_share
+                        has_sigma = True
             except FileNotFoundError:
                 pass
-
-        if not sampled_any:
-            return None
-        return yi, year, yr_mm, yr_sigma, yr_has_sigma
-
-    # ---- Parallel year processing ----
-    from concurrent.futures import ThreadPoolExecutor
-
-    year_args = [(yi, year) for yi, year in enumerate(range(start_year, end_year + 1))]
-
-    years_sampled = []
-    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as executor:
-        for result in executor.map(_process_year, year_args):
-            if result is None:
-                continue
-            yi, year, yr_mm, yr_sigma, yr_has_sigma = result
-            all_mm[yi] = yr_mm
-            all_sigma_mm[yi] = yr_sigma
-            if yr_has_sigma:
-                has_sigma = True
+        if sampled_any:
             years_sampled.append(year)
-            if year % 10 == 0 or year == end_year:
-                logger.info(f'  Well package sampled through {year}')
-
-    years_sampled.sort()
+        if year % 10 == 0 or year == end_year:
+            logger.info(f'  Well package sampled through {year}')
 
     if not years_sampled:
         logger.warning('No raster data found for well package.')
@@ -374,63 +346,97 @@ def create_well_package(
     np.maximum(all_mm, 0, out=all_mm)
     np.maximum(all_sigma_mm, 0, out=all_sigma_mm)
 
-    # ---- Build DataFrame ----
-    year_indices = [y - start_year for y in years_sampled]
-    mm_data = all_mm[year_indices]  # (n_sampled_years, n_wells, n_cats)
-    sigma_mm_data = all_sigma_mm[year_indices]
-
-    n_sampled = len(years_sampled)
-    total_rows = n_sampled * n_wells
-
-    # Flatten: year-major order (year0-well0, year0-well1, ...)
-    mm_flat = mm_data.reshape(total_rows, n_cats)
-    sigma_mm_flat = sigma_mm_data.reshape(total_rows, n_cats)
+    # ---- Write 4 GeoParquet files (one per unit) in chunks ----
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from shapely import wkb as shapely_wkb
 
     col_names = [info[0] for info in cat_mm_info]  # Total, Irrigation, ...
-    data = {}
-    for ci, cat in enumerate(col_names):
-        mm_col = mm_flat[:, ci]
-        data[f'{cat}_mm'] = mm_col
-        data[f'{cat}_ft'] = mm_col * _MM_TO_FT
-        data[f'{cat}_m3'] = mm_col * mm_to_m3
-        data[f'{cat}_AF'] = mm_col * mm_to_m3 * _M3_TO_AF
+    n_sampled = len(years_sampled)
 
-        if has_sigma:
-            s_mm = sigma_mm_flat[:, ci]
-            data[f'{cat}_mm_sigma'] = s_mm
-            data[f'{cat}_ft_sigma'] = s_mm * _MM_TO_FT
-            data[f'{cat}_m3_sigma'] = s_mm * mm_to_m3
-            data[f'{cat}_AF_sigma'] = s_mm * mm_to_m3 * _M3_TO_AF
-            # 95% CI
-            for unit, scale in (('mm', 1.0), ('ft', _MM_TO_FT),
-                                ('m3', mm_to_m3), ('AF', mm_to_m3 * _M3_TO_AF)):
-                s_u = s_mm * scale
-                pred_u = data[f'{cat}_{unit}']
-                data[f'{cat}_{unit}_ci_lower'] = np.maximum(pred_u - 1.96 * s_u, 0)
-                data[f'{cat}_{unit}_ci_upper'] = pred_u + 1.96 * s_u
+    registry_ids = wells['REGISTRY_I'].values
+    water_use_vals = (wells['WATER_USE'].values
+                      if 'WATER_USE' in wells.columns else None)
 
-    data['Year'] = np.repeat(years_sampled, n_wells)
+    # Pre-compute WKB geometry once (reused for every year chunk)
+    well_wkb = np.array([shapely_wkb.dumps(g) for g in wells.geometry.values],
+                        dtype=object)
 
-    df = pd.DataFrame(data)
+    # GeoParquet metadata (shared across all unit files)
+    crs_json = wells.crs.to_json() if wells.crs else '{}'
+    geo_meta = (
+        '{"version": "1.1.0", "primary_column": "geometry", '
+        '"columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]'
+        f', "crs": {crs_json}' + '}}}'
+    )
 
-    # Tile well attributes for all years
-    df['REGISTRY_I'] = np.tile(wells['REGISTRY_I'].values, n_sampled)
-    if 'WATER_USE' in wells.columns:
-        df['WATER_USE'] = np.tile(wells['WATER_USE'].values, n_sampled)
-    geom = np.tile(wells.geometry.values, n_sampled)
+    unit_scales = {
+        'mm': 1.0,
+        'ft': _MM_TO_FT,
+        'm3': mm_to_m3,
+        'AF': mm_to_m3 * _M3_TO_AF,
+    }
 
-    result = gpd.GeoDataFrame(df, geometry=geom, crs=wells.crs)
+    out_parquets = []
+    for unit, scale in unit_scales.items():
+        out_path = os.path.join(output_dir, f'Well_Package_{unit}.parquet')
+        out_parquets.append(out_path)
+        writer = None
+        chunks = []
+        batch_size = 10
 
-    # Reorder columns: ID, year, value columns, geometry
-    id_cols = [c for c in ('REGISTRY_I', 'WATER_USE', 'Year') if c in result.columns]
-    val_cols = sorted(c for c in result.columns if c not in id_cols + ['geometry'])
-    result = result[id_cols + val_cols + ['geometry']]
+        for year in years_sampled:
+            yi = year - start_year
+            row_data = {
+                'REGISTRY_I': registry_ids,
+                'Year': np.full(n_wells, year, dtype=np.int32),
+            }
+            if water_use_vals is not None:
+                row_data['WATER_USE'] = water_use_vals
 
-    result.to_file(out_gpkg, driver='GPKG', layer='well_withdrawals')
-    n_val_cols = len([c for c in result.columns if c not in
-                      ('REGISTRY_I', 'WATER_USE', 'Year', 'geometry')])
-    logger.info(f'Well package written: {out_gpkg}  '
-                f'({n_wells} wells × {n_sampled} years, '
-                f'{n_val_cols} value columns'
-                f'{", incl. σ/CI" if has_sigma else ""})')
-    return out_gpkg
+            for ci, cat in enumerate(col_names):
+                vals = all_mm[yi, :, ci].astype(np.float64) * scale
+                row_data[f'{cat}_{unit}'] = vals.astype(np.float32)
+                if has_sigma:
+                    s_vals = all_sigma_mm[yi, :, ci].astype(np.float64) * scale
+                    row_data[f'{cat}_{unit}_sigma'] = s_vals.astype(np.float32)
+
+            row_data['geometry'] = well_wkb
+            chunks.append(pd.DataFrame(row_data))
+
+            if len(chunks) >= batch_size or year == years_sampled[-1]:
+                batch = pd.concat(chunks, ignore_index=True)
+                table = pa.Table.from_pandas(batch, preserve_index=False)
+                if writer is None:
+                    writer = pq.ParquetWriter(out_path, table.schema)
+                writer.write_table(table)
+                chunks.clear()
+                del batch, table
+
+        if writer is not None:
+            writer.close()
+
+        # Inject GeoParquet metadata by streaming row groups
+        pf = pq.ParquetFile(out_path)
+        schema = pf.schema_arrow
+        existing_meta = schema.metadata or {}
+        existing_meta[b'geo'] = geo_meta.encode('utf-8')
+        new_schema = schema.with_metadata(existing_meta)
+        tmp_path = out_path + '.tmp'
+        with pq.ParquetWriter(tmp_path, new_schema) as w:
+            for i in range(pf.metadata.num_row_groups):
+                w.write_table(pf.read_row_group(i))
+        pf.close()
+        os.replace(tmp_path, out_path)
+
+        logger.info(f'  Well package ({unit}) written: {out_path}')
+
+    n_val_cols = len(col_names) * (2 if has_sigma else 1)
+    logger.info(f'Well package complete: {n_wells} wells × {n_sampled} years, '
+                f'{n_val_cols} columns per unit'
+                f'{", incl. σ" if has_sigma else ""}')
+
+    # Free large arrays
+    del all_mm, all_sigma_mm
+
+    return out_parquets[0]

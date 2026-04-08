@@ -3360,13 +3360,14 @@ def create_era_raster_maps(
 
     # ---- Determine color limits ----
     if vmin is None or vmax is None:
-        all_vals = np.concatenate([
+        valid_arrays = [
             em.compressed() for em in era_means.values()
             if em is not None and em.count() > 0
-        ])
-        if len(all_vals) == 0:
+        ]
+        if not valid_arrays:
             logger.warning('All era means are empty for %s — skipping.', title)
             return
+        all_vals = np.concatenate(valid_arrays)
         if vmin is None:
             vmin = float(np.nanpercentile(all_vals, 2))
         if vmax is None:
