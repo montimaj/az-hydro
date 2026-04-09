@@ -1,4 +1,4 @@
-# AZ-Hydro: Two Centuries of Arizona Water Use — Historical and projected groundwater/surface-water withdrawals and irrigation consumptive use, 1896–2099
+# AZ-Hydro: Two Centuries of Arizona Water Use — Historical and projected withdrawals, consumptive use, and surface water capture, 1896–2099
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Google Earth Engine](https://img.shields.io/badge/Google%20Earth%20Engine-4285F4?logo=google-earth&logoColor=white)](https://earthengine.google.com/)
@@ -130,7 +130,7 @@ Disk usage will increase if additional model configurations or prediction years 
 
 ## Citations
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Historical and projected groundwater/surface-water withdrawals and irrigation consumptive use for Arizona, 1896–2099. _In prep. for Nature Scientific Data_.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Historical and projected groundwater/surface-water withdrawals, irrigation consumptive use, and pumping-induced surface water capture for Arizona, 1896–2099. _In prep. for Nature Scientific Data_.
 
 Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Where Arizona's Water Goes: Declining Agricultural Dominance and Rising Urban Demand Drive a Two-Century Shift in Withdrawal Patterns (1896–2099). _In prep. for AGU Earth's Future_.
 
