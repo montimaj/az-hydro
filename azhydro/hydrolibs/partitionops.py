@@ -258,28 +258,22 @@ def partition_predictions(
         nonirr[is_other] = nonirr[is_other] * uf[is_other]
 
     # ---- Zero-surface-water mask: pixels with no SW access ----
-    # Step 1: Where regular streamflow is zero, force SW density to zero.
-    # This removes Gaussian-smoothed bleed from adjacent rivers into
-    # basins with no actual river flow (e.g., Willcox).
-    # Step 2: Where both (corrected) SW density and canal-weighted
-    # streamflow are zero, force all withdrawals to groundwater.
-    sw_density = year_df['SW'].values.copy() if 'SW' in year_df.columns else None
+    # Where both streamflow and canal-weighted streamflow are zero at a
+    # pixel, there is no surface water available via any pathway (river
+    # flow or canal delivery), so all withdrawals are groundwater.
+    # This targets truly SW-free basins (e.g., Willcox, Ranegras Plain)
+    # without over-constraining pixels in canal-served areas.
     streamflow = year_df['streamflow_mm'].values \
         if 'streamflow_mm' in year_df.columns else None
     cw_streamflow = year_df['canal_weighted_streamflow_mm'].values \
         if 'canal_weighted_streamflow_mm' in year_df.columns else None
-
-    # Zero out SW density where there is no river
-    if sw_density is not None and streamflow is not None:
-        sw_density[streamflow == 0] = 0.0
-
     zero_sw_mask = None
-    if sw_density is not None and cw_streamflow is not None:
-        zero_sw_mask = (sw_density == 0) & (cw_streamflow == 0)
+    if streamflow is not None and cw_streamflow is not None:
+        zero_sw_mask = (streamflow == 0) & (cw_streamflow == 0)
         if not np.any(zero_sw_mask):
             zero_sw_mask = None
-    elif sw_density is not None:
-        zero_sw_mask = sw_density == 0
+    elif streamflow is not None:
+        zero_sw_mask = streamflow == 0
         if not np.any(zero_sw_mask):
             zero_sw_mask = None
 

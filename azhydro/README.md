@@ -943,8 +943,8 @@ ADWR Well Registry.  ADWR reports total statewide water use of ~7.0 MAF
 (2017), of which irrigated agriculture consumes approximately 74 %
 ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
 
-**Water budget reconciliation (2017):** The model predicts 4.76 MAF vs.
-ADWR's 7.0 MAF total, a gap of ~2.25 MAF.  This gap is accounted for by
+**Water budget reconciliation (2017):** The model predicts 4.72 MAF vs.
+ADWR's 7.0 MAF total, a gap of ~2.28 MAF.  This gap is accounted for by
 water sources outside the ADWR Well Registry:
 
 | Source | MAF | Notes |
@@ -955,7 +955,7 @@ water sources outside the ADWR Well Registry:
 | Reclaimed/effluent water | ~0.35 | ~5 % of total state water supply ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)) |
 | **Total gap** | **~2.25** | |
 
-The model thus captures ~68 % of Arizona's total water use — specifically,
+The model thus captures ~67 % of Arizona's total water use — specifically,
 the portion that flows through registered well and diversion infrastructure.
 The remaining ~32 % is delivered by large-scale federal water projects,
 (CAP aqueduct, SRP canal system, Yuma-area Colorado River diversions) and
@@ -966,64 +966,79 @@ water rights on the Lower Colorado River (dating to the Reclamation Act of
 with application efficiencies of 80–90 % — substantially higher than the
 statewide NHM average of ~60 % used in this pipeline
 ([Noble et al., 2015](https://www.azwater.gov/sites/default/files/2022-11/Final%20Yuma%20Report%20021715.pdf)).
-Combining the model's 4.76 MAF with the estimated non-well sources
-(~2.25 MAF) yields ~7.0 MAF, consistent with ADWR's reported total
+Combining the model's 4.72 MAF with the estimated non-well sources
+(~2.25 MAF) yields ~6.97 MAF, closing to within 0.03 MAF of ADWR's
+reported 7.0 MAF total
 ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
 
 Representative statewide volumes (million acre-feet):
 
 | Year | Total | Irrigation | Non-Irrigation | Total GW | Total SW | Irr % | GW % |
 |------|-------|------------|----------------|----------|----------|-------|------|
-| 1900 | 0.10 | 0.04 | 0.06 | 0.08 | 0.02 | 38 % | 81 % |
-| 1910 | 0.13 | 0.05 | 0.08 | 0.09 | 0.03 | 40 % | 75 % |
-| 1920 | 0.23 | 0.12 | 0.12 | 0.16 | 0.07 | 50 % | 71 % |
-| 1930 | 0.42 | 0.24 | 0.18 | 0.29 | 0.14 | 56 % | 68 % |
-| 1940 | 0.78 | 0.53 | 0.26 | 0.49 | 0.30 | 67 % | 62 % |
-| 1950 | 1.65 | 1.25 | 0.40 | 0.98 | 0.67 | 76 % | 59 % |
-| 1960 | 2.52 | 2.00 | 0.52 | 1.42 | 1.10 | 79 % | 56 % |
-| 1970 | 3.10 | 2.49 | 0.61 | 1.66 | 1.44 | 80 % | 54 % |
-| 1980 | 3.74 | 2.99 | 0.76 | 1.96 | 1.78 | 80 % | 52 % |
-| 1985 | 4.14 | 3.25 | 0.89 | 2.15 | 1.98 | 79 % | 52 % |
-| 1990 | 4.15 | 3.23 | 0.92 | 2.17 | 1.98 | 78 % | 52 % |
-| 2000 | 4.31 | 3.22 | 1.09 | 2.31 | 2.00 | 75 % | 54 % |
-| 2010 | 4.17 | 3.05 | 1.13 | 2.23 | 1.94 | 73 % | 54 % |
-| 2017 | 4.76 | 3.53 | 1.23 | 2.54 | 2.22 | 74 % | 53 % |
-| 2020 | 4.77 | 3.48 | 1.29 | 2.57 | 2.20 | 73 % | 54 % |
-| 2024 | 4.79 | 3.45 | 1.34 | 2.60 | 2.19 | 72 % | 54 % |
-| 2030 | 4.78 | 3.36 | 1.42 | 2.63 | 2.15 | 70 % | 55 % |
-| 2040 | 4.91 | 3.37 | 1.54 | 2.75 | 2.16 | 69 % | 56 % |
-| 2050 | 5.17 | 3.46 | 1.72 | 2.94 | 2.23 | 67 % | 57 % |
-| 2060 | 5.39 | 3.52 | 1.87 | 3.12 | 2.27 | 65 % | 58 % |
-| 2070 | 5.65 | 3.59 | 2.06 | 3.33 | 2.32 | 64 % | 59 % |
-| 2080 | 5.79 | 3.62 | 2.17 | 3.44 | 2.34 | 63 % | 60 % |
-| 2090 | 5.99 | 3.67 | 2.32 | 3.61 | 2.38 | 61 % | 60 % |
-| 2099 | 6.16 | 3.72 | 2.44 | 3.74 | 2.42 | 60 % | 61 % |
+| 1900 | 0.10 | 0.04 | 0.06 | 0.08 | 0.02 | 38 % | 83 % |
+| 1910 | 0.13 | 0.05 | 0.08 | 0.10 | 0.03 | 39 % | 77 % |
+| 1920 | 0.23 | 0.12 | 0.12 | 0.17 | 0.06 | 49 % | 73 % |
+| 1930 | 0.43 | 0.24 | 0.19 | 0.30 | 0.13 | 56 % | 71 % |
+| 1940 | 0.81 | 0.54 | 0.27 | 0.54 | 0.26 | 66 % | 67 % |
+| 1950 | 1.66 | 1.25 | 0.41 | 1.06 | 0.61 | 75 % | 64 % |
+| 1960 | 2.54 | 2.00 | 0.54 | 1.52 | 1.02 | 79 % | 60 % |
+| 1970 | 3.12 | 2.49 | 0.63 | 1.86 | 1.26 | 80 % | 60 % |
+| 1980 | 3.77 | 2.99 | 0.77 | 2.23 | 1.54 | 79 % | 59 % |
+| 1985 | 4.14 | 3.24 | 0.90 | 2.43 | 1.71 | 78 % | 59 % |
+| 1990 | 4.19 | 3.25 | 0.94 | 2.48 | 1.71 | 78 % | 59 % |
+| 2000 | 4.32 | 3.21 | 1.11 | 2.61 | 1.71 | 74 % | 61 % |
+| 2010 | 4.17 | 3.02 | 1.15 | 2.54 | 1.63 | 72 % | 61 % |
+| 2017 | 4.72 | 3.46 | 1.25 | 2.87 | 1.85 | 73 % | 61 % |
+| 2020 | 4.70 | 3.41 | 1.30 | 2.88 | 1.82 | 72 % | 61 % |
+| 2024 | 4.74 | 3.39 | 1.35 | 2.92 | 1.82 | 72 % | 62 % |
+| 2030 | 4.66 | 3.27 | 1.39 | 2.91 | 1.75 | 70 % | 62 % |
+| 2040 | 4.77 | 3.28 | 1.50 | 3.01 | 1.76 | 69 % | 63 % |
+| 2050 | 5.00 | 3.35 | 1.65 | 3.19 | 1.81 | 67 % | 64 % |
+| 2060 | 5.17 | 3.41 | 1.76 | 3.32 | 1.85 | 66 % | 64 % |
+| 2070 | 5.39 | 3.48 | 1.92 | 3.50 | 1.89 | 64 % | 65 % |
+| 2080 | 5.51 | 3.50 | 2.01 | 3.60 | 1.91 | 63 % | 65 % |
+| 2090 | 5.67 | 3.53 | 2.14 | 3.74 | 1.93 | 62 % | 66 % |
+| 2099 | 5.82 | 3.58 | 2.24 | 3.85 | 1.97 | 62 % | 66 % |
 
 Key trends:
 - **Irrigation share** declines from ~80 % (1960s–1980s) to ~72 % (2024)
-  and continues to ~60 % by 2099 as urbanization increases M&I demand —
+  and continues to ~62 % by 2099 as urbanization increases M&I demand —
   consistent with ADWR's 74 % estimate for recent years.  Note that the
   irrigation category implicitly includes aquaculture and turf irrigation
   (e.g. golf courses) where the same wells registered as ``IRRIGATION``
   in the ADWR Well Registry serve multiple end uses, which may contribute
   to the irrigation GW share being slightly higher than agriculture-only
   estimates.
-- **GW share** rises from 52–54 % (historical) to ~61 % by 2099 as
-  non-irrigation demand — predominantly groundwater-sourced outside
-  canal service areas — grows faster than irrigation.
-- **Total withdrawals** grow from 0.10 MAF (1900) to 4.79 MAF (2024)
-  and are projected to reach 6.16 MAF by 2099.  Early growth (1900–1950)
+- **GW share** declines from 83 % (1900) to ~59 % by the 1980s as
+  canal infrastructure (SRP, CAP) brought Colorado River surface water
+  inland, then rises gradually to ~66 % by 2099 as non-irrigation
+  demand — predominantly groundwater-sourced outside canal service
+  areas — grows faster than irrigation.  Including unaccounted federal
+  surface water deliveries (~2.25 MAF), the statewide GW share is
+  ~41 % in 2017, consistent with Arizona's roughly even GW/SW balance.
+- **Total withdrawals** grow from 0.10 MAF (1900) to 4.74 MAF (2024)
+  and are projected to reach 5.82 MAF by 2099.  Early growth (1900–1950)
   reflects the build-out of well and canal infrastructure; mid-century
   growth (1950s–1980s) is driven by agricultural expansion; projected
   growth is driven by urbanization and increasing M&I demand.
-- **Irrigation** remains relatively stable in the projections (3.45 →
-  3.72 MAF, +8 % by 2099), while **non-irrigation** nearly doubles
-  (1.34 → 2.44 MAF) reflecting continued urban and industrial growth
+- **Irrigation** remains relatively stable in the projections (3.39 →
+  3.58 MAF, +6 % by 2099), while **non-irrigation** nearly doubles
+  (1.35 → 2.24 MAF) reflecting continued urban and industrial growth
   including data center and energy-sector water demand.
-- **Pre-CAP era** (before 1985): lower total volumes and slightly higher
-  GW share, as CAP Colorado River deliveries had not yet begun.
+- **Pre-CAP era** (before 1985): lower total volumes and higher GW share,
+  as CAP Colorado River deliveries had not yet begun.
 - **Conservation**: Irrigation + Non-Irrigation = Total and GW + SW = Total
   hold exactly for all years.
+- **Uncertainty**: Statewide 95 % CI width ranges from ±0.03 MAF for the
+  historical metered period (CV ~ 0.6 %) to ±0.25 MAF by 2099
+  (CV ~ 2.2 %).  The dominant uncertainty component is the model seed
+  ensemble (σ_model ~ 8–12 mm) across all eras.  For projections
+  (2026–2099), LULC scenario spread (σ_LULC ~ 5–10 mm) and inter-GCM
+  climate spread (σ_MACA ~ 4 mm) add in quadrature, widening the CI.
+  The hindcast era (1896–1983) has higher relative uncertainty
+  (CV ~ 6–12 %) due to irrigation fraction sensitivity (σ_irr).
+  The 0.03 MAF water budget residual (model + unaccounted vs. ADWR)
+  is well within the 2017 95 % CI of [4.66, 4.77] MAF.
 
 Consumptive use (CU = IE × Irrigation Withdrawal) volumes, where IE is the
 USGS NHM basin-level irrigation efficiency (million acre-feet):
@@ -1033,27 +1048,27 @@ USGS NHM basin-level irrigation efficiency (million acre-feet):
 | 1900 | 0.04 | 0.02 | 0.01 | 0.01 | 60 % |
 | 1910 | 0.05 | 0.03 | 0.01 | 0.02 | 60 % |
 | 1920 | 0.12 | 0.07 | 0.03 | 0.04 | 61 % |
-| 1930 | 0.24 | 0.14 | 0.07 | 0.08 | 61 % |
-| 1940 | 0.53 | 0.32 | 0.15 | 0.17 | 61 % |
-| 1950 | 1.25 | 0.76 | 0.37 | 0.39 | 61 % |
-| 1960 | 2.00 | 1.22 | 0.58 | 0.64 | 61 % |
-| 1970 | 2.49 | 1.51 | 0.67 | 0.84 | 61 % |
-| 1980 | 2.99 | 1.81 | 0.78 | 1.03 | 61 % |
-| 1985 | 3.25 | 1.96 | 0.82 | 1.15 | 60 % |
-| 1990 | 3.23 | 1.95 | 0.81 | 1.14 | 60 % |
-| 2000 | 3.22 | 1.94 | 0.80 | 1.14 | 60 % |
-| 2010 | 3.05 | 1.84 | 0.73 | 1.10 | 60 % |
-| 2017 | 3.53 | 2.13 | 0.86 | 1.27 | 60 % |
-| 2020 | 3.48 | 2.09 | 0.84 | 1.25 | 60 % |
-| 2024 | 3.45 | 2.08 | 0.83 | 1.25 | 60 % |
-| 2030 | 3.36 | 2.03 | 0.80 | 1.22 | 60 % |
-| 2040 | 3.37 | 2.03 | 0.81 | 1.23 | 60 % |
-| 2050 | 3.46 | 2.08 | 0.83 | 1.26 | 60 % |
-| 2060 | 3.52 | 2.13 | 0.85 | 1.28 | 60 % |
-| 2070 | 3.59 | 2.17 | 0.87 | 1.30 | 60 % |
-| 2080 | 3.62 | 2.19 | 0.88 | 1.31 | 60 % |
-| 2090 | 3.67 | 2.22 | 0.89 | 1.32 | 60 % |
-| 2099 | 3.72 | 2.25 | 0.91 | 1.34 | 60 % |
+| 1930 | 0.24 | 0.14 | 0.07 | 0.07 | 61 % |
+| 1940 | 0.54 | 0.33 | 0.17 | 0.15 | 61 % |
+| 1950 | 1.25 | 0.76 | 0.41 | 0.36 | 61 % |
+| 1960 | 2.00 | 1.22 | 0.62 | 0.60 | 61 % |
+| 1970 | 2.49 | 1.52 | 0.78 | 0.74 | 61 % |
+| 1980 | 2.99 | 1.82 | 0.92 | 0.89 | 61 % |
+| 1985 | 3.24 | 1.96 | 0.96 | 0.99 | 61 % |
+| 1990 | 3.25 | 1.96 | 0.97 | 0.99 | 60 % |
+| 2000 | 3.21 | 1.93 | 0.96 | 0.98 | 60 % |
+| 2010 | 3.02 | 1.82 | 0.89 | 0.93 | 60 % |
+| 2017 | 3.46 | 2.09 | 1.04 | 1.06 | 60 % |
+| 2020 | 3.41 | 2.05 | 1.01 | 1.03 | 60 % |
+| 2024 | 3.39 | 2.05 | 1.01 | 1.04 | 60 % |
+| 2030 | 3.27 | 1.97 | 0.98 | 1.00 | 60 % |
+| 2040 | 3.28 | 1.98 | 0.98 | 1.00 | 60 % |
+| 2050 | 3.35 | 2.03 | 1.00 | 1.02 | 60 % |
+| 2060 | 3.41 | 2.06 | 1.02 | 1.04 | 60 % |
+| 2070 | 3.48 | 2.10 | 1.04 | 1.06 | 60 % |
+| 2080 | 3.50 | 2.12 | 1.05 | 1.07 | 61 % |
+| 2090 | 3.53 | 2.14 | 1.06 | 1.08 | 61 % |
+| 2099 | 3.58 | 2.17 | 1.08 | 1.09 | 61 % |
 
 The statewide mean IE is ~60 %, meaning roughly 40 % of applied irrigation
 water returns to aquifers as deep percolation or runs off as return flow.
@@ -1909,25 +1924,18 @@ results are in `Uncertainty/Sigma_GW/GW_Fraction_Sensitivity.csv`.
 | **Total_GW** | `Irrigation_GW + Non_Irrigation_GW` |
 | **Total_SW** | `Irrigation_SW + Non_Irrigation_SW` |
 
-**Zero-surface-water constraint (three-layer):**
-
-1. **Gaussian bleed cleanup:** Where `streamflow_mm == 0` (no river in the
-   watershed), `SW` density is forced to zero regardless of the Gaussian-
-   smoothed LULC value.  This prevents the smoothing kernel (sigma=3 for
-   AGRI/URBAN, sigma=1 for SW) from bleeding water-body signal across
-   basin boundaries into riverless basins like Willcox.
-2. **Canal delivery check:** Even after zeroing SW density, if
-   `canal_weighted_streamflow_mm > 0` (canal infrastructure delivers
-   water to the pixel), SW allocation is still permitted.
-3. **Full GW constraint:** Only when both the corrected SW density AND
-   `canal_weighted_streamflow_mm` are zero — meaning no water body, no
-   river, and no canal delivery — are `gw_frac` forced to 1.0 for
-   irrigation and `sw_frac` forced to 0.0 for non-irrigation, assigning
-   all withdrawals to groundwater.
-
-This constraint is applied per-year, so if a pixel gains surface water
-access in a later year (e.g., reservoir construction or canal
-infrastructure), SW allocation resumes.
+**Zero-surface-water constraint:** At pixels where both `streamflow_mm`
+and `canal_weighted_streamflow_mm` are zero for a given year, there is
+no surface water available via any pathway (river flow or canal
+delivery).  In this case, `gw_frac` is forced to 1.0 for irrigation and
+`sw_frac` is forced to 0.0 for non-irrigation, so all withdrawals are
+assigned to groundwater.  This targets truly SW-free basins (e.g.,
+Willcox Playa, Ranegras Plain, San Bernardino Valley) without
+over-constraining pixels in canal-served areas where streamflow is
+nonzero at the watershed level.  The constraint affects ~6 % of pixels
+statewide and is applied per-year, so if a pixel gains surface water
+access in a later year (e.g., canal infrastructure reaches it), SW
+allocation resumes.
 
 **Physics-constrained input data correction:** Published datasets are
 treated as informative priors, not ground truth.  For example, the
