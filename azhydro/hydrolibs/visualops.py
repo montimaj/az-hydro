@@ -4096,6 +4096,72 @@ def create_trend_maps(
         fig.savefig(out_path, dpi=600, bbox_inches='tight')
         plt.close(fig)
 
+        # ── Basin-level choropleth: mean Sen's slope per basin ─────────
+        if not basin_stats.empty and 'Mean_Slope' in basin_stats.columns:
+            fig_b, ax_b = plt.subplots(1, 1, figsize=(10, 9),
+                                       constrained_layout=True)
+            # Merge trend stats into basin geometries
+            basin_trend_gdf = basins_gdf.merge(
+                basin_stats[['Region', 'Mean_Slope', 'Pct_Sig_Increase',
+                              'Pct_Sig_Decrease']],
+                left_on=name_col, right_on='Region', how='left',
+            )
+            basin_trend_gdf['Mean_Slope'] = basin_trend_gdf[
+                'Mean_Slope'].fillna(0)
+
+            # Symmetric color limits
+            slopes = basin_trend_gdf['Mean_Slope'].dropna().values
+            if len(slopes) > 0:
+                b_abs = max(abs(slopes.min()), abs(slopes.max()), 1e-6)
+            else:
+                b_abs = 1.0
+
+            basin_trend_gdf.plot(
+                column='Mean_Slope', ax=ax_b, cmap='RdBu_r',
+                vmin=-b_abs, vmax=b_abs,
+                edgecolor='#333333', linewidth=0.5,
+                legend=False, missing_kwds={'color': '#D5D5D5'},
+            )
+
+            # Label every basin with name + slope value
+            for _, row in basin_trend_gdf.iterrows():
+                if row.geometry is None:
+                    continue
+                centroid = row.geometry.centroid
+                bname = row[name_col]
+                slope_val = row['Mean_Slope']
+                short = bname.replace(' AMA', '').replace(' INA', '')
+                arrow = '\u2191' if slope_val > 0 else '\u2193' if slope_val < 0 else '\u2013'
+                label = f'{short}\n{arrow}{abs(slope_val):.2f}'
+                fontweight = ('bold' if bname in ama_ina else 'normal')
+                ax_b.annotate(
+                    label, (centroid.x, centroid.y),
+                    fontsize=4.5, fontweight=fontweight,
+                    ha='center', va='center',
+                    bbox=dict(boxstyle='round,pad=0.1', fc='white',
+                              alpha=0.7, lw=0),
+                )
+
+            sm = plt.cm.ScalarMappable(
+                cmap='RdBu_r',
+                norm=plt.Normalize(vmin=-b_abs, vmax=b_abs),
+            )
+            sm.set_array([])
+            cbar_b = fig_b.colorbar(sm, ax=ax_b, shrink=0.6, pad=0.02,
+                                    extend='both')
+            cbar_b.set_label(f"Mean Sen's slope ({unit_label}/year)",
+                             fontsize=11, fontweight='bold')
+            ax_b.set_title(
+                f'{title} — Basin Trend {period_name}',
+                fontsize=13, fontweight='bold',
+            )
+            ax_b.axis('off')
+
+            b_out = os.path.join(output_dir,
+                                 f'Basin_Trend_{slug}.png')
+            fig_b.savefig(b_out, dpi=600, bbox_inches='tight')
+            plt.close(fig_b)
+
     logger.info(f'Trend maps for {title} saved to {output_dir}')
 
 

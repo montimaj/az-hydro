@@ -2699,6 +2699,22 @@ def create_all_raster_maps() -> None:
             subbasin_shp=ADWR_SUBBASIN_SHP,
         )
 
+    # SW Capture Index categories
+    sw_cap_base = os.path.join(prediction_dir, 'SW_Capture')
+    for cap_cat in ('Total_GW_Capture', 'Irrigation_GW_Capture',
+                    'Non_Irrigation_GW_Capture'):
+        cap_dir = os.path.join(sw_cap_base, f'{cap_cat}_Rasters', 'Depth_mm')
+        if not os.path.isdir(cap_dir):
+            continue
+        vizops.create_trend_maps(
+            raster_dir=cap_dir,
+            basin_shp=AZ_GW_BASIN,
+            output_dir=trend_dir,
+            title=cap_cat.replace('_', ' '),
+            unit_label='mm',
+            subbasin_shp=ADWR_SUBBASIN_SHP,
+        )
+
     # ── Graphical abstract / Figure 1 (after UQ for augmented rasters) ──
     summary_dir = os.path.join(prediction_dir, 'Annual_Summaries')
     total_csv = os.path.join(summary_dir, 'Total_Predicted.csv')

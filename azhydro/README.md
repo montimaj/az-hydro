@@ -1582,9 +1582,16 @@ per-era).  Each figure shows:
   increasing (↑), decreasing (↓), and non-significant trends.
 - Basin boundaries and AMA/INA labels overlaid.
 
-Trend maps are generated for: total predicted withdrawal, 8 partition categories,
-and 3 CU categories — each with up to 5 periods (full +
-3 eras), yielding ~60 trend figures.
+Trend maps are generated for: total predicted withdrawal, 8 partition
+categories, 3 CU categories, and 3 SW capture categories — each with
+up to 5 periods (full + 3 eras).
+
+**Basin-level trend choropleth** — For each category × period, a
+choropleth map colors each GW basin by its mean Sen's slope (blue =
+decreasing, red = increasing).  Every basin is labeled with its name,
+trend direction arrow (↑/↓), and slope value.  AMA/INA basins are bold;
+others are normal weight.  These maps provide an at-a-glance view of
+which basins are increasing or decreasing across the state.
 
 **Zonal trend statistics** — For each category × period, per-basin and
 per-sub-basin CSV files are written alongside the trend maps.  Each CSV
@@ -1597,7 +1604,8 @@ shapefile.
 
 All outputs are saved to `{prediction_dir}Raster_Maps/` (era maps and
 actual vs predicted) and `{prediction_dir}Raster_Maps/Trend_Analysis/`
-(trend maps and zonal statistics CSVs).
+(pixel-level trend maps, basin choropleth maps, and zonal statistics
+CSVs).
 
 #### 3e. Well package (`create_well_package_step()`)
 
@@ -2002,46 +2010,44 @@ in any basin retain their density-ratio + canal-boost split.
 
 **Physics-constrained input data correction:** Published datasets are
 treated as informative priors, not ground truth.  For example, the
-[Hung et al. (2025)](https://doi.org/10.1038/s41597-025-05920-x) GW-fraction snapshots report values as low as 0.7 in
-Willcox AMA, implying 30% surface-water irrigation in a closed basin
-with no river or canal infrastructure.  This is physically impossible —
-Willcox is an endorheic playa where the only "surface water" visible in
-LULC is mining tailings ponds (redistributed groundwater, confirmed as
-GW-sourced by HarDWR water rights records).  Rather than discarding the
-dataset, the pipeline uses it within its domain of validity and applies
-independent physical constraints to correct it where it falls short:
-the HarDWR temporal adjustment sets pre-canal pixels to GW = 1.0, the
-zero-surface-water constraint overrides to GW = 1.0 where no river and
-no canal exist, and the GW-fraction sensitivity analysis (±0.2)
-quantifies the volume impact of remaining uncertainty in the Hung et al.
-values.
+[Hung et al. (2025)](https://doi.org/10.1038/s41597-025-05920-x)
+GW-fraction snapshots report values as low as 0.7 in Willcox AMA,
+implying 30 % surface-water irrigation in a closed basin with no river
+or canal infrastructure.  This is physically impossible — Willcox is an
+endorheic playa where the only "surface water" visible in LULC is mining
+tailings ponds (redistributed groundwater, confirmed as GW-sourced by
+HarDWR water rights records).  The density-ratio approach inherently
+avoids this issue: Willcox has many GW wells but zero SW rights and
+zero canal-weighted streamflow, so `gw_frac` → 1.0 without requiring
+any override.
 
-**Known limitation (SW fraction proxy):** `compute_sw_fraction()` uses
-canal density normalized by the local maximum as a proxy for the
-surface-water share of non-irrigation withdrawals.  Canal density
-(canal segments per pixel) is not a validated proxy for municipal or
-industrial SW sourcing.  Where canal infrastructure is sparse, all
-non-irrigation withdrawal is assigned to groundwater, which may
-overestimate GW dependence in areas served by surface-water utilities.
-When municipal water-delivery records or alternative data become
-available, they can replace this proxy.
+**Surface Water Capture Index:** After partitioning, the pipeline
+computes a per-pixel, per-year capture index quantifying how much GW
+pumping likely depletes surface water, using water table depth
+([Ma et al., 2026](https://doi.org/10.1038/s43247-025-03094-3)) and
+canal-weighted streamflow:
 
-**SW density rounding:** The Gaussian-smoothed SW density is rounded to
-2 decimal places after normalization.  This ensures that trace bleed
-values (< 0.005) from the smoothing tail are zeroed out, providing a
-clean threshold for the zero-surface-water constraint.  AGRI and URBAN
-densities are not rounded as they serve as model features where full
-precision is needed.
+```
+capture_fraction = exp(-wtd_m / λ) × cw_norm
+sw_capture_mm    = GW_withdrawal × capture_fraction
+```
+
+Three λ values (5, 10, 20 m) produce lower/central/upper bounds.
+Computed separately for Total_GW, Irrigation_GW, and
+Non_Irrigation_GW.  Output in all 4 units (mm, ft, m³, AF).
 
 Key helpers:
 - **`focal_fill_irr_fraction()`** — fills edge-pixel gaps (`irr_frac < 0.05`)
   with a focal mean of valid neighbours, avoiding NaN propagation along
   irrigated-area boundaries.
-- **`compute_sw_fraction()`** — normalizes canal density to [0, 1] using a
-  local-maximum filter (`maximum_filter(size=5)`), so that the pixel with the
-  highest canal density in a 5 × 5 window receives `sw_fraction = 1.0`.
-- **`partition_predictions()`** — orchestrates all splits, applies well-density
-  masking, and returns a dict keyed by the eight category names.
+- **`compute_sw_fraction()`** — normalizes a density array to [0, 1] using a
+  local-maximum filter (`maximum_filter(size=5)`).  Used for focal-max
+  normalization of canal-weighted streamflow (`cw_norm`).
+- **`compute_sw_capture_index()`** — computes per-pixel SW capture fraction
+  and volume at three λ values with uncertainty bounds.
+- **`partition_predictions()`** — orchestrates all splits (irr/nonirr,
+  GW/SW with density-ratio + canal boost, zero-SW constraint), applies
+  well-density masking, and returns a dict keyed by the eight category names.
 
 All partitions use subtraction from the parent total (e.g., `nonirr = total − irr`)
 to guarantee exact budget closure with no floating-point drift.
@@ -2415,7 +2421,8 @@ Data/Outputs/
         │   ├── Era_Maps_*.png               #   2×2 era-mean panels per category
         │   ├── Actual_vs_Predicted.png      #   Actual vs predicted (1984–2024)
         │   └── Trend_Analysis/              #   Mann-Kendall + Sen's slope maps
-        │       ├── Trend_*.png              #   Per-category, per-period trend maps
+        │       ├── Trend_*.png              #   Per-category, per-period pixel-level trend maps
+        │       ├── Basin_Trend_*.png        #   Per-category, per-period basin choropleth maps
         │       ├── Basin_Trend_*.csv        #   Per-basin zonal trend statistics
         │       └── Subbasin_Trend_*.csv     #   Per-sub-basin zonal trend statistics
         ├── Visualizations/                  # Time series & era summary maps
@@ -2446,7 +2453,13 @@ Alzraiee, A., Niswonger, R., Luukkonen, C., Larsen, J., Martin, D., Herbert, D.,
 
 Asfaw, D., Smith, R. G., Majumdar, S., Grote, K., Fang, B., Wilson, B. B., Lakshmi, V., & Butler, J. J. (2025). Predicting groundwater withdrawals using machine learning with limited metering data: Assessment of training data requirements. Agricultural Water Management, 318, 109691. https://doi.org/10.1016/j.agwat.2025.109691
 
+Barlow, P. M., & Leake, S. A. (2012). Streamflow Depletion by Wells—Understanding and Managing the Effects of Groundwater Pumping on Streamflow. _U.S. Geological Survey Circular 1376_. https://pubs.usgs.gov/circ/1376/.
+
+Condon, L. E., & Maxwell, R. M. (2019). Simulating the sensitivity of evapotranspiration and streamflow to large-scale groundwater depletion. _Science Advances_, _5_(6), eaav4574. https://doi.org/10.1126/sciadv.aav4574.
+
 Daly, C., Halbleib, M., Smith, J. I., Gibson, W. P., Doggett, M. K., Taylor, G. H., Curtis, J., & Pasteris, P. P. (2008). Physiographically sensitive mapping of climatological temperature and precipitation across the conterminous United States. _International Journal of Climatology_, _28_(15), 2031–2064. https://doi.org/10.1002/joc.1688.
+
+de Graaf, I. E. M., Gleeson, T., van Beek, L. P. H., Sutanudjaja, E. H., & Bierkens, M. F. P. (2019). Environmental flow limits to global groundwater pumping. _Nature_, _574_, 90–94. https://doi.org/10.1038/s41586-019-1594-4.
 
 Fleckenstein, R., Wellington, D., Jin, S., Tollerud, H., Brown, J. F., Dewitz, J., Pastick, N. J., Barber, C. P., O’Brien, A., & Spanier, M. (2026). A framework for integrating spatiotemporal deep learning methods with landsat for annual land cover and impervious surface mapping. _Remote Sensing of Environment_, _338_, 115347. https://doi.org/10.1016/j.rse.2026.115347.
 
@@ -2466,11 +2479,17 @@ Ketchum, D., Hoylman, Z. H., Huntington, J., Brinkerhoff, D., & Jencso, K. G. (2
 
 Ketchum, D., Jencso, K., Maneta, M. P., Melton, F., Jones, M. O., & Huntington, J. (2020). IrrMapper: A Machine Learning Approach for High Resolution Mapping of Irrigated Agriculture Across the Western U.S. _Remote Sensing_, _12_(14), 2328. https://doi.org/10.3390/rs12142328.
 
+Lisk, M. D., Grogan, D. S., Proctor, K. L., Naz, B. S., Farmer, W. H., & Bock, A. R. (2024). HarDWR — Harmonized Database of Western U.S. Water Rights (v2.0). _Zenodo_. https://doi.org/10.57931/2475303.
+
+Lisk, M. D., Grogan, D. S., Zuidema, S., Zheng, J., Caccese, R., Peklak, D., Fisher-Vanden, K., Lammers, R. B., Olmstead, S. M., & Fowler, L. (2024). Harmonized Database of Western U.S. Water Rights (HarDWR) v.1. _Scientific Data_, _11_(1), 598. https://doi.org/10.1038/s41597-024-03434-6.
+
 Luukkonen, C.L., Alzraiee, A.H., Larsen, J.D., Martin, D.J., Herbert, D.M., Buchwald, C.A., Houston, N.A., Valseth, K.J., Paulinski, S., Miller, L.D., Niswonger, R.G., Stewart, J.S., & Dieter, C.A. (2023). Public supply water use reanalysis for the 2000-2020 period by HUC12, month, and year for the conterminous United States. _U.S. Geological Survey data release_. https://doi.org/10.5066/P9FUL880
 
 Majumdar, S., ReVelle, P., Pearson, C., Nozari, S., Minor, B. A., Hasan, M. F., Huntington, J. L., & Smith, R. G. (2026). pyCropWat: A Python Package for Computing Effective Precipitation Using Google Earth Engine Climate Data (v1.2.1). _Zenodo_. https://doi.org/10.5281/zenodo.18706481.
 
 Majumdar, S., Smith, R., Conway, B. D., & Lakshmi, V. (2022). Advancing remote sensing and machine learning‐driven frameworks for groundwater withdrawal estimation in Arizona: Linking land subsidence to groundwater withdrawals. _Hydrological Processes_, _36_(11), e14757. https://doi.org/10.1002/hyp.14757.
+
+Ma, Y., Condon, L. E., Koch, J., Bennett, A., Defnet, A., Tijerina-Kreuzer, D., Melchior, P., & Maxwell, R. M. (2026). High resolution US water table depth estimates reveal quantity of accessible groundwater. _Communications Earth & Environment_, _7_(1), 45. https://doi.org/10.1038/s43247-025-03094-3.
 
 Martin, D. J., Niswonger, R. G., Regan, R. S., Huntington, J. L., Ott, T., Morton, C., Senay, G. B., Friedrichs, M., Melton, F. S., Haynes, J., Henson, W., Read, A., Xie, Y., Lark, T., & Rush, M. (2025). Estimating irrigation consumptive use for the conterminous United States: coupling satellite-sourced estimates of actual evapotranspiration with a national hydrologic model. _Journal of Hydrology_, _662_, 133909. https://doi.org/10.1016/j.jhydrol.2025.133909.
 
@@ -2479,6 +2498,8 @@ Martin, D.J., Regan, R.S., Haynes, J.V., Read, A.L., Henson, W.R., Stewart, J.S.
 Melton, F., Huntington, J., Grimm, R., Herring, J., Hall, M., Rollison, D., Erickson, T., Allen, R., Anderson, M., Fisher, J. B., Kilic, A., Senay, G. B., Volk, J., Hain, C., Johnson, L., Ruhoff, A., Blankenau, P., Bromley, M., Carrara, W., … Anderson, R. G. (2022). OpenET: Filling a Critical Data Gap in Water Management for the Western United States. _JAWRA Journal of the American Water Resources Association_. https://doi.org/10.1111/1752-1688.12956.
 
 Muratoglu, A., Bilgen, G. K., Angin, I., & Kodal, S. (2023). Performance analyses of effective rainfall estimation methods for accurate quantification of agricultural water footprint. _Water Research_, _238_, 120011. https://doi.org/10.1016/j.watres.2023.120011.
+
+Noble, W. et al. (2015). A Case Study in Efficiency — Agriculture and Water Use in the Yuma, Arizona Area. _Yuma County Agriculture Water Coalition_. https://www.azwater.gov/sites/default/files/2022-11/Final%20Yuma%20Report%20021715.pdf.
 
 Reitz, M., Sanford, W. E., & Saxe, S. (2023). Ensemble Estimation of Historical Evapotranspiration for the Conterminous U.S. _Water Resources Research_, _59_(6). https://doi.org/10.1029/2022WR034012.
 
