@@ -1929,6 +1929,22 @@ This constraint is applied per-year, so if a pixel gains surface water
 access in a later year (e.g., reservoir construction or canal
 infrastructure), SW allocation resumes.
 
+**Physics-constrained input data correction:** Published datasets are
+treated as informative priors, not ground truth.  For example, the
+[Hung et al. (2025)](https://doi.org/10.1038/s41597-025-05920-x) GW-fraction snapshots report values as low as 0.7 in
+Willcox AMA, implying 30% surface-water irrigation in a closed basin
+with no river or canal infrastructure.  This is physically impossible —
+Willcox is an endorheic playa where the only "surface water" visible in
+LULC is mining tailings ponds (redistributed groundwater, confirmed as
+GW-sourced by HarDWR water rights records).  Rather than discarding the
+dataset, the pipeline uses it within its domain of validity and applies
+independent physical constraints to correct it where it falls short:
+the HarDWR temporal adjustment sets pre-canal pixels to GW = 1.0, the
+zero-surface-water constraint overrides to GW = 1.0 where no river and
+no canal exist, and the GW-fraction sensitivity analysis (±0.2)
+quantifies the volume impact of remaining uncertainty in the Hung et al.
+values.
+
 **Known limitation (SW fraction proxy):** `compute_sw_fraction()` uses
 canal density normalized by the local maximum as a proxy for the
 surface-water share of non-irrigation withdrawals.  Canal density
