@@ -1878,21 +1878,49 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             pd.DataFrame(sb_rows).to_csv(_subbasin_csv, index=False)
         # SW Capture Index time series
         if sw_capture_yearly:
-            cap_rows = []
-            years_present = sorted(
-                next(iter(sw_capture_yearly.values())).keys()
-            ) if sw_capture_yearly else []
-            for y in years_present:
-                row = {'Year': y}
-                for key, ydict in sw_capture_yearly.items():
-                    row[f'{key}_AF'] = ydict.get(y, 0)
-                cap_rows.append(row)
-            if cap_rows:
-                cap_csv = os.path.join(
-                    prediction_dir, 'SW_Capture', 'SW_Capture_Time_Series.csv')
-                makedirs(os.path.dirname(cap_csv))
-                pd.DataFrame(cap_rows).to_csv(cap_csv, index=False)
-                logger.info('SW capture time series saved to %s', cap_csv)
+            cap_dir = os.path.join(prediction_dir, 'SW_Capture')
+            makedirs(cap_dir)
+
+            # Statewide time series (scalars: fractions and volumes)
+            scalar_keys = {k: v for k, v in sw_capture_yearly.items()
+                           if v and not isinstance(next(iter(v.values())), dict)}
+            if scalar_keys:
+                years_present = sorted(
+                    next(iter(scalar_keys.values())).keys())
+                cap_rows = []
+                for y in years_present:
+                    row = {'Year': y}
+                    for key, ydict in scalar_keys.items():
+                        suffix = '' if 'Fraction' in key else '_AF'
+                        row[f'{key}{suffix}'] = ydict.get(y, 0)
+                    cap_rows.append(row)
+                pd.DataFrame(cap_rows).to_csv(
+                    os.path.join(cap_dir, 'SW_Capture_Time_Series.csv'),
+                    index=False)
+
+            # Per-basin and per-sub-basin fraction time series
+            for level in ('Basin', 'Subbasin'):
+                zone_keys = {k: v for k, v in sw_capture_yearly.items()
+                             if k.endswith(f'_Fraction_{level}') and v}
+                if not zone_keys:
+                    continue
+                zone_rows = []
+                for key, ydict in zone_keys.items():
+                    cat_label = key.replace(f'_Fraction_{level}', '')
+                    for y, zone_fracs in sorted(ydict.items()):
+                        for zone, frac in zone_fracs.items():
+                            zone_rows.append({
+                                'Year': y,
+                                level: zone,
+                                'Category': cat_label,
+                                'VW_Capture_Fraction': round(frac, 6),
+                            })
+                if zone_rows:
+                    pd.DataFrame(zone_rows).to_csv(
+                        os.path.join(cap_dir,
+                                     f'{level}_Capture_Fraction.csv'),
+                        index=False)
+            logger.info('SW capture time series saved to %s', cap_dir)
         logger.info('Annual summaries saved to %s', _summary_dir)
 
     def _load_yearly_summary() -> bool:
@@ -2168,14 +2196,46 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                     ref_raster_file, mm_to_ft, mm_to_m3, m3_to_af,
                 )
 
-                # Track annual totals for time series
+                # Track statewide annual totals for time series
                 for key in capture:
                     ts_key = f'{cap_cat}_{key}'
                     if ts_key not in sw_capture_yearly:
                         sw_capture_yearly[ts_key] = {}
-                    vol_af = (float(np.nansum(capture[key]))
-                              * mm_to_m3 * m3_to_af)
-                    sw_capture_yearly[ts_key][year] = vol_af
+                    if 'Fraction' in key:
+                        # Volume-weighted mean fraction: what % of GW
+                        # pumping captures surface water statewide
+                        gw_sum = float(np.nansum(gw_pred))
+                        cap_vol_key = key.replace('Fraction', 'Capture')
+                        if cap_vol_key in capture and gw_sum > 0:
+                            val = (float(np.nansum(capture[cap_vol_key]))
+                                   / gw_sum)
+                        else:
+                            val = float(np.nanmean(capture[key]))
+                    else:
+                        # Volume: sum mm → m³ → AF
+                        val = (float(np.nansum(capture[key]))
+                               * mm_to_m3 * m3_to_af)
+                    sw_capture_yearly[ts_key][year] = val
+
+                # Per-basin and per-sub-basin volume-weighted fraction
+                # (central λ=10m only)
+                cap_frac = capture['Capture_Fraction_Central']
+                cap_vol = capture['SW_Capture_Central']
+                basins_arr = year_df['GW_Basin'].values
+                for level, zone_arr, zone_list in [
+                    ('Basin', basins_arr, all_basins),
+                    ('Subbasin', year_df['GW_Subbasin'].values, subbasins),
+                ]:
+                    ts_basin_key = f'{cap_cat}_Capture_Fraction_{level}'
+                    if ts_basin_key not in sw_capture_yearly:
+                        sw_capture_yearly[ts_basin_key] = {}
+                    zone_fracs = {}
+                    for zone in zone_list:
+                        zmask = zone_arr == zone
+                        gw_z = float(np.nansum(gw_pred[zmask]))
+                        cap_z = float(np.nansum(cap_vol[zmask]))
+                        zone_fracs[zone] = cap_z / gw_z if gw_z > 0 else 0.0
+                    sw_capture_yearly[ts_basin_key][year] = zone_fracs
 
         # AZ-wide annual total (all valid pixels)
         yearly_predictions[year] = _pixel_stats(predictions)
@@ -2699,21 +2759,33 @@ def create_all_raster_maps() -> None:
             subbasin_shp=ADWR_SUBBASIN_SHP,
         )
 
-    # SW Capture Index categories
+    # SW Capture Index categories — volume and fraction
     sw_cap_base = os.path.join(prediction_dir, 'SW_Capture')
     for cap_cat in ('Total_GW_Capture', 'Irrigation_GW_Capture',
                     'Non_Irrigation_GW_Capture'):
+        # Volume trends (mm)
         cap_dir = os.path.join(sw_cap_base, f'{cap_cat}_Rasters', 'Depth_mm')
-        if not os.path.isdir(cap_dir):
-            continue
-        vizops.create_trend_maps(
-            raster_dir=cap_dir,
-            basin_shp=AZ_GW_BASIN,
-            output_dir=trend_dir,
-            title=cap_cat.replace('_', ' '),
-            unit_label='mm',
-            subbasin_shp=ADWR_SUBBASIN_SHP,
-        )
+        if os.path.isdir(cap_dir):
+            vizops.create_trend_maps(
+                raster_dir=cap_dir,
+                basin_shp=AZ_GW_BASIN,
+                output_dir=trend_dir,
+                title=f'{cap_cat.replace("_", " ")} Volume',
+                unit_label='mm',
+                subbasin_shp=ADWR_SUBBASIN_SHP,
+            )
+        # Fraction trends (dimensionless, band 2 = central λ=10m)
+        frac_dir = os.path.join(sw_cap_base, f'{cap_cat}_Fraction')
+        if os.path.isdir(frac_dir):
+            vizops.create_trend_maps(
+                raster_dir=frac_dir,
+                basin_shp=AZ_GW_BASIN,
+                output_dir=trend_dir,
+                title=f'{cap_cat.replace("_", " ")} Fraction',
+                unit_label='fraction',
+                band=2,  # central estimate (λ=10m)
+                subbasin_shp=ADWR_SUBBASIN_SHP,
+            )
 
     # ── Graphical abstract / Figure 1 (after UQ for augmented rasters) ──
     summary_dir = os.path.join(prediction_dir, 'Annual_Summaries')
