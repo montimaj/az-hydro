@@ -1924,18 +1924,24 @@ results are in `Uncertainty/Sigma_GW/GW_Fraction_Sensitivity.csv`.
 | **Total_GW** | `Irrigation_GW + Non_Irrigation_GW` |
 | **Total_SW** | `Irrigation_SW + Non_Irrigation_SW` |
 
-**Zero-surface-water constraint:** At pixels where both `streamflow_mm`
-and `canal_weighted_streamflow_mm` are zero for a given year, there is
-no surface water available via any pathway (river flow or canal
-delivery).  In this case, `gw_frac` is forced to 1.0 for irrigation and
-`sw_frac` is forced to 0.0 for non-irrigation, so all withdrawals are
-assigned to groundwater.  This targets truly SW-free basins (e.g.,
-Willcox Playa, Ranegras Plain, San Bernardino Valley) without
-over-constraining pixels in canal-served areas where streamflow is
-nonzero at the watershed level.  The constraint affects ~6 % of pixels
-statewide and is applied per-year, so if a pixel gains surface water
-access in a later year (e.g., canal infrastructure reaches it), SW
-allocation resumes.
+**Zero-surface-water constraint:** Applied at two levels:
+
+1. **Per-pixel:** Where both `streamflow_mm` and
+   `canal_weighted_streamflow_mm` are zero, the pixel has no surface
+   water via any pathway.
+2. **Per-basin:** Where the GW basin **median** of both streamflow and
+   canal-weighted streamflow is zero, all pixels in that basin are
+   forced to 100 % GW — even boundary pixels that pick up nonzero
+   streamflow from adjacent surface watersheds due to rasterization
+   overlap at 2 km resolution.  Using the median (rather than the mean)
+   makes this robust to boundary bleed.
+
+The combined constraint forces `gw_frac` to 1.0 for irrigation and
+`sw_frac` to 0.0 for non-irrigation.  Affected basins include Willcox
+AMA, Butler Valley, Parker, Ranegras Plain, San Bernardino Valley, and
+Yuma (~6.5 % of pixels statewide).  The constraint is applied per-year,
+so if a basin gains surface water access in a later year, SW allocation
+resumes.
 
 **Physics-constrained input data correction:** Published datasets are
 treated as informative priors, not ground truth.  For example, the

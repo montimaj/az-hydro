@@ -257,18 +257,38 @@ def partition_predictions(
         uf = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
         nonirr[is_other] = nonirr[is_other] * uf[is_other]
 
-    # ---- Zero-surface-water mask: pixels with no SW access ----
-    # Where both streamflow and canal-weighted streamflow are zero at a
-    # pixel, there is no surface water available via any pathway (river
-    # flow or canal delivery), so all withdrawals are groundwater.
-    # This targets truly SW-free basins (e.g., Willcox, Ranegras Plain)
-    # without over-constraining pixels in canal-served areas.
+    # ---- Zero-surface-water mask: basins with no SW access ----
+    # Identify GW basins where the basin-level mean of both streamflow
+    # and canal-weighted streamflow is zero (or near-zero).  All pixels
+    # in such basins are forced to 100 % GW, even if boundary pixels
+    # have nonzero streamflow from adjacent watershed bleed at 2 km
+    # resolution.  This is more robust than per-pixel checks because
+    # watershed and GW basin boundaries don't align perfectly.
     streamflow = year_df['streamflow_mm'].values \
         if 'streamflow_mm' in year_df.columns else None
     cw_streamflow = year_df['canal_weighted_streamflow_mm'].values \
         if 'canal_weighted_streamflow_mm' in year_df.columns else None
+    gw_basin = year_df['GW_Basin'].values \
+        if 'GW_Basin' in year_df.columns else None
     zero_sw_mask = None
-    if streamflow is not None and cw_streamflow is not None:
+    if streamflow is not None and cw_streamflow is not None and gw_basin is not None:
+        # Per-pixel check for basins without GW_Basin info
+        pixel_zero = (streamflow == 0) & (cw_streamflow == 0)
+        # Basin-level check: if basin median of both streamflow and
+        # canal-weighted streamflow is zero, force all pixels in that
+        # basin.  Median is robust to boundary bleed (a few edge pixels
+        # with nonzero values from adjacent watersheds).
+        basin_zero = np.zeros(len(streamflow), dtype=bool)
+        for basin_name in np.unique(gw_basin):
+            bmask = gw_basin == basin_name
+            basin_med_sf = np.median(streamflow[bmask])
+            basin_med_cwsf = np.median(cw_streamflow[bmask])
+            if basin_med_sf == 0 and basin_med_cwsf == 0:
+                basin_zero[bmask] = True
+        zero_sw_mask = pixel_zero | basin_zero
+        if not np.any(zero_sw_mask):
+            zero_sw_mask = None
+    elif streamflow is not None and cw_streamflow is not None:
         zero_sw_mask = (streamflow == 0) & (cw_streamflow == 0)
         if not np.any(zero_sw_mask):
             zero_sw_mask = None
