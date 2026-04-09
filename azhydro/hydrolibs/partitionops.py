@@ -258,14 +258,21 @@ def partition_predictions(
         nonirr[is_other] = nonirr[is_other] * uf[is_other]
 
     # ---- Zero-surface-water mask: pixels with no SW access ----
-    # If both SW density (LULC surface water bodies) and canal-weighted
-    # streamflow are zero at a pixel, there is no surface water available
-    # via any pathway (water body or canal delivery), so all withdrawals
-    # are groundwater.  SW density is more spatially precise than the
-    # watershed-level streamflow raster.
-    sw_density = year_df['SW'].values if 'SW' in year_df.columns else None
+    # Step 1: Where regular streamflow is zero, force SW density to zero.
+    # This removes Gaussian-smoothed bleed from adjacent rivers into
+    # basins with no actual river flow (e.g., Willcox).
+    # Step 2: Where both (corrected) SW density and canal-weighted
+    # streamflow are zero, force all withdrawals to groundwater.
+    sw_density = year_df['SW'].values.copy() if 'SW' in year_df.columns else None
+    streamflow = year_df['streamflow_mm'].values \
+        if 'streamflow_mm' in year_df.columns else None
     cw_streamflow = year_df['canal_weighted_streamflow_mm'].values \
         if 'canal_weighted_streamflow_mm' in year_df.columns else None
+
+    # Zero out SW density where there is no river
+    if sw_density is not None and streamflow is not None:
+        sw_density[streamflow == 0] = 0.0
+
     zero_sw_mask = None
     if sw_density is not None and cw_streamflow is not None:
         zero_sw_mask = (sw_density == 0) & (cw_streamflow == 0)

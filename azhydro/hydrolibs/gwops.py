@@ -402,16 +402,22 @@ def create_land_use_data(
     """
 
     cdl_labels = ('AGRI', 'URBAN', 'SW')  # matches GEE recode: 1=AGRI, 2=URBAN, 3=SW
+    # SW uses a tighter kernel (sigma=1) to avoid spreading narrow
+    # water-body signals across basin boundaries (e.g., into Willcox).
+    sw_smoothing = max(smoothing // 3, 1)
+    label_sigma = {'AGRI': smoothing, 'URBAN': smoothing, 'SW': sw_smoothing}
     cdl_arr = cdl_arr.astype(np.float32)
     for idx, cdl_label in enumerate(cdl_labels):
         lu_arr = np.full_like(cdl_arr, fill_value=0.)
         lu_arr[cdl_arr == idx + 1] = 1
-        gaussian_lu_arr = flt.gaussian_filter(lu_arr, sigma=smoothing, order=0)
+        gaussian_lu_arr = flt.gaussian_filter(lu_arr, sigma=label_sigma[cdl_label], order=0)
         gaussian_lu_arr = np.abs(gaussian_lu_arr)
         gaussian_lu_arr -= np.min(gaussian_lu_arr)
         ptp = np.ptp(gaussian_lu_arr)
         if ptp > 0:
             gaussian_lu_arr /= ptp
+        if cdl_label == 'SW':
+            gaussian_lu_arr = np.round(gaussian_lu_arr, 2)
         input_df[cdl_label] = gaussian_lu_arr.ravel()
     return input_df
 

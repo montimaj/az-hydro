@@ -1909,18 +1909,25 @@ results are in `Uncertainty/Sigma_GW/GW_Fraction_Sensitivity.csv`.
 | **Total_GW** | `Irrigation_GW + Non_Irrigation_GW` |
 | **Total_SW** | `Irrigation_SW + Non_Irrigation_SW` |
 
-**Zero-surface-water constraint:** At pixels where both `SW` density
-(LULC-derived surface water body count, bias-corrected at the basin
-scale like AGRI and URBAN) and `canal_weighted_streamflow_mm` are zero
-for a given year, there is no surface water available via any pathway
-(water body or canal delivery).  In this case, `gw_frac` is forced to
-1.0 for irrigation and `sw_frac` is forced to 0.0 for non-irrigation,
-so all withdrawals are assigned to groundwater.  SW density is more
-spatially precise than the watershed-level streamflow raster, which
-assigns uniform values across entire watersheds.  This constraint is
-applied per-year, so if a pixel gains surface water access in a later
-year (e.g., reservoir construction or canal infrastructure), SW
-allocation resumes.
+**Zero-surface-water constraint (three-layer):**
+
+1. **Gaussian bleed cleanup:** Where `streamflow_mm == 0` (no river in the
+   watershed), `SW` density is forced to zero regardless of the Gaussian-
+   smoothed LULC value.  This prevents the smoothing kernel (sigma=3 for
+   AGRI/URBAN, sigma=1 for SW) from bleeding water-body signal across
+   basin boundaries into riverless basins like Willcox.
+2. **Canal delivery check:** Even after zeroing SW density, if
+   `canal_weighted_streamflow_mm > 0` (canal infrastructure delivers
+   water to the pixel), SW allocation is still permitted.
+3. **Full GW constraint:** Only when both the corrected SW density AND
+   `canal_weighted_streamflow_mm` are zero — meaning no water body, no
+   river, and no canal delivery — are `gw_frac` forced to 1.0 for
+   irrigation and `sw_frac` forced to 0.0 for non-irrigation, assigning
+   all withdrawals to groundwater.
+
+This constraint is applied per-year, so if a pixel gains surface water
+access in a later year (e.g., reservoir construction or canal
+infrastructure), SW allocation resumes.
 
 **Known limitation (SW fraction proxy):** `compute_sw_fraction()` uses
 canal density normalized by the local maximum as a proxy for the
@@ -1931,6 +1938,13 @@ non-irrigation withdrawal is assigned to groundwater, which may
 overestimate GW dependence in areas served by surface-water utilities.
 When municipal water-delivery records or alternative data become
 available, they can replace this proxy.
+
+**SW density rounding:** The Gaussian-smoothed SW density is rounded to
+2 decimal places after normalization.  This ensures that trace bleed
+values (< 0.005) from the smoothing tail are zeroed out, providing a
+clean threshold for the zero-surface-water constraint.  AGRI and URBAN
+densities are not rounded as they serve as model features where full
+precision is needed.
 
 Key helpers:
 - **`focal_fill_irr_fraction()`** — fills edge-pixel gaps (`irr_frac < 0.05`)
