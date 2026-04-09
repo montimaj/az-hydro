@@ -786,6 +786,7 @@ def get_feature_dict(get_units: bool = False) -> dict[str, str] | tuple[dict[str
         'soil_depth_mm': 'Soil Depth',
         'awc_mm': 'Available Water Capacity',
         'ksat_mean_micromps': '$K_{sat}$',
+        'wtd_m': 'Water Table Depth',
         'gw_pumping_mm': 'Annual Withdrawals',
     }
 
@@ -807,6 +808,7 @@ def get_feature_dict(get_units: bool = False) -> dict[str, str] | tuple[dict[str
         'soil_depth_mm': 'mm',
         'awc_mm': 'mm',
         'ksat_mean_micromps': r'$\mu$m/s',
+        'wtd_m': 'm',
         'gw_pumping_mm': 'mm',
     }
     return feature_dict if not get_units else (feature_dict, feature_dict_units)
@@ -1161,6 +1163,7 @@ def compute_shap_plots(
     # text at the top no longer overlaps with the black f(x) annotation.
     plt.figure(figsize=(14, 9))
     shap.waterfall_plot(explanation[median_idx], max_display=max_display, show=False)
+    plt.gca().set_xlabel('Annual Withdrawal Prediction (mm)')
     plt.subplots_adjust(top=0.90, right=0.82, left=0.28)
     plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Waterfall{suffix}.png'), dpi=600)
     plt.close('all')

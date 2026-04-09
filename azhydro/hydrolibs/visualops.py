@@ -1476,10 +1476,13 @@ def explore_az_data(
         clip_upper = col_df[col].quantile(0.99)
         clip_mask = col_df[col].between(clip_lower, clip_upper)
         clip_vals = col_df.loc[clip_mask, col]
+        # Disable KDE when too few unique values (e.g., static columns
+        # like wtd_m) — gaussian_kde requires > 1 unique element.
+        use_kde = clip_vals.nunique() > 2
 
         # H1. Overall histogram + KDE
         fig, ax = _plt.subplots(figsize=figsize_box)
-        _sns.histplot(clip_vals, kde=True, ax=ax, color='#2C3E50', edgecolor='white', stat='count')
+        _sns.histplot(clip_vals, kde=use_kde, ax=ax, color='#2C3E50', edgecolor='white', stat='count')
         ax.set_xlabel(label)
         ax.set_title(f'{label} — Histogram + KDE (P1–P99)')
         fig.tight_layout()
@@ -1497,7 +1500,7 @@ def explore_az_data(
             fig, ax = _plt.subplots(figsize=figsize_box)
             _sns.histplot(
                 data=era_df_h, x=col, hue='Era', hue_order=present_eras_h,
-                palette=present_palette_h, kde=True, stat='count',
+                palette=present_palette_h, kde=use_kde, stat='count',
                 edgecolor='white', alpha=0.35, ax=ax,
             )
             ax.set_xlabel(label)
@@ -1514,7 +1517,7 @@ def explore_az_data(
         fig, ax = _plt.subplots(figsize=figsize_box)
         _sns.histplot(
             data=clip_col_df, x=col, hue='Basin_Type_Label',
-            kde=True, stat='count', edgecolor='white', alpha=0.35, ax=ax,
+            kde=use_kde, stat='count', edgecolor='white', alpha=0.35, ax=ax,
         )
         ax.set_xlabel(label)
         ax.set_title(f'{label} — Histogram + KDE by Basin Type (P1–P99)')
@@ -1534,7 +1537,7 @@ def explore_az_data(
             _sns.histplot(
                 data=basin_df_kde, x=col, hue=gw_basin_col,
                 hue_order=basin_list_kde,
-                kde=True, stat='count', edgecolor='white', alpha=0.25, ax=ax,
+                kde=use_kde, stat='count', edgecolor='white', alpha=0.25, ax=ax,
             )
             ax.set_xlabel(label)
             ax.set_title(f'{label} — Histogram + KDE by GW Basin (AMA/INA) (P1–P99)')
