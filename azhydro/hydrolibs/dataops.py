@@ -1061,7 +1061,7 @@ def _apply_basin_scale_lulc_delta(
         y = int(year)
         basin_class_fractions[y] = {}
         basin_groups = year_df.groupby('GW_Basin')['lulc']
-        for cls in (1, 2):
+        for cls in (1, 2, 3):
             basin_class_fractions[y][cls] = basin_groups.apply(
                 lambda x, c=cls: float((x == c).mean())
             ).to_dict()
@@ -1081,12 +1081,12 @@ def _apply_basin_scale_lulc_delta(
     hist_baseline = {
         cls: {b: basin_class_fractions[usgs_hist_baseline_year][cls].get(b, 0.0)
               for b in basins}
-        for cls in (1, 2)
+        for cls in (1, 2, 3)
     }
     proj_baseline = {
         cls: {b: basin_class_fractions[foresce_baseline_year][cls].get(b, 0.0)
               for b in basins}
-        for cls in (1, 2)
+        for cls in (1, 2, 3)
     }
 
     # After OUTSIDE AZ filter, each year has identical pixel count and
@@ -1130,7 +1130,7 @@ def _apply_basin_scale_lulc_delta(
 
         # Per-basin delta for each class
         basin_delta_cls = {}
-        for cls in (1, 2):
+        for cls in (1, 2, 3):
             base = baseline_cls[cls]
             cur = basin_class_fractions[y][cls]
             basin_delta_cls[cls] = {
