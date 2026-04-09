@@ -434,6 +434,24 @@ def _get_site_watershed_map(sites_csv, watershed_geojson):
         site_gdf = site_gdf.to_crs(ws.crs)
     joined = gpd.sjoin(site_gdf, ws[['OBJECTID', 'WATERSHED', 'geometry']],
                        how='left', predicate='within')
+
+    # Assign unmatched gauges to the nearest watershed polygon.
+    # This handles gauges at state/watershed boundaries (e.g., Imperial
+    # Dam at the AZ-CA border falls just outside the Colorado River
+    # polygon) that fail the 'within' predicate.
+    unmatched = joined[joined['OBJECTID'].isna()]
+    if not unmatched.empty:
+        for idx, row in unmatched.iterrows():
+            dists = ws.geometry.distance(row.geometry)
+            nearest_idx = dists.idxmin()
+            nearest = ws.loc[nearest_idx]
+            joined.loc[idx, 'OBJECTID'] = nearest['OBJECTID']
+            joined.loc[idx, 'WATERSHED'] = nearest['WATERSHED']
+            logger.info(
+                f'  Gauge {row.site_no} unmatched by sjoin — assigned to '
+                f'nearest watershed: {nearest["WATERSHED"]} '
+                f'(OID={int(nearest["OBJECTID"])})')
+
     # Map: watershed OBJECTID -> list of site_no in that watershed
     ws_sites = {}
     for _, row in joined.dropna(subset=['OBJECTID']).iterrows():

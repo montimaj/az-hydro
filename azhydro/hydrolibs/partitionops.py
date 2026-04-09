@@ -257,87 +257,72 @@ def partition_predictions(
         uf = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
         nonirr[is_other] = nonirr[is_other] * uf[is_other]
 
-    # ---- Zero-surface-water mask: basins with no SW access ----
-    # Identify GW basins where the basin-level mean of both streamflow
-    # and canal-weighted streamflow is zero (or near-zero).  All pixels
-    # in such basins are forced to 100 % GW, even if boundary pixels
-    # have nonzero streamflow from adjacent watershed bleed at 2 km
-    # resolution.  This is more robust than per-pixel checks because
-    # watershed and GW basin boundaries don't align perfectly.
-    streamflow = year_df['streamflow_mm'].values \
-        if 'streamflow_mm' in year_df.columns else None
+    # ---- Zero-surface-water mask: per-pixel canal-weighted streamflow ----
+    # Where canal-weighted streamflow is zero, there is no canal-delivered
+    # surface water at the pixel → force 100% GW.  Unlike regular
+    # streamflow (which is uniform per-watershed and bleeds into desert
+    # basins like Butler Valley), canal-weighted streamflow is precisely
+    # located at canal-served pixels with no bleed, so a per-pixel check
+    # is sufficient (no basin-median override needed).
     cw_streamflow = year_df['canal_weighted_streamflow_mm'].values \
         if 'canal_weighted_streamflow_mm' in year_df.columns else None
-    gw_basin = year_df['GW_Basin'].values \
-        if 'GW_Basin' in year_df.columns else None
     zero_sw_mask = None
-    if streamflow is not None and cw_streamflow is not None and gw_basin is not None:
-        # Per-pixel check for basins without GW_Basin info
-        pixel_zero = (streamflow == 0) & (cw_streamflow == 0)
-        # Basin-level check: if basin median of both streamflow and
-        # canal-weighted streamflow is zero, force all pixels in that
-        # basin.  Median is robust to boundary bleed (a few edge pixels
-        # with nonzero values from adjacent watersheds).
-        basin_zero = np.zeros(len(streamflow), dtype=bool)
-        for basin_name in np.unique(gw_basin):
-            bmask = gw_basin == basin_name
-            basin_med_sf = np.median(streamflow[bmask])
-            basin_med_cwsf = np.median(cw_streamflow[bmask])
-            if basin_med_sf == 0 and basin_med_cwsf == 0:
-                basin_zero[bmask] = True
-        zero_sw_mask = pixel_zero | basin_zero
-        if not np.any(zero_sw_mask):
-            zero_sw_mask = None
-    elif streamflow is not None and cw_streamflow is not None:
-        zero_sw_mask = (streamflow == 0) & (cw_streamflow == 0)
-        if not np.any(zero_sw_mask):
-            zero_sw_mask = None
-    elif streamflow is not None:
-        zero_sw_mask = streamflow == 0
+    if cw_streamflow is not None:
+        zero_sw_mask = cw_streamflow == 0
         if not np.any(zero_sw_mask):
             zero_sw_mask = None
 
-    # ---- GW / SW split of irrigation ----
-    gw_frac = year_df['annual_gw_fraction'].values if 'annual_gw_fraction' in year_df.columns else None
-    if gw_frac is not None:
-        gw_frac = np.clip(np.nan_to_num(gw_frac, nan=1.0), 0, 1)
-        # Temporal adjustment: pre-canal pixels → 100 % GW
-        sw_access_yr = year_df['sw_access_year'].values \
-            if 'sw_access_year' in year_df.columns else None
-        if sw_access_yr is not None:
-            year_val = int(year_df['Year'].iloc[0])
-            gw_frac = adjust_gw_fraction_temporal(
-                gw_frac, sw_access_yr, year_val,
-            )
-        # Force 100% GW where streamflow is zero
+    # ---- Focal-normalized canal-weighted streamflow for SW boost ----
+    # Adds physical surface-water delivery signal to the density ratio.
+    # Pixels near canals get cw_norm ∈ (0, 1], boosting SW fraction.
+    # Pixels without canals get cw_norm = 0 → pure density ratio.
+    cw_norm = np.zeros_like(predictions)
+    if cw_streamflow is not None:
+        cw_norm = compute_sw_fraction(cw_streamflow, raster_shape, valid_mask)
+
+    # ---- GW / SW split of irrigation (density-ratio + canal boost) ----
+    # gw_frac = irr_well_density / (irr_well_density + irr_sw_rights_density + cw_norm)
+    # cw_norm boosts SW at canal-served pixels; defaults to 1.0 (100% GW)
+    # where all three terms are zero.
+    irr_wd = year_df['irr_well_density'].values \
+        if 'irr_well_density' in year_df.columns else None
+    irr_swd = year_df['irr_sw_rights_density'].values \
+        if 'irr_sw_rights_density' in year_df.columns else None
+
+    if irr_wd is not None and irr_swd is not None:
+        irr_wd = np.nan_to_num(irr_wd, nan=0.0)
+        irr_swd = np.nan_to_num(irr_swd, nan=0.0)
+        denom = irr_wd + irr_swd + cw_norm
+        with np.errstate(invalid='ignore', divide='ignore'):
+            irr_gw_frac = np.where(denom > 0, irr_wd / denom, 1.0)
+        irr_gw_frac = np.clip(irr_gw_frac, 0, 1)
+        # Force 100% GW where canal-weighted streamflow is zero
         if zero_sw_mask is not None:
-            gw_frac[zero_sw_mask] = 1.0
-        irr_gw = irr * gw_frac
+            irr_gw_frac[zero_sw_mask] = 1.0
+        irr_gw = irr * irr_gw_frac
         irr_sw = irr - irr_gw
     else:
         irr_gw = irr.copy()
         irr_sw = np.zeros_like(irr)
 
-    # ---- GW / SW split of non-irrigation ----
-    # Prefer HarDWR non-irrigation SW rights density (temporally varying)
-    # over static canal density when available.
-    nonirr_sw_dens = year_df['nonirr_sw_rights_density'].values \
+    # ---- GW / SW split of non-irrigation (density-ratio + canal boost) ----
+    nonirr_wd = year_df['nonirr_well_density'].values \
+        if 'nonirr_well_density' in year_df.columns else None
+    nonirr_swd = year_df['nonirr_sw_rights_density'].values \
         if 'nonirr_sw_rights_density' in year_df.columns else None
-    canal_dens = year_df['canal_density'].values \
-        if 'canal_density' in year_df.columns else None
-    if nonirr_sw_dens is not None:
-        sw_frac = compute_sw_fraction(nonirr_sw_dens, raster_shape, valid_mask)
-        # Force zero SW where streamflow is zero
+
+    if nonirr_wd is not None and nonirr_swd is not None:
+        nonirr_wd = np.nan_to_num(nonirr_wd, nan=0.0)
+        nonirr_swd = np.nan_to_num(nonirr_swd, nan=0.0)
+        denom = nonirr_wd + nonirr_swd + cw_norm
+        with np.errstate(invalid='ignore', divide='ignore'):
+            nonirr_gw_frac = np.where(denom > 0, nonirr_wd / denom, 1.0)
+        nonirr_gw_frac = np.clip(nonirr_gw_frac, 0, 1)
+        # Force 100% GW where canal-weighted streamflow is zero
         if zero_sw_mask is not None:
-            sw_frac[zero_sw_mask] = 0.0
-        nonirr_sw = nonirr * sw_frac
-        nonirr_gw = nonirr - nonirr_sw
-    elif canal_dens is not None:
-        sw_frac = compute_sw_fraction(canal_dens, raster_shape, valid_mask)
-        if zero_sw_mask is not None:
-            sw_frac[zero_sw_mask] = 0.0
-        nonirr_sw = nonirr * sw_frac
-        nonirr_gw = nonirr - nonirr_sw
+            nonirr_gw_frac[zero_sw_mask] = 1.0
+        nonirr_gw = nonirr * nonirr_gw_frac
+        nonirr_sw = nonirr - nonirr_gw
     else:
         nonirr_gw = nonirr.copy()
         nonirr_sw = np.zeros_like(nonirr)
@@ -351,4 +336,91 @@ def partition_predictions(
         'Non_Irrigation_SW':  nonirr_sw,
         'Total_GW':           irr_gw + nonirr_gw,
         'Total_SW':           irr_sw + nonirr_sw,
+    }
+
+
+# Default λ values for SW capture index (meters)
+LAMBDA_LOWER = 5.0    # conservative: only very shallow connections
+LAMBDA_CENTRAL = 10.0  # moderate: typical western US alluvial aquifers
+LAMBDA_UPPER = 20.0    # liberal: deeper basin-fill connections
+
+
+def compute_sw_capture_index(
+        total_gw: np.ndarray,
+        sigma_gw: np.ndarray | None,
+        wtd_m: np.ndarray,
+        cw_streamflow: np.ndarray,
+        raster_shape: tuple,
+        valid_mask: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Compute the Surface Water Capture Index per pixel.
+
+    Estimates what fraction of GW pumping depletes surface water,
+    based on hydraulic connectivity (exponential decay with water table
+    depth) and surface water availability (focal-max normalized
+    canal-weighted streamflow).
+
+    ``capture_fraction = exp(-wtd / λ) × cw_norm``
+
+    Three λ values (5, 10, 20 m) produce lower/central/upper bounds.
+    Volume bounds optionally incorporate Total_GW uncertainty (σ).
+
+    Args:
+        total_gw: 1-D array of Total_GW withdrawal (mm) for valid pixels.
+        sigma_gw: 1-D array of σ_total for Total_GW (mm), or None.
+        wtd_m: 1-D array of water table depth (m) for valid pixels.
+        cw_streamflow: 1-D array of canal-weighted streamflow (mm) for
+            valid pixels.
+        raster_shape: (rows, cols) of the full raster grid.
+        valid_mask: Boolean mask of valid pixels (ravelled).
+
+    Returns:
+        dict with keys:
+            ``Capture_Fraction_Lower``, ``Capture_Fraction_Central``,
+            ``Capture_Fraction_Upper`` — dimensionless [0, 1]
+            ``SW_Capture_Lower``, ``SW_Capture_Central``,
+            ``SW_Capture_Upper`` — volume in mm
+
+    References:
+        Condon & Maxwell (2019), de Graaf et al. (2019),
+        Barlow & Leake (2012).
+    """
+    # Focal-max normalized canal-weighted streamflow [0, 1]
+    cw_norm = compute_sw_fraction(cw_streamflow, raster_shape, valid_mask)
+
+    # Water table depth — ensure non-negative
+    wtd = np.clip(np.nan_to_num(wtd_m, nan=0.0), 0, None)
+
+    # Connectivity at three λ values
+    conn_lower = np.exp(-wtd / LAMBDA_LOWER)
+    conn_central = np.exp(-wtd / LAMBDA_CENTRAL)
+    conn_upper = np.exp(-wtd / LAMBDA_UPPER)
+
+    # Capture fraction = connectivity × SW availability
+    cf_lower = conn_lower * cw_norm
+    cf_central = conn_central * cw_norm
+    cf_upper = conn_upper * cw_norm
+
+    # Volume of SW captured (mm)
+    gw = np.maximum(np.nan_to_num(total_gw, nan=0.0), 0)
+
+    if sigma_gw is not None:
+        sigma = np.maximum(np.nan_to_num(sigma_gw, nan=0.0), 0)
+        gw_lower = np.maximum(gw - 1.96 * sigma, 0)
+        gw_upper = gw + 1.96 * sigma
+    else:
+        gw_lower = gw
+        gw_upper = gw
+
+    vol_lower = gw_lower * cf_lower
+    vol_central = gw * cf_central
+    vol_upper = gw_upper * cf_upper
+
+    return {
+        'Capture_Fraction_Lower': cf_lower,
+        'Capture_Fraction_Central': cf_central,
+        'Capture_Fraction_Upper': cf_upper,
+        'SW_Capture_Lower': vol_lower,
+        'SW_Capture_Central': vol_central,
+        'SW_Capture_Upper': vol_upper,
     }

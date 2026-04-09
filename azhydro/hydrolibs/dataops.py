@@ -1235,6 +1235,8 @@ def create_az_data_parquet(
             'Irr_Capacity_Fraction',
             'Irr_SW_Rights_Density',
             'NonIrr_SW_Rights_Density',
+            'Well_Density_Irrigation',
+            'Well_Density_NonIrrigation',
         ]
         # Static raster: SW access year (earliest irrigation SW priority
         # date per pixel from HarDWR).  Loaded once and reused per year.
@@ -1244,6 +1246,15 @@ def create_az_data_parquet(
             sw_access_year_arr = read_raster_as_arr(
                 sw_access_year_file, get_file=False,
             ).ravel()
+
+        # Static raster: water table depth (Ma et al., 2026).
+        # Loaded once and reused per year.
+        wtd_file = os.path.join(input_file_dir, 'WTD.tif')
+        wtd_arr = None
+        if os.path.exists(wtd_file):
+            wtd_arr = read_raster_as_arr(wtd_file, get_file=False).ravel()
+            # NaN WTD → large depth (negligible connectivity in capture index)
+            wtd_arr = np.where(np.isfinite(wtd_arr), wtd_arr, 999.0)
         for year in range(start_year, end_year + 1):
             df = pd.DataFrame()
             if year not in exclude_years:
@@ -1297,6 +1308,12 @@ def create_az_data_parquet(
                             # rights (irr + non-irr, excl. environmental)
                             irr_rd = df.get('irr_sw_rights_density', 0)
                             df['sw_rights_density'] = irr_rd + raster_arr
+                        elif var_name == 'Well_Density_Irrigation':
+                            raster_arr[np.isnan(raster_arr)] = 0
+                            df['irr_well_density'] = raster_arr
+                        elif var_name == 'Well_Density_NonIrrigation':
+                            raster_arr[np.isnan(raster_arr)] = 0
+                            df['nonirr_well_density'] = raster_arr
                         elif var_name == 'GW':
                             raster_arr[np.isnan(raster_arr)] = 0
                         else:
@@ -1311,6 +1328,8 @@ def create_az_data_parquet(
                 df['Year'] = year
                 if sw_access_year_arr is not None:
                     df['sw_access_year'] = sw_access_year_arr
+                if wtd_arr is not None:
+                    df['wtd_m'] = wtd_arr
                 data_df_parts.append(df)
         data_df = pd.concat(data_df_parts, ignore_index=True) if data_df_parts else pd.DataFrame()
 

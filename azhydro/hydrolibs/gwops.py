@@ -587,6 +587,8 @@ def create_well_density_raster(
         well_registry_file: str,
         output_dir: str,
         water_use: str | None = None,
+        water_use_exclude: bool = False,
+        output_prefix: str = 'Well_Density',
         xres: float = 2000,
         yres: float = 2000,
         start_year: int = 1896,
@@ -604,8 +606,16 @@ def create_well_density_raster(
     Args:
         well_registry_file (str): Path to the ADWR Well Registry shapefile.
         output_dir (str): Output directory for the well density rasters.
-        water_use (str or None): Filter wells by WATER_USE attribute.
-            E.g. 'IRRIGATION'. Set None to include all wells.
+        water_use (str or None): Filter wells by WATER_USE attribute using
+            substring matching (``str.contains``).  E.g. ``'IRRIGATION'``
+            matches ``'IRRIGATION'``, ``'IRRIGATION, DOMESTIC'``, etc.
+            Set None to include all consumptive wells.
+        water_use_exclude (bool): If True, **exclude** wells matching
+            *water_use* instead of keeping them.  E.g.
+            ``water_use='IRRIGATION', water_use_exclude=True`` keeps
+            only non-irrigation consumptive wells.
+        output_prefix (str): Filename prefix for the output rasters
+            (default ``'Well_Density'`` → ``Well_Density_YYYY.tif``).
         xres (float): X-resolution in map units. Defaults to 2000.
         yres (float): Y-resolution in map units. Defaults to 2000.
         start_year (int): Start year. Defaults to 1896.
@@ -616,9 +626,9 @@ def create_well_density_raster(
         str: Path to the base well density raster.
     """
 
-    base_raster = os.path.join(output_dir, f'Well_Density_{start_year}.tif')
+    base_raster = os.path.join(output_dir, f'{output_prefix}_{start_year}.tif')
     if already_created:
-        logger.info('Well density rasters already created, skipping...')
+        logger.info(f'{output_prefix} rasters already created, skipping...')
         return base_raster
 
     makedirs(output_dir)
@@ -629,23 +639,24 @@ def create_well_density_raster(
     has_use = gdf['WATER_USE'].notna()
     gdf = gdf[has_use & ~gdf['WATER_USE'].str.contains(pattern, na=False)]
     if water_use:
-        gdf = gdf[gdf['WATER_USE'] == water_use]
+        mask = gdf['WATER_USE'].str.contains(water_use, na=False)
+        gdf = gdf[~mask] if water_use_exclude else gdf[mask]
     gdf = gdf.copy()
 
     well_start_year = derive_well_start_year(gdf, default_year=start_year)
     gdf['_count'] = 1.0
 
-    tmp_dir = os.path.join(output_dir, '_well_temp')
+    tmp_dir = os.path.join(output_dir, f'_{output_prefix}_temp')
     makedirs(tmp_dir)
     tmp_shp = os.path.join(tmp_dir, 'wells.shp')
 
-    logger.info(f'Creating well density rasters ({start_year}-{end_year}) '
-                f'from {len(gdf)} consumptive wells...')
+    logger.info(f'Creating {output_prefix} rasters ({start_year}-{end_year}) '
+                f'from {len(gdf)} wells...')
 
     prev_raster = None
     prev_mask = np.zeros(len(gdf), dtype=bool)
     for year in range(start_year, end_year + 1):
-        out_file = os.path.join(output_dir, f'Well_Density_{year}.tif')
+        out_file = os.path.join(output_dir, f'{output_prefix}_{year}.tif')
         active = well_start_year <= year
 
         # Skip rasterization if the active set hasn't changed
@@ -666,7 +677,7 @@ def create_well_density_raster(
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    logger.info(f'Created well density rasters ({start_year}-{end_year}) in {output_dir}')
+    logger.info(f'Created {output_prefix} rasters ({start_year}-{end_year}) in {output_dir}')
     return base_raster
 
 
@@ -1172,3 +1183,145 @@ def create_nonirr_sw_rights_density_raster(
     logger.info(f'Created non-irr Irr SW rights density rasters '
                 f'({start_year}-{end_year})')
     return base_raster
+
+
+def create_wtd_raster(
+        wtd_dir: str,
+        az_boundary_file: str,
+        output_dir: str,
+        ref_raster: str,
+        states: tuple[str, ...] = ('arizona', 'nevada', 'california'),
+        already_created: bool = False,
+) -> str:
+    """Create a 2 km water table depth (WTD) raster for Arizona.
+
+    Mosaics state-level WTD rasters from Ma et al. (2026), reprojects
+    from Lambert Conformal Conic to match the reference raster grid
+    (EPSG:26912, 2 km), and resamples using mean aggregation.  The
+    reference raster's bounding box defines the spatial extent; the
+    downstream reprojection step handles final alignment and masking.
+
+    Args:
+        wtd_dir: Directory containing ``wtd_{state}.tif`` files.
+        az_boundary_file: Path to the reprojected AZ boundary file.
+        output_dir: Output directory for the resampled WTD raster.
+        ref_raster: Reference raster for target CRS, transform, and shape.
+        states: Tuple of state names to mosaic (default: AZ, NV, CA
+            to cover the full AZ bounding box at borders).
+        already_created: If True, skip creation.
+
+    Returns:
+        str: Path to the output WTD raster.
+
+    Reference:
+        Ma, Y., Condon, L. E., Koch, J., Bennett, A., Defnet, A.,
+        Tijerina-Kreuzer, D., Melchior, P., & Maxwell, R. M. (2026).
+        High resolution US water table depth estimates reveal quantity
+        of accessible groundwater. Communications Earth & Environment,
+        7(1), 45. https://doi.org/10.1038/s43247-025-03094-3
+    """
+    import rasterio as rio
+    from rasterio.merge import merge
+    from rasterio.warp import Resampling, reproject
+
+    out_file = os.path.join(output_dir, 'WTD.tif')
+    if already_created and os.path.exists(out_file):
+        logger.info('WTD raster already created, skipping...')
+        return out_file
+
+    makedirs(output_dir)
+
+    # ---- Compute AZ bounding box in source CRS ----
+    # Clip NV/CA rasters to AZ extent to avoid loading full state tiles.
+    src_files = []
+    for state in states:
+        f = os.path.join(wtd_dir, f'wtd_{state}.tif')
+        if os.path.exists(f):
+            src_files.append(rio.open(f))
+        else:
+            logger.warning(f'WTD file not found: {f}')
+    if not src_files:
+        logger.warning('No WTD files found — skipping.')
+        return out_file
+
+    mosaic_crs = src_files[0].crs
+
+    # Get AZ bounding box from the reference raster and transform
+    # to the source CRS for spatial clipping during merge.
+    from rasterio.warp import transform_bounds
+    with rio.open(ref_raster) as ref:
+        ref_crs = ref.crs
+        ref_bounds = ref.bounds
+    az_bounds_src = transform_bounds(ref_crs, mosaic_crs,
+                                     *ref_bounds)
+
+    # Use nodata=np.nan to convert the source nodata sentinel
+    # (float32 max ≈ 3.4e38) to NaN during merge, avoiding
+    # float64→float32 precision issues that produce all-zero output.
+    # bounds= clips to AZ bounding box, reducing memory.
+    mosaic, mosaic_transform = merge(src_files, method='first',
+                                     nodata=np.nan,
+                                     bounds=az_bounds_src)
+    for f in src_files:
+        f.close()
+
+    mosaic = mosaic[0].astype(np.float32)
+
+    logger.info(f'Mosaicked {len(states)} WTD state rasters '
+                f'(clipped to AZ bbox): shape={mosaic.shape}, '
+                f'valid pixels={np.isfinite(mosaic).sum():,}')
+
+    # ---- Reproject and resample to match reference raster ----
+    with rio.open(ref_raster) as ref:
+        dst_crs = ref.crs
+        dst_transform = ref.transform
+        dst_shape = (ref.height, ref.width)
+
+    dst_arr = np.full(dst_shape, np.nan, dtype=np.float32)
+    reproject(
+        source=mosaic,
+        destination=dst_arr,
+        src_transform=mosaic_transform,
+        src_crs=mosaic_crs,
+        dst_transform=dst_transform,
+        dst_crs=dst_crs,
+        resampling=Resampling.average,  # mean aggregation
+        src_nodata=np.nan,
+        dst_nodata=np.nan,
+    )
+    del mosaic
+
+    # ---- Gap-fill NaN pixels at 2 km (nearest neighbor) ----
+    # The Ma et al. WTD dataset covers only the US, so pixels near the
+    # Mexico border have no data.  Fill from the nearest valid pixel.
+    from scipy.ndimage import distance_transform_edt
+    nan_mask = ~np.isfinite(dst_arr)
+    n_valid = np.isfinite(dst_arr).sum()
+    n_gaps = nan_mask.sum()
+    if n_gaps > 0 and n_valid > 0:
+        _, nearest_idx = distance_transform_edt(
+            nan_mask, return_distances=True, return_indices=True,
+        )
+        dst_arr[nan_mask] = dst_arr[
+            nearest_idx[0][nan_mask],
+            nearest_idx[1][nan_mask],
+        ]
+        logger.info(f'  Gap-filled {n_gaps:,} NaN pixels at 2 km '
+                    f'using nearest-neighbor interpolation')
+
+    valid = np.isfinite(dst_arr)
+    logger.info(f'WTD resampled to 2 km: shape={dst_shape}, '
+                f'valid={valid.sum():,} pixels, '
+                f'range=[{np.nanmin(dst_arr[valid]):.1f}, '
+                f'{np.nanmax(dst_arr[valid]):.1f}] m')
+
+    # ---- Write output ----
+    with rio.open(ref_raster) as ref:
+        profile = ref.profile.copy()
+    profile.update(count=1, dtype='float32', nodata=np.nan)
+    with rio.open(out_file, 'w', **profile) as dst:
+        dst.write(dst_arr, 1)
+        dst.set_band_description(1, 'water_table_depth_m')
+
+    logger.info(f'WTD raster saved to {out_file}')
+    return out_file

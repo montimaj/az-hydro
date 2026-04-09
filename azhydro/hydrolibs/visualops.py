@@ -3072,32 +3072,24 @@ def create_graphical_abstract(
         vmin=vmin, vmax=vmax,
     )
 
-    # Draw all basin boundaries
-    basins_gdf.boundary.plot(ax=ax_map, color='#2C3E50', linewidth=0.5)
-
-    # Highlight AMA/INA basins with thicker boundary and semi-transparent fill
     ama_ina = get_ama_ina_basin_names()
     name_col = 'BASIN_NAME' if 'BASIN_NAME' in basins_gdf.columns else basins_gdf.columns[0]
-    ama_ina_gdf = basins_gdf[basins_gdf[name_col].isin(ama_ina)]
-    ama_ina_gdf.boundary.plot(ax=ax_map, color='black', linewidth=1.5)
+    _overlay_boundaries(ax_map, basins_gdf, ama_ina, name_col,
+                        label_fontsize=6, label_all=True)
 
-    # Label AMA/INA basins
-    for _, row in ama_ina_gdf.iterrows():
-        bname = row[name_col]
-        centroid = row.geometry.centroid
-        short_name = bname.replace(' AMA', '').replace(' INA', '')
-        ax_map.annotate(
-            short_name, (centroid.x, centroid.y),
-            fontsize=6, fontweight='bold', ha='center', va='center',
-            color='black',
-            bbox=dict(boxstyle='round,pad=0.15', fc='white', alpha=0.8, lw=0),
-        )
+    cbar = fig.colorbar(im, ax=ax_map, shrink=0.45, pad=0.08, extend='both')
+    cbar_fontsize = 10
+    cbar.set_label('Depth (mm)', fontweight='bold', fontsize=cbar_fontsize)
+    cbar.ax.tick_params(labelsize=cbar_fontsize)
+    # Secondary unit (ft) on the opposite side of the colorbar
+    cb_ax2 = cbar.ax.twinx()
+    cb_lo, cb_hi = cbar.ax.get_ylim()
+    cb_ax2.set_ylim(cb_lo * _MM_TO_FT, cb_hi * _MM_TO_FT)
+    cb_ax2.set_ylabel('Depth (ft)', fontsize=cbar_fontsize, fontweight='bold')
+    cb_ax2.tick_params(labelsize=cbar_fontsize)
 
-    cbar = fig.colorbar(im, ax=ax_map, shrink=0.75, pad=0.02, extend='both')
-    cbar.set_label('Mean Annual Withdrawal Depth (mm)', fontweight='bold')
-    ax_map.axis('off')
     ax_map.set_title(
-        f'(a) Mean Annual Predicted Withdrawal ({start_year}–{end_year})',
+        f'(a) Mean Annual Predicted Withdrawal ({start_year}\u2013{end_year})',
         fontweight='bold', fontsize=13,
     )
     # ---- Panel B: Time series (top-right) ----
@@ -3204,8 +3196,14 @@ def _overlay_boundaries(
     name_col: str,
     *,
     label_fontsize: float = 5.5,
+    label_all: bool = False,
 ) -> None:
-    """Draw basin boundaries and highlight AMA/INA basins on a map axis."""
+    """Draw basin boundaries and label basins on a map axis.
+
+    Args:
+        label_all: If True, label all basins (small font for non-AMA/INA).
+            If False (default), label only AMA/INA basins.
+    """
     basins_gdf.boundary.plot(ax=ax, color='#555555', linewidth=0.4)
     ama_ina_gdf = basins_gdf[basins_gdf[name_col].isin(ama_ina_names)]
     ama_ina_gdf.boundary.plot(ax=ax, color='black', linewidth=1.2)
@@ -3219,6 +3217,18 @@ def _overlay_boundaries(
             bbox=dict(boxstyle='round,pad=0.12', fc='white',
                       alpha=0.8, lw=0),
         )
+    if label_all:
+        other_gdf = basins_gdf[~basins_gdf[name_col].isin(ama_ina_names)]
+        for _, row in other_gdf.iterrows():
+            centroid = row.geometry.centroid
+            short = row[name_col].title()
+            ax.annotate(
+                short, (centroid.x, centroid.y),
+                fontsize=max(label_fontsize - 1.5, 3.5), fontstyle='italic',
+                ha='center', va='center', color='#333333',
+                bbox=dict(boxstyle='round,pad=0.08', fc='white',
+                          alpha=0.6, lw=0),
+            )
     ax.axis('off')
 
 
@@ -3407,19 +3417,37 @@ def create_era_raster_maps(
                 interpolation='nearest',
             )
 
-        _overlay_boundaries(ax, basins_gdf, ama_ina, name_col)
+        _overlay_boundaries(ax, basins_gdf, ama_ina, name_col,
+                            label_all=True)
         ax.set_title(
             f'{panel_labels[idx]} {era} ({y1}–{y2})',
             fontsize=12, fontweight='bold',
         )
 
-    # Shared colorbar
+    # Shared colorbar with dual units
+    era_cbar_fontsize = 10
     cbar = fig.colorbar(
-        im, ax=axes_flat, shrink=0.6, pad=0.02,
+        im, ax=axes_flat, shrink=0.5, pad=0.06,
         orientation='horizontal', aspect=40, extend='both',
     )
-    cbar.set_label(unit_label, fontsize=12, fontweight='bold')
-    cbar.ax.tick_params(labelsize=10)
+    cbar.set_label(unit_label, fontsize=era_cbar_fontsize, fontweight='bold')
+    cbar.ax.tick_params(labelsize=era_cbar_fontsize)
+
+    # Add secondary unit axis on top of the colorbar
+    if 'mm' in unit_label.lower():
+        cb_ax2 = cbar.ax.twiny()
+        cb_lo, cb_hi = cbar.ax.get_xlim()
+        cb_ax2.set_xlim(cb_lo * _MM_TO_FT, cb_hi * _MM_TO_FT)
+        cb_ax2.set_xlabel('Depth (ft)', fontsize=era_cbar_fontsize,
+                          fontweight='bold')
+        cb_ax2.tick_params(labelsize=era_cbar_fontsize)
+    elif 'm$^3$' in unit_label or 'm3' in unit_label.lower():
+        cb_ax2 = cbar.ax.twiny()
+        cb_lo, cb_hi = cbar.ax.get_xlim()
+        cb_ax2.set_xlim(cb_lo / _AF_TO_M3, cb_hi / _AF_TO_M3)
+        cb_ax2.set_xlabel('Volume (acre-ft)', fontsize=era_cbar_fontsize,
+                          fontweight='bold')
+        cb_ax2.tick_params(labelsize=era_cbar_fontsize)
 
     if out_filename is None:
         slug = title.replace(' ', '_').replace('/', '_')
@@ -3505,7 +3533,10 @@ def create_actual_vs_predicted_maps(
                 continue
             with rio.open(os.path.join(directory, fname)) as src:
                 arr = src.read(1).astype(np.float64)
+                nd = src.nodata
             mask = ~np.isnan(arr) & (arr != 0)
+            if nd is not None:
+                mask &= arr != nd
             total[mask] += arr[mask]
             valid_count[mask] += 1
         with np.errstate(invalid='ignore'):
@@ -3582,20 +3613,60 @@ def create_actual_vs_predicted_maps(
     else:
         d_abs = 1.0
 
-    # ---- Create 1×3 figure ----
-    fig, axes = plt.subplots(
-        1, 3, figsize=(21, 7), constrained_layout=True,
-    )
-    fig.suptitle(
-        f'{title} — Actual vs Predicted ({start_year}–{end_year} Mean)',
-        fontsize=15, fontweight='bold',
-    )
-
     # Build AZ-interior gray underlay images
-    az_gray_actual = np.where(az_mask_actual, 0.82, np.nan)  # light gray inside AZ
+    az_gray_actual = np.where(az_mask_actual, 0.82, np.nan)
     az_gray_pred = np.where(az_mask_pred, 0.82, np.nan)
 
-    panels = [
+    # ---- Helper: create one 1×3 figure ----
+    def _make_figure(data_sets, suptitle, primary_label, secondary_label,
+                     secondary_factor, out_file, v_lo, v_hi, d_lo, d_hi):
+        fig, axes = plt.subplots(
+            1, 3, figsize=(21, 7), constrained_layout=True,
+        )
+        fig.suptitle(suptitle, fontsize=15, fontweight='bold')
+
+        for ax, (panel_title, data, ext, cm, lo, hi, az_gray) in zip(
+                axes, data_sets):
+            ax.set_facecolor('white')
+            ax.imshow(
+                az_gray, extent=ext, origin='upper',
+                cmap='Greys', vmin=0, vmax=1,
+                interpolation='nearest', zorder=0,
+            )
+            im = ax.imshow(
+                data, extent=ext, origin='upper',
+                cmap=cm, vmin=lo, vmax=hi,
+                interpolation='nearest', zorder=1,
+            )
+            _overlay_boundaries(ax, basins_gdf, ama_ina, name_col,
+                                label_all=True)
+            ax.set_title(panel_title, fontsize=12, fontweight='bold')
+
+            is_diff = 'Difference' in panel_title
+            p_label = f'\u0394 {primary_label}' if is_diff else primary_label
+            avp_fontsize = 10
+            cb = fig.colorbar(im, ax=ax, shrink=0.6, pad=0.04,
+                              extend='both')
+            cb.set_label(p_label, fontsize=avp_fontsize, fontweight='bold')
+            cb.ax.tick_params(labelsize=avp_fontsize)
+            # Add secondary unit ticks on the opposite side
+            s_label = (f'\u0394 {secondary_label}' if is_diff
+                       else secondary_label)
+            cb_ax2 = cb.ax.twinx()
+            cb_lo, cb_hi = cb.ax.get_ylim()
+            cb_ax2.set_ylim(cb_lo * secondary_factor,
+                            cb_hi * secondary_factor)
+            cb_ax2.set_ylabel(s_label, fontsize=avp_fontsize,
+                              fontweight='bold')
+            cb_ax2.tick_params(labelsize=avp_fontsize)
+
+        out_path = os.path.join(output_dir, out_file)
+        fig.savefig(out_path, dpi=600, bbox_inches='tight')
+        plt.close(fig)
+        logger.info(f'Actual vs predicted maps saved to {out_path}')
+
+    # ---- Depth maps (mm / ft) ----
+    depth_panels = [
         ('(a) Actual (Metered)', actual_masked, extent_actual,
          cmap, v_min, v_max, az_gray_actual),
         ('(b) Predicted (ML)', pred_masked, extent_pred,
@@ -3603,30 +3674,55 @@ def create_actual_vs_predicted_maps(
         ('(c) Difference (Predicted \u2212 Actual)', diff_masked, extent_actual,
          diff_cmap, -d_abs, d_abs, az_gray_actual),
     ]
+    _make_figure(
+        depth_panels,
+        f'{title} \u2014 Actual vs Predicted Depth ({start_year}\u2013{end_year} Mean)',
+        'Depth (mm)', 'Depth (ft)', _MM_TO_FT,
+        out_filename,
+        v_min, v_max, -d_abs, d_abs,
+    )
 
-    for ax, (panel_title, data, ext, cm, lo, hi, az_gray) in zip(axes, panels):
-        ax.set_facecolor('white')  # outside AZ = white
-        # Draw gray AZ interior (no-meter areas visible as gray)
-        ax.imshow(
-            az_gray, extent=ext, origin='upper',
-            cmap='Greys', vmin=0, vmax=1,
-            interpolation='nearest', zorder=0,
-        )
-        im = ax.imshow(
-            data, extent=ext, origin='upper',
-            cmap=cm, vmin=lo, vmax=hi,
-            interpolation='nearest', zorder=1,
-        )
-        _overlay_boundaries(ax, basins_gdf, ama_ina, name_col)
-        ax.set_title(panel_title, fontsize=12, fontweight='bold')
+    # ---- Volume maps (m³ / AF) ----
+    # Convert depth (mm) to volume (m³) per pixel
+    # Pixel area from the raster resolution
+    with rio.open(os.path.join(predicted_dir, predicted_files[0])) as src:
+        px = abs(src.transform.a)
+        py = abs(src.transform.e)
+    pixel_area_m2 = px * py
+    mm_to_m3 = pixel_area_m2 / 1000
+    m3_to_af = 1 / _AF_TO_M3
 
-        label = f'\u0394 {unit_label}' if 'Difference' in panel_title else unit_label
-        fig.colorbar(im, ax=ax, shrink=0.75, pad=0.02, label=label, extend='both')
+    actual_vol = np.ma.array(actual_masked * mm_to_m3,
+                             mask=actual_masked.mask)
+    pred_vol = np.ma.array(pred_masked * mm_to_m3,
+                           mask=pred_masked.mask)
+    diff_vol = np.ma.array(diff_masked * mm_to_m3,
+                           mask=diff_masked.mask)
 
-    out_path = os.path.join(output_dir, out_filename)
-    fig.savefig(out_path, dpi=600, bbox_inches='tight')
-    plt.close(fig)
-    logger.info(f'Actual vs predicted maps saved to {out_path}')
+    vol_vals = np.concatenate([actual_vol.compressed(), pred_vol.compressed()])
+    vol_min = float(np.nanpercentile(vol_vals, 2))
+    vol_max = float(np.nanpercentile(vol_vals, 98))
+    dvol_vals = diff_vol.compressed()
+    dvol_abs = (max(abs(np.nanpercentile(dvol_vals, 2)),
+                    abs(np.nanpercentile(dvol_vals, 98)))
+                if len(dvol_vals) > 0 else 1.0)
+
+    vol_panels = [
+        ('(a) Actual (Metered)', actual_vol, extent_actual,
+         cmap, vol_min, vol_max, az_gray_actual),
+        ('(b) Predicted (ML)', pred_vol, extent_pred,
+         cmap, vol_min, vol_max, az_gray_pred),
+        ('(c) Difference (Predicted \u2212 Actual)', diff_vol, extent_actual,
+         diff_cmap, -dvol_abs, dvol_abs, az_gray_actual),
+    ]
+    vol_filename = out_filename.replace('.png', '_Volume.png')
+    _make_figure(
+        vol_panels,
+        f'{title} \u2014 Actual vs Predicted Volume ({start_year}\u2013{end_year} Mean)',
+        r'Volume (m$^3$)', 'Volume (AF)', m3_to_af,
+        vol_filename,
+        vol_min, vol_max, -dvol_abs, dvol_abs,
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════════════

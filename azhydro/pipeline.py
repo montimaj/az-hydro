@@ -47,6 +47,7 @@ import hydrolibs.streamflowops as streamflowops
 import hydrolibs.uncertaintyops as uncops
 import hydrolibs.visualops as vizops
 import hydrolibs.wellops as wellops
+import rasterio
 from hydrolibs.rasterops import read_raster_as_arr, write_raster
 from hydrolibs.sysops import makedirs
 
@@ -139,6 +140,8 @@ DROP_ATTRS = (
     'sw_access_year',  # earliest irrigation SW priority year (Part A)
     'irr_sw_rights_density',  # intermediate; combined into sw_rights_density
     'nonirr_sw_rights_density',  # non-irr SW rights density (Part B)
+    'irr_well_density',       # irrigation well count density (partitioning only)
+    'nonirr_well_density',    # non-irrigation well count density (partitioning only)
 )
 
 # # Temporal holdout configurations
@@ -321,6 +324,31 @@ def prepare_data(
         end_year=END_YEAR,
         already_created=skip_basin,
     )
+    # Irrigation well density (wells with WATER_USE containing 'IRRIGATION')
+    gwops.create_well_density_raster(
+        well_reg_file,
+        GEE_MOSAIC_DIR,
+        water_use='IRRIGATION',
+        output_prefix='Well_Density_Irrigation',
+        xres=MOSAIC_RASTER_RES,
+        yres=MOSAIC_RASTER_RES,
+        start_year=START_YEAR,
+        end_year=END_YEAR,
+        already_created=skip_basin,
+    )
+    # Non-irrigation well density (consumptive wells WITHOUT 'IRRIGATION')
+    gwops.create_well_density_raster(
+        well_reg_file,
+        GEE_MOSAIC_DIR,
+        water_use='IRRIGATION',
+        water_use_exclude=True,
+        output_prefix='Well_Density_NonIrrigation',
+        xres=MOSAIC_RASTER_RES,
+        yres=MOSAIC_RASTER_RES,
+        start_year=START_YEAR,
+        end_year=END_YEAR,
+        already_created=skip_basin,
+    )
     gwops.create_irr_capacity_fraction_raster(
         well_reg_file,
         GEE_MOSAIC_DIR,
@@ -347,6 +375,16 @@ def prepare_data(
         pod_shapefile, GEE_MOSAIC_DIR, ref_raster,
         start_year=START_YEAR, end_year=END_YEAR,
         already_created=skip_rights,
+    )
+
+    # Water table depth (Ma et al., 2026) — static raster
+    wtd_dir = os.path.join(VECTOR_DIR, 'wtd_states')
+    gwops.create_wtd_raster(
+        wtd_dir=wtd_dir,
+        az_boundary_file=az_state,
+        output_dir=GEE_MOSAIC_DIR,
+        ref_raster=ref_raster,
+        already_created=load_files or 'wtd' in skip_prep,
     )
 
     # Reproject GEE mosaics to match GW raster grid
@@ -1772,6 +1810,9 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     cat_basin_yearly = {cat: {} for cat in partops.CATEGORIES}
     cat_subbasin_yearly = {cat: {} for cat in partops.CATEGORIES}
 
+    # SW capture index tracking
+    sw_capture_yearly = {}
+
     # Consumptive use tracking dicts
     cu_yearly = {cat: {} for cat in CU_CATEGORIES}
     cu_basin_yearly = {cat: {} for cat in CU_CATEGORIES}
@@ -1835,6 +1876,23 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                 sb_rows.append({'Year': y, 'Subbasin': sb, **metrics})
         if sb_rows:
             pd.DataFrame(sb_rows).to_csv(_subbasin_csv, index=False)
+        # SW Capture Index time series
+        if sw_capture_yearly:
+            cap_rows = []
+            years_present = sorted(
+                next(iter(sw_capture_yearly.values())).keys()
+            ) if sw_capture_yearly else []
+            for y in years_present:
+                row = {'Year': y}
+                for key, ydict in sw_capture_yearly.items():
+                    row[f'{key}_AF'] = ydict.get(y, 0)
+                cap_rows.append(row)
+            if cap_rows:
+                cap_csv = os.path.join(
+                    prediction_dir, 'SW_Capture', 'SW_Capture_Time_Series.csv')
+                makedirs(os.path.dirname(cap_csv))
+                pd.DataFrame(cap_rows).to_csv(cap_csv, index=False)
+                logger.info('SW capture time series saved to %s', cap_csv)
         logger.info('Annual summaries saved to %s', _summary_dir)
 
     def _load_yearly_summary() -> bool:
@@ -2045,6 +2103,79 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                 cu_mm, cu_raster_dirs[cu_cat], cu_cat, year,
                 ref_raster_file, mm_to_ft, mm_to_m3, m3_to_af,
             )
+
+        # ---- Surface Water Capture Index ----
+        # Quantifies how much GW pumping depletes surface water,
+        # based on water table depth × canal-weighted streamflow.
+        if 'wtd_m' in year_df.columns:
+            wtd_vals = year_df['wtd_m'].values
+            cw_sf_vals = (year_df['canal_weighted_streamflow_mm'].values
+                          if 'canal_weighted_streamflow_mm' in year_df.columns
+                          else np.zeros(len(wtd_vals)))
+
+            # Compute capture for Total GW, Irrigation GW, Non-Irrigation GW
+            cap_categories = {
+                'Total_GW': cat_predictions['Total_GW'],
+                'Irrigation_GW': cat_predictions['Irrigation_GW'],
+                'Non_Irrigation_GW': cat_predictions['Non_Irrigation_GW'],
+            }
+            sw_cap_dir = os.path.join(prediction_dir, 'SW_Capture')
+
+            for cap_cat, gw_pred in cap_categories.items():
+                capture = partops.compute_sw_capture_index(
+                    total_gw=gw_pred,
+                    sigma_gw=None,
+                    wtd_m=wtd_vals,
+                    cw_streamflow=cw_sf_vals,
+                    raster_shape=raster_shape,
+                    valid_mask=valid_mask,
+                )
+
+                # Write capture fraction (3-band, dimensionless)
+                frac_dir = os.path.join(sw_cap_dir, f'{cap_cat}_Capture_Fraction')
+                makedirs(frac_dir)
+                cf_grid = np.stack([
+                    _valid_pixels_to_raster(capture[f'Capture_Fraction_{b}'],
+                                            valid_mask, raster_shape)
+                    for b in ('Lower', 'Central', 'Upper')
+                ])
+                with rasterio.open(ref_raster_file) as ref:
+                    profile = ref.profile.copy()
+                profile.update(count=3, dtype='float32', nodata=np.nan)
+                with rasterio.open(
+                    os.path.join(frac_dir,
+                                 f'{cap_cat}_Capture_Fraction_{year}.tif'),
+                    'w', **profile,
+                ) as dst:
+                    for bi in range(3):
+                        dst.write(cf_grid[bi], bi + 1)
+                    dst.set_band_description(1, 'lower_lambda5m')
+                    dst.set_band_description(2, 'central_lambda10m')
+                    dst.set_band_description(3, 'upper_lambda20m')
+
+                # Write capture volume in all 4 units (central estimate only)
+                cap_mm = _valid_pixels_to_raster(
+                    capture['SW_Capture_Central'], valid_mask, raster_shape)
+                cap_dirs = {}
+                for unit_key in ('mm', 'ft', 'm3', 'AF'):
+                    d = os.path.join(sw_cap_dir,
+                                     f'{cap_cat}_Capture_Rasters',
+                                     f'Depth_{unit_key}')
+                    makedirs(d)
+                    cap_dirs[unit_key] = d
+                _write_multi_unit_rasters(
+                    cap_mm, cap_dirs, f'{cap_cat}_Capture', year,
+                    ref_raster_file, mm_to_ft, mm_to_m3, m3_to_af,
+                )
+
+                # Track annual totals for time series
+                for key in capture:
+                    ts_key = f'{cap_cat}_{key}'
+                    if ts_key not in sw_capture_yearly:
+                        sw_capture_yearly[ts_key] = {}
+                    vol_af = (float(np.nansum(capture[key]))
+                              * mm_to_m3 * m3_to_af)
+                    sw_capture_yearly[ts_key][year] = vol_af
 
         # AZ-wide annual total (all valid pixels)
         yearly_predictions[year] = _pixel_stats(predictions)
@@ -2293,6 +2424,18 @@ def create_well_package_step() -> None:
             'm3': os.path.join(base, 'Volume_m3'),
             'AF': os.path.join(base, 'Volume_AF'),
         }
+    # SW capture volume rasters (same unit structure as CU)
+    sw_cap_base = os.path.join(prediction_dir, 'SW_Capture')
+    for cap_cat in ('Total_GW_Capture', 'Irrigation_GW_Capture',
+                    'Non_Irrigation_GW_Capture'):
+        base = os.path.join(sw_cap_base, f'{cap_cat}_Rasters')
+        if os.path.isdir(os.path.join(base, 'Depth_mm')):
+            cu_raster_dirs[cap_cat] = {
+                'mm': os.path.join(base, 'Depth_mm'),
+                'ft': os.path.join(base, 'Depth_ft'),
+                'm3': os.path.join(base, 'Volume_m3'),
+                'AF': os.path.join(base, 'Volume_AF'),
+            }
 
     ref_raster_file = os.path.join(PRED_DATA_DIR, f'Predictor_{YEAR_LIST[0]}.tif')
     well_registry_file = os.path.join(
@@ -2386,6 +2529,20 @@ def create_all_raster_maps() -> None:
             cmap='Spectral_r',
         )
 
+    # ── Volume-based categories (use Volume_m3 sub-directory) ─────────
+    for folder, title in depth_categories:
+        raster_dir = os.path.join(prediction_dir, folder, 'Volume_m3')
+        if not os.path.isdir(raster_dir):
+            continue
+        vizops.create_era_raster_maps(
+            raster_dir=raster_dir,
+            basin_shp=AZ_GW_BASIN,
+            output_dir=maps_dir,
+            title=f'{title} (Volume)',
+            unit_label=r'Volume (m$^3$)',
+            cmap='Spectral_r',
+        )
+
     # ── OOD Rasters (probability, 0 = in-distribution, 1 = OOD) ─────
     ood_dir = os.path.join(prediction_dir, 'OOD_Rasters')
     if os.path.isdir(ood_dir):
@@ -2469,6 +2626,36 @@ def create_all_raster_maps() -> None:
             start_year=YEAR_LIST[0],
             end_year=YEAR_LIST[-1],
         )
+
+    # ── SW Capture Index era maps ───────────────────────────────────
+    sw_cap_base = os.path.join(prediction_dir, 'SW_Capture')
+    for cap_cat in ('Total_GW', 'Irrigation_GW', 'Non_Irrigation_GW'):
+        pretty = cap_cat.replace('_', ' ')
+        # Capture fraction (band 2 = central λ=10m)
+        frac_dir = os.path.join(sw_cap_base, f'{cap_cat}_Capture_Fraction')
+        if os.path.isdir(frac_dir):
+            vizops.create_era_raster_maps(
+                raster_dir=frac_dir,
+                basin_shp=AZ_GW_BASIN,
+                output_dir=maps_dir,
+                title=f'{pretty} Capture Fraction (\u03bb=10m)',
+                unit_label='Capture Fraction',
+                cmap='YlOrRd',
+                band=2,
+                mask_nan_only=True,
+            )
+        # Capture depth (mm)
+        depth_dir = os.path.join(sw_cap_base, f'{cap_cat}_Capture_Rasters',
+                                 'Depth_mm')
+        if os.path.isdir(depth_dir):
+            vizops.create_era_raster_maps(
+                raster_dir=depth_dir,
+                basin_shp=AZ_GW_BASIN,
+                output_dir=maps_dir,
+                title=f'{pretty} SW Capture',
+                unit_label='Capture (mm)',
+                cmap='YlOrRd',
+            )
 
     # ── Trend analysis (Mann-Kendall + Sen's slope) ────────────────
     trend_dir = os.path.join(maps_dir, 'Trend_Analysis')
@@ -2825,6 +3012,7 @@ Step 0 sub-steps (use with --skip-prep to skip individual sub-steps):
   gw-rasters    GW volume -> depth -> cropped rasters
   streamflow    Canal density & streamflow rasters
   basin-rasters GW basin, sub-basin & well density rasters
+  wtd           Water table depth raster (Ma et al., 2026)
   reproject     Reproject GEE mosaics to match GW grid
 
 Evaluation sub-steps (use with --skip-eval to skip individual strategies):
@@ -2841,7 +3029,7 @@ UQ sub-steps (use with --skip-uq to skip individual σ components):
   sigma-irr        Skip σ_irr (irrigation fraction uncertainty)
   sigma-lulc       Skip σ_LULC (LULC projection spread)
   sigma-gw         Skip σ_gw (GW fraction snapshot spread)
-  gw-sensitivity   Skip GW fraction ±0.2 sensitivity analysis
+  density-sensitivity   Skip density-ratio partitioning sensitivity (±20%)
   sigma-total      Skip σ_total quadrature, basin σ, visualisations, and raster augmentation
   sigma-cu         Skip σ_CU (consumptive use uncertainty)
 """
@@ -2914,7 +3102,7 @@ def main() -> None:
         help=(
             'Comma-separated UQ sub-steps to skip: '
             'sigma-maca, sigma-model, sigma-irr, sigma-lulc, '
-            'sigma-gw, gw-sensitivity.'
+            'sigma-gw, density-sensitivity.'
         ),
     )
     args = parser.parse_args()
