@@ -1015,7 +1015,7 @@ Key trends:
   demand — predominantly groundwater-sourced outside canal service
   areas — grows faster than irrigation.  Including unaccounted federal
   surface water deliveries (~2.25 MAF), the statewide GW share is
-  ~41 % in 2017, consistent with Arizona's roughly even GW/SW balance.
+  ~41 % in 2017, consistent with ADWR-reported GW/SW shares ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
 - **Total withdrawals** grow from 0.10 MAF (1900) to 4.74 MAF (2024)
   and are projected to reach 5.82 MAF by 2099.  Early growth (1900–1950)
   reflects the build-out of well and canal infrastructure; mid-century
