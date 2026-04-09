@@ -940,7 +940,7 @@ infrastructure.  This is a subset of Arizona's total water supply, which also
 includes Colorado River imports (CAP aqueduct deliveries, Yuma-area
 diversions), reclaimed/effluent water, and other sources not captured by the
 ADWR Well Registry.  ADWR reports total statewide water use of ~7.0 MAF
-(2017), of which irrigated agriculture consumes approximately 74 %
+(2017), of which irrigated agriculture consumes approximately 72 % (as per ADWR 2019 data)
 ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
 
 **Water budget reconciliation (2017):** The model predicts 4.72 MAF vs.
@@ -1003,7 +1003,7 @@ Representative statewide volumes (million acre-feet):
 Key trends:
 - **Irrigation share** declines from ~80 % (1960s–1980s) to ~72 % (2024)
   and continues to ~62 % by 2099 as urbanization increases M&I demand —
-  consistent with ADWR's 74 % estimate for recent years.  Note that the
+  consistent with ADWR's 72 % estimate for recent years.  Note that the
   irrigation category implicitly includes aquaculture and turf irrigation
   (e.g. golf courses) where the same wells registered as ``IRRIGATION``
   in the ADWR Well Registry serve multiple end uses, which may contribute
