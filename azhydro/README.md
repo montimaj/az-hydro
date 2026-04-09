@@ -1909,14 +1909,18 @@ results are in `Uncertainty/Sigma_GW/GW_Fraction_Sensitivity.csv`.
 | **Total_GW** | `Irrigation_GW + Non_Irrigation_GW` |
 | **Total_SW** | `Irrigation_SW + Non_Irrigation_SW` |
 
-**Zero-streamflow constraint:** At pixels where both `streamflow_mm`
-and `canal_weighted_streamflow_mm` are zero for a given year, there is
-no surface water available via any pathway (direct river access or canal
-delivery).  In this case, `gw_frac` is forced to 1.0 for irrigation and
-`sw_frac` is forced to 0.0 for non-irrigation, so all withdrawals are
-assigned to groundwater.  This is applied per-year, so if a pixel gains
-surface water access in a later year (e.g., canal infrastructure reaches
-it), SW allocation resumes.
+**Zero-surface-water constraint:** At pixels where both `SW` density
+(LULC-derived surface water body count, bias-corrected at the basin
+scale like AGRI and URBAN) and `canal_weighted_streamflow_mm` are zero
+for a given year, there is no surface water available via any pathway
+(water body or canal delivery).  In this case, `gw_frac` is forced to
+1.0 for irrigation and `sw_frac` is forced to 0.0 for non-irrigation,
+so all withdrawals are assigned to groundwater.  SW density is more
+spatially precise than the watershed-level streamflow raster, which
+assigns uniform values across entire watersheds.  This constraint is
+applied per-year, so if a pixel gains surface water access in a later
+year (e.g., reservoir construction or canal infrastructure), SW
+allocation resumes.
 
 **Known limitation (SW fraction proxy):** `compute_sw_fraction()` uses
 canal density normalized by the local maximum as a proxy for the

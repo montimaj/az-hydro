@@ -257,21 +257,22 @@ def partition_predictions(
         uf = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
         nonirr[is_other] = nonirr[is_other] * uf[is_other]
 
-    # ---- Zero-streamflow mask: pixels with no surface water access ----
-    # If both streamflow and canal-weighted streamflow are zero at a pixel,
-    # there is no surface water available via any pathway (river or canal),
-    # so all withdrawals are groundwater.
-    streamflow = year_df['streamflow_mm'].values \
-        if 'streamflow_mm' in year_df.columns else None
+    # ---- Zero-surface-water mask: pixels with no SW access ----
+    # If both SW density (LULC surface water bodies) and canal-weighted
+    # streamflow are zero at a pixel, there is no surface water available
+    # via any pathway (water body or canal delivery), so all withdrawals
+    # are groundwater.  SW density is more spatially precise than the
+    # watershed-level streamflow raster.
+    sw_density = year_df['SW'].values if 'SW' in year_df.columns else None
     cw_streamflow = year_df['canal_weighted_streamflow_mm'].values \
         if 'canal_weighted_streamflow_mm' in year_df.columns else None
     zero_sw_mask = None
-    if streamflow is not None and cw_streamflow is not None:
-        zero_sw_mask = (streamflow == 0) & (cw_streamflow == 0)
+    if sw_density is not None and cw_streamflow is not None:
+        zero_sw_mask = (sw_density == 0) & (cw_streamflow == 0)
         if not np.any(zero_sw_mask):
             zero_sw_mask = None
-    elif streamflow is not None:
-        zero_sw_mask = streamflow == 0
+    elif sw_density is not None:
+        zero_sw_mask = sw_density == 0
         if not np.any(zero_sw_mask):
             zero_sw_mask = None
 

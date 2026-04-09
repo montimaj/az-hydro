@@ -1036,6 +1036,7 @@ def _apply_basin_scale_lulc_delta(
         'annual_urban_fraction': 2,
         'AGRI': 1,
         'annual_crop_fraction': 1,
+        'SW': 3,
     }
     present_cols = {c: k for c, k in cols_cls.items() if c in data_df.columns}
     if not present_cols:
@@ -1405,10 +1406,83 @@ def create_az_data_parquet(
                 logger.info(f'Capped {n_capped:,} pixels where ET > {kc_max}×ETo '
                             f'({100 * n_capped / len(data_df):.2f}% of rows)')
 
+        # ---- Export AGRI, URBAN, SW density rasters (post delta-correction) ----
+        _export_lulc_density_rasters(
+            data_df, output_dir, input_file_dir,
+            start_year=int(data_df['Year'].min()),
+            end_year=int(data_df['Year'].max()),
+        )
+
         data_df.to_parquet(data_parquet, index=False)
     else:
         data_df = pd.read_parquet(data_parquet)
     return data_df
+
+
+def _export_lulc_density_rasters(
+        data_df: pd.DataFrame,
+        output_dir: str,
+        pred_data_dir: str,
+        start_year: int,
+        end_year: int,
+) -> None:
+    """Export per-year AGRI, URBAN, and SW density rasters from the parquet.
+
+    Rasters are written after basin-scale LULC delta correction so they
+    reflect the bias-corrected values used by the pipeline.  Output
+    directory: ``{output_dir}/LULC_Density_Rasters/``.
+
+    Args:
+        data_df: Full predictor DataFrame (all years, all pixels).
+        output_dir: Base output directory (e.g., GEE_Mosaics_2000m).
+        pred_data_dir: Directory containing reference predictor rasters
+            (for spatial metadata).
+        start_year: First year.
+        end_year: Last year.
+    """
+    from hydrolibs.rasterops import read_raster_as_arr, write_raster
+    from hydrolibs.sysops import makedirs
+
+    lulc_cols = {'AGRI': 'AGRI', 'URBAN': 'URBAN', 'SW': 'SW'}
+    present = {k: v for k, v in lulc_cols.items() if v in data_df.columns}
+    if not present:
+        logger.warning('No LULC density columns found — skipping raster export.')
+        return
+
+    lulc_dir = os.path.join(output_dir, 'LULC_Density_Rasters')
+    makedirs(lulc_dir)
+
+    # Reference raster for spatial metadata and valid-pixel mask
+    ref_file = os.path.join(pred_data_dir, f'GW_Basin_{start_year}.tif')
+    if not os.path.exists(ref_file):
+        ref_file = os.path.join(pred_data_dir, f'Predictor_{start_year}.tif')
+    basin_arr, bfile = read_raster_as_arr(ref_file, get_file=True)
+    basin_flat = basin_arr.ravel()
+    valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
+    raster_shape = basin_arr.shape
+    ref_transform = bfile.transform
+
+    n_written = 0
+    for year in range(start_year, end_year + 1):
+        year_df = data_df[data_df.Year == year]
+        if year_df.empty:
+            continue
+
+        for label, col in present.items():
+            vals = year_df[col].values
+            grid = np.full(raster_shape, np.nan, dtype=np.float32)
+            grid.ravel()[valid_mask] = vals.astype(np.float32)
+
+            out_path = os.path.join(lulc_dir, f'{label}_{year}.tif')
+            write_raster(
+                grid, bfile, ref_transform,
+                outfile_path=out_path,
+                no_data_value=np.nan,
+            )
+            n_written += 1
+
+    bfile.close()
+    logger.info(f'Exported {n_written} LULC density rasters to {lulc_dir}')
 
 
 def split_data_train_test(
