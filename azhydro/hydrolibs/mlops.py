@@ -1161,11 +1161,17 @@ def compute_shap_plots(
     # Create a wider figure BEFORE calling waterfall_plot so the SHAP
     # internal layout uses the larger canvas and the grey feature-value
     # text at the top no longer overlaps with the black f(x) annotation.
-    plt.figure(figsize=(14, 9))
+    plt.figure(figsize=(16, 10))
     shap.waterfall_plot(explanation[median_idx], max_display=max_display, show=False)
-    plt.gca().set_xlabel('Annual Withdrawal Prediction (mm)')
-    plt.subplots_adjust(top=0.90, right=0.82, left=0.28)
-    plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Waterfall{suffix}.png'), dpi=600)
+    ax_wf = plt.gca()
+    # Add unit label as figure text below the plot to avoid overlap
+    # with SHAP's internal x-axis annotations at the top.
+    fig_wf = plt.gcf()
+    fig_wf.text(0.55, 0.01, 'Annual Withdrawal Prediction (mm)',
+                ha='center', fontsize=12, fontweight='bold')
+    plt.subplots_adjust(top=0.90, right=0.82, left=0.35, bottom=0.06)
+    plt.savefig(os.path.join(output_dir, f'{model_name}_SHAP_Waterfall{suffix}.png'), dpi=600,
+                bbox_inches='tight')
     plt.close('all')
 
     logger.info(f'SHAP plots saved to {output_dir}')
