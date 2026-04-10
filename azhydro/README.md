@@ -1066,6 +1066,31 @@ GW withdrawals for 2015 ([Dieter et al., 2018](https://doi.org/10.3133/cir1441))
 the model produces 3.17 MAF for the same year (within 0.08 MAF)
 ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
 
+**Uncertainty around the reconciliation:** The 2017 AZ-wide σ_total
+from the UQ pipeline is **0.66 MAF** (≈ 13.9 % of the 4.74 MAF model
+value), giving a 95 % confidence interval of **3.45–6.03 MAF** on the
+model alone.  Adding the (constant) ~2.26 MAF federal-delivery
+adjustment shifts that interval to **5.71–8.29 MAF** for the
+reconciled total, which comfortably brackets both the closure value
+(6.99 MAF) and ADWR's reported 7.0 MAF.  The fact that the central
+estimate (6.99 MAF) lands within 0.01 MAF of ADWR while the 95 % CI
+spans ~2.6 MAF is a useful reminder that the very tight closure is a
+consequence of using the same federal-delivery offset that ADWR
+implicitly counts — not evidence that the underlying ML prediction is
+accurate to ± 0.01 MAF.  The honest precision of the model-side
+estimate is the σ_total interval, which 6.99 / 7.0 MAF both fall well
+inside.
+
+The USGS 2015 GW comparison tells the same story from an independent
+direction: the model predicts 3.17 MAF GW pumping for 2015 with
+σ_total ≈ 0.65 MAF, giving a 95 % CI of **1.90–4.44 MAF**, and USGS's
+3.09 MAF estimate ([Dieter et al., 2018](https://doi.org/10.3133/cir1441))
+lands well inside that interval.  Two independent agency totals — ADWR
+for 2017 and USGS for 2015, computed from different source data with
+different methodologies — both fall within the model's σ_total
+intervals despite the model never being trained or tuned against either
+of them.
+
 Representative statewide volumes (million acre-feet):
 
 | Year | Total | Irrigation | Non-Irrigation | Total GW | Total SW | Irr % | GW % |
@@ -1183,8 +1208,26 @@ Key trends:
   Gila River alluvial corridors identified in the 2022 study as the
   primary zones of pumping-induced surface water depletion.
 
-- **Uncertainty**: UQ results will be updated after the full pipeline
-  rerun with WTD as a predictor.
+- **Uncertainty**: AZ-wide volume-weighted σ_total is **~14 % of the
+  mean predicted withdrawal during the 1984–2025 historical period**
+  (≈ 0.62 MAF σ on a 4.38 MAF mean), rising to **~19 % over the
+  2026–2099 projection** (≈ 0.98 MAF on 5.18 MAF) as σ_LULC and σ_MACA
+  begin to contribute, and reaching **~26 % in the deep hindcast
+  (1896–1983)** (≈ 0.32 MAF on 1.40 MAF) where σ_irr is largest because
+  pre-IrrMapper irrigation-fraction reconstruction is more uncertain.
+  Variance attribution (% of σ_total²) shifts across eras:
+  - **Hindcast (1900):** σ_irr 61 % · σ_model 20 % · others ≈ 0
+  - **Historical (2017):** σ_model 58 % · σ_irr 4 % · σ_GW 0.1 %
+  - **Projection (2099):** σ_model 46 % · σ_LULC 19 % · σ_MACA 4 % · σ_irr 0 % · σ_GW 0 %
+
+  The well-density σ_gw component is small everywhere
+  (≈ 0.3 mm depth, < 0.1 % of σ_total²) — the 5-snapshot HarDWR
+  perturbation captures real year-over-year variability in the model's
+  #1 SHAP feature, but the input CV (~3 %) is small enough that the
+  resulting prediction sensitivity is dominated by the seed ensemble
+  σ_model. Per-pixel CV maps (`Sigma_Total/Mean_CV.tif`) and
+  per-component contribution time series are written to
+  `Uncertainty/Sigma_Total/` and `Uncertainty/Plots/`.
 
 Consumptive use (CU = IE × Irrigation Withdrawal) volumes, where IE is the
 USGS NHM basin-level irrigation efficiency (million acre-feet):
