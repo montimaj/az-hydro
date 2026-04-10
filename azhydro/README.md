@@ -2425,7 +2425,7 @@ statewide NHM average of ~60 % used in this pipeline
 Combining the model's 4.74 MAF with the estimated non-well sources
 (~2.25 MAF) yields ~6.99 MAF, closing to within 0.01 MAF of ADWR's
 reported 7.0 MAF total.  USGS independently estimates 3.09 MAF of
-GW withdrawals for 2015 ([Dieter et al., 2018](https://doi.org/10.3133/cir1441));
+GW withdrawals for 2015 ([Dieter et al., 2018](https://doi.org/10.3133/cir1441); Arizona summary in [NGWA, 2020](https://www.ngwa.org/docs/default-source/default-document-library/states/az.pdf));
 the model produces 3.17 MAF for the same year (within 0.08 MAF)
 ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
 
@@ -2447,7 +2447,7 @@ inside.
 The USGS 2015 GW comparison tells the same story from an independent
 direction: the model predicts 3.17 MAF GW pumping for 2015 with
 σ_total ≈ 0.65 MAF, giving a 95 % CI of **1.90–4.44 MAF**, and USGS's
-3.09 MAF estimate ([Dieter et al., 2018](https://doi.org/10.3133/cir1441))
+3.09 MAF estimate ([Dieter et al., 2018](https://doi.org/10.3133/cir1441); Arizona summary in [NGWA, 2020](https://www.ngwa.org/docs/default-source/default-document-library/states/az.pdf))
 lands well inside that interval.  Two independent agency totals — ADWR
 for 2017 and USGS for 2015, computed from different source data with
 different methodologies — both fall within the model's σ_total
@@ -2559,14 +2559,27 @@ stable across years because the same NHM efficiency map is applied to
 changing withdrawal volumes.
 
 Key trends:
-- **Irrigation share** declines from ~80 % (1960s–1980s) to ~71 % (2024)
-  and continues to ~62 % by 2099 as urbanization increases M&I demand —
-  consistent with ADWR's 72 % estimate for recent years.  Note that the
-  irrigation category implicitly includes aquaculture and turf irrigation
-  (e.g. golf courses) where the same wells registered as ``IRRIGATION``
-  in the ADWR Well Registry serve multiple end uses, which may contribute
-  to the irrigation GW share being slightly higher than agriculture-only
-  estimates.
+- **Irrigation share** (irrigation withdrawal as a fraction of total
+  well-mediated withdrawal) declines from ~80 % (1960s–1980s) to
+  ~73 % (2019) and continues to ~62 % by 2099 as urbanization
+  increases M&I demand. The 2019 model value of **72.8 %** matches
+  ADWR's reported ~72 % share of agriculture in total Arizona water
+  use ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector))
+  to within ~0.8 percentage point. The irrigation category includes
+  rural dual-purpose wells coded ``IRRIGATION, DOMESTIC`` or
+  ``IRRIGATION, STOCK`` in the ADWR Well Registry; recreation / turf
+  wells (e.g. golf courses) are coded ``RECREATION`` and routed to
+  the non-irrigation category.
+- **Irrigation GW share** (`Irrigation_GW / Irrigation_total`) is a
+  separate metric that asks "of the irrigation water alone, what
+  fraction comes from wells." The model produces ~68 % for 2017,
+  ~69 % for 2019, and ~71 % for 2024, all in the metered window. This
+  is much higher than the *statewide* GW share (44–46 % in those same
+  years, the figures compared to USGS and ADWR above) because the
+  statewide number is diluted by the ~2.26 MAF/yr of federal Colorado
+  River canal deliveries (CAP, SRP, Yuma-area diversions) that bypass
+  wells entirely and are reconciled separately as the federal-delivery
+  offset.
 - **GW share** declines from 66 % (1900) to ~51 % by the 1950s as canal
   infrastructure (SRP) brought surface water to irrigated areas, then
   rises gradually to ~70 % by 2099 as non-irrigation demand —
@@ -2574,18 +2587,18 @@ Key trends:
   faster than irrigation.  Including unaccounted federal SW
   deliveries (~2.26 MAF), the statewide GW share is ~46 % in 2017,
   consistent with independently reported GW/SW shares: USGS estimates
-  46 % GW and 3.09 MAF total GW for 2015 ([NGWA, 2020](https://www.ngwa.org/);
+  46 % GW and 3.09 MAF total GW for 2015 ([NGWA, 2020](https://www.ngwa.org/docs/default-source/default-document-library/states/az.pdf);
   based on [Dieter et al., 2018](https://doi.org/10.3133/cir1441)), while
   ADWR reports 41 % GW for 2019 ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
-  The model produces 45 % / 3.17 MAF for 2015 (within 0.08 MAF and
-  1 percentage point of USGS) and 44 % for 2019 (within 3 percentage
+  The model produces 45.9 % / 3.17 MAF for 2015 (within 0.08 MAF and
+  0.1 percentage point of USGS) and 44 % for 2019 (within 3 percentage
   points of ADWR) — converging on both agency estimates across different
   years without any calibration to these targets.
 
   | Year | Source | GW (MAF) | Statewide GW % |
   |------|--------|----------|----------------|
   | 2015 | USGS/NGWA | 3.09 | 46 % |
-  | 2015 | AZ-Hydro | 3.17 | 45 % |
+  | 2015 | AZ-Hydro | 3.17 | 45.9 % |
   | 2019 | ADWR | — | 41 % |
   | 2019 | AZ-Hydro | 3.06 | 44 % |
 - **Total withdrawals** grow from 0.11 MAF (1900) to 4.74 MAF (2024)
