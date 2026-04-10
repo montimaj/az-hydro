@@ -364,6 +364,27 @@ splits.  A time series CSV
 (`SW_Capture/SW_Capture_Time_Series.csv`) and era-mean maps are also
 produced.
 
+**What "SW capture" actually means in this model.** The index measures
+only one specific pathway: well-mediated stream depletion in pixels the
+partition step has labeled as `_GW`. Three categories of well/canal
+interaction are *not* counted in the capture numerator: (1) direct
+canal diversions, which never enter the model because the ML target is
+ADWR Well Registry pumping (federal Yuma-area deliveries through WMIDD,
+YCWUA, and the Gila Project bypass wells entirely and are reconciled
+separately as the ~2.26 MAF water-budget gap); (2) wells filed under
+HarDWR surface-water rights, which the partition routes into `_SW`
+regardless of whether they are physically pumping ambient groundwater
+or river-recharged alluvium — those volumes are tracked under
+`Irrigation_SW`/`Non_Irrigation_SW` and never reach the capture index;
+and (3) any well-mediated SW interaction outside the perennial
+canal-delivered footprint (`cw_norm = 0`), since ephemeral stream–
+aquifer exchange would require transient groundwater modeling. The
+capture fraction is therefore the model's most conservative lower bound
+on well-mediated SW depletion: a "low" capture fraction in a
+canal-dominated basin like Yuma (~4%) means most of that basin's SW use
+is being delivered through canals or through SW-righted wells already
+counted in `Total_SW`, not that wells are causing little impact.
+
 **Scope limitation:** The index quantifies SW depletion only where
 perennial canal-delivered surface water exists (`cw_norm > 0`).
 Ephemeral stream–aquifer exchange is excluded because most ephemeral
