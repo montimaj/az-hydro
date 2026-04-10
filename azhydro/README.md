@@ -396,38 +396,120 @@ already counted in `Total_SW`, or through engineered drain
 infrastructure that this index does not represent — not that wells
 are causing little impact.
 
-**Why this is hard.** Allocating surface-water *withdrawals* across
-canal diversions and water-right duties is standard water accounting
-and can be done from permits and delivery records. Allocating
-*groundwater pumping* into the share that depletes stream baseflow
-versus the share that mines aquifer storage is much harder: at the
-basin scale it normally requires a transient calibrated groundwater
-model coupled to a stream network (e.g. MODFLOW–SFR), which is built
-one aquifer at a time and rarely covers entire states or multi-century
-time spans. **To our knowledge, no prior study has produced a
-per-pixel, per-year apportionment of GW pumping into stream-depletion
-vs. storage-mining shares at this combination of spatial coverage
-(full state), temporal span (1896–2099), and methodology (a
-process-informed proxy applied uniformly at gridded scale).** Existing
-basin-scale capture estimates exist for individual aquifers (e.g.
-Phoenix AMA, Tucson AMA, the Lower Colorado main stem) but each is a
-bespoke model run with its own calibration targets, parameter set,
-and time horizon, and none are mutually comparable. The capture
-index here uses a process-informed proxy
-([Barlow & Leake 2012](https://doi.org/10.3133/cir1376),
-[Condon & Maxwell 2019](https://doi.org/10.1126/sciadv.aav4574)) —
-exponential connectivity decay with water table depth, modulated by
-canal-weighted streamflow availability — applied at 2 km annual
-resolution across all of Arizona for 1896–2099, with three λ values
-producing physically-bounded uncertainty intervals rather than a
-single tuned answer. The contribution is the *coverage* (full state,
-two centuries, hindcast plus projection) more than the formula
-itself. It is not a substitute for a calibrated transient flow
-simulation in any individual basin, but it provides the first
-consistent first-order screen for where well-mediated stream
-depletion is plausibly significant across an entire state's
-groundwater system, in a framework that is portable to any other
-state with comparable WTD and canal-network data.
+**What is novel here, and what is not.** The base ML method
+(XGBoost trained on metered well records with remote-sensing-derived
+predictor features) is *not itself novel*. Our group has applied it
+across four regions over the last five years before scaling up to
+this Arizona statewide application: the Kansas High Plains Aquifer
+([Majumdar et al., 2020](https://doi.org/10.1029/2020WR028059);
+[Asfaw et al., 2025](https://doi.org/10.1016/j.agwat.2025.109691)),
+the Mississippi Alluvial Plain
+([Majumdar et al., 2024](https://doi.org/10.1016/j.ejrh.2024.101674);
+[Majumdar et al., 2025](https://doi.org/10.1109/IGARSS55030.2025.11243173)),
+the Arizona AMA/INA management areas
+([Majumdar et al., 2022](https://doi.org/10.1002/hyp.14757)) — the
+direct precursor to the present study area — and the broader
+Western U.S. effective-precipitation domain
+([Hasan et al., 2025](https://doi.org/10.1016/j.agwat.2025.109821)).
+Each prior application validated specific framework components:
+Kansas validated the original ML-driven withdrawal estimation
+against Kansas Geological Survey metered records, the MAP papers
+validated transferability under data-scarce conditions and crop-
+specific disaggregation, the 2022 Arizona paper validated the GW–
+subsidence linkage and basin-level partitioning inside metered AMAs,
+and the Hasan et al. 2025 effective-precipitation work validated the
+satellite-data-plus-physics-constrained-ML pattern across the
+entire Western U.S.
+
+What *is* novel about AZ-Hydro is everything built *on top of* the
+base ML method to turn a single-region withdrawal-prediction model
+into a complete state-scale water-budget framework. Six contributions
+are individually novel and collectively define the contribution of
+this study:
+
+1. **Physics-informed feature engineering and predictor stack** —
+   pump-capacity-weighted irrigation/non-irrigation fractions,
+   canal-weighted streamflow with Gaussian smoothing across canal
+   service areas, HarDWR water-rights densities split by water-use
+   category, USGS / FORE-SCE LULC bias-corrected at the basin scale
+   to preserve NLCD's pixel-level spatial pattern, climate features
+   bias-corrected to remove USGS/USBR step jumps, and Ma et al.
+   (2026) high-resolution WTD as model inputs. Each adds a
+   hydrologically meaningful signal that off-the-shelf predictor
+   stacks lack.
+
+2. **Density-ratio GW/SW partitioning with locally observable
+   infrastructure** — splits predicted total pumping into eight
+   conservation-consistent withdrawal categories (Irrigation,
+   Non-Irrigation, Total/Irrigation/Non-Irrigation × GW/SW) using
+   ADWR well density vs. HarDWR surface-water rights density,
+   modulated by canal-weighted streamflow with focal-max
+   normalization. This replaces the global statistical proxies that
+   most large-scale studies fall back on with state-specific
+   infrastructure observations.
+
+3. **Per-pixel, per-year surface-water capture quantification** — a
+   process-informed proxy
+   ([Barlow & Leake 2012](https://doi.org/10.3133/cir1376),
+   [Condon & Maxwell 2019](https://doi.org/10.1126/sciadv.aav4574))
+   that apportions GW pumping into stream-depletion vs. storage-
+   mining shares at 2 km annual resolution across an entire state
+   and a 204-year window, with three λ values producing physically-
+   bounded uncertainty intervals. Existing basin-scale capture
+   estimates exist for individual aquifers (e.g. Phoenix AMA,
+   Tucson AMA, the Lower Colorado main stem) but each is a bespoke
+   MODFLOW–SFR run with its own calibration targets, parameter set,
+   and time horizon, and none are mutually comparable across basins.
+   **To our knowledge, no prior study has produced a per-pixel,
+   per-year apportionment of GW pumping into stream-depletion vs.
+   storage-mining shares at this combination of spatial coverage,
+   temporal span, and methodology.** This is the single most novel
+   product of the study; it is not a substitute for a calibrated
+   transient flow simulation in any individual basin, but it
+   provides the first consistent first-order screen for where well-
+   mediated stream depletion is plausibly significant across an
+   entire state's groundwater system in a uniform framework.
+
+4. **A 204-year continuous record** — hindcast (1896–1983),
+   historical (1984–2025), and projection (2026–2099) eras all in
+   one self-consistent framework, with the projection driven by
+   5 GCMs × 2 RCPs × 4 USGS LULC scenarios × 112 streamflow
+   ensemble members. No prior single-state water-use study spans
+   two centuries with a uniform methodology and per-pixel/per-well
+   resolution.
+
+5. **First-of-a-kind statewide irrigation consumptive use dataset
+   for Arizona** at 2 km annual resolution, with separate GW-CU and
+   SW-CU components consistent with the partitioning, per-well
+   disaggregation via the well package, and physics-based error
+   propagation. The closest existing product is the USGS NHM HUC12
+   monthly irrigation CU reanalysis
+   ([Martin et al., 2025](https://doi.org/10.1016/j.jhydrol.2025.133909);
+   [Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM)) which
+   is national in scope but limited to 2000–2020 at HUC12 monthly
+   resolution. ADWR publishes statewide withdrawal totals and an
+   irrigation share but does not produce a basin-resolved CU
+   product.
+
+6. **Hybrid five-component σ_total uncertainty quantification** —
+   σ_MACA (5 GCMs, scenario-based) + σ_model (10 seeds, t-corrected
+   sample-based) + σ_irr (irrigation-fraction half-range) + σ_LULC
+   (4 USGS scenarios) + σ_GW (5 recent HarDWR well-density
+   snapshots, t-corrected sample-based), combined in quadrature
+   with physics-based CU error propagation, producing 6-band
+   augmented rasters (prediction, σ, CV, SNR, lower/upper 95 % CI)
+   for every product and unit. To our knowledge no prior water-use
+   ML study at this spatial coverage and temporal span has
+   reported a UQ framework of comparable rigor.
+
+**No prior study we are aware of provides this combination of
+feature engineering, partitioning, capture quantification,
+hindcast/projection coverage, and 5-component UQ for any U.S.
+state.** The base ML method is shared with our four prior regional
+applications and was validated there; everything in items 1–6 above
+is what makes the AZ-Hydro framework state-scale, two-century, and
+uncertainty-honest rather than just a model that maps wells to
+pixels.
 
 **Scope limitation:** The index quantifies SW depletion only where
 perennial canal-delivered surface water exists (`cw_norm > 0`).
@@ -2961,7 +3043,13 @@ Luukkonen, C.L., Alzraiee, A.H., Larsen, J.D., Martin, D.J., Herbert, D.M., Buch
 
 Majumdar, S., ReVelle, P., Pearson, C., Nozari, S., Minor, B. A., Hasan, M. F., Huntington, J. L., & Smith, R. G. (2026). pyCropWat: A Python Package for Computing Effective Precipitation Using Google Earth Engine Climate Data (v1.2.1). _Zenodo_. https://doi.org/10.5281/zenodo.18706481.
 
+Majumdar, S., Smith, R., Butler, J. J., & Lakshmi, V. (2020). Groundwater withdrawal prediction using integrated multitemporal remote sensing data sets and machine learning. _Water Resources Research_, _56_(11), e2020WR028059. https://doi.org/10.1029/2020WR028059.
+
 Majumdar, S., Smith, R., Conway, B. D., & Lakshmi, V. (2022). Advancing remote sensing and machine learning‐driven frameworks for groundwater withdrawal estimation in Arizona: Linking land subsidence to groundwater withdrawals. _Hydrological Processes_, _36_(11), e14757. https://doi.org/10.1002/hyp.14757.
+
+Majumdar, S., Smith, R. G., Hasan, M. F., Wilson, J. L., White, V. E., Bristow, E. L., Rigby, J. R., Kress, W. H., & Painter, J. A. (2024). Improving crop-specific groundwater use estimation in the Mississippi Alluvial Plain: Implications for integrated remote sensing and machine learning approaches in data-scarce regions. _Journal of Hydrology: Regional Studies_, _52_, 101674. https://doi.org/10.1016/j.ejrh.2024.101674.
+
+Majumdar, S., Smith, R. G., & Hasan, M. F. (2025). A High-Resolution Data-Driven Monthly Aquaculture and Irrigation Water Use Model in the Mississippi Alluvial Plain. _IGARSS 2025 — 2025 IEEE International Geoscience and Remote Sensing Symposium_, 2686–2691. https://doi.org/10.1109/IGARSS55030.2025.11243173.
 
 Ma, Y., Condon, L. E., Koch, J., Bennett, A., Defnet, A., Tijerina-Kreuzer, D., Melchior, P., & Maxwell, R. M. (2026). High resolution US water table depth estimates reveal quantity of accessible groundwater. _Communications Earth & Environment_, _7_(1), 45. https://doi.org/10.1038/s43247-025-03094-3.
 
