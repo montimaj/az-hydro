@@ -385,6 +385,27 @@ canal-dominated basin like Yuma (~4%) means most of that basin's SW use
 is being delivered through canals or through SW-righted wells already
 counted in `Total_SW`, not that wells are causing little impact.
 
+**Why this is hard.** Allocating surface-water *withdrawals* across
+canal diversions and water-right duties is standard water accounting
+and can be done from permits and delivery records. Allocating
+*groundwater pumping* into the share that depletes stream baseflow
+versus the share that mines aquifer storage is much harder: at the
+basin scale it normally requires a transient calibrated groundwater
+model coupled to a stream network (e.g. MODFLOW–SFR), which is built
+one aquifer at a time and rarely covers entire states or multi-century
+time spans. The capture index here uses a process-informed proxy
+([Barlow & Leake 2012](https://doi.org/10.3133/cir1376),
+[Condon & Maxwell 2019](https://doi.org/10.1126/sciadv.aav4574)) —
+exponential connectivity decay with water table depth, modulated by
+canal-weighted streamflow availability — applied at 2 km annual
+resolution across all of Arizona for 1896–2099, with three λ values
+producing physically-bounded uncertainty intervals rather than a single
+tuned answer. The contribution is the *coverage* (full state, two
+centuries, hindcast plus projection) more than the formula itself. It
+is not a substitute for a calibrated transient flow simulation in any
+individual basin, but it provides a consistent first-order screen for
+where well-mediated stream depletion is plausibly significant.
+
 **Scope limitation:** The index quantifies SW depletion only where
 perennial canal-delivered surface water exists (`cw_norm > 0`).
 Ephemeral stream–aquifer exchange is excluded because most ephemeral
