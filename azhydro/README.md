@@ -1025,282 +1025,6 @@ three-panel publication figure:
 
 Saved as `{prediction_dir}Graphical_Abstract_Fig1.png` (600 dpi).
 
-#### Statewide volume summary
-
-The pipeline estimates **well-based withdrawals** — groundwater pumping plus
-locally diverted surface water that passes through registered well/diversion
-infrastructure.  This is a subset of Arizona's total water supply, which also
-includes Colorado River imports (CAP aqueduct deliveries, Yuma-area
-diversions), reclaimed/effluent water, and other sources not captured by the
-ADWR Well Registry.  ADWR reports total statewide water use of ~7.0 MAF
-(2017), of which irrigated agriculture consumes approximately 72 % (as per ADWR 2019 data)
-([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
-
-**Water budget reconciliation (2017):** The model predicts 4.74 MAF vs.
-ADWR's 7.0 MAF total, a gap of ~2.25 MAF.  This gap is accounted for by
-water sources outside the ADWR Well Registry:
-
-| Source | MAF | Notes |
-|--------|-----|-------|
-| CAP direct deliveries | 0.71 | Excludes recharge; from CAP delivery records |
-| SRP surface water | 0.40 | Phoenix AMA; from ADWR SRP delivery records |
-| Yuma-area federal diversions | ~0.79 | Bureau of Reclamation Yuma and Gila Project irrigation districts (WMIDD: 278,000 AF, YCWUA: 254,200 AF, Gila Project Yuma Mesa Division: 250,000 AF, Unit B: 6,800 AF); gravity canal diversions from the Colorado River via the All-American Canal and Gila Gravity Main Canal ([Noble et al., 2015](https://www.azwater.gov/sites/default/files/2022-11/Final%20Yuma%20Report%20021715.pdf)) |
-| Reclaimed/effluent water | ~0.35 | ~5 % of total state water supply ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)) |
-| **Total gap** | **~2.25** | |
-
-The model thus captures ~68% of Arizona's total water use — specifically,
-the portion that flows through registered well and diversion infrastructure.
-The remaining ~32 % is delivered by large-scale federal water projects,
-(CAP aqueduct, SRP canal system, Yuma-area Colorado River diversions) and
-reclaimed water systems that operate outside the ADWR Well Registry.
-The Yuma-area irrigation districts hold some of the oldest and most senior
-water rights on the Lower Colorado River (dating to the Reclamation Act of
-1902) and collectively divert ~0.79 MAF/yr through federal canal infrastructure
-with application efficiencies of 80–90 % — substantially higher than the
-statewide NHM average of ~60 % used in this pipeline
-([Noble et al., 2015](https://www.azwater.gov/sites/default/files/2022-11/Final%20Yuma%20Report%20021715.pdf)).
-Combining the model's 4.74 MAF with the estimated non-well sources
-(~2.25 MAF) yields ~6.99 MAF, closing to within 0.01 MAF of ADWR's
-reported 7.0 MAF total.  USGS independently estimates 3.09 MAF of
-GW withdrawals for 2015 ([Dieter et al., 2018](https://doi.org/10.3133/cir1441));
-the model produces 3.17 MAF for the same year (within 0.08 MAF)
-([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
-
-**Uncertainty around the reconciliation:** The 2017 AZ-wide σ_total
-from the UQ pipeline is **0.66 MAF** (≈ 13.9 % of the 4.74 MAF model
-value), giving a 95 % confidence interval of **3.45–6.03 MAF** on the
-model alone.  Adding the (constant) ~2.26 MAF federal-delivery
-adjustment shifts that interval to **5.71–8.29 MAF** for the
-reconciled total, which comfortably brackets both the closure value
-(6.99 MAF) and ADWR's reported 7.0 MAF.  The fact that the central
-estimate (6.99 MAF) lands within 0.01 MAF of ADWR while the 95 % CI
-spans ~2.6 MAF is a useful reminder that the very tight closure is a
-consequence of using the same federal-delivery offset that ADWR
-implicitly counts — not evidence that the underlying ML prediction is
-accurate to ± 0.01 MAF.  The honest precision of the model-side
-estimate is the σ_total interval, which 6.99 / 7.0 MAF both fall well
-inside.
-
-The USGS 2015 GW comparison tells the same story from an independent
-direction: the model predicts 3.17 MAF GW pumping for 2015 with
-σ_total ≈ 0.65 MAF, giving a 95 % CI of **1.90–4.44 MAF**, and USGS's
-3.09 MAF estimate ([Dieter et al., 2018](https://doi.org/10.3133/cir1441))
-lands well inside that interval.  Two independent agency totals — ADWR
-for 2017 and USGS for 2015, computed from different source data with
-different methodologies — both fall within the model's σ_total
-intervals despite the model never being trained or tuned against either
-of them.
-
-**Spatial scope of "no calibration":** The training dataset
-(`USE_AMA_INA = True` in [pipeline.py](pipeline.py#L120)) is restricted
-to ADWR-metered pixels inside the ten AMA/INA management areas:
-Phoenix, Pinal, Tucson, Prescott, Santa Cruz, Douglas, and Willcox
-AMAs plus Joseph City, Harquahala, and Hualapai Valley INAs.  Of these,
-the eight legacy AMA/INAs (everything except Willcox and Hualapai
-Valley) provide continuous metered records from 1984 onward and
-contribute the bulk of the training signal.  **Willcox AMA and
-Hualapai Valley INA were designated only recently and have sparse
-metering both temporally (records concentrated in the most recent
-years) and spatially (fewer reporting wells per pixel)**, so the
-effective training signal from those two basins is much smaller than
-from the eight legacy areas.  Predictions are then generated for every
-2 km pixel in Arizona, including the ~25 unmetered Other basins
-(basin type 2) — Yuma, Lower Gila, Parker, Lake Havasu, Bill Williams,
-Butler Valley, the Mogollon plateau basins, and others — for which
-**no per-well training labels exist anywhere**.  The 4.74 MAF (2017)
-model total therefore mixes in-sample-distribution AMA/INA predictions
-with out-of-distribution unmetered-basin predictions, and roughly 30 %
-of the statewide volume comes from the latter group.  When ADWR's 7.0
-MAF and USGS's 3.09 MAF land inside the σ_total intervals, the model
-is being validated not just against an independent target year and
-methodology, but against a target that explicitly aggregates basins
-the ML model has never been trained on.  The agreement is therefore a
-genuine out-of-distribution generalization test, not an in-sample
-goodness-of-fit check.  This is the strongest possible version of the
-"no calibration to reported totals" claim because no training signal
-from the unmetered basins flows into the model at any stage —
-predictor features (climate, LULC, well density, canal-weighted
-streamflow, WTD, etc.) are computed identically inside and outside
-AMA/INAs from the same gridded inputs, and the model relies entirely
-on the assumption that the learned predictor → pumping mapping
-generalizes from metered AMA/INAs to morphologically similar
-unmetered basins.
-
-Representative statewide volumes (million acre-feet):
-
-| Year | Total | Irrigation | Non-Irrigation | Total GW | Total SW | Irr % | GW % |
-|------|-------|------------|----------------|----------|----------|-------|------|
-| 1900 | 0.11 | 0.04 | 0.07 | 0.07 | 0.04 | 39 % | 66 % |
-| 1910 | 0.14 | 0.06 | 0.08 | 0.10 | 0.04 | 40 % | 71 % |
-| 1920 | 0.26 | 0.13 | 0.13 | 0.16 | 0.09 | 50 % | 63 % |
-| 1930 | 0.46 | 0.26 | 0.20 | 0.26 | 0.20 | 56 % | 57 % |
-| 1940 | 0.85 | 0.57 | 0.28 | 0.46 | 0.40 | 67 % | 54 % |
-| 1950 | 1.74 | 1.32 | 0.43 | 0.89 | 0.86 | 75 % | 51 % |
-| 1960 | 2.61 | 2.05 | 0.56 | 1.42 | 1.19 | 79 % | 55 % |
-| 1970 | 3.16 | 2.51 | 0.65 | 1.88 | 1.28 | 80 % | 60 % |
-| 1980 | 3.82 | 3.03 | 0.80 | 2.23 | 1.59 | 79 % | 58 % |
-| 1985 | 4.17 | 3.24 | 0.93 | 2.52 | 1.65 | 78 % | 60 % |
-| 1990 | 4.20 | 3.25 | 0.95 | 2.65 | 1.55 | 77 % | 63 % |
-| 2000 | 4.35 | 3.22 | 1.12 | 2.80 | 1.55 | 74 % | 64 % |
-| 2010 | 4.20 | 3.03 | 1.17 | 2.77 | 1.42 | 72 % | 66 % |
-| 2015 | 4.65 | 3.41 | 1.24 | 3.17 | 1.48 | 73 % | 68 % |
-| 2017 | 4.74 | 3.46 | 1.28 | 3.25 | 1.50 | 73 % | 68 % |
-| 2019 | 4.46 | 3.25 | 1.21 | 3.06 | 1.40 | 73 % | 69 % |
-| 2020 | 4.73 | 3.41 | 1.32 | 3.28 | 1.45 | 72 % | 69 % |
-| 2024 | 4.74 | 3.37 | 1.36 | 3.33 | 1.40 | 71 % | 70 % |
-| 2030 | 4.68 | 3.25 | 1.43 | 3.18 | 1.50 | 69 % | 68 % |
-| 2040 | 4.79 | 3.26 | 1.52 | 3.26 | 1.52 | 68 % | 68 % |
-| 2050 | 4.99 | 3.33 | 1.65 | 3.42 | 1.56 | 67 % | 69 % |
-| 2060 | 5.14 | 3.38 | 1.76 | 3.54 | 1.59 | 66 % | 69 % |
-| 2070 | 5.34 | 3.44 | 1.89 | 3.71 | 1.62 | 64 % | 70 % |
-| 2080 | 5.42 | 3.46 | 1.96 | 3.79 | 1.64 | 64 % | 70 % |
-| 2090 | 5.55 | 3.48 | 2.07 | 3.89 | 1.66 | 63 % | 70 % |
-| 2099 | 5.66 | 3.52 | 2.14 | 3.99 | 1.67 | 62 % | 71 % |
-
-Key trends:
-- **Irrigation share** declines from ~80 % (1960s–1980s) to ~71 % (2024)
-  and continues to ~62 % by 2099 as urbanization increases M&I demand —
-  consistent with ADWR's 72 % estimate for recent years.  Note that the
-  irrigation category implicitly includes aquaculture and turf irrigation
-  (e.g. golf courses) where the same wells registered as ``IRRIGATION``
-  in the ADWR Well Registry serve multiple end uses, which may contribute
-  to the irrigation GW share being slightly higher than agriculture-only
-  estimates.
-- **GW share** declines from 66 % (1900) to ~51 % by the 1950s as canal
-  infrastructure (SRP) brought surface water to irrigated areas, then
-  rises gradually to ~70 % by 2099 as non-irrigation demand —
-  predominantly groundwater-sourced outside canal service areas — grows
-  faster than irrigation.  Including unaccounted federal SW
-  deliveries (~2.26 MAF), the statewide GW share is ~46 % in 2017,
-  consistent with independently reported GW/SW shares: USGS estimates
-  46 % GW and 3.09 MAF total GW for 2015 ([NGWA, 2020](https://www.ngwa.org/);
-  based on [Dieter et al., 2018](https://doi.org/10.3133/cir1441)), while
-  ADWR reports 41 % GW for 2019 ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
-  The model produces 45 % / 3.17 MAF for 2015 (within 0.08 MAF and
-  1 percentage point of USGS) and 44 % for 2019 (within 3 percentage
-  points of ADWR) — converging on both agency estimates across different
-  years without any calibration to these targets.
-
-  | Year | Source | GW (MAF) | Statewide GW % |
-  |------|--------|----------|----------------|
-  | 2015 | USGS/NGWA | 3.09 | 46 % |
-  | 2015 | AZ-Hydro | 3.17 | 45 % |
-  | 2019 | ADWR | — | 41 % |
-  | 2019 | AZ-Hydro | 3.06 | 44 % |
-- **Total withdrawals** grow from 0.11 MAF (1900) to 4.74 MAF (2024)
-  and are projected to reach 5.66 MAF by 2099.  Early growth (1900–1950)
-  reflects the build-out of well and canal infrastructure; mid-century
-  growth (1950s–1980s) is driven by agricultural expansion; projected
-  growth is driven by urbanization and increasing M&I demand.
-- **Irrigation** remains relatively stable in the projections (3.37 →
-  3.52 MAF, +4 % by 2099), while **non-irrigation** grows by ~57 %
-  (1.36 → 2.14 MAF), more than doubling from the 1990s level
-  (0.95 MAF), reflecting continued urban and industrial growth
-  including data center and energy-sector water demand.
-- **Pre-CAP era** (before 1985): GW share declines as SRP canal
-  infrastructure expanded, reaching a minimum ~51 % by the 1950s.
-  Post-1985 GW share rises as non-irrigation (predominantly GW)
-  demand grows relative to canal-served irrigation.
-- **Conservation**: Irrigation + Non-Irrigation = Total and GW + SW = Total
-  hold exactly for all years.
-- **Surface Water Capture Index**: The statewide volume-weighted
-  capture fraction is ~0.2 % (central estimate, λ=10 m), translating
-  to 0.02–0.04 MAF of GW pumping that physically captures surface
-  water via stream depletion.  Capture grows from ~0.001 MAF (1900)
-  to a peak of ~0.038 MAF (2015–2024) as pumping infrastructure
-  expanded near canal corridors, then declines slightly in projections
-  as irrigation stabilizes.  Irrigation GW accounts for ~90 % of total
-  capture (~0.034 MAF), with non-irrigation contributing ~0.003 MAF.
-  While the statewide impact is small (<1 % of total GW), the capture
-  is spatially concentrated in shallow-water-table areas near rivers
-  and canal infrastructure.  Basin-level volume-weighted capture
-  fractions (2017, central λ=10 m):
-
-  | Basin | Capture Fraction | Mean WTD (m) | Context |
-  |-------|-----------------|-------------|---------|
-  | Parker | 9.7 % | 51 | Colorado River alluvial aquifer |
-  | Lower Gila | 6.9 % | 55 | Gila River corridor |
-  | Yuma | 3.7 % | 42 | Colorado River diversions, alluvial wells |
-  | Lake Havasu | 3.3 % | 73 | Colorado River adjacent |
-  | Safford | 2.1 % | 34 | Upper Gila River valley, shallowest WTD |
-  | Phoenix AMA | 0.4 % | 64 | Deep wells dominate; SRP corridor localized |
-  | Willcox AMA | 0.0 % | 44 | Negative control: no canals despite moderate WTD |
-  | Butler Valley | 0.0 % | 72 | Negative control: no canal infrastructure |
-
-  The spatial pattern is consistent with
-  [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757), which
-  qualitatively identified regions where GW pumping potentially
-  impacts surface water by mapping floodplains within 20 km of the
-  Colorado and Gila rivers (catchment area ≥ 40,000 km²) with grade
-  < 0.4 % and average well depth ≤ 50 m.  The capture index advances
-  this from binary criteria to continuous, physics-based variables:
-  `canal_weighted_streamflow` replaces the binary "near river"
-  proximity rule, and `exp(−wtd/λ)` replaces the 50 m well-depth
-  threshold with a smooth exponential decay — at λ = 10 m, a 50 m
-  water table gives `exp(−50/10) ≈ 0.007` (negligible capture),
-  consistent with the 2022 study's cutoff.  The highest capture
-  fractions (Parker, Lower Gila, Yuma) align with the Colorado and
-  Gila River alluvial corridors identified in the 2022 study as the
-  primary zones of pumping-induced surface water depletion.
-
-- **Uncertainty**: AZ-wide volume-weighted σ_total is **~14 % of the
-  mean predicted withdrawal during the 1984–2025 historical period**
-  (≈ 0.62 MAF σ on a 4.38 MAF mean), rising to **~19 % over the
-  2026–2099 projection** (≈ 0.98 MAF on 5.18 MAF) as σ_LULC and σ_MACA
-  begin to contribute, and reaching **~26 % in the deep hindcast
-  (1896–1983)** (≈ 0.32 MAF on 1.40 MAF) where σ_irr is largest because
-  pre-IrrMapper irrigation-fraction reconstruction is more uncertain.
-  Variance attribution (% of σ_total²) shifts across eras:
-  - **Hindcast (1900):** σ_irr 61 % · σ_model 20 % · others ≈ 0
-  - **Historical (2017):** σ_model 58 % · σ_irr 4 % · σ_GW 0.1 %
-  - **Projection (2099):** σ_model 46 % · σ_LULC 19 % · σ_MACA 4 % · σ_irr 0 % · σ_GW 0 %
-
-  The well-density σ_gw component is small everywhere
-  (≈ 0.3 mm depth, < 0.1 % of σ_total²) — the 5-snapshot HarDWR
-  perturbation captures real year-over-year variability in the model's
-  #1 SHAP feature, but the input CV (~3 %) is small enough that the
-  resulting prediction sensitivity is dominated by the seed ensemble
-  σ_model. Per-pixel CV maps (`Sigma_Total/Mean_CV.tif`) and
-  per-component contribution time series are written to
-  `Uncertainty/Sigma_Total/` and `Uncertainty/Plots/`.
-
-Consumptive use (CU = IE × Irrigation Withdrawal) volumes, where IE is the
-USGS NHM basin-level irrigation efficiency (million acre-feet):
-
-| Year | Irrigation | Irrigation CU | Irrigation GW CU | Irrigation SW CU | IE |
-|------|------------|---------------|-------------------|------------------|----|
-| 1900 | 0.04 | 0.03 | 0.02 | 0.01 | 61 % |
-| 1910 | 0.06 | 0.03 | 0.03 | 0.01 | 61 % |
-| 1920 | 0.13 | 0.08 | 0.05 | 0.03 | 61 % |
-| 1930 | 0.26 | 0.16 | 0.08 | 0.07 | 61 % |
-| 1940 | 0.57 | 0.35 | 0.17 | 0.17 | 61 % |
-| 1950 | 1.32 | 0.80 | 0.38 | 0.42 | 61 % |
-| 1960 | 2.05 | 1.25 | 0.66 | 0.59 | 61 % |
-| 1970 | 2.51 | 1.53 | 0.89 | 0.64 | 61 % |
-| 1980 | 3.03 | 1.84 | 1.05 | 0.79 | 61 % |
-| 1985 | 3.24 | 1.96 | 1.16 | 0.80 | 61 % |
-| 1990 | 3.25 | 1.97 | 1.22 | 0.75 | 61 % |
-| 2000 | 3.22 | 1.94 | 1.22 | 0.72 | 60 % |
-| 2010 | 3.03 | 1.83 | 1.19 | 0.64 | 60 % |
-| 2015 | 3.41 | 2.06 | 1.40 | 0.66 | 60 % |
-| 2017 | 3.46 | 2.10 | 1.43 | 0.67 | 61 % |
-| 2019 | 3.25 | 1.97 | 1.35 | 0.62 | 61 % |
-| 2020 | 3.41 | 2.05 | 1.41 | 0.64 | 60 % |
-| 2024 | 3.37 | 2.04 | 1.44 | 0.60 | 60 % |
-| 2030 | 3.25 | 1.97 | 1.33 | 0.63 | 60 % |
-| 2040 | 3.26 | 1.97 | 1.34 | 0.63 | 60 % |
-| 2050 | 3.33 | 2.01 | 1.37 | 0.64 | 60 % |
-| 2060 | 3.38 | 2.04 | 1.40 | 0.64 | 61 % |
-| 2070 | 3.44 | 2.08 | 1.43 | 0.65 | 61 % |
-| 2080 | 3.46 | 2.10 | 1.44 | 0.65 | 61 % |
-| 2090 | 3.48 | 2.11 | 1.46 | 0.65 | 61 % |
-| 2099 | 3.52 | 2.13 | 1.48 | 0.65 | 61 % |
-
-The statewide mean IE is ~60 %, meaning roughly 40 % of applied irrigation
-water returns to aquifers as deep percolation or runs off as return flow.
-IE varies by basin (NHM HUC12-level values) but the statewide aggregate is
-stable across years because the same NHM efficiency map is applied to
-changing withdrawal volumes.
 
 #### 3d. Hybrid uncertainty quantification (`uncertaintyops.run_uncertainty_quantification()`)
 
@@ -2664,7 +2388,476 @@ Data/Outputs/
         └── PS_Intercomparison/              # Step 4e — Non-irrigation vs USGS PS
 ```
 
-### Data References
+## Results
+
+The pipeline estimates **well-based withdrawals** — groundwater pumping plus
+locally diverted surface water that passes through registered well/diversion
+infrastructure.  This is a subset of Arizona's total water supply, which also
+includes Colorado River imports (CAP aqueduct deliveries, Yuma-area
+diversions), reclaimed/effluent water, and other sources not captured by the
+ADWR Well Registry.  ADWR reports total statewide water use of ~7.0 MAF
+(2017), of which irrigated agriculture consumes approximately 72 % (as per ADWR 2019 data)
+([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
+
+**Water budget reconciliation (2017):** The model predicts 4.74 MAF vs.
+ADWR's 7.0 MAF total, a gap of ~2.25 MAF.  This gap is accounted for by
+water sources outside the ADWR Well Registry:
+
+| Source | MAF | Notes |
+|--------|-----|-------|
+| CAP direct deliveries | 0.71 | Excludes recharge; from CAP delivery records |
+| SRP surface water | 0.40 | Phoenix AMA; from ADWR SRP delivery records |
+| Yuma-area federal diversions | ~0.79 | Bureau of Reclamation Yuma and Gila Project irrigation districts (WMIDD: 278,000 AF, YCWUA: 254,200 AF, Gila Project Yuma Mesa Division: 250,000 AF, Unit B: 6,800 AF); gravity canal diversions from the Colorado River via the All-American Canal and Gila Gravity Main Canal ([Noble et al., 2015](https://www.azwater.gov/sites/default/files/2022-11/Final%20Yuma%20Report%20021715.pdf)) |
+| Reclaimed/effluent water | ~0.35 | ~5 % of total state water supply ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)) |
+| **Total gap** | **~2.25** | |
+
+The model thus captures ~68% of Arizona's total water use — specifically,
+the portion that flows through registered well and diversion infrastructure.
+The remaining ~32 % is delivered by large-scale federal water projects,
+(CAP aqueduct, SRP canal system, Yuma-area Colorado River diversions) and
+reclaimed water systems that operate outside the ADWR Well Registry.
+The Yuma-area irrigation districts hold some of the oldest and most senior
+water rights on the Lower Colorado River (dating to the Reclamation Act of
+1902) and collectively divert ~0.79 MAF/yr through federal canal infrastructure
+with application efficiencies of 80–90 % — substantially higher than the
+statewide NHM average of ~60 % used in this pipeline
+([Noble et al., 2015](https://www.azwater.gov/sites/default/files/2022-11/Final%20Yuma%20Report%20021715.pdf)).
+Combining the model's 4.74 MAF with the estimated non-well sources
+(~2.25 MAF) yields ~6.99 MAF, closing to within 0.01 MAF of ADWR's
+reported 7.0 MAF total.  USGS independently estimates 3.09 MAF of
+GW withdrawals for 2015 ([Dieter et al., 2018](https://doi.org/10.3133/cir1441));
+the model produces 3.17 MAF for the same year (within 0.08 MAF)
+([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
+
+**Uncertainty around the reconciliation:** The 2017 AZ-wide σ_total
+from the UQ pipeline is **0.66 MAF** (≈ 13.9 % of the 4.74 MAF model
+value), giving a 95 % confidence interval of **3.45–6.03 MAF** on the
+model alone.  Adding the (constant) ~2.26 MAF federal-delivery
+adjustment shifts that interval to **5.71–8.29 MAF** for the
+reconciled total, which comfortably brackets both the closure value
+(6.99 MAF) and ADWR's reported 7.0 MAF.  The fact that the central
+estimate (6.99 MAF) lands within 0.01 MAF of ADWR while the 95 % CI
+spans ~2.6 MAF is a useful reminder that the very tight closure is a
+consequence of using the same federal-delivery offset that ADWR
+implicitly counts — not evidence that the underlying ML prediction is
+accurate to ± 0.01 MAF.  The honest precision of the model-side
+estimate is the σ_total interval, which 6.99 / 7.0 MAF both fall well
+inside.
+
+The USGS 2015 GW comparison tells the same story from an independent
+direction: the model predicts 3.17 MAF GW pumping for 2015 with
+σ_total ≈ 0.65 MAF, giving a 95 % CI of **1.90–4.44 MAF**, and USGS's
+3.09 MAF estimate ([Dieter et al., 2018](https://doi.org/10.3133/cir1441))
+lands well inside that interval.  Two independent agency totals — ADWR
+for 2017 and USGS for 2015, computed from different source data with
+different methodologies — both fall within the model's σ_total
+intervals despite the model never being trained or tuned against either
+of them.
+
+**Spatial scope of "no calibration":** The training dataset
+(`USE_AMA_INA = True` in [pipeline.py](pipeline.py#L120)) is restricted
+to ADWR-metered pixels inside the ten AMA/INA management areas:
+Phoenix, Pinal, Tucson, Prescott, Santa Cruz, Douglas, and Willcox
+AMAs plus Joseph City, Harquahala, and Hualapai Valley INAs.  Of these,
+the eight legacy AMA/INAs (everything except Willcox and Hualapai
+Valley) provide continuous metered records from 1984 onward and
+contribute the bulk of the training signal.  **Willcox AMA and
+Hualapai Valley INA were designated only recently and have sparse
+metering both temporally (records concentrated in the most recent
+years) and spatially (fewer reporting wells per pixel)**, so the
+effective training signal from those two basins is much smaller than
+from the eight legacy areas.  Predictions are then generated for every
+2 km pixel in Arizona, including the ~25 unmetered Other basins
+(basin type 2) — Yuma, Lower Gila, Parker, Lake Havasu, Bill Williams,
+Butler Valley, the Mogollon plateau basins, and others — for which
+**no per-well training labels exist anywhere**.  The 4.74 MAF (2017)
+model total therefore mixes in-sample-distribution AMA/INA predictions
+with out-of-distribution unmetered-basin predictions, and roughly 30 %
+of the statewide volume comes from the latter group.  When ADWR's 7.0
+MAF and USGS's 3.09 MAF land inside the σ_total intervals, the model
+is being validated not just against an independent target year and
+methodology, but against a target that explicitly aggregates basins
+the ML model has never been trained on.  The agreement is therefore a
+genuine out-of-distribution generalization test, not an in-sample
+goodness-of-fit check.  This is the strongest possible version of the
+"no calibration to reported totals" claim because no training signal
+from the unmetered basins flows into the model at any stage —
+predictor features (climate, LULC, well density, canal-weighted
+streamflow, WTD, etc.) are computed identically inside and outside
+AMA/INAs from the same gridded inputs, and the model relies entirely
+on the assumption that the learned predictor → pumping mapping
+generalizes from metered AMA/INAs to morphologically similar
+unmetered basins.
+
+Representative statewide volumes (million acre-feet):
+
+| Year | Total | Irrigation | Non-Irrigation | Total GW | Total SW | Irr % | GW % |
+|------|-------|------------|----------------|----------|----------|-------|------|
+| 1900 | 0.11 | 0.04 | 0.07 | 0.07 | 0.04 | 39 % | 66 % |
+| 1910 | 0.14 | 0.06 | 0.08 | 0.10 | 0.04 | 40 % | 71 % |
+| 1920 | 0.26 | 0.13 | 0.13 | 0.16 | 0.09 | 50 % | 63 % |
+| 1930 | 0.46 | 0.26 | 0.20 | 0.26 | 0.20 | 56 % | 57 % |
+| 1940 | 0.85 | 0.57 | 0.28 | 0.46 | 0.40 | 67 % | 54 % |
+| 1950 | 1.74 | 1.32 | 0.43 | 0.89 | 0.86 | 75 % | 51 % |
+| 1960 | 2.61 | 2.05 | 0.56 | 1.42 | 1.19 | 79 % | 55 % |
+| 1970 | 3.16 | 2.51 | 0.65 | 1.88 | 1.28 | 80 % | 60 % |
+| 1980 | 3.82 | 3.03 | 0.80 | 2.23 | 1.59 | 79 % | 58 % |
+| 1985 | 4.17 | 3.24 | 0.93 | 2.52 | 1.65 | 78 % | 60 % |
+| 1990 | 4.20 | 3.25 | 0.95 | 2.65 | 1.55 | 77 % | 63 % |
+| 2000 | 4.35 | 3.22 | 1.12 | 2.80 | 1.55 | 74 % | 64 % |
+| 2010 | 4.20 | 3.03 | 1.17 | 2.77 | 1.42 | 72 % | 66 % |
+| 2015 | 4.65 | 3.41 | 1.24 | 3.17 | 1.48 | 73 % | 68 % |
+| 2017 | 4.74 | 3.46 | 1.28 | 3.25 | 1.50 | 73 % | 68 % |
+| 2019 | 4.46 | 3.25 | 1.21 | 3.06 | 1.40 | 73 % | 69 % |
+| 2020 | 4.73 | 3.41 | 1.32 | 3.28 | 1.45 | 72 % | 69 % |
+| 2024 | 4.74 | 3.37 | 1.36 | 3.33 | 1.40 | 71 % | 70 % |
+| 2030 | 4.68 | 3.25 | 1.43 | 3.18 | 1.50 | 69 % | 68 % |
+| 2040 | 4.79 | 3.26 | 1.52 | 3.26 | 1.52 | 68 % | 68 % |
+| 2050 | 4.99 | 3.33 | 1.65 | 3.42 | 1.56 | 67 % | 69 % |
+| 2060 | 5.14 | 3.38 | 1.76 | 3.54 | 1.59 | 66 % | 69 % |
+| 2070 | 5.34 | 3.44 | 1.89 | 3.71 | 1.62 | 64 % | 70 % |
+| 2080 | 5.42 | 3.46 | 1.96 | 3.79 | 1.64 | 64 % | 70 % |
+| 2090 | 5.55 | 3.48 | 2.07 | 3.89 | 1.66 | 63 % | 70 % |
+| 2099 | 5.66 | 3.52 | 2.14 | 3.99 | 1.67 | 62 % | 71 % |
+
+Consumptive use (CU = IE × Irrigation Withdrawal) volumes, where IE is the
+USGS NHM basin-level irrigation efficiency (million acre-feet):
+
+| Year | Irrigation | Irrigation CU | Irrigation GW CU | Irrigation SW CU | IE |
+|------|------------|---------------|-------------------|------------------|----|
+| 1900 | 0.04 | 0.03 | 0.02 | 0.01 | 61 % |
+| 1910 | 0.06 | 0.03 | 0.03 | 0.01 | 61 % |
+| 1920 | 0.13 | 0.08 | 0.05 | 0.03 | 61 % |
+| 1930 | 0.26 | 0.16 | 0.08 | 0.07 | 61 % |
+| 1940 | 0.57 | 0.35 | 0.17 | 0.17 | 61 % |
+| 1950 | 1.32 | 0.80 | 0.38 | 0.42 | 61 % |
+| 1960 | 2.05 | 1.25 | 0.66 | 0.59 | 61 % |
+| 1970 | 2.51 | 1.53 | 0.89 | 0.64 | 61 % |
+| 1980 | 3.03 | 1.84 | 1.05 | 0.79 | 61 % |
+| 1985 | 3.24 | 1.96 | 1.16 | 0.80 | 61 % |
+| 1990 | 3.25 | 1.97 | 1.22 | 0.75 | 61 % |
+| 2000 | 3.22 | 1.94 | 1.22 | 0.72 | 60 % |
+| 2010 | 3.03 | 1.83 | 1.19 | 0.64 | 60 % |
+| 2015 | 3.41 | 2.06 | 1.40 | 0.66 | 60 % |
+| 2017 | 3.46 | 2.10 | 1.43 | 0.67 | 61 % |
+| 2019 | 3.25 | 1.97 | 1.35 | 0.62 | 61 % |
+| 2020 | 3.41 | 2.05 | 1.41 | 0.64 | 60 % |
+| 2024 | 3.37 | 2.04 | 1.44 | 0.60 | 60 % |
+| 2030 | 3.25 | 1.97 | 1.33 | 0.63 | 60 % |
+| 2040 | 3.26 | 1.97 | 1.34 | 0.63 | 60 % |
+| 2050 | 3.33 | 2.01 | 1.37 | 0.64 | 60 % |
+| 2060 | 3.38 | 2.04 | 1.40 | 0.64 | 61 % |
+| 2070 | 3.44 | 2.08 | 1.43 | 0.65 | 61 % |
+| 2080 | 3.46 | 2.10 | 1.44 | 0.65 | 61 % |
+| 2090 | 3.48 | 2.11 | 1.46 | 0.65 | 61 % |
+| 2099 | 3.52 | 2.13 | 1.48 | 0.65 | 61 % |
+
+The statewide mean IE is ~60 %, meaning roughly 40 % of applied irrigation
+water returns to aquifers as deep percolation or runs off as return flow.
+IE varies by basin (NHM HUC12-level values) but the statewide aggregate is
+stable across years because the same NHM efficiency map is applied to
+changing withdrawal volumes.
+
+Key trends:
+- **Irrigation share** declines from ~80 % (1960s–1980s) to ~71 % (2024)
+  and continues to ~62 % by 2099 as urbanization increases M&I demand —
+  consistent with ADWR's 72 % estimate for recent years.  Note that the
+  irrigation category implicitly includes aquaculture and turf irrigation
+  (e.g. golf courses) where the same wells registered as ``IRRIGATION``
+  in the ADWR Well Registry serve multiple end uses, which may contribute
+  to the irrigation GW share being slightly higher than agriculture-only
+  estimates.
+- **GW share** declines from 66 % (1900) to ~51 % by the 1950s as canal
+  infrastructure (SRP) brought surface water to irrigated areas, then
+  rises gradually to ~70 % by 2099 as non-irrigation demand —
+  predominantly groundwater-sourced outside canal service areas — grows
+  faster than irrigation.  Including unaccounted federal SW
+  deliveries (~2.26 MAF), the statewide GW share is ~46 % in 2017,
+  consistent with independently reported GW/SW shares: USGS estimates
+  46 % GW and 3.09 MAF total GW for 2015 ([NGWA, 2020](https://www.ngwa.org/);
+  based on [Dieter et al., 2018](https://doi.org/10.3133/cir1441)), while
+  ADWR reports 41 % GW for 2019 ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
+  The model produces 45 % / 3.17 MAF for 2015 (within 0.08 MAF and
+  1 percentage point of USGS) and 44 % for 2019 (within 3 percentage
+  points of ADWR) — converging on both agency estimates across different
+  years without any calibration to these targets.
+
+  | Year | Source | GW (MAF) | Statewide GW % |
+  |------|--------|----------|----------------|
+  | 2015 | USGS/NGWA | 3.09 | 46 % |
+  | 2015 | AZ-Hydro | 3.17 | 45 % |
+  | 2019 | ADWR | — | 41 % |
+  | 2019 | AZ-Hydro | 3.06 | 44 % |
+- **Total withdrawals** grow from 0.11 MAF (1900) to 4.74 MAF (2024)
+  and are projected to reach 5.66 MAF by 2099.  Early growth (1900–1950)
+  reflects the build-out of well and canal infrastructure; mid-century
+  growth (1950s–1980s) is driven by agricultural expansion; projected
+  growth is driven by urbanization and increasing M&I demand.
+- **Irrigation** remains relatively stable in the projections (3.37 →
+  3.52 MAF, +4 % by 2099), while **non-irrigation** grows by ~57 %
+  (1.36 → 2.14 MAF), more than doubling from the 1990s level
+  (0.95 MAF), reflecting continued urban and industrial growth
+  including data center and energy-sector water demand.
+- **Pre-CAP era** (before 1985): GW share declines as SRP canal
+  infrastructure expanded, reaching a minimum ~51 % by the 1950s.
+  Post-1985 GW share rises as non-irrigation (predominantly GW)
+  demand grows relative to canal-served irrigation.
+- **Conservation**: Irrigation + Non-Irrigation = Total and GW + SW = Total
+  hold exactly for all years.
+- **Consumptive use** (CU = IE × Irrigation Withdrawal, with IE the
+  USGS NHM HUC12 irrigation efficiency map): irrigation CU rises from
+  ~0.03 MAF in 1900 to a 2.10 MAF peak in 2017 — a ~70× increase that
+  tracks the parent irrigation withdrawal trajectory closely because
+  the statewide IE is stable at ~60 % across all years (60.1 % in 2010,
+  60.6 % in 2017, 60.4 % in 2024). The roughly 40 % of applied
+  irrigation water that is *not* consumed returns to the aquifer as
+  deep percolation or runs off as return flow, which is a substantial
+  recharge term that this study quantifies but does not separately
+  route through the capture index. The GW share of irrigation CU
+  follows the parent GW share of irrigation withdrawal — rising from
+  ~50 % in the 1950s (when SRP canal deliveries were near peak) to
+  ~70 % by 2017 — so the consumptive component of pumping-induced
+  groundwater depletion grows in proportion. In the projection
+  (2026–2099) irrigation CU is flat to slightly rising (2.04 → 2.13
+  MAF, +5 %) because the parent irrigation withdrawal — which is
+  driven by the LULC-projection-derived `annual_irr_fraction` and
+  `annual_crop_fraction` features — is roughly stable in the USGS
+  scenarios used here. Crop-area expansion or contraction *is*
+  captured in the projection through those LULC features, so a future
+  in which irrigated acreage changes will move our predicted
+  withdrawal (and therefore CU) accordingly. The projected CU
+  trajectories should still be interpreted with the **irrigation
+  efficiency paradox** in mind: an upward shift in IE may actually
+  *increase* basin-scale CU rather than decrease it, through several
+  rebound channels that this framework does not represent. See the
+  Known Limitations subsection on the irrigation efficiency paradox
+  for the full discussion and the supporting [Grafton et al. (2018)](https://doi.org/10.1126/science.aat9314)
+  citation.
+- **Surface Water Capture Index**: The statewide volume-weighted
+  capture fraction is ~0.2 % (central estimate, λ=10 m), translating
+  to 0.02–0.04 MAF of GW pumping that physically captures surface
+  water via stream depletion.  Capture grows from ~0.001 MAF (1900)
+  to a peak of ~0.038 MAF (2015–2024) as pumping infrastructure
+  expanded near canal corridors, then declines slightly in projections
+  as irrigation stabilizes.  Irrigation GW accounts for ~90 % of total
+  capture (~0.034 MAF), with non-irrigation contributing ~0.003 MAF.
+  While the statewide impact is small (<1 % of total GW), the capture
+  is spatially concentrated in shallow-water-table areas near rivers
+  and canal infrastructure.  Basin-level volume-weighted capture
+  fractions (2017, central λ=10 m):
+
+  | Basin | Capture Fraction | Mean WTD (m) | Context |
+  |-------|-----------------|-------------|---------|
+  | Parker | 9.7 % | 51 | Colorado River alluvial aquifer |
+  | Lower Gila | 6.9 % | 55 | Gila River corridor |
+  | Yuma | 3.7 % | 42 | Colorado River diversions, alluvial wells |
+  | Lake Havasu | 3.3 % | 73 | Colorado River adjacent |
+  | Safford | 2.1 % | 34 | Upper Gila River valley, shallowest WTD |
+  | Phoenix AMA | 0.4 % | 64 | Deep wells dominate; SRP corridor localized |
+  | Willcox AMA | 0.0 % | 44 | Negative control: no canals despite moderate WTD |
+  | Butler Valley | 0.0 % | 72 | Negative control: no canal infrastructure |
+
+  The spatial pattern is consistent with
+  [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757), which
+  qualitatively identified regions where GW pumping potentially
+  impacts surface water by mapping floodplains within 20 km of the
+  Colorado and Gila rivers (catchment area ≥ 40,000 km²) with grade
+  < 0.4 % and average well depth ≤ 50 m.  The capture index advances
+  this from binary criteria to continuous, physics-based variables:
+  `canal_weighted_streamflow` replaces the binary "near river"
+  proximity rule, and `exp(−wtd/λ)` replaces the 50 m well-depth
+  threshold with a smooth exponential decay — at λ = 10 m, a 50 m
+  water table gives `exp(−50/10) ≈ 0.007` (negligible capture),
+  consistent with the 2022 study's cutoff.  The highest capture
+  fractions (Parker, Lower Gila, Yuma) align with the Colorado and
+  Gila River alluvial corridors identified in the 2022 study as the
+  primary zones of pumping-induced surface water depletion.
+
+- **Uncertainty**: AZ-wide volume-weighted σ_total is **~14 % of the
+  mean predicted withdrawal during the 1984–2025 historical period**
+  (≈ 0.62 MAF σ on a 4.38 MAF mean), rising to **~19 % over the
+  2026–2099 projection** (≈ 0.98 MAF on 5.18 MAF) as σ_LULC and σ_MACA
+  begin to contribute, and reaching **~26 % in the deep hindcast
+  (1896–1983)** (≈ 0.32 MAF on 1.40 MAF) where σ_irr is largest because
+  pre-IrrMapper irrigation-fraction reconstruction is more uncertain.
+  Variance attribution (% of σ_total²) shifts across eras:
+  - **Hindcast (1900):** σ_irr 61 % · σ_model 20 % · others ≈ 0
+  - **Historical (2017):** σ_model 58 % · σ_irr 4 % · σ_GW 0.1 %
+  - **Projection (2099):** σ_model 46 % · σ_LULC 19 % · σ_MACA 4 % · σ_irr 0 % · σ_GW 0 %
+
+  The well-density σ_gw component is small everywhere
+  (≈ 0.3 mm depth, < 0.1 % of σ_total²) — the 5-snapshot HarDWR
+  perturbation captures real year-over-year variability in the model's
+  #1 SHAP feature, but the input CV (~3 %) is small enough that the
+  resulting prediction sensitivity is dominated by the seed ensemble
+  σ_model. Per-pixel CV maps (`Sigma_Total/Mean_CV.tif`) and
+  per-component contribution time series are written to
+  `Uncertainty/Sigma_Total/` and `Uncertainty/Plots/`.
+
+  **Per-basin CV structure (2017 example).** The AZ-wide ~14 % figure
+  conflates very different per-basin behaviors. Quadrature-aggregated
+  σ within each basin (from `Sigma_Total/Basin_Sigma_Total.csv`) gives:
+
+  | Basin group | Examples | Per-basin CV |
+  |---|---|---|
+  | Largest legacy AMAs (in-sample) | Phoenix 1.1 %, Tucson 1.0 %, Pinal 1.3 % | **1–5 %** |
+  | Largest unmetered Other / OOD basins | Yuma 3.1 %, Lower Gila 5.9 %, Parker 5.2 %, Lake Havasu 6.9 %, Hualapai INA 5.7 % | **3–10 %** |
+  | Mid-size mixed | Lake Mohave 6.4 %, Bill Williams 10.5 %, LCRP 8.5 % | **5–11 %** |
+  | Small low-volume basins | Meadview 48 %, Peach Springs 26 %, Morenci 24 % | **20–50 %** |
+
+  Two things are worth noting. First, the largest unmetered Other
+  basins (the river-corridor basins where the model is in pure OOD
+  mode) have CVs only modestly higher than the largest legacy AMAs —
+  the σ framework does inflate the CI in OOD basins, but the inflation
+  is small because the predictor → pumping mapping generalizes well
+  from morphologically similar metered basins. The very high CVs are
+  concentrated in tiny low-volume basins (Meadview, Peach Springs)
+  where the absolute σ is small but the denominator is even smaller,
+  not in the OOD basins per se. Second, the AZ-wide ~14 % figure
+  reported above is computed from `Mean_Sigma_Total_mm × active_area`
+  (effectively assuming maximum spatial correlation across pixels),
+  while the per-basin numbers use proper quadrature within each basin
+  and would aggregate across basins to a much smaller statewide CV
+  (~1 %) under an independence assumption. The truth lives between
+  these bounds because pixel errors are partially correlated through
+  shared predictors. We report the conservative ~14 % number in the
+  reconciliation paragraph because it is the most defensible upper
+  bound on the AZ-wide aggregate; per-basin CIs in
+  `Basin_Sigma_Total.csv` are the appropriate honest precision for
+  any individual-basin claim.
+
+### Known limitations
+
+Five limitations are baked into the framework's structure rather than
+into any individual UQ component. Each is unavoidable given current
+data and is named explicitly here so it does not have to be inferred
+from the methods.
+
+1. **Deep hindcast extrapolation (1896–~1950).** The model is trained
+   on 1984–2024 metered records and applied backward to 1896. For the
+   most recent decades of the hindcast (1950s onward), the underlying
+   infrastructure, climate normals, and crop mix are similar enough to
+   the training period that the predictor → pumping mapping is
+   plausibly stationary, and the σ_irr component correctly inflates
+   the CI in this era (61 % of variance share at 1900) to reflect
+   that pre-IrrMapper irrigation reconstruction is uncertain. For the
+   deep hindcast (pre-1950, and especially pre-1920), the model is
+   predicting 60+ years before its training window in a state with
+   very different cropping patterns, no Hoover Dam, no SRP canal
+   build-out, and dramatically lower well counts. The 1896–1950
+   numbers should be read as a **physics-constrained reconstruction
+   consistent with the available historical record**, not as a
+   validated quantitative reconstruction of any specific year. The
+   1950s onward have substantially stronger empirical anchoring.
+
+2. **Projection structural-change blindness (2026–2099).** The σ_LULC
+   and σ_MACA components capture parameter uncertainty within fixed
+   ensemble scenarios — they vary climate and land use across the
+   provided GCM and USGS LULC scenarios but they do not vary the
+   underlying predictor → pumping relationship the model learned on
+   1984–2024 data. The projection is therefore blind to structural
+   changes that would alter that relationship: new crop types and
+   crop-mix shifts at constant area, on-farm irrigation technology
+   transitions (treated separately as the irrigation efficiency
+   paradox in item 3 below), policy shifts (Senate Bill 1740 basin
+   closures, additional metering, mandatory conservation rules),
+   step-change events (Colorado River Tier 2/3 declarations, Lake
+   Mead/Powell shortage cuts, dam decommissioning), and emerging
+   demands (data centers, hydrogen production, atmospheric water
+   capture). The 2099 projection should be read as **"what would
+   happen if the 1984–2024 model relationships continued forward under
+   the provided climate and land-use scenarios"**, not as a forecast
+   of actual 2099 water use under all plausible futures.
+
+3. **Irrigation efficiency paradox in CU projections.** Consumptive
+   use is computed as `CU = IE × Irrigation_Withdrawal`, where the
+   irrigation efficiency (IE) is taken from the USGS NHM HUC12 map
+   and held constant across all 204 prediction years. The crop-area
+   channel of CU change *is* captured in the projection because
+   `annual_irr_fraction` and `annual_crop_fraction` are LULC-projection
+   features that vary year to year, so a future in which Arizona's
+   irrigated acreage expands or contracts under the USGS scenarios
+   moves both the parent withdrawal and the resulting CU. Several
+   other channels are not represented, however, and they all share a
+   common pattern documented by [Grafton et al. (2018)](https://doi.org/10.1126/science.aat9314)
+   as **"the paradox of irrigation efficiency"**: when farmers adopt
+   higher-efficiency technologies (drip, sub-surface, precision
+   sprinklers), the typical empirical response is *not* to use less
+   water on the same crops but to switch to higher-water-demand crops,
+   intensify application depth, extend the growing season, or
+   introduce double-cropping — each of which raises ET and therefore
+   raises CU. The mechanism is conservation of mass: the unrecovered
+   "losses" from low-efficiency surface irrigation (deep percolation,
+   runoff) are largely *recoverable* return flow that recharges the
+   aquifer downstream, while the "savings" from high-efficiency
+   systems are largely *non-recoverable* consumptive losses to ET.
+   Specifically, our framework does not represent: **(i)** crop-mix
+   shifts at constant area, because the model has no per-crop water
+   demand profile; **(ii)** growing-season extension or double-cropping,
+   because the model targets total annual pumping rather than
+   per-event applications; **(iii)** intensification of irrigation
+   depth on the same area; and **(iv)** the IE shift itself, since
+   the NHM HUC12 IE map is held constant. The deeper conceptual
+   limitation is that the LULC scenarios are *exogenous* — they do
+   not respond endogenously to a hypothetical IE adoption — whereas
+   the Grafton paradox is fundamentally about the *coupling* between
+   IE adoption and farmer behavioral response. So a wholesale Arizona
+   shift to drip irrigation would likely move our CU trajectory
+   upward through channels (i)–(iii) above, even where the LULC-driven
+   cropped area stays flat. The flat-to-slightly-rising projected CU
+   (2.04 → 2.13 MAF, +5 % over 2024 → 2099) should therefore be read
+   as a *mechanistic projection under the assumption that IE and the
+   IE → behavior coupling do not change*, not as a forecast of actual
+   2099 CU under all plausible technology trajectories.
+
+4. **Sparse metering in Willcox AMA and Hualapai Valley INA.** Both
+   basins were designated as AMA/INAs only recently, and ADWR-metered
+   records exist there only for the most recent years and at fewer
+   reporting wells per pixel than the eight legacy AMA/INAs. The
+   training set technically includes them, but the effective signal
+   from them is small and concentrated in the latest years of the
+   training window. Predictions for these two basins for years before
+   their designation are de facto extrapolations from the morphology
+   of similar legacy basins. The model's published agreement with
+   ADWR's reconciliation does not specifically validate the Willcox
+   and Hualapai trajectories; basin-specific results in those two
+   basins should be interpreted with the same caution as Other-basin
+   predictions.
+
+5. **Static water table depth (WTD) raster.** The capture index and
+   the σ framework both treat the [Ma et al. (2026)](https://doi.org/10.1038/s43247-025-03094-3)
+   WTD raster as time-invariant — a single snapshot is used for all
+   204 prediction years. Yuma's water table near the Colorado has
+   dropped meaningfully over recent decades; SRP-corridor water
+   tables have risen with canal recharge. Using one snapshot for all
+   years means the per-pixel `exp(−wtd/λ)` connectivity term in the
+   capture index does not move as the actual water table moves, which
+   under-counts capture in basins where WTD is rising and over-counts
+   capture in basins where WTD is falling. The hydraulic-connectivity
+   proxy is therefore most defensible for years close to the snapshot
+   date and progressively more uncertain as the prediction year moves
+   away from it. Building a time-varying WTD layer for the full
+   1896–2099 window would require a transient regional groundwater
+   model and is out of scope for this study; the static-WTD assumption
+   is documented here so users of the capture-index outputs know what
+   they are inheriting.
+
+We document these limitations alongside the methods so that users of
+the published outputs inherit them explicitly rather than discovering
+them from the data. They define the scope conditions under which our
+results should be interpreted: the framework is most defensible for
+predictions inside the 1984–2024 metered window and within
+morphologically similar basins, and the σ_total framework already
+inflates the confidence intervals where these limitations apply most
+strongly. Outputs outside that scope — the deep hindcast, the 2099
+projection, the projected CU trajectories under hypothetical
+irrigation-efficiency shifts, the two recently designated AMA/INAs,
+and the capture-index estimates far from the WTD snapshot date —
+should be read as physics-constrained reconstructions and projections
+rather than as validated point estimates.
+
+
+## References
 
 Abatzoglou, J. T. (2013). Development of gridded surface meteorological data for ecological applications and modeling. _International Journal of Climatology_, _33_(1), 121–131. https://doi.org/10.1002/joc.3413.
 
@@ -2689,6 +2882,8 @@ Fleckenstein, R., Wellington, D., Jin, S., Tollerud, H., Brown, J. F., Dewitz, J
 Gangopadhyay, S., & Pruitt, T. (2011). West-Wide Climate Risk Assessments:  Bias-Corrected  and Spatially Downscaled  Surface Water Projections (Technical Memorandum No. 86-68210-2011-01). _U.S. Bureau of Reclamation_. https://www.usbr.gov/watersmart/docs/west-wide-climate-risk-assessments.pdf.
 
 Gorelick, N., Hancher, M., Dixon, M., Ilyushchenko, S., Thau, D., & Moore, R. (2017). Google Earth Engine: Planetary-scale geospatial analysis for everyone. _Remote Sensing of Environment_, _202_, 18–27. https://doi.org/10.1016/j.rse.2017.06.031.
+
+Grafton, R. Q., Williams, J., Perry, C. J., Molle, F., Ringler, C., Steduto, P., Udall, B., Wheeler, S. A., Wang, Y., Garrick, D., & Allen, R. G. (2018). The paradox of irrigation efficiency. _Science_, _361_(6404), 748–750. https://doi.org/10.1126/science.aat9314.
 
 Hasan, M. F., Smith, R. G., Majumdar, S., Huntington, J. L., Alves Meira Neto, A., & Minor, B. A. (2025). Satellite data and physics-constrained machine learning for estimating effective precipitation in the Western United States and application for monitoring groundwater irrigation. _Agricultural Water Management_, _319_, 109821. https://doi.org/10.1016/j.agwat.2025.109821.
 

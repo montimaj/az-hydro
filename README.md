@@ -7,6 +7,18 @@
 
 Maintainer: [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majumdar/) [sayantan.majumdar@dri.edu]
 
+## TL;DR
+
+**What it is.** A physics-constrained machine-learning pipeline that produces annual groundwater and surface-water withdrawals, irrigation consumptive use, and pumping-induced surface-water capture for every 2 km pixel in Arizona, every year from 1896 through 2099.
+
+**What's new.** (1) A 204-year continuous statewide water-use dataset spanning hindcast, historical, and projection eras in one self-consistent framework. (2) The first publicly available statewide irrigation CU dataset for Arizona at this combination of resolution and temporal coverage. (3) A novel surface-water capture index that apportions GW pumping into stream-depletion vs. storage-mining shares at 2 km annual resolution — work normally done one basin at a time with calibrated MODFLOW models. (4) Density-ratio GW/SW partitioning driven by HarDWR water-rights records and canal-weighted streamflow, replacing global statistical datasets with locally observable infrastructure.
+
+**The headline validation.** The model is trained *only* on metered ADWR records from the ten AMA/INA management areas, then applied to every 2 km pixel statewide — including ~25 unmetered basins where it has never seen a single training label. Despite this, statewide totals land within ±1σ of two independent agency reconciliations: ADWR's 7.0 MAF total for 2017 falls inside the model's federal-adjusted 5.71–8.29 MAF 95 % CI (central closure within 0.01 MAF), and USGS's 3.09 MAF GW estimate for 2015 falls inside the model's 1.90–4.44 MAF interval. **No calibration to either agency total or to any reported total in any unmetered basin.**
+
+**What it doesn't do.** See the [Known Limitations](azhydro/README.md#known-limitations) subsection in the methods README for the five structural caveats (deep-hindcast extrapolation, projection structural-change blindness, the irrigation efficiency paradox in CU projections, sparse metering in Willcox/Hualapai, and the static water table depth raster).
+
+**Where to start.** Methods and CLI usage: [`azhydro/README.md`](azhydro/README.md). GEE export scripts: [`gee/README.md`](gee/README.md). Input data: [Zenodo archive](https://doi.org/10.5281/zenodo.19057936).
+
 ## Graphical Abstract
 
 ![Graphical Abstract](docs/images/Graphical_Abstract_Fig1.png)
@@ -22,6 +34,7 @@ AZ-Hydro is a physics-constrained machine learning pipeline for estimating annua
 - **204-year continuous water use dataset** — first statewide, spatially resolved (2 km) annual withdrawal estimates spanning hindcast (1896–1983), historical (1984–2025), and projected (2026–2099) eras
 - **Density-ratio GW/SW partitioning** — uses ADWR well density vs. HarDWR surface-water rights density with canal-delivery boost, replacing global statistical datasets with locally observable infrastructure records
 - **Surface Water Capture Index** — novel per-pixel, per-year quantification of pumping-induced streamflow depletion based on water table depth and canal infrastructure, with physics-based uncertainty bounds
+- **Statewide irrigation consumptive use, 1896–2099** — to our knowledge, no publicly available dataset reports irrigation CU over Arizona at this combination of spatial resolution (2 km), temporal coverage (204 years, hindcast through projection), and per-well/per-basin/per-sub-basin/per-pixel disaggregation. The closest existing product is the USGS NHM HUC12 monthly irrigation CU reanalysis ([Martin et al., 2025](https://doi.org/10.1016/j.jhydrol.2025.133909); [Haynes et al., 2023](https://doi.org/10.5066/P9LGISUM)), which is national in scope but limited to 2000–2020 at HUC12 monthly resolution. ADWR publishes statewide withdrawal totals and an irrigation share but does not produce a basin-resolved irrigation CU product. AZ-Hydro provides annual irrigation CU at 2 km resolution for every year from 1896 through 2099, with per-pixel uncertainty bounds via physics-based error propagation (`σ_CU = IE × σ_Withdrawal`), separate GW-CU and SW-CU components consistent with the partitioning, and per-well CU disaggregation for ~170,000 individual wells via the well package. Statewide irrigation CU is reported here for the first time as 0.03 MAF (1900) → 2.10 MAF (2017 peak) → ~2.13 MAF (2099 projection), with the limitations on the projected trajectories and the irrigation efficiency paradox documented in the methods Limitations subsection
 - **Trained inside AMA/INAs, predicting statewide** — the ML model is trained *only* on metered ADWR records from the ten AMA/INA management areas (Phoenix, Pinal, Tucson, Prescott, Santa Cruz, Douglas, Willcox AMAs + Joseph City, Harquahala, Hualapai Valley INAs), which are the basins with mandatory metering. The eight legacy AMA/INAs (Phoenix, Pinal, Tucson, Prescott, Santa Cruz, Douglas, Joseph City, Harquahala) provide most of the training signal because they have been metered continuously since 1984; **Willcox AMA and Hualapai Valley INA were designated only recently and are sparsely metered both in time (records concentrated in the last few years) and in space (fewer reporting wells per pixel)**, so they contribute much less training data than the legacy areas. At prediction time the model is applied to **every 2 km pixel in Arizona**, including the ~25 unmetered "Other" basins (basin type 2) — Yuma, Lower Gila, Parker, Lake Havasu, Bill Williams, Butler Valley, Mogollon plateau basins, and others. The model has *never* seen a single labeled withdrawal record from any of those unmetered basins. All headline statewide totals, the SW capture index headline numbers for the river-corridor basins, and the agency reconciliation comparisons therefore depend on out-of-distribution transfer from the metered AMA/INAs to morphologically similar but completely unlabeled regions
 - **Full water-budget closure** — model captures ~68% of Arizona's 7.0 MAF total; the remaining ~32% (CAP, SRP, Yuma federal diversions, reclaimed water) is independently accounted for. Adding the constant ~2.26 MAF federal-delivery offset to the model's 4.74 MAF (2017) gives 6.99 MAF, closing to within 0.01 MAF of ADWR's reported 7.0 MAF. **Crucially, the unmetered Other-basin contribution to that 4.74 MAF is itself an out-of-distribution prediction** — the model has never seen labeled pumping data from those basins, yet the statewide aggregate matches an independent agency total within 0.2 %. The σ_total interval on the model side is ±0.66 MAF (≈14% CV), so 7.0 MAF lands well inside the federal-adjusted 95% CI of 5.71–8.29 MAF — the very tight central closure is a feature of the constant offset, while the honest precision of the underlying ML prediction is the σ_total interval
 - **Multi-source emergent validation, no calibration to reported totals in any basin** — statewide irrigation share (72%) matches ADWR; GW dependence matches both USGS (45% vs 46% for 2015, within 1 percentage point) and ADWR (44% vs 41% for 2019, within 3 percentage points) **without calibration to any agency target and without ever training on a single observation from outside the AMA/INA management areas**. Both reference values fall comfortably inside the model's σ_total 95% CI: USGS's 3.09 MAF (2015 GW pumping) lands inside the model's 1.90–4.44 MAF interval, and ADWR's 7.0 MAF (2017 reconciled total) lands inside the federal-adjusted 5.71–8.29 MAF interval. Two independent agency totals computed from different source data with different methodologies both agree with the model to far better than ±1σ, despite the model having never seen either of those totals — and despite ~30 % of the volume being predicted in basins for which no per-well training labels exist anywhere. The capture index independently reproduces the same SW–GW interaction zones identified qualitatively by [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757) using different methodology, cross-validating both studies. The convergence of independent datasets (ADWR wells, [HarDWR](https://doi.org/10.57931/2475303) rights, USGS gauges, [Ma et al.](https://doi.org/10.1038/s43247-025-03094-3) WTD, [GRAIN](https://doi.org/10.5194/essd-18-1855-2026) canals) in a physics-constrained framework provides a unified, self-consistent picture of Arizona's water system
@@ -44,11 +57,10 @@ az-hydro/
 ├── DISCLAIMER.md                    # Provisional software disclaimer
 ├── LICENSE
 ├── environment.yml                  # Conda environment specification
-├── recommendations.md               # Code-review recommendations & resolutions
 ├── ruff.toml                        # Ruff linter configuration
 │
 ├── azhydro/                         # ML pipeline package
-│   ├── README.md                    # Installation & CLI usage docs
+│   ├── README.md                    # Methods, CLI usage, and Results documentation
 │   ├── pipeline.py                  # Main entry point (CLI + step orchestration)
 │   └── hydrolibs/                   # Core library modules
 │       ├── __init__.py
@@ -58,7 +70,7 @@ az-hydro/
 │       ├── mlops.py                 # Model training, tuning (Optuna/Dask), evaluation
 │       ├── partitionops.py          # Withdrawal partitioning by category
 │       ├── rasterops.py             # Raster I/O, mosaicking, reprojection utilities
-│       ├── streamflowops.py         # USGS streamflow retrieval & rasterisation
+│       ├── streamflowops.py         # USGS streamflow retrieval & rasterization
 │       ├── sysops.py                # File-system helpers, directory creation
 │       ├── uncertaintyops.py        # 5-component hybrid uncertainty quantification
 │       ├── vectorops.py             # Vector reprojection, fishnet creation
@@ -69,6 +81,7 @@ az-hydro/
 │   ├── README.md                    # GEE script documentation
 │   ├── config.py                    # Shared GEE constants (bands, models, scales)
 │   ├── run_all_exports.py           # CLI to batch-run all export scripts
+│   ├── plot_monthly_ratios.py       # Diagnostic plots for monthly ET/ETo ratios
 │   ├── export_gridmet_hargreaves_ratio.py
 │   ├── export_lulc_ensemble.py
 │   ├── export_maca_gcm_annual_et.py
@@ -83,21 +96,15 @@ az-hydro/
 │   ├── export_usgs_adjusted_et.py
 │   └── js/                          # GEE Code Editor visualization scripts
 │
+├── paper/                           # Paper drafts (Markdown)
+│   └── data_paper.md                # Sci Data manuscript draft
+│
 ├── tests/                           # Unit tests
 │   ├── conftest.py                  # Shared fixtures
 │   └── test_core.py                 # Core pipeline tests
 │
-├── Data/                            # External — download from Zenodo (see below)
-│   ├── Inputs/
-│   │   ├── GEE_Data/                # Downloaded GEE tiles & HUC12 polygons
-│   │   ├── GW_Data/                 # ADWR records, shapefiles, ancillary vectors
-│   │   └── USGS WU/                 # NHM withdrawals, Reitz rasters, crop surveys
-│   └── Outputs/                     # Generated by the pipeline
-│       ├── GW_Data/                 # Observed withdrawal depth rasters & vectors
-│       └── ML_Model_*/              # Model evaluation, predictions, intercomparisons
-│
 └── docs/
-    └── images/                   # Logo images for README
+    └── images/                      # Logo images and graphical abstract
 ```
 
 ### Input data
