@@ -3055,14 +3055,25 @@ def create_graphical_abstract(
 
     if has_ts:
         from matplotlib.gridspec import GridSpec
-        fig = plt.figure(figsize=(18, 9))
-        gs = GridSpec(2, 2, figure=fig, width_ratios=[1, 1.2],
-                      height_ratios=[1.2, 1], hspace=0.35, wspace=0.3)
-        ax_map = fig.add_subplot(gs[:, 0])  # map spans both rows
-        ax_ts = fig.add_subplot(gs[0, 1])   # time series top-right
-        ax_bar = fig.add_subplot(gs[1, 1])  # bar chart bottom-right
+        # 3-row layout: top two rows hold the map (left, spanning) and
+        # the time series + bar chart (right, stacked).  The bottom row
+        # spans the full width and holds a single-column "Key
+        # contributions" text panel summarising the headline claims for
+        # a poster/abstract reader.
+        fig = plt.figure(figsize=(18, 10.5))
+        gs = GridSpec(
+            3, 2, figure=fig,
+            width_ratios=[1, 1.2],
+            height_ratios=[1.2, 1, 0.45],
+            hspace=0.35, wspace=0.3,
+        )
+        ax_map = fig.add_subplot(gs[:2, 0])   # map spans top two rows of left column
+        ax_ts = fig.add_subplot(gs[0, 1])     # time series top-right
+        ax_bar = fig.add_subplot(gs[1, 1])    # bar chart middle-right
+        ax_contrib = fig.add_subplot(gs[2, :])  # contributions span both columns of bottom row
     else:
         fig, ax_map = plt.subplots(1, 1, figsize=(9, 9))
+        ax_contrib = None
 
     # ---- Panel A: Spatial map ----
 
@@ -3089,12 +3100,20 @@ def create_graphical_abstract(
     cbar_fontsize = 10
     cbar.set_label('Depth (mm)', fontweight='bold', fontsize=cbar_fontsize)
     cbar.ax.tick_params(labelsize=cbar_fontsize)
-    # Secondary unit (ft) on the opposite side of the colorbar
+    # Place the primary metric unit (mm) on the LEFT side of the
+    # colorbar so it sits between the colorbar and the map, matching
+    # the convention used in create_actual_vs_predicted_maps and
+    # _add_af_twinx elsewhere in this file.
+    cbar.ax.yaxis.set_label_position('left')
+    cbar.ax.yaxis.tick_left()
+    # Secondary unit (ft) on the RIGHT side of the colorbar
     cb_ax2 = cbar.ax.twinx()
     cb_lo, cb_hi = cbar.ax.get_ylim()
     cb_ax2.set_ylim(cb_lo * _MM_TO_FT, cb_hi * _MM_TO_FT)
     cb_ax2.set_ylabel('Depth (ft)', fontsize=cbar_fontsize, fontweight='bold')
     cb_ax2.tick_params(labelsize=cbar_fontsize)
+    cb_ax2.yaxis.set_label_position('right')
+    cb_ax2.yaxis.tick_right()
 
     ax_map.set_title(
         f'(a) Mean Annual Predicted Withdrawal ({start_year}\u2013{end_year})',
@@ -3183,6 +3202,75 @@ def create_graphical_abstract(
         ax_bar.set_title('(c) Era Averages', fontsize=13, fontweight='bold')
         ax_bar.grid(axis='y', alpha=0.3, linestyle='--')
         _add_dual_volume_axes(ax_bar, label='Mean Annual Withdrawal')
+
+    # ---- Panel D: Key contributions text panel (bottom row) ----
+    if has_ts and ax_contrib is not None:
+        ax_contrib.set_xlim(0, 1)
+        ax_contrib.set_ylim(0, 1)
+        ax_contrib.axis('off')
+
+        # Light background panel matching the era-shading aesthetic
+        bg = mpatches.FancyBboxPatch(
+            (0.005, 0.05), 0.99, 0.90,
+            boxstyle='round,pad=0.01,rounding_size=0.015',
+            facecolor='#F5F5F5', edgecolor='#888888', linewidth=0.6,
+            transform=ax_contrib.transAxes,
+            zorder=0,
+        )
+        ax_contrib.add_patch(bg)
+
+        ax_contrib.text(
+            0.015, 0.92, '(d) Key Contributions',
+            transform=ax_contrib.transAxes,
+            fontsize=12, fontweight='bold', va='top',
+        )
+
+        # Single-column, single-line bullets.  Each bullet stays under
+        # ~150 characters so it fits on one line at the panel width
+        # without wrapping.  Lead phrase is set off from the body by
+        # an em-dash separator instead of bold formatting, which
+        # avoids matplotlib's fragile mathtext escaping for the unicode
+        # characters (×, σ, –) used in the lead phrases.
+        bullets = [
+            '2 km × 204-yr coverage — first statewide annual withdrawals, '
+            'irrigation CU, and SW capture index, 1896–2099, in one '
+            'self-consistent framework.',
+
+            'First Arizona-wide irrigation CU dataset at 2 km annual '
+            'resolution — no public alternative exists at this combination '
+            'of resolution and time horizon.',
+
+            'Out-of-distribution validation — trained only in the 10 '
+            'metered ADWR AMA/INAs, predicts statewide; matches ADWR and '
+            'USGS within ~1 pp / 0.1 MAF with no calibration to either '
+            'agency.',
+
+            'Novel SW capture index — apportions GW pumping into '
+            'stream-depletion vs. storage-mining shares at 2 km annual, '
+            'work that normally requires a per-basin MODFLOW–SFR model.',
+
+            'Hybrid 5-component σ_total UQ with physics-based CU error '
+            'propagation, producing 6-band augmented rasters (pred, σ, CV, '
+            'SNR, lower/upper CI) for every product.',
+        ]
+
+        # Render bullets evenly spaced down the panel.  The panel is
+        # ~2.0 inches tall (0.45 height ratio out of 2.65 total × 10.5
+        # inches), with the title taking the top ~10% and the bullets
+        # filling y in [0.05, 0.78].
+        line_h = (0.78 - 0.10) / max(len(bullets), 1)
+        for i, text in enumerate(bullets):
+            y = 0.78 - i * line_h
+            ax_contrib.text(
+                0.025, y, '\u2022',
+                transform=ax_contrib.transAxes,
+                fontsize=11, fontweight='bold', va='top',
+            )
+            ax_contrib.text(
+                0.04, y, text,
+                transform=ax_contrib.transAxes,
+                fontsize=9.5, va='top',
+            )
 
     out_path = os.path.join(output_dir, 'Graphical_Abstract_Fig1.png')
     fig.savefig(out_path, dpi=600, bbox_inches='tight')
@@ -3834,11 +3922,20 @@ def _compute_zonal_trend_stats(
     label_grid: np.ndarray,
     id_to_name: dict[int, str],
     alpha: float,
+    units: str = '',
 ) -> pd.DataFrame:
     """Compute per-zone trend statistics from pixel-wise results.
 
+    Args:
+        units: Free-text unit label written into a ``Units`` column on
+            every row (e.g. ``'mm/year'``, ``'m^3/year'``,
+            ``'fraction/year'``). Lets a downstream reader tell whether
+            the slope columns are in depth, volume, or dimensionless
+            units without having to parse the filename or ``Category``
+            column.
+
     Returns a DataFrame with one row per zone and columns:
-    Region, N_Pixels, Median_Slope, Mean_Slope, Mean_Slope_Sig,
+    Region, Units, N_Pixels, Median_Slope, Mean_Slope, Mean_Slope_Sig,
     Pct_Sig_Increase, Pct_Sig_Decrease, Pct_Not_Sig,
     P10_Slope, P90_Slope, Median_P_Value.
     """
@@ -3848,7 +3945,9 @@ def _compute_zonal_trend_stats(
         n = int(in_zone.sum())
         if n == 0:
             records.append({
-                'Region': zone_name, 'N_Pixels': 0,
+                'Region': zone_name,
+                'Units': units,
+                'N_Pixels': 0,
                 'Median_Slope': np.nan, 'Mean_Slope': np.nan,
                 'Mean_Slope_Sig': np.nan,
                 'Pct_Sig_Increase': 0.0, 'Pct_Sig_Decrease': 0.0,
@@ -3870,7 +3969,9 @@ def _compute_zonal_trend_stats(
         n_valid = int(finite.sum())
         if n_valid == 0:
             records.append({
-                'Region': zone_name, 'N_Pixels': n,
+                'Region': zone_name,
+                'Units': units,
+                'N_Pixels': n,
                 'Median_Slope': np.nan, 'Mean_Slope': np.nan,
                 'Mean_Slope_Sig': np.nan,
                 'Pct_Sig_Increase': 0.0, 'Pct_Sig_Decrease': 0.0,
@@ -3886,6 +3987,7 @@ def _compute_zonal_trend_stats(
 
         records.append({
             'Region': zone_name,
+            'Units': units,
             'N_Pixels': n_valid,
             'Median_Slope': float(np.median(slopes_f)),
             'Mean_Slope': float(np.mean(slopes_f)),
@@ -3940,6 +4042,8 @@ def create_trend_maps(
     *,
     title: str = 'Predicted Annual Withdrawal',
     unit_label: str = 'mm',
+    secondary_unit_label: str | None = None,
+    secondary_unit_factor: float | None = None,
     periods: dict[str, tuple[int, int]] | None = None,
     alpha: float = 0.05,
     band: int = 1,
@@ -3967,7 +4071,15 @@ def create_trend_maps(
         basin_shp (str): Path to GW basin boundary shapefile.
         output_dir (str): Where to save figures.
         title (str): Category name for the figure title.
-        unit_label (str): Depth/volume unit (e.g. 'mm', 'AF').
+        unit_label (str): Primary depth/volume unit (e.g. 'mm', 'm³').
+        secondary_unit_label (str or None): Optional secondary unit
+            (e.g. 'ft', 'AF') to display on the right side of every
+            colorbar via a twinx axis.  If ``None``, the colorbar shows
+            only the primary unit.
+        secondary_unit_factor (float or None): Multiplicative conversion
+            factor from the primary unit to the secondary unit
+            (e.g. ``1/304.8`` for mm → ft, ``1/1233.48`` for m³ → AF).
+            Required if ``secondary_unit_label`` is set.
         periods (dict or None): ``{period_name: (start, end)}`` year ranges
             to analyze.  Defaults to the four standard eras plus full period.
         alpha (float): Significance level for Mann-Kendall (default 0.05).
@@ -4090,9 +4202,11 @@ def create_trend_maps(
                 .replace(' ', '_').replace('–', '-')
                 .replace('(', '').replace(')', ''))
 
+        units_str = f'{unit_label}/year'
         basin_stats = _compute_zonal_trend_stats(
             slope_map, pval_map, sig_map, all_nan,
             basin_labels, basin_id_map, alpha,
+            units=units_str,
         )
         basin_stats.insert(0, 'Category', title)
         basin_stats.insert(1, 'Period', period_name)
@@ -4103,6 +4217,7 @@ def create_trend_maps(
             sub_stats = _compute_zonal_trend_stats(
                 slope_map, pval_map, sig_map, all_nan,
                 subbasin_labels, subbasin_id_map, alpha,
+                units=units_str,
             )
             sub_stats.insert(0, 'Category', title)
             sub_stats.insert(1, 'Period', period_name)
@@ -4145,6 +4260,30 @@ def create_trend_maps(
     if not period_results:
         logger.warning('No valid periods to plot for %s', title)
         return
+
+    # Helper: attach a secondary-unit twin axis to a colorbar so the
+    # primary metric unit (e.g. mm, m³) sits on the LEFT side of the
+    # colorbar and the secondary unit (e.g. ft, AF) sits on the RIGHT.
+    # No-op if secondary_unit_label / secondary_unit_factor are not set.
+    def _add_secondary_unit_axis(cbar, slope_scale, unit_prefix,
+                                 fontsize=10):
+        if secondary_unit_label is None or secondary_unit_factor is None:
+            return
+        # Move the primary axis to the LEFT of the colorbar
+        cbar.ax.yaxis.set_label_position('left')
+        cbar.ax.yaxis.tick_left()
+        # Build the secondary twin axis on the RIGHT
+        cb_ax2 = cbar.ax.twinx()
+        cb_lo, cb_hi = cbar.ax.get_ylim()
+        cb_ax2.set_ylim(cb_lo * secondary_unit_factor,
+                        cb_hi * secondary_unit_factor)
+        cb_ax2.set_ylabel(
+            f"Sen's slope ({unit_prefix}{secondary_unit_label}/year)",
+            fontsize=fontsize, fontweight='bold',
+        )
+        cb_ax2.tick_params(labelsize=fontsize)
+        cb_ax2.yaxis.set_label_position('right')
+        cb_ax2.yaxis.tick_right()
 
     # ── Rendering helpers ────────────────────────────────────────────
     def _draw_pixel_panel(ax, period_name, pr, color_abs, slope_scale=1.0):
@@ -4249,6 +4388,8 @@ def create_trend_maps(
             fontsize=12, fontweight='bold',
         )
         cbar.ax.tick_params(labelsize=10)
+        _add_secondary_unit_axis(cbar, pixel_scale, pixel_prefix,
+                                 fontsize=10)
         fig.suptitle(
             f'{title} \u2014 Trend {period_name}\n'
             f"(stipple = not significant at \u03b1 = {alpha})",
@@ -4283,6 +4424,8 @@ def create_trend_maps(
                 f"Mean Sen's slope ({basin_prefix}{unit_label}/year)",
                 fontsize=11, fontweight='bold',
             )
+            _add_secondary_unit_axis(cbar_b, basin_scale, basin_prefix,
+                                     fontsize=10)
             fig_b.suptitle(
                 f'{title} \u2014 Basin Trend {period_name}',
                 fontsize=13, fontweight='bold',
@@ -4321,6 +4464,8 @@ def create_trend_maps(
             fontsize=12, fontweight='bold',
         )
         cbar.ax.tick_params(labelsize=10)
+        _add_secondary_unit_axis(cbar, eras_scale, eras_prefix,
+                                 fontsize=10)
         fig.suptitle(
             f'{title} \u2014 Trend by Era\n'
             f"(stipple = not significant at \u03b1 = {alpha})",
@@ -4376,6 +4521,8 @@ def create_trend_maps(
                 f"Mean Sen's slope ({basin_eras_prefix}{unit_label}/year)",
                 fontsize=11, fontweight='bold',
             )
+            _add_secondary_unit_axis(cbar_b, basin_eras_scale,
+                                     basin_eras_prefix, fontsize=10)
             fig_b.suptitle(
                 f'{title} \u2014 Basin Trend by Era',
                 fontsize=14, fontweight='bold',

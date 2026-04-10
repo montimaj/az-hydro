@@ -2186,14 +2186,24 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                     dst.set_band_description(2, 'central_lambda10m')
                     dst.set_band_description(3, 'upper_lambda20m')
 
-                # Write capture volume in all 4 units (central estimate only)
+                # Write capture volume in all 4 units (central estimate only).
+                # Depth units (mm, ft) live under Depth_*; volume units
+                # (m³, AF) live under Volume_*, matching the convention
+                # used by every other multi-unit raster tree in this
+                # pipeline (Total_GW_Rasters, Irrigation_CU_Rasters, etc.).
                 cap_mm = _valid_pixels_to_raster(
                     capture['Capture_Volume_Central'], valid_mask, raster_shape)
+                _SW_CAPTURE_UNIT_SUBDIR = {
+                    'mm': 'Depth_mm',
+                    'ft': 'Depth_ft',
+                    'm3': 'Volume_m3',
+                    'AF': 'Volume_AF',
+                }
                 cap_dirs = {}
-                for unit_key in ('mm', 'ft', 'm3', 'AF'):
+                for unit_key, sub in _SW_CAPTURE_UNIT_SUBDIR.items():
                     d = os.path.join(sw_cap_dir,
                                      f'{cap_cat}_Capture_Rasters',
-                                     f'Depth_{unit_key}')
+                                     sub)
                     makedirs(d)
                     cap_dirs[unit_key] = d
                 _write_multi_unit_rasters(
@@ -2726,6 +2736,10 @@ def create_all_raster_maps() -> None:
     # ── Trend analysis (Mann-Kendall + Sen's slope) ────────────────
     trend_dir = os.path.join(maps_dir, 'Trend_Analysis')
 
+    # Conversion factors for the trend-map secondary axes
+    _MM_TO_FT = 1.0 / 304.8
+    _M3_TO_AF = 1.0 / 1233.48
+
     # Total predicted annual withdrawal
     if os.path.isdir(predicted_mm_dir):
         vizops.create_trend_maps(
@@ -2734,6 +2748,8 @@ def create_all_raster_maps() -> None:
             output_dir=trend_dir,
             title='Total Predicted Annual Withdrawal',
             unit_label='mm',
+            secondary_unit_label='ft',
+            secondary_unit_factor=_MM_TO_FT,
             subbasin_shp=ADWR_SUBBASIN_SHP,
         )
 
@@ -2748,6 +2764,8 @@ def create_all_raster_maps() -> None:
             output_dir=trend_dir,
             title=cat.replace('_', ' '),
             unit_label='mm',
+            secondary_unit_label='ft',
+            secondary_unit_factor=_MM_TO_FT,
             subbasin_shp=ADWR_SUBBASIN_SHP,
         )
 
@@ -2762,24 +2780,47 @@ def create_all_raster_maps() -> None:
             output_dir=trend_dir,
             title=cu.replace('_', ' '),
             unit_label='mm',
+            secondary_unit_label='ft',
+            secondary_unit_factor=_MM_TO_FT,
             subbasin_shp=ADWR_SUBBASIN_SHP,
         )
 
-    # SW Capture Index categories — volume and fraction
+    # SW Capture Index categories — depth, volume, and fraction trends
     sw_cap_base = os.path.join(prediction_dir, 'SW_Capture')
     for cap_cat in ('Total_SW_Capture', 'Irrigation_SW_Capture',
                     'Non_Irrigation_SW_Capture'):
-        # Volume trends (mm)
-        cap_dir = os.path.join(sw_cap_base, f'{cap_cat}_Rasters', 'Depth_mm')
-        if os.path.isdir(cap_dir):
+        pretty = cap_cat.replace('_', ' ')
+
+        # Depth trends (mm raster source, mm/ft colorbar)
+        depth_dir = os.path.join(sw_cap_base, f'{cap_cat}_Rasters',
+                                 'Depth_mm')
+        if os.path.isdir(depth_dir):
             vizops.create_trend_maps(
-                raster_dir=cap_dir,
+                raster_dir=depth_dir,
                 basin_shp=AZ_GW_BASIN,
                 output_dir=trend_dir,
-                title=f'{cap_cat.replace("_", " ")} Volume',
+                title=f'{pretty} Depth',
                 unit_label='mm',
+                secondary_unit_label='ft',
+                secondary_unit_factor=_MM_TO_FT,
                 subbasin_shp=ADWR_SUBBASIN_SHP,
             )
+
+        # Volume trends (m³ raster source, m³/AF colorbar)
+        vol_dir = os.path.join(sw_cap_base, f'{cap_cat}_Rasters',
+                               'Volume_m3')
+        if os.path.isdir(vol_dir):
+            vizops.create_trend_maps(
+                raster_dir=vol_dir,
+                basin_shp=AZ_GW_BASIN,
+                output_dir=trend_dir,
+                title=f'{pretty} Volume',
+                unit_label=r'm$^3$',
+                secondary_unit_label='AF',
+                secondary_unit_factor=_M3_TO_AF,
+                subbasin_shp=ADWR_SUBBASIN_SHP,
+            )
+
         # Fraction trends (dimensionless, band 2 = central λ=10m)
         frac_dir = os.path.join(sw_cap_base, f'{cap_cat}_Fraction')
         if os.path.isdir(frac_dir):
@@ -2787,7 +2828,7 @@ def create_all_raster_maps() -> None:
                 raster_dir=frac_dir,
                 basin_shp=AZ_GW_BASIN,
                 output_dir=trend_dir,
-                title=f'{cap_cat.replace("_", " ")} Fraction',
+                title=f'{pretty} Fraction',
                 unit_label='fraction',
                 band=2,  # central estimate (λ=10m)
                 subbasin_shp=ADWR_SUBBASIN_SHP,

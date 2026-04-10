@@ -366,7 +366,7 @@ produced.
 
 **What "SW capture" actually means in this model.** The index measures
 only one specific pathway: well-mediated stream depletion in pixels the
-partition step has labeled as `_GW`. Three categories of well/canal
+partition step has labeled as `_GW`. Four categories of well/canal
 interaction are *not* counted in the capture numerator: (1) direct
 canal diversions, which never enter the model because the ML target is
 ADWR Well Registry pumping (federal Yuma-area deliveries through WMIDD,
@@ -376,14 +376,25 @@ HarDWR surface-water rights, which the partition routes into `_SW`
 regardless of whether they are physically pumping ambient groundwater
 or river-recharged alluvium — those volumes are tracked under
 `Irrigation_SW`/`Non_Irrigation_SW` and never reach the capture index;
-and (3) any well-mediated SW interaction outside the perennial
+(3) any well-mediated SW interaction outside the perennial
 canal-delivered footprint (`cw_norm = 0`), since ephemeral stream–
-aquifer exchange would require transient groundwater modeling. The
-capture fraction is therefore the model's most conservative lower bound
-on well-mediated SW depletion: a "low" capture fraction in a
-canal-dominated basin like Yuma (~4%) means most of that basin's SW use
-is being delivered through canals or through SW-righted wells already
-counted in `Total_SW`, not that wells are causing little impact.
+aquifer exchange would require transient groundwater modeling; and
+(4) engineered drain networks that recapture irrigation return flow
+plus shallow GW pumping and route it as a designed downstream
+delivery — for example, the Wellton-Mohawk Irrigation and Drainage
+District drain system that collects ~85,000 AF/yr of WMIDD field
+return flow plus ~20,000 AF/yr of USBR well-field pumping and routes
+it via the Boundary Pumping Plant to Mexico under the 1944 Treaty,
+sustaining both Mexico's $280M Mexicali agricultural industry and
+the 5,635 ha Cienega de Santa Clara wetland on the Pacific Flyway
+([Frisvold et al., 2018](https://doi.org/10.3390/su10051548) §6.7).
+The capture fraction is therefore the model's most conservative lower
+bound on well-mediated SW depletion: a "low" capture fraction in a
+canal-dominated basin like Yuma (~4%) means most of that basin's SW
+use is being delivered through canals, through SW-righted wells
+already counted in `Total_SW`, or through engineered drain
+infrastructure that this index does not represent — not that wells
+are causing little impact.
 
 **Why this is hard.** Allocating surface-water *withdrawals* across
 canal diversions and water-right duties is standard water accounting
@@ -393,18 +404,30 @@ versus the share that mines aquifer storage is much harder: at the
 basin scale it normally requires a transient calibrated groundwater
 model coupled to a stream network (e.g. MODFLOW–SFR), which is built
 one aquifer at a time and rarely covers entire states or multi-century
-time spans. The capture index here uses a process-informed proxy
+time spans. **To our knowledge, no prior study has produced a
+per-pixel, per-year apportionment of GW pumping into stream-depletion
+vs. storage-mining shares at this combination of spatial coverage
+(full state), temporal span (1896–2099), and methodology (a
+process-informed proxy applied uniformly at gridded scale).** Existing
+basin-scale capture estimates exist for individual aquifers (e.g.
+Phoenix AMA, Tucson AMA, the Lower Colorado main stem) but each is a
+bespoke model run with its own calibration targets, parameter set,
+and time horizon, and none are mutually comparable. The capture
+index here uses a process-informed proxy
 ([Barlow & Leake 2012](https://doi.org/10.3133/cir1376),
 [Condon & Maxwell 2019](https://doi.org/10.1126/sciadv.aav4574)) —
 exponential connectivity decay with water table depth, modulated by
 canal-weighted streamflow availability — applied at 2 km annual
 resolution across all of Arizona for 1896–2099, with three λ values
-producing physically-bounded uncertainty intervals rather than a single
-tuned answer. The contribution is the *coverage* (full state, two
-centuries, hindcast plus projection) more than the formula itself. It
-is not a substitute for a calibrated transient flow simulation in any
-individual basin, but it provides a consistent first-order screen for
-where well-mediated stream depletion is plausibly significant.
+producing physically-bounded uncertainty intervals rather than a
+single tuned answer. The contribution is the *coverage* (full state,
+two centuries, hindcast plus projection) more than the formula
+itself. It is not a substitute for a calibrated transient flow
+simulation in any individual basin, but it provides the first
+consistent first-order screen for where well-mediated stream
+depletion is plausibly significant across an entire state's
+groundwater system, in a framework that is portable to any other
+state with comparable WTD and canal-network data.
 
 **Scope limitation:** The index quantifies SW depletion only where
 perennial canal-delivered surface water exists (`cw_norm > 0`).
@@ -2407,7 +2430,7 @@ water sources outside the ADWR Well Registry:
 |--------|-----|-------|
 | CAP direct deliveries | 0.71 | Excludes recharge; from CAP delivery records |
 | SRP surface water | 0.40 | Phoenix AMA; from ADWR SRP delivery records |
-| Yuma-area federal diversions | ~0.79 | Bureau of Reclamation Yuma and Gila Project irrigation districts (WMIDD: 278,000 AF, YCWUA: 254,200 AF, Gila Project Yuma Mesa Division: 250,000 AF, Unit B: 6,800 AF); gravity canal diversions from the Colorado River via the All-American Canal and Gila Gravity Main Canal ([Noble et al., 2015](https://www.azwater.gov/sites/default/files/2022-11/Final%20Yuma%20Report%20021715.pdf)) |
+| Yuma-area federal diversions | ~0.79 | Bureau of Reclamation Yuma and Gila Project irrigation districts (WMIDD: 278,000 AF, YCWUA: 254,200 AF, Gila Project Yuma Mesa Division: 250,000 AF, Unit B: 6,800 AF); gravity canal diversions from the Colorado River via the All-American Canal and Gila Gravity Main Canal ([Noble et al., 2015](https://www.azwater.gov/sites/default/files/2022-11/Final%20Yuma%20Report%20021715.pdf); cf. [Frisvold et al., 2018](https://doi.org/10.3390/su10051548) §6.2 for the WMIDD-specific delivery time series and the historical conservation gains) |
 | Reclaimed/effluent water | ~0.35 | ~5 % of total state water supply ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)) |
 | **Total gap** | **~2.25** | |
 
@@ -2793,11 +2816,12 @@ from the methods.
    moves both the parent withdrawal and the resulting CU. Several
    other channels are not represented, however, and they all share a
    common pattern documented by [Grafton et al. (2018)](https://doi.org/10.1126/science.aat9314)
-   as **"the paradox of irrigation efficiency"**: when farmers adopt
-   higher-efficiency technologies (drip, sub-surface, precision
-   sprinklers), the typical empirical response is *not* to use less
-   water on the same crops but to switch to higher-water-demand crops,
-   intensify application depth, extend the growing season, or
+   as **"the paradox of irrigation efficiency"** and corroborated for
+   the U.S. Southwest by [Frisvold et al. (2018)](https://doi.org/10.3390/su10051548):
+   when farmers adopt higher-efficiency technologies (drip, sub-surface,
+   precision sprinklers), the typical empirical response is *not* to
+   use less water on the same crops but to switch to higher-water-demand
+   crops, intensify application depth, extend the growing season, or
    introduce double-cropping — each of which raises ET and therefore
    raises CU. The mechanism is conservation of mass: the unrecovered
    "losses" from low-efficiency surface irrigation (deep percolation,
@@ -2817,7 +2841,24 @@ from the methods.
    IE adoption and farmer behavioral response. So a wholesale Arizona
    shift to drip irrigation would likely move our CU trajectory
    upward through channels (i)–(iii) above, even where the LULC-driven
-   cropped area stays flat. The flat-to-slightly-rising projected CU
+   cropped area stays flat. **A concrete documented example of this
+   gap:** Yuma agriculture transitioned from perennial / summer-centric
+   cropping (cotton, alfalfa, citrus) to winter-centric multi-crop
+   vegetable systems between 1970 and 2010, reducing district water
+   deliveries by ~120 kAF/yr while irrigable acreage stayed nearly
+   flat ([Frisvold et al., 2018](https://doi.org/10.3390/su10051548) §6.2).
+   This is precisely the channel (i) crop-mix shift at constant area
+   that our framework cannot reproduce — the conservation came from
+   replacing high-ET summer crops with low-ET winter vegetables, not
+   from acreage retirement or from an IE upgrade. Any future Yuma
+   trajectory that follows the same crop-mix evolution would be
+   under-represented in our CU projection for the same structural
+   reason. Yuma is also the canonical southwest counterexample to the
+   general Grafton paradox: there, conservation gains from improved
+   on-farm efficiency *did* materialize at the basin scale because
+   they were coupled to a crop-mix shift toward shallow-rooted,
+   short-season vegetables rather than to acreage expansion or
+   higher-water-demand crops. The flat-to-slightly-rising projected CU
    (2.04 → 2.13 MAF, +5 % over 2024 → 2099) should therefore be read
    as a *mechanistic projection under the assumption that IE and the
    IE → behavior coupling do not change*, not as a forecast of actual
@@ -2891,6 +2932,8 @@ de Graaf, I. E. M., Gleeson, T., van Beek, L. P. H., Sutanudjaja, E. H., & Bierk
 Dieter, C. A., Maupin, M. A., Caldwell, R. R., Harris, M. A., Ivahnenko, T. I., Lovelace, J. K., Barber, N. L., & Linsey, K. S. (2018). Estimated use of water in the United States in 2015. _U.S. Geological Survey Circular 1441_. https://doi.org/10.3133/cir1441.
 
 Fleckenstein, R., Wellington, D., Jin, S., Tollerud, H., Brown, J. F., Dewitz, J., Pastick, N. J., Barber, C. P., O’Brien, A., & Spanier, M. (2026). A framework for integrating spatiotemporal deep learning methods with landsat for annual land cover and impervious surface mapping. _Remote Sensing of Environment_, _338_, 115347. https://doi.org/10.1016/j.rse.2026.115347.
+
+Frisvold, G. B., Sanchez, C., Gollehon, N., Megdal, S. B., & Brown, P. (2018). Evaluating gravity-flow irrigation with lessons from Yuma, Arizona, USA. _Sustainability_, _10_(5), 1548. https://doi.org/10.3390/su10051548.
 
 Gangopadhyay, S., & Pruitt, T. (2011). West-Wide Climate Risk Assessments:  Bias-Corrected  and Spatially Downscaled  Surface Water Projections (Technical Memorandum No. 86-68210-2011-01). _U.S. Bureau of Reclamation_. https://www.usbr.gov/watersmart/docs/west-wide-climate-risk-assessments.pdf.
 
