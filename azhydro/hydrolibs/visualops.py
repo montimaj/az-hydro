@@ -3679,7 +3679,14 @@ def create_actual_vs_predicted_maps(
                               extend='both')
             cb.set_label(p_label, fontsize=avp_fontsize, fontweight='bold')
             cb.ax.tick_params(labelsize=avp_fontsize)
-            # Add secondary unit ticks on the opposite side
+            # Place the primary metric unit (mm for depth, m³ for volume)
+            # on the LEFT side of the colorbar so it sits between the
+            # colorbar and the map.  This matches the m³-on-left /
+            # AF-on-right convention used by _add_af_twinx elsewhere in
+            # the codebase.
+            cb.ax.yaxis.set_label_position('left')
+            cb.ax.yaxis.tick_left()
+            # Add secondary unit ticks on the RIGHT side of the colorbar
             s_label = (f'\u0394 {secondary_label}' if is_diff
                        else secondary_label)
             cb_ax2 = cb.ax.twinx()
@@ -3689,6 +3696,8 @@ def create_actual_vs_predicted_maps(
             cb_ax2.set_ylabel(s_label, fontsize=avp_fontsize,
                               fontweight='bold')
             cb_ax2.tick_params(labelsize=avp_fontsize)
+            cb_ax2.yaxis.set_label_position('right')
+            cb_ax2.yaxis.tick_right()
 
             # Show 'Unmetered' legend only on panels that contain
             # unmetered (gray) pixels — Actual and Difference.  Predicted
