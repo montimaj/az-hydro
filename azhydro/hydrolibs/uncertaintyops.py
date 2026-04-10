@@ -91,11 +91,11 @@ _INPUT_SPREAD_COLS = ['annual_et_ensemble_mm', 'annual_eto_mm', 'annual_peff_mm'
 # 10-seed ensemble for model uncertainty
 MODEL_SEEDS = [7, 123, 456, 789, 1024, 2048, 3072, 4096, 5120, 6144]
 
-# GW fraction band index in Predictor_{year}.tif (1-based)
-GW_FRACTION_BAND_INDEX = 12
-
-# GW fraction snapshot years (Hung et al.)
-GW_FRACTION_SNAPSHOTS = [2000, 2005, 2010, 2015]
+# Recent HarDWR reference years for infrastructure-density sensitivity.
+# σ_gw swaps well_density with values from each of these years and takes the
+# sample std of the resulting predictions. Chosen to probe recent year-over-year
+# variability in HarDWR well-registry counts for the #1 SHAP feature.
+INFRASTRUCTURE_SNAPSHOT_YEARS = [2020, 2021, 2022, 2023, 2024]
 
 # Unit conversions
 MM_TO_FT = 1 / 304.8
@@ -121,27 +121,27 @@ CI_Z = 1.96
 
 # t_{0.025, df} critical values (two-tailed 95 %)
 T_CRIT_MODEL = 2.2622   # df = len(MODEL_SEEDS) − 1 = 9
-T_CRIT_GW = 3.1824      # df = len(GW_FRACTION_SNAPSHOTS) − 1 = 3
+T_CRIT_GW = 2.776       # df = len(INFRASTRUCTURE_SNAPSHOT_YEARS) − 1 = 4
 
 # Scale factors applied to sample-based σ before quadrature so that the
 # final ± CI_Z × σ_total interval reflects t-corrected CIs.
 T_SCALE_MODEL = T_CRIT_MODEL / CI_Z   # ≈ 1.154
-T_SCALE_GW = T_CRIT_GW / CI_Z         # ≈ 1.624
+T_SCALE_GW = T_CRIT_GW / CI_Z         # ≈ 1.416
 
 COMPONENT_T_SCALE = {
     'MACA': 1.0,           # scenario-based — no correction
     'Model': T_SCALE_MODEL,  # sample-based (10 seeds)
     'Irr': 1.0,             # half-range of 2 scenarios — no correction
     'LULC': 1.0,            # scenario-based — no correction
-    'GW': T_SCALE_GW,       # sample-based (4 Hung et al. snapshots)
+    'GW': T_SCALE_GW,       # sample-based (5 recent HarDWR snapshots)
 }
 
 COMPONENT_N = {
-    'MACA': len(MACA_REPRESENTATIVE_GCMS),   # 5
-    'Model': len(MODEL_SEEDS),               # 10
-    'Irr': 2,                                # 2 (half-range, not std)
-    'LULC': len(USGS_LULC_SCENARIOS),        # 4
-    'GW': len(GW_FRACTION_SNAPSHOTS),         # 4
+    'MACA': len(MACA_REPRESENTATIVE_GCMS),          # 5
+    'Model': len(MODEL_SEEDS),                      # 10
+    'Irr': 2,                                       # 2 (half-range, not std)
+    'LULC': len(USGS_LULC_SCENARIOS),               # 4
+    'GW': len(INFRASTRUCTURE_SNAPSHOT_YEARS),       # 5
 }
 
 # Category / CU raster groups
@@ -1369,19 +1369,36 @@ def compute_sigma_gw(
         mosaic_res: int,
 ) -> tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]:
     """
-    Compute σ_gw: uncertainty from the stepped GW-fraction assignment.
+    Compute σ_gw: ML-feature sensitivity to recent year-over-year variability
+    in HarDWR well-registry counts.
 
-    The pipeline assigns one of 4 Hung et al. snapshots (2000, 2005, 2010,
-    2015) per year.  σ_gw is the std of predictions when each of the 4
-    snapshots is used, capturing temporal variability in irrigation source
-    allocation.
+    For each prediction year, ``well_density`` — the #1 feature by mean
+    |SHAP value| in the XGBRF model — is swapped with values observed in each
+    of five recent reference years (INFRASTRUCTURE_SNAPSHOT_YEARS, 2020–2024).
+    The model is re-run on the modified feature matrix and σ_gw is the sample
+    std across the five predictions.
+
+    ``well_density`` was chosen because it dominates the model's learned
+    response to GW infrastructure (mean |SHAP| ≈ 24 mm, roughly 8× the
+    contribution of the Hung ``annual_gw_fraction`` feature that previous
+    versions of this function perturbed). ``sw_rights_density`` is *not*
+    perturbed: it is rank 15 in SHAP importance (≈2 mm) and is effectively
+    frozen in the HarDWR record after ~1996 (per-pixel std across 2020–2024
+    is 0.000), so probing it would contribute negligibly to σ_total while
+    requiring counterfactuals that don't exist in the data.
+
+    σ_gw does not represent new-well drilling, well retirement, or spatial
+    redistribution of infrastructure beyond what the five reference years
+    already contain — those are out of scope for this study absent
+    structural scenario projections.
 
     Args:
         model: Trained ML model for prediction.
         feature_cols (list[str]): Feature column names.
-        az_df (pd.DataFrame): Arizona training DataFrame.
+        az_df (pd.DataFrame): Arizona predictor DataFrame spanning all years.
         drop_attrs (tuple[str, ...]): Columns to drop before prediction.
-        pred_data_dir (str): Directory containing predictor rasters.
+        pred_data_dir (str): Directory containing predictor rasters (used
+            to load the reference basin raster for shape/mask).
         output_dir (str): Base output directory for uncertainty products.
         start_year (int): First year of prediction period.
         end_year (int): Last year of prediction period.
@@ -1396,7 +1413,10 @@ def compute_sigma_gw(
     from hydrolibs.rasterops import read_raster_as_arr, write_raster
     from hydrolibs.sysops import makedirs
 
-    logger.info('Computing σ_gw (GW fraction inter-snapshot uncertainty)...')
+    logger.info(
+        'Computing σ_gw (well_density sensitivity across %d recent HarDWR snapshots)...',
+        len(INFRASTRUCTURE_SNAPSHOT_YEARS),
+    )
     base_dir = os.path.join(output_dir, 'Sigma_GW')
     raster_dir = os.path.join(base_dir, 'Rasters')
     makedirs(raster_dir)
@@ -1412,23 +1432,28 @@ def compute_sigma_gw(
     pixel_area_m2 = mosaic_res ** 2
     mm_to_m3 = pixel_area_m2 / 1000
 
-    # Load the 4 GW-fraction rasters from the predictor mosaics
-    # (closest available snapshot years in the historical period)
-    # Band 12 = annual_gw_fraction
-    snapshot_gw_fracs = {}
-    for snap_year in GW_FRACTION_SNAPSHOTS:
-        raster_file = os.path.join(pred_data_dir, f'Predictor_{snap_year}.tif')
-        if not os.path.exists(raster_file):
-            # Fall back to nearest available year
-            for fallback in year_list:
-                rf = os.path.join(pred_data_dir, f'Predictor_{fallback}.tif')
-                if os.path.exists(rf):
-                    raster_file = rf
-                    break
-        gw_arr = read_raster_as_arr(
-            raster_file, band=GW_FRACTION_BAND_INDEX, get_file=False
+    # Load well_density snapshots from az_df for each reference year.
+    # Pixel ordering is consistent across years within az_df (each year block
+    # is a row-stack of the same valid pixels), so snap_df['well_density']
+    # has the same length as year_df and can be assigned directly.
+    snapshot_wd: dict[int, np.ndarray] = {}
+    for snap_year in INFRASTRUCTURE_SNAPSHOT_YEARS:
+        snap_df = az_df[az_df.Year == snap_year]
+        if snap_df.empty:
+            logger.warning(
+                'Infrastructure snapshot year %d not present in az_df; skipping',
+                snap_year,
+            )
+            continue
+        snapshot_wd[snap_year] = snap_df['well_density'].values
+
+    if len(snapshot_wd) < 2:
+        logger.warning(
+            'Fewer than 2 infrastructure snapshots available; returning empty sigma_gw',
         )
-        snapshot_gw_fracs[snap_year] = gw_arr.ravel()[valid_mask]
+        return {}, {c: {} for c in partops.CATEGORIES}
+
+    logger.info('  Loaded well_density snapshots: %s', list(snapshot_wd.keys()))
 
     sigma_gw = {}
     yearly_stats = {}
@@ -1444,9 +1469,9 @@ def compute_sigma_gw(
 
         snapshot_preds = []
         snapshot_cats = []
-        for snap_year in GW_FRACTION_SNAPSHOTS:
+        for snap_year in snapshot_wd:
             alt_df = year_df.copy()
-            alt_df['annual_gw_fraction'] = snapshot_gw_fracs[snap_year]
+            alt_df['well_density'] = snapshot_wd[snap_year]
             pf = _build_pred_features(alt_df, feature_cols, drop_attrs)
             pred, cat = _predict_total(model, pf, alt_df, partops,
                                        raster_shape, valid_mask)
@@ -1483,225 +1508,6 @@ def compute_sigma_gw(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# GW fraction sensitivity analysis
-# ═════════════════════════════════════════════════════════════════════════════
-
-def run_gw_fraction_sensitivity(
-        model,
-        feature_cols: list[str],
-        az_df: pd.DataFrame,
-        drop_attrs: tuple[str, ...],
-        pred_data_dir: str,
-        output_dir: str,
-        start_year: int,
-        end_year: int,
-        year_list: list[int],
-        mosaic_res: int,
-        delta: float = 0.2,
-) -> None:
-    """
-    Sensitivity analysis: effect of ±*delta* shift in ``gw_fraction`` on
-    pumping category volumes.
-
-    The GW fraction in the predictor stack is frozen at the nearest
-    5-yearly USGS snapshot (2000 for years < 2005, 2005 for 2005–2009,
-    2010 for 2010–2014, and 2015 for years ≥ 2015).  This means 1896–2004
-    all use the 2000 snapshot and 2015–2099 all use the 2015 snapshot.
-
-    For each year in [*start_year*, *end_year*], the baseline
-    ``gw_fraction`` is perturbed by +*delta* and −*delta* (clipped to
-    [0, 1]).  The perturbed predictions are partitioned and the resulting
-    category-level AZ-wide volumes (AF) are compared to the baseline.
-
-    Writes ``GW_Fraction_Sensitivity.csv`` with columns:
-        Year, Category, Baseline_AF, Plus_AF, Minus_AF,
-        Delta_Plus_AF, Delta_Minus_AF, Pct_Change_Plus, Pct_Change_Minus
-
-    Args:
-        model: Trained ML model for prediction.
-        feature_cols (list[str]): Feature column names.
-        az_df (pd.DataFrame): Arizona training DataFrame.
-        drop_attrs (tuple[str, ...]): Columns to drop before prediction.
-        pred_data_dir (str): Directory containing predictor rasters.
-        output_dir (str): Base output directory for uncertainty products.
-        start_year (int): First year of prediction period.
-        end_year (int): Last year of prediction period.
-        year_list (list[int]): Full list of prediction years.
-        mosaic_res (int): Raster resolution in metres.
-        delta (float): GW fraction perturbation magnitude (default 0.2).
-
-    Returns:
-        None.
-    """
-    import hydrolibs.partitionops as partops
-    from hydrolibs.sysops import makedirs
-
-    logger.info('Running GW-fraction sensitivity analysis (±%.2f)...', delta)
-    sens_dir = os.path.join(output_dir, 'Sigma_GW')
-    makedirs(sens_dir)
-
-    pixel_area_m2 = mosaic_res ** 2
-    mm_to_m3 = pixel_area_m2 / 1000
-
-    ref_basin_file = os.path.join(pred_data_dir, f'GW_Basin_{year_list[0]}.tif')
-    from hydrolibs.rasterops import read_raster_as_arr
-    basin_arr, bfile = read_raster_as_arr(ref_basin_file, get_file=True)
-    basin_flat = basin_arr.ravel()
-    valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
-    raster_shape = basin_arr.shape
-    bfile.close()
-
-    rows = []
-
-    for year in range(start_year, end_year + 1):
-        year_df = az_df[az_df.Year == year].copy()
-        if year_df.empty:
-            continue
-
-        baseline_gw = year_df['annual_gw_fraction'].values.copy()
-
-        # --- Baseline prediction ---
-        pf_base = _build_pred_features(year_df, feature_cols, drop_attrs)
-        _, cats_base = _predict_total(model, pf_base, year_df, partops,
-                                      raster_shape, valid_mask)
-
-        # --- Plus delta ---
-        plus_df = year_df.copy()
-        plus_df['annual_gw_fraction'] = np.clip(baseline_gw + delta, 0, 1)
-        pf_plus = _build_pred_features(plus_df, feature_cols, drop_attrs)
-        _, cats_plus = _predict_total(model, pf_plus, plus_df, partops,
-                                      raster_shape, valid_mask)
-
-        # --- Minus delta ---
-        minus_df = year_df.copy()
-        minus_df['annual_gw_fraction'] = np.clip(baseline_gw - delta, 0, 1)
-        pf_minus = _build_pred_features(minus_df, feature_cols, drop_attrs)
-        _, cats_minus = _predict_total(model, pf_minus, minus_df, partops,
-                                       raster_shape, valid_mask)
-
-        for cat in partops.CATEGORIES:
-            base_af = float(np.nansum(cats_base[cat])) * mm_to_m3 * M3_TO_AF
-            plus_af = float(np.nansum(cats_plus[cat])) * mm_to_m3 * M3_TO_AF
-            minus_af = float(np.nansum(cats_minus[cat])) * mm_to_m3 * M3_TO_AF
-            d_plus = plus_af - base_af
-            d_minus = minus_af - base_af
-            pct_plus = (d_plus / base_af * 100) if base_af > 0 else 0.0
-            pct_minus = (d_minus / base_af * 100) if base_af > 0 else 0.0
-            rows.append({
-                'Year': year,
-                'Category': cat,
-                'Baseline_AF': round(base_af, 2),
-                'Plus_AF': round(plus_af, 2),
-                'Minus_AF': round(minus_af, 2),
-                'Delta_Plus_AF': round(d_plus, 2),
-                'Delta_Minus_AF': round(d_minus, 2),
-                'Pct_Change_Plus': round(pct_plus, 2),
-                'Pct_Change_Minus': round(pct_minus, 2),
-            })
-
-        if year % 20 == 0 or year == end_year:
-            logger.info('    Sensitivity year %d done', year)
-
-    sens_df = pd.DataFrame(rows)
-    out_csv = os.path.join(sens_dir, 'GW_Fraction_Sensitivity.csv')
-    sens_df.to_csv(out_csv, index=False)
-    logger.info('GW-fraction sensitivity results saved to %s', out_csv)
-
-    # Log summary for key categories (non-irrigation GW/SW excluded
-    # because gw_fraction only governs the irrigation GW/SW split)
-    plot_cats = ('Irrigation_GW', 'Irrigation_SW', 'Total_GW', 'Total_SW')
-    for cat in plot_cats:
-        cdf = sens_df[sens_df.Category == cat]
-        if cdf.empty:
-            continue
-        mean_pct_plus = cdf['Pct_Change_Plus'].mean()
-        mean_pct_minus = cdf['Pct_Change_Minus'].mean()
-        logger.info(
-            '  %s: mean %%Δ = %+.1f%% (gw+%.1f), %+.1f%% (gw−%.1f)',
-            cat, mean_pct_plus, delta, mean_pct_minus, delta,
-        )
-
-    # --- Plot: GW fraction sensitivity time series ---
-    import matplotlib.patches as mpatches
-    import matplotlib.pyplot as plt
-
-    from hydrolibs.visualops import (
-        ERA_COLORS,
-        ERA_PERIODS,
-        apply_journal_style,
-    )
-
-    apply_journal_style()
-
-    cat_titles = {
-        'Irrigation_GW': 'Irrigation GW',
-        'Irrigation_SW': 'Irrigation SW',
-        'Total_GW': 'Total GW',
-        'Total_SW': 'Total SW',
-    }
-    cat_colors = {
-        'Irrigation_GW': '#2980B9',
-        'Irrigation_SW': '#27AE60',
-        'Total_GW': '#2C3E50',
-        'Total_SW': '#E74C3C',
-    }
-
-    n_cats = len(plot_cats)
-    fig, axes = plt.subplots(n_cats, 1, figsize=(16, 4 * n_cats), sharex=True)
-    if n_cats == 1:
-        axes = [axes]
-
-    for ax, cat in zip(axes, plot_cats):
-        cdf = sens_df[sens_df.Category == cat].sort_values('Year')
-        if cdf.empty:
-            continue
-        years = cdf['Year'].values
-        baseline = cdf['Baseline_AF'].values
-        plus_af = cdf['Plus_AF'].values
-        minus_af = cdf['Minus_AF'].values
-        color = cat_colors.get(cat, '#2C3E50')
-
-        for era, (s, e) in ERA_PERIODS.items():
-            ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.08)
-
-        ax.fill_between(years, minus_af, plus_af,
-                        alpha=0.20, color=color,
-                        label=f'\u00b1{delta} GW fraction range')
-        ax.plot(years, baseline, color=color, linewidth=1.4,
-                marker='.', markersize=2, label='Baseline')
-        ax.plot(years, plus_af, color=color, linewidth=0.8,
-                linestyle='--', alpha=0.6)
-        ax.plot(years, minus_af, color=color, linewidth=0.8,
-                linestyle='--', alpha=0.6)
-
-        ax.set_ylabel('Volume (AF)', fontweight='bold')
-        ax.set_title(f'{cat_titles.get(cat, cat)}', fontweight='bold',
-                     fontsize=12)
-        ax.grid(True, alpha=0.3, linestyle='--')
-
-        handles = ax.get_legend_handles_labels()[0]
-        era_handles = [
-            mpatches.Patch(
-                color=ERA_COLORS[e], alpha=0.4,
-                label=f'{e} ({ERA_PERIODS[e][0]}\u2013{ERA_PERIODS[e][1]})',
-            )
-            for e in ERA_PERIODS
-        ]
-        ax.legend(handles=handles + era_handles,
-                  loc='upper left', framealpha=0.9, fontsize=8)
-
-    axes[-1].set_xlabel('Year', fontweight='bold')
-    axes[-1].set_xlim(start_year - 1, end_year + 1)
-    fig.suptitle(f'GW Fraction Sensitivity (\u00b1{delta})',
-                 fontweight='bold', fontsize=14, y=1.001)
-    plt.tight_layout()
-    fig.savefig(os.path.join(sens_dir, 'GW_Fraction_Sensitivity.png'),
-                dpi=600, bbox_inches='tight')
-    plt.close()
-    logger.info('  GW-fraction sensitivity plot saved to %s', sens_dir)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
 # Density-ratio partitioning sensitivity analysis
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1717,20 +1523,37 @@ def run_density_ratio_sensitivity(
         year_list: list[int],
         mosaic_res: int,
         delta: float = 0.2,
+        smooth_sigmas: tuple[float, float] = (2.0, 8.0),
 ) -> None:
     """
-    Sensitivity analysis: effect of ±*delta* perturbation in well density
-    on the GW/SW partitioned volumes.
+    Partition-level sensitivity diagnostic covering two orthogonal knobs
+    that drive the GW/SW split in ``partition_predictions``:
 
-    For each year, the baseline ``irr_well_density`` and
-    ``nonirr_well_density`` are perturbed by ×(1+δ) and ×(1−δ).  The
-    perturbed densities change the GW/SW split but NOT the total
-    prediction (which depends only on the ML model).  The resulting
-    category-level AZ-wide volumes (AF) are compared to the baseline.
+    1. **Density ratio** — both sides of the ratio are perturbed with
+       opposite signs:
+           plus  : well × (1+δ), sw_rights × (1−δ)  → more GW, less SW
+           minus : well × (1−δ), sw_rights × (1+δ)  → less GW, more SW
+       Probes how sensitive the split is to a coordinated scaling of the
+       well-count and SW-rights-count inputs.
 
-    Writes ``Density_Ratio_Sensitivity.csv`` with columns:
-        Year, Category, Baseline_AF, Plus_AF, Minus_AF,
+    2. **Smoothing kernel width** — ``sw_smooth_sigma`` in
+       ``partition_predictions`` is swept across two values (default
+       ``smooth_sigmas=(2.0, 8.0)``) while densities are held at baseline.
+       Probes how sensitive the split is to the assumed canal-service-area
+       radius (~4 km vs ~16 km at 2 km resolution).
+
+    Writes ``Density_Ratio_Sensitivity.csv`` with one row per
+    (Year, Perturbation_Type, Category):
+        Year, Perturbation_Type, Category, Baseline_AF, Plus_AF, Minus_AF,
         Delta_Plus_AF, Delta_Minus_AF, Pct_Change_Plus, Pct_Change_Minus
+    where ``Perturbation_Type`` ∈ {'Density', 'Smoothing'}.
+
+    Writes two PNG plots — one per perturbation section.
+
+    The perturbed density columns (irr/nonirr well_density and
+    sw_rights_density) are all in ``DROP_ATTRS``, so the ML prediction is
+    identical across members and ``model.predict()`` is called only once
+    per year; only the partitioning step is re-run.
 
     Args:
         model: Trained ML model for prediction.
@@ -1743,7 +1566,9 @@ def run_density_ratio_sensitivity(
         end_year (int): Last year of prediction period.
         year_list (list[int]): Full list of prediction years.
         mosaic_res (int): Raster resolution in metres.
-        delta (float): Perturbation magnitude (default 0.2 = ±20%).
+        delta (float): Density perturbation magnitude (default 0.2 = ±20%).
+        smooth_sigmas (tuple[float, float]): Low/high values of
+            ``sw_smooth_sigma`` to sweep (default ``(2.0, 8.0)``).
 
     Returns:
         None.
@@ -1751,8 +1576,11 @@ def run_density_ratio_sensitivity(
     import hydrolibs.partitionops as partops
     from hydrolibs.sysops import makedirs
 
-    logger.info('Running density-ratio sensitivity analysis (±%.0f%%)...',
-                delta * 100)
+    logger.info(
+        'Running partition sensitivity analysis '
+        '(density ±%.0f%%, smoothing σ ∈ {%.1f, %.1f})...',
+        delta * 100, smooth_sigmas[0], smooth_sigmas[1],
+    )
     sens_dir = os.path.join(output_dir, 'Sigma_GW')
     makedirs(sens_dir)
 
@@ -1767,6 +1595,29 @@ def run_density_ratio_sensitivity(
     raster_shape = basin_arr.shape
     bfile.close()
 
+    required_cols = (
+        'irr_well_density', 'nonirr_well_density',
+        'irr_sw_rights_density', 'nonirr_sw_rights_density',
+    )
+
+    def _mk_row(yr, ptype, cat, base_af, plus_af, minus_af):
+        d_plus = plus_af - base_af
+        d_minus = minus_af - base_af
+        pct_plus = (d_plus / base_af * 100) if base_af > 0 else 0.0
+        pct_minus = (d_minus / base_af * 100) if base_af > 0 else 0.0
+        return {
+            'Year': yr,
+            'Perturbation_Type': ptype,
+            'Category': cat,
+            'Baseline_AF': round(base_af, 2),
+            'Plus_AF': round(plus_af, 2),
+            'Minus_AF': round(minus_af, 2),
+            'Delta_Plus_AF': round(d_plus, 2),
+            'Delta_Minus_AF': round(d_minus, 2),
+            'Pct_Change_Plus': round(pct_plus, 2),
+            'Pct_Change_Minus': round(pct_minus, 2),
+        }
+
     rows = []
 
     for year in range(start_year, end_year + 1):
@@ -1774,55 +1625,61 @@ def run_density_ratio_sensitivity(
         if year_df.empty:
             continue
 
-        # Check that density columns exist
-        if ('irr_well_density' not in year_df.columns
-                or 'nonirr_well_density' not in year_df.columns):
+        if any(c not in year_df.columns for c in required_cols):
             continue
 
-        baseline_irr_wd = year_df['irr_well_density'].values.copy()
-        baseline_nonirr_wd = year_df['nonirr_well_density'].values.copy()
-
-        # --- Baseline prediction + partitioning ---
+        # Predict once per year — all perturbed columns are in DROP_ATTRS
+        # (they are partitioning-only inputs), so model.predict() is
+        # identical across all members. Only partition_predictions varies.
         pf_base = _build_pred_features(year_df, feature_cols, drop_attrs)
-        _, cats_base = _predict_total(model, pf_base, year_df, partops,
-                                      raster_shape, valid_mask)
+        raw = np.abs(model.predict(pf_base))
 
-        # --- Plus delta: increase well density by (1+δ) ---
+        # --- Baseline partition ---
+        cats_base = partops.partition_predictions(
+            raw, year_df, raster_shape, valid_mask, sw_smooth_sigma=4.0,
+        )
+
+        # --- Density section: both sides of ratio, opposite signs ---
         plus_df = year_df.copy()
-        plus_df['irr_well_density'] = baseline_irr_wd * (1 + delta)
-        plus_df['nonirr_well_density'] = baseline_nonirr_wd * (1 + delta)
-        # Re-partition with same total prediction but perturbed densities
-        pf_plus = _build_pred_features(plus_df, feature_cols, drop_attrs)
-        _, cats_plus = _predict_total(model, pf_plus, plus_df, partops,
-                                      raster_shape, valid_mask)
+        plus_df['irr_well_density'] = year_df['irr_well_density'].values * (1 + delta)
+        plus_df['nonirr_well_density'] = year_df['nonirr_well_density'].values * (1 + delta)
+        plus_df['irr_sw_rights_density'] = year_df['irr_sw_rights_density'].values * max(1 - delta, 0)
+        plus_df['nonirr_sw_rights_density'] = year_df['nonirr_sw_rights_density'].values * max(1 - delta, 0)
+        cats_density_plus = partops.partition_predictions(
+            raw, plus_df, raster_shape, valid_mask, sw_smooth_sigma=4.0,
+        )
 
-        # --- Minus delta: decrease well density by (1-δ) ---
         minus_df = year_df.copy()
-        minus_df['irr_well_density'] = baseline_irr_wd * max(1 - delta, 0)
-        minus_df['nonirr_well_density'] = baseline_nonirr_wd * max(1 - delta, 0)
-        pf_minus = _build_pred_features(minus_df, feature_cols, drop_attrs)
-        _, cats_minus = _predict_total(model, pf_minus, minus_df, partops,
-                                       raster_shape, valid_mask)
+        minus_df['irr_well_density'] = year_df['irr_well_density'].values * max(1 - delta, 0)
+        minus_df['nonirr_well_density'] = year_df['nonirr_well_density'].values * max(1 - delta, 0)
+        minus_df['irr_sw_rights_density'] = year_df['irr_sw_rights_density'].values * (1 + delta)
+        minus_df['nonirr_sw_rights_density'] = year_df['nonirr_sw_rights_density'].values * (1 + delta)
+        cats_density_minus = partops.partition_predictions(
+            raw, minus_df, raster_shape, valid_mask, sw_smooth_sigma=4.0,
+        )
+
+        # --- Smoothing section: baseline densities, swept sigma ---
+        cats_smooth_high = partops.partition_predictions(
+            raw, year_df, raster_shape, valid_mask,
+            sw_smooth_sigma=smooth_sigmas[1],  # wider canal reach
+        )
+        cats_smooth_low = partops.partition_predictions(
+            raw, year_df, raster_shape, valid_mask,
+            sw_smooth_sigma=smooth_sigmas[0],  # tighter canal reach
+        )
 
         for cat in partops.CATEGORIES:
             base_af = float(np.nansum(cats_base[cat])) * mm_to_m3 * M3_TO_AF
-            plus_af = float(np.nansum(cats_plus[cat])) * mm_to_m3 * M3_TO_AF
-            minus_af = float(np.nansum(cats_minus[cat])) * mm_to_m3 * M3_TO_AF
-            d_plus = plus_af - base_af
-            d_minus = minus_af - base_af
-            pct_plus = (d_plus / base_af * 100) if base_af > 0 else 0.0
-            pct_minus = (d_minus / base_af * 100) if base_af > 0 else 0.0
-            rows.append({
-                'Year': year,
-                'Category': cat,
-                'Baseline_AF': round(base_af, 2),
-                'Plus_AF': round(plus_af, 2),
-                'Minus_AF': round(minus_af, 2),
-                'Delta_Plus_AF': round(d_plus, 2),
-                'Delta_Minus_AF': round(d_minus, 2),
-                'Pct_Change_Plus': round(pct_plus, 2),
-                'Pct_Change_Minus': round(pct_minus, 2),
-            })
+
+            # Density row
+            d_plus_af = float(np.nansum(cats_density_plus[cat])) * mm_to_m3 * M3_TO_AF
+            d_minus_af = float(np.nansum(cats_density_minus[cat])) * mm_to_m3 * M3_TO_AF
+            rows.append(_mk_row(year, 'Density', cat, base_af, d_plus_af, d_minus_af))
+
+            # Smoothing row ("Plus" = high sigma = wider reach)
+            s_plus_af = float(np.nansum(cats_smooth_high[cat])) * mm_to_m3 * M3_TO_AF
+            s_minus_af = float(np.nansum(cats_smooth_low[cat])) * mm_to_m3 * M3_TO_AF
+            rows.append(_mk_row(year, 'Smoothing', cat, base_af, s_plus_af, s_minus_af))
 
         if year % 20 == 0 or year == end_year:
             logger.info('    Sensitivity year %d done', year)
@@ -1830,24 +1687,56 @@ def run_density_ratio_sensitivity(
     sens_df = pd.DataFrame(rows)
     out_csv = os.path.join(sens_dir, 'Density_Ratio_Sensitivity.csv')
     sens_df.to_csv(out_csv, index=False)
-    logger.info('Density-ratio sensitivity results saved to %s', out_csv)
+    logger.info('Partition sensitivity results saved to %s', out_csv)
 
-    # Log summary and plot for key GW/SW categories
+    # Log summary for key GW/SW categories, per perturbation type
     plot_cats = ('Irrigation_GW', 'Irrigation_SW',
                  'Non_Irrigation_GW', 'Non_Irrigation_SW',
                  'Total_GW', 'Total_SW')
-    for cat in plot_cats:
-        cdf = sens_df[sens_df.Category == cat]
-        if cdf.empty:
-            continue
-        mean_pct_plus = cdf['Pct_Change_Plus'].mean()
-        mean_pct_minus = cdf['Pct_Change_Minus'].mean()
-        logger.info(
-            '  %s: mean %%Δ = %+.1f%% (wd+%.0f%%), %+.1f%% (wd−%.0f%%)',
-            cat, mean_pct_plus, delta * 100, mean_pct_minus, delta * 100,
-        )
+    for ptype in ('Density', 'Smoothing'):
+        for cat in plot_cats:
+            cdf = sens_df[(sens_df.Perturbation_Type == ptype) & (sens_df.Category == cat)]
+            if cdf.empty:
+                continue
+            mean_pct_plus = cdf['Pct_Change_Plus'].mean()
+            mean_pct_minus = cdf['Pct_Change_Minus'].mean()
+            logger.info(
+                '  [%s] %s: mean %%Δ = %+.1f%% (plus), %+.1f%% (minus)',
+                ptype, cat, mean_pct_plus, mean_pct_minus,
+            )
 
-    # --- Plot: density-ratio sensitivity time series ---
+    # --- Plots: one PNG per perturbation section ---
+    _plot_sens_section(
+        sens_df[sens_df.Perturbation_Type == 'Density'], plot_cats,
+        title=f'Density Ratio Sensitivity (±{delta * 100:.0f}% well / ∓{delta * 100:.0f}% SW-rights)',
+        ribbon_label=f'±{delta * 100:.0f}% well density, ∓{delta * 100:.0f}% SW-rights density',
+        out_path=os.path.join(sens_dir, 'Density_Ratio_Sensitivity.png'),
+        start_year=start_year, end_year=end_year,
+    )
+    _plot_sens_section(
+        sens_df[sens_df.Perturbation_Type == 'Smoothing'], plot_cats,
+        title=f'Smoothing Sigma Sensitivity (σ ∈ {{{smooth_sigmas[0]:.0f}, {smooth_sigmas[1]:.0f}}})',
+        ribbon_label=f'sw_smooth_sigma ∈ {{{smooth_sigmas[0]:.0f}, {smooth_sigmas[1]:.0f}}}',
+        out_path=os.path.join(sens_dir, 'Smoothing_Sigma_Sensitivity.png'),
+        start_year=start_year, end_year=end_year,
+    )
+    logger.info('  Partition sensitivity plots saved to %s', sens_dir)
+
+
+def _plot_sens_section(
+        df_section: pd.DataFrame,
+        plot_cats: tuple,
+        title: str,
+        ribbon_label: str,
+        out_path: str,
+        start_year: int,
+        end_year: int,
+) -> None:
+    """Render a single partition-sensitivity time-series figure.
+
+    Used by ``run_density_ratio_sensitivity`` to plot either the density
+    section or the smoothing section with identical styling.
+    """
     import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
 
@@ -1882,7 +1771,7 @@ def run_density_ratio_sensitivity(
         axes = [axes]
 
     for ax, cat in zip(axes, plot_cats):
-        cdf = sens_df[sens_df.Category == cat].sort_values('Year')
+        cdf = df_section[df_section.Category == cat].sort_values('Year')
         if cdf.empty:
             continue
         years = cdf['Year'].values
@@ -1895,8 +1784,7 @@ def run_density_ratio_sensitivity(
             ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.08)
 
         ax.fill_between(years, minus_af, plus_af,
-                        alpha=0.20, color=color,
-                        label=f'\u00b1{delta * 100:.0f}% well density range')
+                        alpha=0.20, color=color, label=ribbon_label)
         ax.plot(years, baseline, color=color, linewidth=1.4,
                 marker='.', markersize=2, label='Baseline')
         ax.plot(years, plus_af, color=color, linewidth=0.8,
@@ -1921,13 +1809,10 @@ def run_density_ratio_sensitivity(
 
     axes[-1].set_xlabel('Year', fontweight='bold')
     axes[-1].set_xlim(start_year - 1, end_year + 1)
-    fig.suptitle(f'Density-Ratio Sensitivity (\u00b1{delta * 100:.0f}% Well Density)',
-                 fontweight='bold', fontsize=14, y=1.001)
+    fig.suptitle(title, fontweight='bold', fontsize=14, y=1.001)
     plt.tight_layout()
-    fig.savefig(os.path.join(sens_dir, 'Density_Ratio_Sensitivity.png'),
-                dpi=600, bbox_inches='tight')
+    fig.savefig(out_path, dpi=600, bbox_inches='tight')
     plt.close()
-    logger.info('  Density-ratio sensitivity plot saved to %s', sens_dir)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -3702,7 +3587,7 @@ def _plot_uncertainty_time_series(
         'Model': 'Seed Ensemble (σ_model)',
         'Irr': 'Irrigation Fraction (σ_irr)',
         'LULC': 'LULC Projection (σ_LULC)',
-        'GW': 'GW Fraction (σ_gw)',
+        'GW': 'Well Density (σ_gw)',
     }
 
     for name, comp in sigma_components.items():

@@ -111,7 +111,7 @@ UQ components (Step 3b) support `--skip-uq`:
 ```bash
 python pipeline.py --steps 3b --skip-uq sigma-maca,sigma-lulc   # skip GEE-dependent components
 python pipeline.py --steps 3b --skip-uq sigma-maca              # skip only inter-GCM spread
-python pipeline.py --steps 3b --skip-uq sigma-model,gw-sensitivity # skip seed ensemble + GW sensitivity
+python pipeline.py --steps 3b --skip-uq sigma-model,density-sensitivity # skip seed ensemble + partition sensitivity
 ```
 
 #### Available steps
@@ -169,12 +169,12 @@ python pipeline.py --steps 3b --skip-uq sigma-model,gw-sensitivity # skip seed e
 | `sigma-model` | Skip σ_model — seed ensemble spread |
 | `sigma-irr` | Skip σ_irr — irrigation fraction uncertainty |
 | `sigma-lulc` | Skip σ_LULC — LULC projection spread (requires GEE download) |
-| `sigma-gw` | Skip σ_gw — GW fraction snapshot spread |
-| `density-sensitivity` | Skip density-ratio partitioning sensitivity (±20% well density) |
+| `sigma-gw` | Skip σ_gw — well-density feature sensitivity across 5 recent HarDWR snapshots (2020–2024) |
+| `density-sensitivity` | Skip partition-level diagnostic (density-ratio ±20% + smoothing-sigma sweep {2, 8}) |
 | `sigma-total` | Skip σ_total quadrature, basin σ, visualizations, and raster augmentation |
 | `sigma-cu` | Skip σ_CU — consumptive use uncertainty (IE × Withdrawal error propagation) |
 
-> **Note on skipping individual σ components:** Per-category σ arrays (e.g., σ_model for Irrigation, Non_Irrigation, etc.) are only held in memory during computation and are never written to disk as separate rasters. When `sigma-total` runs, it can reload *total-level* per-component σ from disk (e.g., `Sigma_Model_mm_{year}.tif`), but the per-category σ_total rasters (`Sigma_Total_{cat}_mm_{year}.tif`) will be zero if the individual σ steps were skipped. This causes downstream augmented category rasters to have zero σ, which in turn makes σ_CU zero. To get correct per-category uncertainty, run all individual σ components (σ_MACA through σ_gw) without skipping. Only `gw-sensitivity` can be safely skipped without affecting downstream products.
+> **Note on skipping individual σ components:** Per-category σ arrays (e.g., σ_model for Irrigation, Non_Irrigation, etc.) are only held in memory during computation and are never written to disk as separate rasters. When `sigma-total` runs, it can reload *total-level* per-component σ from disk (e.g., `Sigma_Model_mm_{year}.tif`), but the per-category σ_total rasters (`Sigma_Total_{cat}_mm_{year}.tif`) will be zero if the individual σ steps were skipped. This causes downstream augmented category rasters to have zero σ, which in turn makes σ_CU zero. To get correct per-category uncertainty, run all individual σ components (σ_MACA through σ_gw) without skipping. Only `density-sensitivity` (the partition-level diagnostic) can be safely skipped without affecting downstream products.
 
 #### CLI flags
 
@@ -988,8 +988,8 @@ ADWR Well Registry.  ADWR reports total statewide water use of ~7.0 MAF
 (2017), of which irrigated agriculture consumes approximately 72 % (as per ADWR 2019 data)
 ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
 
-**Water budget reconciliation (2017):** The model predicts 4.78 MAF vs.
-ADWR's 7.0 MAF total, a gap of ~2.22 MAF.  This gap is accounted for by
+**Water budget reconciliation (2017):** The model predicts 4.74 MAF vs.
+ADWR's 7.0 MAF total, a gap of ~2.25 MAF.  This gap is accounted for by
 water sources outside the ADWR Well Registry:
 
 | Source | MAF | Notes |
@@ -1000,7 +1000,7 @@ water sources outside the ADWR Well Registry:
 | Reclaimed/effluent water | ~0.35 | ~5 % of total state water supply ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)) |
 | **Total gap** | **~2.25** | |
 
-The model thus captures ~68 % of Arizona's total water use — specifically,
+The model thus captures ~68% of Arizona's total water use — specifically,
 the portion that flows through registered well and diversion infrastructure.
 The remaining ~32 % is delivered by large-scale federal water projects,
 (CAP aqueduct, SRP canal system, Yuma-area Colorado River diversions) and
@@ -1011,109 +1011,164 @@ water rights on the Lower Colorado River (dating to the Reclamation Act of
 with application efficiencies of 80–90 % — substantially higher than the
 statewide NHM average of ~60 % used in this pipeline
 ([Noble et al., 2015](https://www.azwater.gov/sites/default/files/2022-11/Final%20Yuma%20Report%20021715.pdf)).
-Combining the model's 4.78 MAF with the estimated non-well sources
-(~2.25 MAF) yields ~7.03 MAF, closing to within 0.03 MAF of ADWR's
-reported 7.0 MAF total
+Combining the model's 4.74 MAF with the estimated non-well sources
+(~2.25 MAF) yields ~6.99 MAF, closing to within 0.01 MAF of ADWR's
+reported 7.0 MAF total.  USGS independently estimates 3.09 MAF of
+GW withdrawals for 2015 ([Dieter et al., 2018](https://doi.org/10.3133/cir1441));
+the model produces 3.17 MAF for the same year (within 0.08 MAF)
 ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
 
 Representative statewide volumes (million acre-feet):
 
 | Year | Total | Irrigation | Non-Irrigation | Total GW | Total SW | Irr % | GW % |
 |------|-------|------------|----------------|----------|----------|-------|------|
-| 1900 | 0.10 | 0.04 | 0.06 | 0.08 | 0.02 | 39 % | 82 % |
-| 1910 | 0.13 | 0.05 | 0.08 | 0.10 | 0.03 | 40 % | 77 % |
-| 1920 | 0.24 | 0.12 | 0.12 | 0.17 | 0.06 | 49 % | 73 % |
-| 1930 | 0.43 | 0.23 | 0.19 | 0.31 | 0.12 | 55 % | 72 % |
-| 1940 | 0.80 | 0.53 | 0.28 | 0.55 | 0.26 | 66 % | 68 % |
-| 1950 | 1.66 | 1.23 | 0.42 | 1.06 | 0.59 | 75 % | 64 % |
-| 1960 | 2.56 | 2.01 | 0.55 | 1.55 | 1.01 | 78 % | 61 % |
-| 1970 | 3.18 | 2.53 | 0.65 | 1.94 | 1.24 | 80 % | 61 % |
-| 1980 | 3.82 | 3.02 | 0.80 | 2.31 | 1.50 | 79 % | 61 % |
-| 1985 | 4.15 | 3.24 | 0.92 | 2.47 | 1.68 | 78 % | 60 % |
-| 1990 | 4.21 | 3.26 | 0.95 | 2.55 | 1.66 | 77 % | 60 % |
-| 2000 | 4.34 | 3.22 | 1.12 | 2.68 | 1.66 | 74 % | 62 % |
-| 2010 | 4.18 | 3.01 | 1.17 | 2.61 | 1.57 | 72 % | 62 % |
-| 2017 | 4.78 | 3.50 | 1.28 | 2.96 | 1.81 | 73 % | 62 % |
-| 2020 | 4.74 | 3.42 | 1.32 | 2.96 | 1.78 | 72 % | 62 % |
-| 2024 | 4.80 | 3.43 | 1.37 | 3.02 | 1.79 | 71 % | 63 % |
-| 2030 | 4.72 | 3.30 | 1.42 | 3.00 | 1.72 | 70 % | 64 % |
-| 2040 | 4.84 | 3.31 | 1.53 | 3.11 | 1.73 | 68 % | 64 % |
-| 2050 | 5.07 | 3.39 | 1.68 | 3.29 | 1.78 | 67 % | 65 % |
-| 2060 | 5.25 | 3.43 | 1.81 | 3.43 | 1.81 | 65 % | 65 % |
-| 2070 | 5.47 | 3.49 | 1.98 | 3.61 | 1.86 | 64 % | 66 % |
-| 2080 | 5.63 | 3.53 | 2.10 | 3.74 | 1.88 | 63 % | 67 % |
-| 2090 | 5.80 | 3.56 | 2.24 | 3.88 | 1.91 | 61 % | 67 % |
-| 2099 | 5.94 | 3.61 | 2.33 | 3.99 | 1.95 | 61 % | 67 % |
+| 1900 | 0.11 | 0.04 | 0.07 | 0.07 | 0.04 | 39 % | 66 % |
+| 1910 | 0.14 | 0.06 | 0.08 | 0.10 | 0.04 | 40 % | 71 % |
+| 1920 | 0.26 | 0.13 | 0.13 | 0.16 | 0.09 | 50 % | 63 % |
+| 1930 | 0.46 | 0.26 | 0.20 | 0.26 | 0.20 | 56 % | 57 % |
+| 1940 | 0.85 | 0.57 | 0.28 | 0.46 | 0.40 | 67 % | 54 % |
+| 1950 | 1.74 | 1.32 | 0.43 | 0.89 | 0.86 | 75 % | 51 % |
+| 1960 | 2.61 | 2.05 | 0.56 | 1.42 | 1.19 | 79 % | 55 % |
+| 1970 | 3.16 | 2.51 | 0.65 | 1.88 | 1.28 | 80 % | 60 % |
+| 1980 | 3.82 | 3.03 | 0.80 | 2.23 | 1.59 | 79 % | 58 % |
+| 1985 | 4.17 | 3.24 | 0.93 | 2.52 | 1.65 | 78 % | 60 % |
+| 1990 | 4.20 | 3.25 | 0.95 | 2.65 | 1.55 | 77 % | 63 % |
+| 2000 | 4.35 | 3.22 | 1.12 | 2.80 | 1.55 | 74 % | 64 % |
+| 2010 | 4.20 | 3.03 | 1.17 | 2.77 | 1.42 | 72 % | 66 % |
+| 2015 | 4.65 | 3.41 | 1.24 | 3.17 | 1.48 | 73 % | 68 % |
+| 2017 | 4.74 | 3.46 | 1.28 | 3.25 | 1.50 | 73 % | 68 % |
+| 2019 | 4.46 | 3.25 | 1.21 | 3.06 | 1.40 | 73 % | 69 % |
+| 2020 | 4.73 | 3.41 | 1.32 | 3.28 | 1.45 | 72 % | 69 % |
+| 2024 | 4.74 | 3.37 | 1.36 | 3.33 | 1.40 | 71 % | 70 % |
+| 2030 | 4.68 | 3.25 | 1.43 | 3.18 | 1.50 | 69 % | 68 % |
+| 2040 | 4.79 | 3.26 | 1.52 | 3.26 | 1.52 | 68 % | 68 % |
+| 2050 | 4.99 | 3.33 | 1.65 | 3.42 | 1.56 | 67 % | 69 % |
+| 2060 | 5.14 | 3.38 | 1.76 | 3.54 | 1.59 | 66 % | 69 % |
+| 2070 | 5.34 | 3.44 | 1.89 | 3.71 | 1.62 | 64 % | 70 % |
+| 2080 | 5.42 | 3.46 | 1.96 | 3.79 | 1.64 | 64 % | 70 % |
+| 2090 | 5.55 | 3.48 | 2.07 | 3.89 | 1.66 | 63 % | 70 % |
+| 2099 | 5.66 | 3.52 | 2.14 | 3.99 | 1.67 | 62 % | 71 % |
 
 Key trends:
 - **Irrigation share** declines from ~80 % (1960s–1980s) to ~71 % (2024)
-  and continues to ~61 % by 2099 as urbanization increases M&I demand —
+  and continues to ~62 % by 2099 as urbanization increases M&I demand —
   consistent with ADWR's 72 % estimate for recent years.  Note that the
   irrigation category implicitly includes aquaculture and turf irrigation
   (e.g. golf courses) where the same wells registered as ``IRRIGATION``
   in the ADWR Well Registry serve multiple end uses, which may contribute
   to the irrigation GW share being slightly higher than agriculture-only
   estimates.
-- **GW share** declines from 82 % (1900) to ~60 % by the 1980s as
-  canal infrastructure (SRP, CAP) brought Colorado River surface water
-  inland, then rises gradually to ~67 % by 2099 as non-irrigation
-  demand — predominantly groundwater-sourced outside canal service
-  areas — grows faster than irrigation.  Including unaccounted federal
-  surface water deliveries (~2.22 MAF), the statewide GW share is
-  ~42 % in 2017, consistent with ADWR-reported GW/SW shares ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
-- **Total withdrawals** grow from 0.10 MAF (1900) to 4.80 MAF (2024)
-  and are projected to reach 5.94 MAF by 2099.  Early growth (1900–1950)
+- **GW share** declines from 66 % (1900) to ~51 % by the 1950s as canal
+  infrastructure (SRP) brought surface water to irrigated areas, then
+  rises gradually to ~70 % by 2099 as non-irrigation demand —
+  predominantly groundwater-sourced outside canal service areas — grows
+  faster than irrigation.  Including unaccounted federal SW
+  deliveries (~2.26 MAF), the statewide GW share is ~46 % in 2017,
+  consistent with independently reported GW/SW shares: USGS estimates
+  46 % GW and 3.09 MAF total GW for 2015 ([NGWA, 2020](https://www.ngwa.org/);
+  based on [Dieter et al., 2018](https://doi.org/10.3133/cir1441)), while
+  ADWR reports 41 % GW for 2019 ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
+  The model produces 45 % / 3.17 MAF for 2015 (within 0.08 MAF and
+  1 percentage point of USGS) and 44 % for 2019 (within 3 percentage
+  points of ADWR) — converging on both agency estimates across different
+  years without any calibration to these targets.
+
+  | Year | Source | GW (MAF) | Statewide GW % |
+  |------|--------|----------|----------------|
+  | 2015 | USGS/NGWA | 3.09 | 46 % |
+  | 2015 | AZ-Hydro | 3.17 | 45 % |
+  | 2019 | ADWR | — | 41 % |
+  | 2019 | AZ-Hydro | 3.06 | 44 % |
+- **Total withdrawals** grow from 0.11 MAF (1900) to 4.74 MAF (2024)
+  and are projected to reach 5.66 MAF by 2099.  Early growth (1900–1950)
   reflects the build-out of well and canal infrastructure; mid-century
   growth (1950s–1980s) is driven by agricultural expansion; projected
   growth is driven by urbanization and increasing M&I demand.
-- **Irrigation** remains relatively stable in the projections (3.43 →
-  3.61 MAF, +5 % by 2099), while **non-irrigation** nearly doubles
-  (1.37 → 2.33 MAF) reflecting continued urban and industrial growth
+- **Irrigation** remains relatively stable in the projections (3.37 →
+  3.52 MAF, +4 % by 2099), while **non-irrigation** grows by ~57 %
+  (1.36 → 2.14 MAF), more than doubling from the 1990s level
+  (0.95 MAF), reflecting continued urban and industrial growth
   including data center and energy-sector water demand.
-- **Pre-CAP era** (before 1985): lower total volumes and higher GW share,
-  as CAP Colorado River deliveries had not yet begun.
+- **Pre-CAP era** (before 1985): GW share declines as SRP canal
+  infrastructure expanded, reaching a minimum ~51 % by the 1950s.
+  Post-1985 GW share rises as non-irrigation (predominantly GW)
+  demand grows relative to canal-served irrigation.
 - **Conservation**: Irrigation + Non-Irrigation = Total and GW + SW = Total
   hold exactly for all years.
-- **Uncertainty**: Statewide 95 % CI width ranges from ±0.06 MAF for the
-  historical metered period (CV ~ 0.6 %) to ±0.28 MAF by 2099
-  (CV ~ 2.4 %).  The dominant uncertainty component is the model seed
-  ensemble (σ_model ~ 8–12 mm) across all eras.  For projections
-  (2026–2099), LULC scenario spread (σ_LULC ~ 5–10 mm) and inter-GCM
-  climate spread (σ_MACA ~ 4 mm) add in quadrature, widening the CI.
-  The hindcast era (1896–1983) has higher relative uncertainty
-  (CV ~ 6–12 %) due to irrigation fraction sensitivity (σ_irr).
-  The 0.03 MAF water budget residual (model + unaccounted vs. ADWR)
-  is well within the 2017 95 % CI of [4.72, 4.83] MAF.
+- **Surface Water Capture Index**: The statewide volume-weighted
+  capture fraction is ~0.2 % (central estimate, λ=10 m), translating
+  to 0.02–0.04 MAF of GW pumping that physically captures surface
+  water via stream depletion.  Capture grows from ~0.001 MAF (1900)
+  to a peak of ~0.038 MAF (2015–2024) as pumping infrastructure
+  expanded near canal corridors, then declines slightly in projections
+  as irrigation stabilizes.  Irrigation GW accounts for ~90 % of total
+  capture (~0.034 MAF), with non-irrigation contributing ~0.003 MAF.
+  While the statewide impact is small (<1 % of total GW), the capture
+  is spatially concentrated in shallow-water-table areas near rivers
+  and canal infrastructure.  Basin-level volume-weighted capture
+  fractions (2017, central λ=10 m):
+
+  | Basin | Capture Fraction | Mean WTD (m) | Context |
+  |-------|-----------------|-------------|---------|
+  | Parker | 9.7 % | 51 | Colorado River alluvial aquifer |
+  | Lower Gila | 6.9 % | 55 | Gila River corridor |
+  | Yuma | 3.7 % | 42 | Colorado River diversions, alluvial wells |
+  | Lake Havasu | 3.3 % | 73 | Colorado River adjacent |
+  | Safford | 2.1 % | 34 | Upper Gila River valley, shallowest WTD |
+  | Phoenix AMA | 0.4 % | 64 | Deep wells dominate; SRP corridor localized |
+  | Willcox AMA | 0.0 % | 44 | Negative control: no canals despite moderate WTD |
+  | Butler Valley | 0.0 % | 72 | Negative control: no canal infrastructure |
+
+  The spatial pattern is consistent with
+  [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757), which
+  qualitatively identified regions where GW pumping potentially
+  impacts surface water by mapping floodplains within 20 km of the
+  Colorado and Gila rivers (catchment area ≥ 40,000 km²) with grade
+  < 0.4 % and average well depth ≤ 50 m.  The capture index advances
+  this from binary criteria to continuous, physics-based variables:
+  `canal_weighted_streamflow` replaces the binary "near river"
+  proximity rule, and `exp(−wtd/λ)` replaces the 50 m well-depth
+  threshold with a smooth exponential decay — at λ = 10 m, a 50 m
+  water table gives `exp(−50/10) ≈ 0.007` (negligible capture),
+  consistent with the 2022 study's cutoff.  The highest capture
+  fractions (Parker, Lower Gila, Yuma) align with the Colorado and
+  Gila River alluvial corridors identified in the 2022 study as the
+  primary zones of pumping-induced surface water depletion.
+
+- **Uncertainty**: UQ results will be updated after the full pipeline
+  rerun with WTD as a predictor.
 
 Consumptive use (CU = IE × Irrigation Withdrawal) volumes, where IE is the
 USGS NHM basin-level irrigation efficiency (million acre-feet):
 
 | Year | Irrigation | Irrigation CU | Irrigation GW CU | Irrigation SW CU | IE |
 |------|------------|---------------|-------------------|------------------|----|
-| 1900 | 0.04 | 0.02 | 0.01 | 0.01 | 60 % |
-| 1910 | 0.05 | 0.03 | 0.02 | 0.02 | 61 % |
-| 1920 | 0.12 | 0.07 | 0.03 | 0.04 | 61 % |
-| 1930 | 0.23 | 0.14 | 0.07 | 0.07 | 61 % |
-| 1940 | 0.53 | 0.32 | 0.17 | 0.15 | 61 % |
-| 1950 | 1.23 | 0.75 | 0.40 | 0.35 | 61 % |
-| 1960 | 2.01 | 1.22 | 0.63 | 0.59 | 61 % |
-| 1970 | 2.53 | 1.53 | 0.81 | 0.73 | 61 % |
-| 1980 | 3.02 | 1.83 | 0.95 | 0.88 | 61 % |
-| 1985 | 3.24 | 1.96 | 0.98 | 0.97 | 60 % |
-| 1990 | 3.26 | 1.97 | 1.00 | 0.96 | 60 % |
-| 2000 | 3.22 | 1.94 | 0.99 | 0.95 | 60 % |
-| 2010 | 3.01 | 1.82 | 0.92 | 0.90 | 60 % |
-| 2017 | 3.50 | 2.11 | 1.07 | 1.04 | 60 % |
-| 2020 | 3.42 | 2.06 | 1.05 | 1.01 | 60 % |
-| 2024 | 3.43 | 2.07 | 1.05 | 1.02 | 60 % |
-| 2030 | 3.30 | 1.99 | 1.01 | 0.98 | 60 % |
-| 2040 | 3.31 | 2.00 | 1.02 | 0.98 | 60 % |
-| 2050 | 3.39 | 2.05 | 1.04 | 1.01 | 60 % |
-| 2060 | 3.43 | 2.07 | 1.05 | 1.02 | 60 % |
-| 2070 | 3.49 | 2.11 | 1.07 | 1.04 | 60 % |
-| 2080 | 3.53 | 2.13 | 1.08 | 1.05 | 60 % |
-| 2090 | 3.56 | 2.15 | 1.09 | 1.07 | 60 % |
-| 2099 | 3.61 | 2.18 | 1.10 | 1.08 | 60 % |
+| 1900 | 0.04 | 0.03 | 0.02 | 0.01 | 61 % |
+| 1910 | 0.06 | 0.03 | 0.03 | 0.01 | 61 % |
+| 1920 | 0.13 | 0.08 | 0.05 | 0.03 | 61 % |
+| 1930 | 0.26 | 0.16 | 0.08 | 0.07 | 61 % |
+| 1940 | 0.57 | 0.35 | 0.17 | 0.17 | 61 % |
+| 1950 | 1.32 | 0.80 | 0.38 | 0.42 | 61 % |
+| 1960 | 2.05 | 1.25 | 0.66 | 0.59 | 61 % |
+| 1970 | 2.51 | 1.53 | 0.89 | 0.64 | 61 % |
+| 1980 | 3.03 | 1.84 | 1.05 | 0.79 | 61 % |
+| 1985 | 3.24 | 1.96 | 1.16 | 0.80 | 61 % |
+| 1990 | 3.25 | 1.97 | 1.22 | 0.75 | 61 % |
+| 2000 | 3.22 | 1.94 | 1.22 | 0.72 | 60 % |
+| 2010 | 3.03 | 1.83 | 1.19 | 0.64 | 60 % |
+| 2015 | 3.41 | 2.06 | 1.40 | 0.66 | 60 % |
+| 2017 | 3.46 | 2.10 | 1.43 | 0.67 | 61 % |
+| 2019 | 3.25 | 1.97 | 1.35 | 0.62 | 61 % |
+| 2020 | 3.41 | 2.05 | 1.41 | 0.64 | 60 % |
+| 2024 | 3.37 | 2.04 | 1.44 | 0.60 | 60 % |
+| 2030 | 3.25 | 1.97 | 1.33 | 0.63 | 60 % |
+| 2040 | 3.26 | 1.97 | 1.34 | 0.63 | 60 % |
+| 2050 | 3.33 | 2.01 | 1.37 | 0.64 | 60 % |
+| 2060 | 3.38 | 2.04 | 1.40 | 0.64 | 61 % |
+| 2070 | 3.44 | 2.08 | 1.43 | 0.65 | 61 % |
+| 2080 | 3.46 | 2.10 | 1.44 | 0.65 | 61 % |
+| 2090 | 3.48 | 2.11 | 1.46 | 0.65 | 61 % |
+| 2099 | 3.52 | 2.13 | 1.48 | 0.65 | 61 % |
 
 The statewide mean IE is ~60 %, meaning roughly 40 % of applied irrigation
 water returns to aquifers as deep percolation or runs off as return flow.
@@ -1136,11 +1191,11 @@ each component.  Per-category σ_total is then obtained by the same
 quadrature formula applied category-wise.
 
 **Sample-based vs scenario-based components.**  σ_model (10 random seeds)
-and σ_gw (4 Hung et al. temporal snapshots) are *sample-based*: their
-ensemble members are random draws from a larger population, so
-Student's t-distribution critical values are used instead of z = 1.96
-to account for small-N estimation uncertainty
-(t₉ = 2.262 for σ_model, t₃ = 3.182 for σ_gw).
+and σ_gw (5 recent HarDWR well-density snapshots, 2020–2024) are
+*sample-based*: their ensemble members are random draws from a larger
+population, so Student's t-distribution critical values are used instead
+of z = 1.96 to account for small-N estimation uncertainty
+(t₉ = 2.262 for σ_model, t₄ = 2.776 for σ_gw).
 The t-correction is applied by inflating σ by t/z *before* quadrature,
 so all downstream CI computation uses a single multiplier (z = 1.96).
 σ_MACA, σ_LULC, and σ_irr are *scenario-based*: their spread bounds
@@ -1270,31 +1325,53 @@ In addition to the pixel-level σ, per-scenario **volume projections**
 `Scenario_Comparison.csv` provides all four scenarios side by side for
 plotting scenario-dependent volume trajectories.
 
-##### σ_gw — GW fraction inter-snapshot spread (all years, 1896–2099)
+##### σ_gw — Well-density feature sensitivity (all years, 1896–2099)
 
-USGS groundwater irrigation fraction data are available at four snapshots
-(2000, 2005, 2010, 2015).  The primary model uses interpolated/extended
-values via band 12.  σ_gw evaluates the model at each of the four snapshot
-fractions and takes the per-pixel standard deviation:
+σ_gw measures ML-feature sensitivity of predicted pumping to recent
+year-over-year variability in HarDWR well-registry counts.  For each
+prediction year, ``well_density`` — the **#1 feature by mean |SHAP
+value|** in the XGBRF model — is swapped with values observed in each
+of five recent reference years (``INFRASTRUCTURE_SNAPSHOT_YEARS = [2020,
+2021, 2022, 2023, 2024]``), the model is re-run on the modified feature
+matrix, and σ_gw is the sample std across the five predictions:
 
-$$\sigma_{\text{gw}}(x, y, t) = \text{std}\bigl[\hat{y}_{2000}, \hat{y}_{2005}, \hat{y}_{2010}, \hat{y}_{2015}\bigr]$$
+$$\sigma_{\text{gw}}(x, y, t) = \text{std}\bigl[\hat{y}_{\text{wd}=2020}, \hat{y}_{\text{wd}=2021}, \hat{y}_{\text{wd}=2022}, \hat{y}_{\text{wd}=2023}, \hat{y}_{\text{wd}=2024}\bigr]$$
 
-This quantifies how sensitive the prediction is to the choice of GW
-fraction snapshot at each pixel.
+The sample std is computed with ``ddof = 1`` (N − 1 = 4 degrees of
+freedom) and scaled by the Student's t correction
+``T_SCALE_GW = t₄ / z = 2.776 / 1.96 ≈ 1.416`` before entering the
+quadrature, so the final σ_total reflects a t-corrected 95 % CI rather
+than a z-based one.
 
-**Known limitation — σ_gw is a lower bound:** Only 4 snapshot years
-(2000, 2005, 2010, 2015) with 5–15 year gaps are available, so decadal
-oscillations (droughts, extreme-wet periods) between snapshots are
-invisible to the ensemble.  The resulting σ_gw underestimates the true
-temporal variability of GW sourcing fractions.
+``well_density`` was chosen because it dominates the model's learned
+response to GW infrastructure (mean |SHAP| ≈ 24 mm, roughly 8× the
+contribution of the Hung ``annual_gw_fraction`` feature that earlier
+versions of this component perturbed).  Replacing a perturbation of a
+rank-12 feature with a perturbation of the rank-1 feature at the same
+input CV gives a substantially larger σ_gw signal across the entire
+1896–2099 window — the previous Hung-based implementation collapsed to
+~0 outside 2000–2015, whereas the new one is nonzero everywhere because
+the same five reference snapshots are loaded and swapped in regardless
+of the prediction year.
 
-**GW fraction sensitivity analysis:** A standalone sensitivity test
-(`run_gw_fraction_sensitivity`) perturbs `gw_fraction` by ±0.2 for all
-years (1896–2099) and reports the resulting per-category volume changes
-(AF) to bound the impact of freezing gw_fraction at snapshot values.
-Years < 2005 (all frozen at the 2000 snapshot) and years ≥ 2015 (all
-frozen at the 2015 snapshot) are the most affected.  Results are written
-to `Uncertainty/Sigma_GW/GW_Fraction_Sensitivity.csv`.
+**Known limitations — σ_gw scope:** ``sw_rights_density`` is *not*
+perturbed.  It is rank 15 in SHAP importance (~2 mm, about 12× less
+influential than ``well_density``) and is effectively frozen in the
+HarDWR record after ~1996: per-pixel std across 2020–2024 is literally
+0.000 because SW water rights in Arizona were almost entirely filed by
+the mid-1990s and only ~400 new entries have appeared in the 28 years
+since.  Probing it would contribute negligibly to σ_total while
+requiring counterfactuals that don't exist in the data, so it is
+omitted with this rationale documented in the docstring.
+
+σ_gw does not represent new-well drilling, well retirement, or spatial
+redistribution of infrastructure beyond what the five reference years
+already contain — those are out of scope absent structural scenario
+projections for Arizona well infrastructure.  For prediction years far
+from 2020–2024 the counterfactuals become increasingly abstract ("what
+if 2099 Arizona had 2020-era wells"), but because ``well_density`` is
+the dominant SHAP feature, probing it at real observed amounts still
+exercises the model's primary sensitivity axis.
 
 ##### σ_total — Quadrature combination
 
@@ -1438,10 +1515,10 @@ Model, Irr, LULC, GW), which are then combined via quadrature:
 $$\sigma_{\text{cat}} = \sqrt{\sum_i \sigma_{\text{cat},i}^2}$$
 
 where $\sigma_{\text{cat},i}$ is the per-category std from the $i$-th
-UQ component’s ensemble.  This correctly propagates partition-fraction
-uncertainty (σ_irr and σ_gw perturb `irr_fraction` and `gw_fraction`
-respectively, so per-category spreads differ from simple linear scaling
-of the total σ).
+UQ component’s ensemble.  This correctly propagates feature-input
+uncertainty (σ_irr perturbs ``irr_fraction`` and σ_gw perturbs
+``well_density`` across recent HarDWR snapshots, so per-category
+spreads differ from simple linear scaling of the total σ).
 
 **Execution order** (dependencies require sequential processing):
 
@@ -1968,34 +2045,45 @@ ancillary data already in the predictor stack:
 | **Total_GW** | `Irrigation_GW + Non_Irrigation_GW` |
 | **Total_SW** | `Irrigation_SW + Non_Irrigation_SW` |
 
-**Density-ratio GW/SW split with canal boost:** The GW/SW split for
-both irrigation and non-irrigation uses a count-based density ratio of
-ADWR registered wells (groundwater infrastructure) to HarDWR
-surface-water rights PODs, with canal-weighted streamflow (focal-max
-normalized to [0, 1]) added to the SW side to boost SW allocation at
-canal-served pixels:
+**Density-ratio GW/SW split with CW-weighted smoothing:** The GW/SW
+split uses ADWR well density against HarDWR SW rights density weighted
+by canal-weighted streamflow and Gaussian-smoothed (σ=4, ~8 km radius)
+to spread each SW POD's influence over its canal service area:
 
 ```
-cw_norm        = focal_max_normalize(canal_weighted_streamflow)
-irr_gw_frac    = irr_well_density    / (irr_well_density    + irr_sw_rights_density    + cw_norm)
-nonirr_gw_frac = nonirr_well_density / (nonirr_well_density + nonirr_sw_rights_density + cw_norm)
+sw_smoothed    = gaussian_filter(irr_sw_rights_density × canal_weighted_streamflow, σ=4)
+irr_gw_frac    = irr_well_density    / (irr_well_density    + sw_smoothed)
+nonirr_gw_frac = nonirr_well_density / (nonirr_well_density + nonirr_sw_smoothed)
 ```
 
-Both well and SW-rights densities are per-year rasters gated by
-installation/priority dates, so the GW/SW balance naturally evolves as
-infrastructure builds out.  The `cw_norm` term uses the existing
-`compute_sw_fraction()` focal-max normalization (5×5 kernel), ensuring
-that pixels at the heart of canal systems (SRP, CAP service area) get
-the strongest SW boost while pixels far from canals get none.  Where
-the entire denominator is zero (no wells, no SW rights, no canals),
-`gw_frac` defaults to 1.0 (100 % GW).
+A POD at a major canal headgate (high cw_streamflow) gets proportionally
+more influence than a POD at a dry wash — the product
+`POD_count × cw_streamflow` scales the SW rights by actual delivery
+capacity.  The Gaussian spread distributes that capacity-weighted
+influence across the canal service area, solving the spatial mismatch
+between point-source SW PODs and diffuse GW wells.  Both well and
+SW-rights densities are per-year rasters gated by installation/priority
+dates, so the GW/SW balance evolves as infrastructure builds out.
+Where the denominator is zero, `gw_frac` defaults to 1.0 (100 % GW).
 
 The [Hung et al. (2025)](https://doi.org/10.1038/s41597-025-05920-x)
 `annual_gw_fraction` is retained as an ML feature but no longer used
-for partitioning.  A density-ratio sensitivity analysis
-(`run_density_ratio_sensitivity`, ±20 % well density perturbation)
-quantifies the volume impact of well-count uncertainty; results are in
-`Uncertainty/Sigma_GW/Density_Ratio_Sensitivity.csv`.
+for partitioning.  A partition-level sensitivity diagnostic
+(`run_density_ratio_sensitivity`) probes two orthogonal knobs and
+writes both as sections of one CSV with a `Perturbation_Type` column:
+
+- **Density** — well and SW-rights densities perturbed simultaneously
+  with opposite signs (well × (1 ± 0.2), sw_rights × (1 ∓ 0.2)) to
+  probe the GW/SW ratio's sensitivity to coordinated scaling of its
+  numerator and denominator.
+- **Smoothing** — the Gaussian canal-reach kernel `sw_smooth_sigma` is
+  swept across {2, 8} (~4 km / ~16 km radius at 2 km resolution) with
+  densities held at baseline, to probe the assumed canal service-area
+  extent.
+
+Both sections write to `Uncertainty/Sigma_GW/Density_Ratio_Sensitivity.csv`
+with time-series ribbon plots in `Density_Ratio_Sensitivity.png` and
+`Smoothing_Sigma_Sensitivity.png`.
 
 **Zero-surface-water constraint:** Where `canal_weighted_streamflow_mm`
 is zero at a pixel, there is no canal-delivered surface water, and
@@ -2079,8 +2167,12 @@ Key functions:
 - **`compute_sigma_lulc()`** — LULC projection spread (4 USGS scenarios,
   future only, 2026–2099).  Re-derives the full LULC → crop_frac →
   irr_frac chain per scenario.  Returns per-year total σ and per-category σ.
-- **`compute_sigma_gw()`** — GW fraction snapshot spread (4 USGS
-  snapshots, all years).  Returns per-year total σ and per-category σ.
+- **`compute_sigma_gw()`** — ML-feature sensitivity to recent HarDWR
+  well-registry variability.  Swaps `well_density` (#1 SHAP feature)
+  with values from each of 5 recent reference years (2020–2024) and
+  takes the sample std across the 5 predictions.  Does not cover
+  `sw_rights_density` sensitivity (the feature is rank 15 in SHAP and
+  flat post-1996).  Returns per-year total σ and per-category σ.
 - **`compute_sigma_total()`** — Quadrature combination of all five
   components for both total and per-category σ.  Writes 2-band total σ
   rasters (σ, CV), per-category σ rasters, and temporal Mean_CV.tif.
@@ -2091,11 +2183,11 @@ Key functions:
   CU = IE × Withdrawal.  Reads augmented per-category withdrawal σ (band 2)
   and basin-level NHM IE std (2000–2020).  Writes per-category σ_CU rasters
   (Irrigation_CU, Irrigation_GW_CU, Irrigation_SW_CU).
-- **`run_gw_fraction_sensitivity()`** — Standalone sensitivity analysis
-  perturbing `gw_fraction` by ±0.2 for all years (1896–2099) and
-  reporting per-category volume changes.  Years < 2005 and ≥ 2015 are
-  most affected since they are frozen at a single snapshot.  Writes
-  `Sigma_GW/GW_Fraction_Sensitivity.csv`.
+- **`run_density_ratio_sensitivity()`** — Partition-level diagnostic
+  covering two orthogonal knobs: a density-ratio sweep (well and
+  SW-rights densities perturbed with opposite signs at ±20%) and a
+  smoothing-kernel sweep (`sw_smooth_sigma ∈ {2, 8}`).  Writes one CSV
+  with a `Perturbation_Type` column and two ribbon-plot PNGs.
 - **`augment_prediction_rasters()`** — Rewrites total annual withdrawal rasters as
   6-band GeoTIFFs (pred, σ, CV, SNR, lower CI, upper CI) for all 4 units.
 - **`augment_category_rasters()`** — Augments 8 withdrawal category rasters
@@ -2410,7 +2502,7 @@ Data/Outputs/
         │   ├── Sigma_Model/                 #   Seed ensemble spread
         │   ├── Sigma_Irr/                   #   Irrigation fraction spread
         │   ├── Sigma_LULC/                  #   LULC projection spread
-        │   ├── Sigma_GW/                    #   GW fraction spread
+        │   ├── Sigma_GW/                    #   Well-density feature sensitivity (2020–2024 snapshots)
         │   ├── Sigma_Total/                 #   Quadrature combination (σ, CV, per-category σ)
         │   ├── Sigma_CU/                    #   CU error-propagation σ
         │   └── Plots/                       #   Time-series plots
@@ -2460,6 +2552,8 @@ Condon, L. E., & Maxwell, R. M. (2019). Simulating the sensitivity of evapotrans
 Daly, C., Halbleib, M., Smith, J. I., Gibson, W. P., Doggett, M. K., Taylor, G. H., Curtis, J., & Pasteris, P. P. (2008). Physiographically sensitive mapping of climatological temperature and precipitation across the conterminous United States. _International Journal of Climatology_, _28_(15), 2031–2064. https://doi.org/10.1002/joc.1688.
 
 de Graaf, I. E. M., Gleeson, T., van Beek, L. P. H., Sutanudjaja, E. H., & Bierkens, M. F. P. (2019). Environmental flow limits to global groundwater pumping. _Nature_, _574_, 90–94. https://doi.org/10.1038/s41586-019-1594-4.
+
+Dieter, C. A., Maupin, M. A., Caldwell, R. R., Harris, M. A., Ivahnenko, T. I., Lovelace, J. K., Barber, N. L., & Linsey, K. S. (2018). Estimated use of water in the United States in 2015. _U.S. Geological Survey Circular 1441_. https://doi.org/10.3133/cir1441.
 
 Fleckenstein, R., Wellington, D., Jin, S., Tollerud, H., Brown, J. F., Dewitz, J., Pastick, N. J., Barber, C. P., O’Brien, A., & Spanier, M. (2026). A framework for integrating spatiotemporal deep learning methods with landsat for annual land cover and impervious surface mapping. _Remote Sensing of Environment_, _338_, 115347. https://doi.org/10.1016/j.rse.2026.115347.
 

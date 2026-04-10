@@ -159,6 +159,7 @@ def partition_predictions(
         year_df,
         raster_shape: tuple,
         valid_mask: np.ndarray,
+        sw_smooth_sigma: float = 4.0,
 ) -> dict[str, np.ndarray]:
     """
     Partition total pumping predictions into 8 withdrawal categories.
@@ -170,6 +171,9 @@ def partition_predictions(
             ``annual_gw_fraction``, ``canal_density`` when available).
         raster_shape (tuple): (rows, cols) of the full raster grid.
         valid_mask (np.ndarray): Mask of valid (in-AZ) pixels in the flattened raster (1-D bool array).
+        sw_smooth_sigma (float): Gaussian smoothing kernel width (in pixels) used to
+            spread SW-rights-density influence across canal service areas.
+            Default 4.0 (~8 km radius at 2 km resolution).
 
     Returns:
         dict[str, np.ndarray]: Mapping of category name to 1-D prediction array (same length
@@ -272,18 +276,28 @@ def partition_predictions(
         if not np.any(zero_sw_mask):
             zero_sw_mask = None
 
-    # ---- Focal-normalized canal-weighted streamflow for SW boost ----
-    # Adds physical surface-water delivery signal to the density ratio.
-    # Pixels near canals get cw_norm ∈ (0, 1], boosting SW fraction.
-    # Pixels without canals get cw_norm = 0 → pure density ratio.
-    cw_norm = np.zeros_like(predictions)
-    if cw_streamflow is not None:
-        cw_norm = compute_sw_fraction(cw_streamflow, raster_shape, valid_mask)
+    # ---- CW-streamflow-weighted SW POD smoothing ----
+    # Weight SW rights density by canal-weighted streamflow (delivery
+    # capacity), then Gaussian-smooth to spread influence over the canal
+    # service area.  A POD at a major canal headgate (cw_sf = 1000 mm)
+    # gets 1000× more influence than a POD at a dry wash.  This replaces
+    # the separate cw_norm boost — canal delivery information is now
+    # embedded in the smoothed SW density itself.
+    from scipy.ndimage import gaussian_filter as _gaussian_filter
 
-    # ---- GW / SW split of irrigation (density-ratio + canal boost) ----
-    # gw_frac = irr_well_density / (irr_well_density + irr_sw_rights_density + cw_norm)
-    # cw_norm boosts SW at canal-served pixels; defaults to 1.0 (100% GW)
-    # where all three terms are zero.
+    def _smooth_sw_density(sw_dens, cw_sf):
+        """Weight SW POD density by cw_streamflow and Gaussian-smooth."""
+        sw_grid = np.zeros(raster_shape, dtype=np.float64)
+        cw_grid = np.zeros(raster_shape, dtype=np.float64)
+        sw_grid.ravel()[valid_mask] = np.nan_to_num(sw_dens, nan=0.0)
+        cw_grid.ravel()[valid_mask] = np.nan_to_num(cw_sf, nan=0.0)
+        weighted = sw_grid * cw_grid
+        smoothed = _gaussian_filter(weighted, sigma=sw_smooth_sigma)
+        return smoothed.ravel()[valid_mask]
+
+    cw_sf_vals = cw_streamflow if cw_streamflow is not None else np.zeros(len(predictions))
+
+    # ---- GW / SW split of irrigation (CW-weighted density ratio) ----
     irr_wd = year_df['irr_well_density'].values \
         if 'irr_well_density' in year_df.columns else None
     irr_swd = year_df['irr_sw_rights_density'].values \
@@ -291,8 +305,8 @@ def partition_predictions(
 
     if irr_wd is not None and irr_swd is not None:
         irr_wd = np.nan_to_num(irr_wd, nan=0.0)
-        irr_swd = np.nan_to_num(irr_swd, nan=0.0)
-        denom = irr_wd + irr_swd + cw_norm
+        irr_swd_smooth = _smooth_sw_density(irr_swd, cw_sf_vals)
+        denom = irr_wd + irr_swd_smooth
         with np.errstate(invalid='ignore', divide='ignore'):
             irr_gw_frac = np.where(denom > 0, irr_wd / denom, 1.0)
         irr_gw_frac = np.clip(irr_gw_frac, 0, 1)
@@ -305,7 +319,7 @@ def partition_predictions(
         irr_gw = irr.copy()
         irr_sw = np.zeros_like(irr)
 
-    # ---- GW / SW split of non-irrigation (density-ratio + canal boost) ----
+    # ---- GW / SW split of non-irrigation (CW-weighted density ratio) ----
     nonirr_wd = year_df['nonirr_well_density'].values \
         if 'nonirr_well_density' in year_df.columns else None
     nonirr_swd = year_df['nonirr_sw_rights_density'].values \
@@ -313,8 +327,8 @@ def partition_predictions(
 
     if nonirr_wd is not None and nonirr_swd is not None:
         nonirr_wd = np.nan_to_num(nonirr_wd, nan=0.0)
-        nonirr_swd = np.nan_to_num(nonirr_swd, nan=0.0)
-        denom = nonirr_wd + nonirr_swd + cw_norm
+        nonirr_swd_smooth = _smooth_sw_density(nonirr_swd, cw_sf_vals)
+        denom = nonirr_wd + nonirr_swd_smooth
         with np.errstate(invalid='ignore', divide='ignore'):
             nonirr_gw_frac = np.where(denom > 0, nonirr_wd / denom, 1.0)
         nonirr_gw_frac = np.clip(nonirr_gw_frac, 0, 1)

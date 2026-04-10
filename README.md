@@ -23,7 +23,7 @@ AZ-Hydro is a physics-constrained machine learning pipeline for estimating annua
 - **Density-ratio GW/SW partitioning** — uses ADWR well density vs. HarDWR surface-water rights density with canal-delivery boost, replacing global statistical datasets with locally observable infrastructure records
 - **Surface Water Capture Index** — novel per-pixel, per-year quantification of pumping-induced streamflow depletion based on water table depth and canal infrastructure, with physics-based uncertainty bounds
 - **Full water-budget closure** — model captures ~68% of Arizona's 7.0 MAF total; the remaining ~32% (CAP, SRP, Yuma federal diversions, reclaimed water) is independently accounted for, closing to within 0.03 MAF
-- **Emergent validation** — statewide irrigation share (72%) and GW dependence (42% including federal SW) independently match ADWR-reported values without calibration to those targets
+- **Multi-source emergent validation** — statewide irrigation share (72%) matches ADWR; GW dependence matches both USGS (45% vs 46% for 2015) and ADWR (44% vs 41% for 2019) without calibration to any agency target. The capture index independently reproduces the same SW–GW interaction zones identified qualitatively by [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757) using different methodology, cross-validating both studies. The convergence of independent datasets (ADWR wells, [HarDWR](https://doi.org/10.57931/2475303) rights, USGS gauges, [Ma et al.](https://doi.org/10.1038/s43247-025-03094-3) WTD, [GRAIN](https://doi.org/10.5194/essd-18-1855-2026) canals) in a physics-constrained framework provides a unified, self-consistent picture of Arizona's water system
 - **Hybrid uncertainty quantification** — five-component σ_total via quadrature with physics-based CU error propagation, producing 6-band augmented rasters for every product
 - **Multi-scenario projections** — 5 GCMs × 2 RCPs × 4 LULC scenarios × 112 streamflow ensemble members, with pixel-level uncertainty bounds
 - **Well-level disaggregation** — ~170,000 individual wells with per-well withdrawal, CU, capture index, and uncertainty in 4 units via GeoParquet
@@ -168,7 +168,11 @@ Hasan, M. F., Smith, R. G., Majumdar, S., Huntington, J. L., Alves Meira Neto, A
 
 Haynes, J. V., Read, A. L., Chan, A. Y., Martin, D. J., Regan, R. S., Henson, W. R., Niswonger, R. G., & Stewart, J. S. (2023). Monthly crop irrigation withdrawals and efficiencies by HUC12 watershed for years 2000–2020 within the conterminous United States (ver. 2.0, September 2024). _U.S. Geological Survey data release_. https://doi.org/10.5066/P9LGISUM.
 
+Lisk, M. D., Grogan, D. S., Proctor, K. L., Naz, B. S., Farmer, W. H., & Bock, A. R. (2024). HarDWR — Harmonized Database of Western U.S. Water Rights (v2.0). _Zenodo_. https://doi.org/10.57931/2475303.
+
 Luukkonen, C.L., Alzraiee, A.H., Larsen, J.D., Martin, D.J., Herbert, D.M., Buchwald, C.A., Houston, N.A., Valseth, K.J., Paulinski, S., Miller, L.D., Niswonger, R.G., Stewart, J.S., & Dieter, C.A. (2023). Public supply water use reanalysis for the 2000-2020 period by HUC12, month, and year for the conterminous United States. _U.S. Geological Survey data release_. https://doi.org/10.5066/P9FUL880
+
+Ma, Y., Condon, L. E., Koch, J., Bennett, A., Defnet, A., Tijerina-Kreuzer, D., Melchior, P., & Maxwell, R. M. (2026). High resolution US water table depth estimates reveal quantity of accessible groundwater. _Communications Earth & Environment_, _7_(1), 45. https://doi.org/10.1038/s43247-025-03094-3.
 
 Majumdar, S., Smith, R., Butler, J. J., & Lakshmi, V. (2020). Groundwater withdrawal prediction using integrated multitemporal remote sensing data sets and machine learning. _Water Resources Research_, _56_(11), e2020WR028059. https://doi.org/10.1029/2020WR028059.
 
@@ -183,3 +187,5 @@ Ott, T. J., Majumdar, S., Huntington, J. L., Pearson, C., Bromley, M., Minor, B.
 Reitz, M., Sanford, W. E., & Saxe, S. (2023a). Ensemble Estimation of Historical Evapotranspiration for the Conterminous U.S. _Water Resources Research_, _59_(6). https://doi.org/10.1029/2022WR034012.
 
 Reitz, M., Sanford, W. E., & Saxe, S. (2023b). Historical evapotranspiration for the conterminous U.S. _U.S. Geological Survey Data Release_. https://doi.org/10.5066/P9EZ3VAS.
+
+Suresh, S., Hossain, F., Mishra, V., & Hossain, N. (2026). GRAIN — a Global Registry of Agricultural Irrigation Networks. _Earth System Science Data_, _18_(3), 1855–1875. https://doi.org/10.5194/essd-18-1855-2026.
