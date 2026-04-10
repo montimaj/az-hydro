@@ -353,10 +353,16 @@ Three λ values (5, 10, 20 m) produce lower/central/upper bounds
 without tunable parameters.  Volume bounds additionally incorporate
 Total_GW uncertainty (σ_total from the UQ framework).
 
-Output rasters are 3-band (lower, central, upper) stored in
-`SW_Capture/Fraction/` and `SW_Capture/Volume_mm/`.  A time series
-CSV (`SW_Capture/SW_Capture_Time_Series.csv`) and era-mean maps
-are also produced.
+Output rasters are organized by GW pumping pool — Total, Irrigation,
+Non-Irrigation — under `SW_Capture/{Total,Irrigation,Non_Irrigation}_SW_Capture_Fraction/`
+(3-band, dimensionless [0, 1] for λ = 5/10/20 m) and
+`SW_Capture/{Total,Irrigation,Non_Irrigation}_SW_Capture_Rasters/Depth_{unit}/`
+(central capture volume in mm/ft/m³/AF).  Reading the directory names:
+`Total_SW_Capture_Fraction` is "the fraction of Total GW pumping that
+captures surface water," and so on for the irrigation and non-irrigation
+splits.  A time series CSV
+(`SW_Capture/SW_Capture_Time_Series.csv`) and era-mean maps are also
+produced.
 
 **Scope limitation:** The index quantifies SW depletion only where
 perennial canal-delivered surface water exists (`cw_norm > 0`).
@@ -530,7 +536,7 @@ model zoo comprises 13 models — 4 core baselines (XGB, LGBM, RF, XGBRF)
 and 9 additional ensemble/linear models (ETR, HGBR, GBR, ADA, BAG, CAT,
 LR, RIDGE, LASSO) enabled via `INCLUDE_ALL_MODELS=True`.
 
-All models use Optuna + Dask hyperparameter optimisation (50 TPE trials,
+All models use Optuna + Dask hyperparameter optimization (50 TPE trials,
 5-fold CV) and report R², normalized RMSE (% of mean), normalized MAE
 (% of mean), and normalized MBE (%).  All three normalized metrics use
 the mean of observed values as the denominator, giving a physically
@@ -1707,8 +1713,11 @@ per-well uncertainty columns are included:
 
 Categories include 9 withdrawal categories (Total + 8 partitions),
 3 CU categories (Irrigation_CU, Irrigation_GW_CU, Irrigation_SW_CU),
-and 3 SW capture categories (Total_GW_Capture, Irrigation_GW_Capture,
-Non_Irrigation_GW_Capture) — when the SW Capture rasters are available.
+and 3 SW capture categories (Total_SW_Capture, Irrigation_SW_Capture,
+Non_Irrigation_SW_Capture) — when the SW Capture rasters are available.
+The SW capture category names refer to the surface water captured by
+each GW pumping pool: e.g. `Total_SW_Capture` is "SW captured by Total
+GW pumping" within the parent `SW_Capture/` folder context.
 
 **Caveat:** Per-well σ assumes pixel-level uncertainty distributes
 proportionally to capacity weight.  This is a simplification — true
@@ -1858,7 +1867,7 @@ Three categories are compared at the basin level:
   PS-as-fraction-of-ML percentage.
 - Temporal agreement metrics (Pearson r, NSE) per basin.
 - Time series plots and CSVs per basin and category.
-- Temporal agreement visualisation (heatmap, box/violin, r-vs-NSE).
+- Temporal agreement visualization (heatmap, box/violin, r-vs-NSE).
 
 All outputs are written to `{prediction_dir}PS_Intercomparison/`.
 
@@ -1929,7 +1938,7 @@ Key functions:
   `predict_full_period()` to write per-year OOD rasters, a summary CSV
   with era-level diagnostics, and a time-series plot.
 
-### `visualops.py` — Visualisation
+### `visualops.py` — Visualization
 
 Produces journal-quality figures for every stage of the pipeline.
 
@@ -2126,7 +2135,7 @@ Non_Irrigation_GW.  Output in all 4 units (mm, ft, m³, AF).
 
 Key helpers:
 - **`focal_fill_irr_fraction()`** — fills edge-pixel gaps (`irr_frac < 0.05`)
-  with a focal mean of valid neighbours, avoiding NaN propagation along
+  with a focal mean of valid neighbors, avoiding NaN propagation along
   irrigated-area boundaries.
 - **`compute_sw_fraction()`** — normalizes a density array to [0, 1] using a
   local-maximum filter (`maximum_filter(size=5)`).  Used for focal-max
@@ -2231,7 +2240,7 @@ are included in the disaggregation.  A well's start year is determined by:
 Dates equal to the ADWR sentinel value `1899-12-30` (meaning "unknown") are
 treated as missing and fall through to the next tier.
 
-Capacity weights are re-normalised per year within each pixel using only the
+Capacity weights are re-normalized per year within each pixel using only the
 active wells, so the pixel total is always fully distributed.
 
 **Distribution logic** — when multiple wells share a 2 km pixel, the pixel
@@ -2537,7 +2546,7 @@ Data/Outputs/
 
 ### Data References
 
-Abatzoglou, J. T. (2013). Development of gridded surface meteorological data for ecological applications and modelling. _International Journal of Climatology_, _33_(1), 121–131. https://doi.org/10.1002/joc.3413.
+Abatzoglou, J. T. (2013). Development of gridded surface meteorological data for ecological applications and modeling. _International Journal of Climatology_, _33_(1), 121–131. https://doi.org/10.1002/joc.3413.
 
 Abatzoglou, J. T., & Brown, T. J. (2012). A comparison of statistical downscaling methods suited for wildfire applications. _International Journal of Climatology_, _32_(5), 772–780. https://doi.org/10.1002/joc.2312.
 

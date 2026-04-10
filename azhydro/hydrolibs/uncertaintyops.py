@@ -417,6 +417,8 @@ def _write_basin_sigma_csv(
                 mean_m3 = mean_af * af_to_m3
                 std_m3 = std_af * af_to_m3
                 cv = std_af / abs(mean_af) if abs(mean_af) > 0 else np.nan
+                # Withdrawal volumes are physically non-negative, so the
+                # 95% CI lower bound is clipped at 0.
                 rows.append({
                     'Year': year,
                     'Region': region,
@@ -425,9 +427,9 @@ def _write_basin_sigma_csv(
                     'Mean_Volume_AF': round(mean_af, 2),
                     'Sigma_Volume_AF': round(std_af, 2),
                     'CV': round(cv, 6),
-                    'Lower_95CI_m3': round(mean_m3 - CI_Z * std_m3, 2),
+                    'Lower_95CI_m3': round(max(mean_m3 - CI_Z * std_m3, 0), 2),
                     'Upper_95CI_m3': round(mean_m3 + CI_Z * std_m3, 2),
-                    'Lower_95CI_AF': round(mean_af - CI_Z * std_af, 2),
+                    'Lower_95CI_AF': round(max(mean_af - CI_Z * std_af, 0), 2),
                     'Upper_95CI_AF': round(mean_af + CI_Z * std_af, 2),
                     'N_Members': len(vols),
                 })
@@ -477,7 +479,7 @@ def compute_sigma_maca(
         output_dir (str): Base output directory for uncertainty products.
         input_dir (str): Base input directory for GEE downloads.
         vector_dir (str): Directory containing vector shapefiles.
-        mosaic_res (int): Raster resolution in metres.
+        mosaic_res (int): Raster resolution in meters.
         gcloud_project (str): Google Cloud project ID.
         gcloud_bucket (str): Google Cloud Storage bucket name.
         tile_size (int): GEE export tile size.
@@ -726,7 +728,7 @@ def compute_sigma_model(
         start_year (int): First year of prediction period.
         end_year (int): Last year of prediction period.
         year_list (list[int]): Full list of prediction years.
-        mosaic_res (int): Raster resolution in metres.
+        mosaic_res (int): Raster resolution in meters.
         prediction_model (str): Model name (e.g. 'XGBRF'). Default 'XGBRF'.
         model_dir (str or None): Base model directory containing
             ``Full_Prediction_{model}/`` with the Optuna study DB.
@@ -893,7 +895,7 @@ def compute_sigma_irr(
         start_year (int): First year of prediction period.
         end_year (int): Last year of prediction period.
         year_list (list[int]): Full list of prediction years.
-        mosaic_res (int): Raster resolution in metres.
+        mosaic_res (int): Raster resolution in meters.
 
     Returns:
         tuple: (sigma_irr, cat_sigma_irr) — per-year total σ and
@@ -1075,7 +1077,7 @@ def compute_sigma_lulc(
         output_dir (str): Base output directory for uncertainty products.
         input_dir (str): Base input directory for GEE downloads.
         vector_dir (str): Directory containing vector shapefiles.
-        mosaic_res (int): Raster resolution in metres.
+        mosaic_res (int): Raster resolution in meters.
         gcloud_project (str): Google Cloud project ID.
         gcloud_bucket (str): Google Cloud Storage bucket name.
         tile_size (int): GEE export tile size.
@@ -1403,7 +1405,7 @@ def compute_sigma_gw(
         start_year (int): First year of prediction period.
         end_year (int): Last year of prediction period.
         year_list (list[int]): Full list of prediction years.
-        mosaic_res (int): Raster resolution in metres.
+        mosaic_res (int): Raster resolution in meters.
 
     Returns:
         tuple: (sigma_gw, cat_sigma_gw) — per-year total σ and
@@ -1565,7 +1567,7 @@ def run_density_ratio_sensitivity(
         start_year (int): First year of prediction period.
         end_year (int): Last year of prediction period.
         year_list (list[int]): Full list of prediction years.
-        mosaic_res (int): Raster resolution in metres.
+        mosaic_res (int): Raster resolution in meters.
         delta (float): Density perturbation magnitude (default 0.2 = ±20%).
         smooth_sigmas (tuple[float, float]): Low/high values of
             ``sw_smooth_sigma`` to sweep (default ``(2.0, 8.0)``).
@@ -1708,15 +1710,15 @@ def run_density_ratio_sensitivity(
     # --- Plots: one PNG per perturbation section ---
     _plot_sens_section(
         sens_df[sens_df.Perturbation_Type == 'Density'], plot_cats,
-        title=f'Density Ratio Sensitivity (±{delta * 100:.0f}% well / ∓{delta * 100:.0f}% SW-rights)',
-        ribbon_label=f'±{delta * 100:.0f}% well density, ∓{delta * 100:.0f}% SW-rights density',
+        title=f'Density Ratio Sensitivity (well ±{delta * 100:.0f}%, SW-rights opposite sign)',
+        ribbon_label=f'well density ±{delta * 100:.0f}%, SW-rights density opposite sign',
         out_path=os.path.join(sens_dir, 'Density_Ratio_Sensitivity.png'),
         start_year=start_year, end_year=end_year,
     )
     _plot_sens_section(
         sens_df[sens_df.Perturbation_Type == 'Smoothing'], plot_cats,
-        title=f'Smoothing Sigma Sensitivity (σ ∈ {{{smooth_sigmas[0]:.0f}, {smooth_sigmas[1]:.0f}}})',
-        ribbon_label=f'sw_smooth_sigma ∈ {{{smooth_sigmas[0]:.0f}, {smooth_sigmas[1]:.0f}}}',
+        title=f'Smoothing Sigma Sensitivity (σ = {smooth_sigmas[0]:.0f} vs {smooth_sigmas[1]:.0f})',
+        ribbon_label=f'sw_smooth_sigma = {smooth_sigmas[0]:.0f} vs {smooth_sigmas[1]:.0f}',
         out_path=os.path.join(sens_dir, 'Smoothing_Sigma_Sensitivity.png'),
         start_year=start_year, end_year=end_year,
     )
@@ -2180,15 +2182,20 @@ def compute_basin_sigma_total(output_dir: str, prediction_dir: str = '') -> None
                 merged['Sigma_Total_AF'] / np.abs(merged['Mean_Volume_AF']),
                 np.nan,
             ).round(6)
+        # Withdrawal volumes are physically non-negative; clip the 95%
+        # CI lower bound at 0 so the on-disk values match what the
+        # plotting layer renders.
         merged['Lower_95CI_m3'] = (
-            merged['Mean_Volume_m3'] - CI_Z * merged['Sigma_Total_m3']
-        ).round(2)
+            (merged['Mean_Volume_m3'] - CI_Z * merged['Sigma_Total_m3'])
+            .clip(lower=0).round(2)
+        )
         merged['Upper_95CI_m3'] = (
             merged['Mean_Volume_m3'] + CI_Z * merged['Sigma_Total_m3']
         ).round(2)
         merged['Lower_95CI_AF'] = (
-            merged['Mean_Volume_AF'] - CI_Z * merged['Sigma_Total_AF']
-        ).round(2)
+            (merged['Mean_Volume_AF'] - CI_Z * merged['Sigma_Total_AF'])
+            .clip(lower=0).round(2)
+        )
         merged['Upper_95CI_AF'] = (
             merged['Mean_Volume_AF'] + CI_Z * merged['Sigma_Total_AF']
         ).round(2)
@@ -2254,7 +2261,7 @@ def compute_sigma_cu(
         input_dir (str): Root input directory (for NHM IE CSV paths).
         start_year (int): First year of prediction period.
         end_year (int): Last year of prediction period.
-        mosaic_res (int): Raster resolution in metres.
+        mosaic_res (int): Raster resolution in meters.
 
     Returns:
         None.
@@ -2451,7 +2458,7 @@ def run_uncertainty_quantification(
         model_dir (str): Base model output directory.
         input_dir (str): Base input directory for GEE downloads.
         vector_dir (str): Directory containing vector shapefiles.
-        mosaic_res (int): Raster resolution in metres.
+        mosaic_res (int): Raster resolution in meters.
         gcloud_project (str): Google Cloud project ID.
         gcloud_bucket (str): Google Cloud Storage bucket name.
         tile_size (int): GEE export tile size.
@@ -2592,7 +2599,7 @@ def run_uncertainty_quantification(
         compute_basin_sigma_total(unc_dir, prediction_dir=full_prediction_dir)
         _plot_basin_sigma_time_series(unc_dir)
 
-        # ── Visualisations ──
+        # ── Visualizations ──
         _plot_uncertainty_time_series(
             sigma_components, unc_dir, mosaic_res, vizops,
         )
@@ -2689,7 +2696,7 @@ def augment_prediction_rasters(
         prediction_base_dir (str): Base directory for prediction rasters.
         start_year (int): First year of prediction period.
         end_year (int): Last year of prediction period.
-        mosaic_res (int or float): Raster resolution in metres.
+        mosaic_res (int or float): Raster resolution in meters.
 
     Returns:
         None.
@@ -2795,7 +2802,7 @@ def augment_category_rasters(
         sigma_total_raster_dir (str): Directory containing per-category σ_total rasters.
         start_year (int): First year of prediction period.
         end_year (int): Last year of prediction period.
-        mosaic_res (int or float): Raster resolution in metres.
+        mosaic_res (int or float): Raster resolution in meters.
 
     Returns:
         None.
@@ -2881,7 +2888,7 @@ def augment_cu_rasters(
         prediction_dir (str): Base directory for CU prediction rasters.
         start_year (int): First year of prediction period.
         end_year (int): Last year of prediction period.
-        mosaic_res (int or float): Raster resolution in metres.
+        mosaic_res (int or float): Raster resolution in meters.
 
     Returns:
         None.
@@ -3659,12 +3666,15 @@ def _plot_component_basin_sigma(
             fig, axes = plt.subplots(2, 1, figsize=(16, 9), sharex=True)
 
             # --- Panel 1: Mean volume with 95% CI ---
+            # Lower CI is clipped at 0 (volumes are non-negative);
+            # this is also done at CSV write time but applied here as a
+            # belt-and-braces against any pre-clipping CSVs on disk.
             ax1 = axes[0]
             for era, (s, e) in ERA_PERIODS.items():
                 ax1.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
             ax1.fill_between(
                 years,
-                rdf['Lower_95CI_m3'].values,
+                np.maximum(rdf['Lower_95CI_m3'].values, 0),
                 rdf['Upper_95CI_m3'].values,
                 alpha=0.25, color='#2980B9', label='95 % CI',
             )
@@ -3815,12 +3825,13 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
             fig, axes = plt.subplots(2, 1, figsize=(16, 9), sharex=True)
 
             # --- Panel 1: Mean volume with 95% CI ---
+            # Lower CI clipped at 0 (volumes are non-negative).
             ax1 = axes[0]
             for era, (s, e) in ERA_PERIODS.items():
                 ax1.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
             ax1.fill_between(
                 years,
-                rdf['Lower_95CI_m3'].values,
+                np.maximum(rdf['Lower_95CI_m3'].values, 0),
                 rdf['Upper_95CI_m3'].values,
                 alpha=0.25, color='#2980B9', label='95 % CI',
             )
@@ -3932,9 +3943,15 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
                 Sigma_Total_AF=('Sigma_Total_AF', lambda x: np.sqrt((x ** 2).sum())),
             ).reset_index().sort_values('Year')
 
-            az_df['Lower_95CI_m3'] = az_df['Mean_Volume_m3'] - CI_Z * az_df['Sigma_Total_m3']
+            # Withdrawal volumes are physically non-negative; clip the
+            # 95% CI lower bound at 0.
+            az_df['Lower_95CI_m3'] = (
+                az_df['Mean_Volume_m3'] - CI_Z * az_df['Sigma_Total_m3']
+            ).clip(lower=0)
             az_df['Upper_95CI_m3'] = az_df['Mean_Volume_m3'] + CI_Z * az_df['Sigma_Total_m3']
-            az_df['Lower_95CI_AF'] = az_df['Mean_Volume_AF'] - CI_Z * az_df['Sigma_Total_AF']
+            az_df['Lower_95CI_AF'] = (
+                az_df['Mean_Volume_AF'] - CI_Z * az_df['Sigma_Total_AF']
+            ).clip(lower=0)
             az_df['Upper_95CI_AF'] = az_df['Mean_Volume_AF'] + CI_Z * az_df['Sigma_Total_AF']
 
             years = az_df['Year'].values
@@ -3944,12 +3961,13 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
             fig, axes = plt.subplots(2, 1, figsize=(16, 9), sharex=True)
 
             # --- Panel 1: Mean volume with 95% CI ---
+            # Lower CI clipped at 0 (volumes are non-negative).
             ax1 = axes[0]
             for era, (s, e) in ERA_PERIODS.items():
                 ax1.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
             ax1.fill_between(
                 years,
-                az_df['Lower_95CI_m3'].values,
+                np.maximum(az_df['Lower_95CI_m3'].values, 0),
                 az_df['Upper_95CI_m3'].values,
                 alpha=0.25, color='#2980B9', label='95 % CI',
             )

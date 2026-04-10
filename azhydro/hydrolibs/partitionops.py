@@ -39,11 +39,11 @@ def focal_fill_irr_fraction(
     Gap-fill irrigation fraction for pixels that have wells but a
     negligibly small irrigated area (irr_fraction < *min_irr_frac*).
     These are typically edge pixels where a field barely overlaps the
-    2 km cell.  Replace with the focal mean of neighbours whose
+    2 km cell.  Replace with the focal mean of neighbors whose
     irr_fraction >= *min_irr_frac* within a *kernel_size* × *kernel_size*
     window.
 
-    If the focal neighbourhood also has no substantial irrigated pixels,
+    If the focal neighborhood also has no substantial irrigated pixels,
     the value stays unchanged (genuinely non-irrigation well).
 
     Args:
@@ -51,7 +51,7 @@ def focal_fill_irr_fraction(
         well_dens (np.ndarray): 1-D well density for valid pixels.
         raster_shape (tuple): (rows, cols) of the full raster grid.
         valid_mask (np.ndarray): Boolean mask of valid pixels (ravelled).
-        kernel_size (int): Focal neighbourhood size (default 5).
+        kernel_size (int): Focal neighborhood size (default 5).
         min_irr_frac (float): Minimum irrigation fraction threshold.
 
     Returns:
@@ -66,7 +66,7 @@ def focal_fill_irr_fraction(
     irr_grid[valid_mask] = irr_frac
     irr_grid = irr_grid.reshape(raster_shape)
 
-    # Only count neighbours with substantial irrigation for the focal mean
+    # Only count neighbors with substantial irrigation for the focal mean
     substantial = irr_grid.copy()
     substantial[np.isnan(substantial)] = 0
     substantial[substantial < min_irr_frac] = 0
@@ -85,7 +85,7 @@ def focal_fill_irr_fraction(
             f'valid_mask size ({valid_mask.shape[0]})'
         )
     focal_flat = focal_raveled[valid_mask]
-    # Only overwrite when the focal neighbourhood has substantial irrigation;
+    # Only overwrite when the focal neighborhood has substantial irrigation;
     # otherwise preserve the original small value.
     fill_mask = needs_fill & (focal_flat > 0)
     filled[fill_mask] = np.clip(focal_flat[fill_mask], 0, 1)
@@ -130,7 +130,7 @@ def compute_sw_fraction(
     using canal density as a proxy.
 
     The fraction is the pixel's canal density divided by the local
-    maximum within a *kernel_size* × *kernel_size* neighbourhood,
+    maximum within a *kernel_size* × *kernel_size* neighborhood,
     clipped to [0, 1].  Pixels with zero canal density get sw_frac = 0
     (100 % groundwater).
 
@@ -138,7 +138,7 @@ def compute_sw_fraction(
         canal_dens (np.ndarray): 1-D canal density for valid pixels.
         raster_shape (tuple): (rows, cols) of the full raster grid.
         valid_mask (np.ndarray): Boolean mask of valid pixels (ravelled).
-        kernel_size (int): Focal neighbourhood size (default 5).
+        kernel_size (int): Focal neighborhood size (default 5).
 
     Returns:
         np.ndarray: Surface-water fraction array, clipped to [0, 1].
@@ -392,8 +392,11 @@ def compute_sw_capture_index(
         dict with keys:
             ``Capture_Fraction_Lower``, ``Capture_Fraction_Central``,
             ``Capture_Fraction_Upper`` — dimensionless [0, 1]
-            ``SW_Capture_Lower``, ``SW_Capture_Central``,
-            ``SW_Capture_Upper`` — volume in mm
+            ``Capture_Volume_Lower``, ``Capture_Volume_Central``,
+            ``Capture_Volume_Upper`` — captured SW volume in mm
+            (named ``Capture_Volume`` rather than ``SW_Capture`` so that
+            downstream consumers prefixing the key with a category like
+            ``Total_SW`` don't end up with a duplicated ``SW`` token)
 
     References:
         Condon & Maxwell (2019), de Graaf et al. (2019),
@@ -434,7 +437,7 @@ def compute_sw_capture_index(
         'Capture_Fraction_Lower': cf_lower,
         'Capture_Fraction_Central': cf_central,
         'Capture_Fraction_Upper': cf_upper,
-        'SW_Capture_Lower': vol_lower,
-        'SW_Capture_Central': vol_central,
-        'SW_Capture_Upper': vol_upper,
+        'Capture_Volume_Lower': vol_lower,
+        'Capture_Volume_Central': vol_central,
+        'Capture_Volume_Upper': vol_upper,
     }

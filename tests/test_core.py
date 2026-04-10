@@ -192,7 +192,7 @@ class TestFocalFillIrrFraction:
         raster_shape = (5, 5)
 
         result = focal_fill_irr_fraction(irr_frac, well_dens, raster_shape, valid_mask)
-        # Center should be filled with neighbourhood mean, not the original 0.01
+        # Center should be filled with neighborhood mean, not the original 0.01
         assert result[12] > 0.01
 
 

@@ -1159,7 +1159,7 @@ def compute_shap_plots(
     median_idx = np.argmin(np.abs(pred_vals - np.median(pred_vals)))
 
     # Create a wider figure BEFORE calling waterfall_plot so the SHAP
-    # internal layout uses the larger canvas and the grey feature-value
+    # internal layout uses the larger canvas and the gray feature-value
     # text at the top no longer overlaps with the black f(x) annotation.
     plt.figure(figsize=(16, 10))
     shap.waterfall_plot(explanation[median_idx], max_display=max_display, show=False)

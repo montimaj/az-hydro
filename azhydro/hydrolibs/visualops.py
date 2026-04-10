@@ -1177,7 +1177,7 @@ def make_time_series_plots(
         pred_attr (str): Target column name.
         split_strategy (int): Splitting strategy identifier.
         test_gw_basins (tuple[str, ...]): GW basin names for spatial holdout.
-        raster_res (float): Raster resolution in metres.
+        raster_res (float): Raster resolution in meters.
         x_scaler: Feature scaler (or None).
         y_scaler: Target scaler (or None).
 
@@ -2551,7 +2551,11 @@ def era_shaded_ts(
         color: str = '#2C3E50',
         label: str | None = None,
 ) -> None:
-    """Plot a line with ±1 σ shading and era background colours.
+    """Plot a line with ±1 σ shading and era background colors.
+
+    The lower edge of the uncertainty band is clipped at 0 because all
+    callers pass non-negative quantities (annual withdrawal depths or
+    volumes), so a CI tail extending below 0 is physically meaningless.
 
     Args:
         ax (plt.Axes): Matplotlib axes to plot on.
@@ -2569,8 +2573,9 @@ def era_shaded_ts(
     ax.plot(years, mean_vals, color=color, linewidth=1.4, marker='.', markersize=3,
             label=label)
     if std_vals is not None:
-        ax.fill_between(years, mean_vals - std_vals, mean_vals + std_vals,
-                        color=color, alpha=0.18)
+        lower = np.maximum(mean_vals - std_vals, 0)
+        upper = mean_vals + std_vals
+        ax.fill_between(years, lower, upper, color=color, alpha=0.18)
 
 
 def create_basin_time_series(
@@ -3121,10 +3126,14 @@ def create_graphical_abstract(
         for era, (s, e) in ERA_PERIODS.items():
             ax_ts.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
 
-        # ±1σ band
+        # ±1σ band — lower edge clipped at 0 (volumes are non-negative)
         if vol_std.any():
-            ax_ts.fill_between(years, vol_af - vol_std, vol_af + vol_std,
-                               alpha=0.2, color=COLORS['predicted'], label=std_label)
+            ax_ts.fill_between(
+                years,
+                np.maximum(vol_af - vol_std, 0),
+                vol_af + vol_std,
+                alpha=0.2, color=COLORS['predicted'], label=std_label,
+            )
 
         ax_ts.plot(years, vol_af, color=COLORS['predicted'],
                    linewidth=1.2, marker='.', markersize=2)
@@ -3448,7 +3457,7 @@ def create_era_raster_maps(
         cb_ax2 = cbar.ax.twiny()
         cb_lo, cb_hi = cbar.ax.get_xlim()
         cb_ax2.set_xlim(cb_lo / _AF_TO_M3, cb_hi / _AF_TO_M3)
-        cb_ax2.set_xlabel('Volume (acre-ft)', fontsize=era_cbar_fontsize,
+        cb_ax2.set_xlabel('Volume (AF)', fontsize=era_cbar_fontsize,
                           fontweight='bold')
         cb_ax2.tick_params(labelsize=era_cbar_fontsize)
 
@@ -3616,24 +3625,40 @@ def create_actual_vs_predicted_maps(
     else:
         d_abs = 1.0
 
-    # Build AZ-interior gray underlay images
-    az_gray_actual = np.where(az_mask_actual, 0.82, np.nan)
-    az_gray_pred = np.where(az_mask_pred, 0.82, np.nan)
+    # Build AZ-interior gray underlay images. Pixels inside AZ that lack
+    # observed/predicted data render as a uniform light gray (#D1D1D1)
+    # so the "Unmetered" legend swatch matches the on-map color exactly.
+    from matplotlib.colors import ListedColormap as _ListedColormap
+    _UNMETERED_CMAP = _ListedColormap(['#D1D1D1'])
+    az_gray_actual = np.where(az_mask_actual, 0.5, np.nan)
+    az_gray_pred = np.where(az_mask_pred, 0.5, np.nan)
 
     # ---- Helper: create one 1×3 figure ----
     def _make_figure(data_sets, suptitle, primary_label, secondary_label,
                      secondary_factor, out_file, v_lo, v_hi, d_lo, d_hi):
+        import matplotlib.patches as mpatches
         fig, axes = plt.subplots(
-            1, 3, figsize=(21, 7), constrained_layout=True,
+            1, 3, figsize=(24, 7.5), constrained_layout=True,
         )
+        # Increase horizontal space between subplots so each panel's
+        # twin-axis colorbar does not crowd the next map.
+        try:
+            fig.get_layout_engine().set(w_pad=0.18, wspace=0.22)
+        except AttributeError:
+            pass
         fig.suptitle(suptitle, fontsize=15, fontweight='bold')
+
+        unmetered_handle = mpatches.Patch(
+            facecolor='#D1D1D1', edgecolor='#555555', linewidth=0.4,
+            label='Unmetered',
+        )
 
         for ax, (panel_title, data, ext, cm, lo, hi, az_gray) in zip(
                 axes, data_sets):
             ax.set_facecolor('white')
             ax.imshow(
                 az_gray, extent=ext, origin='upper',
-                cmap='Greys', vmin=0, vmax=1,
+                cmap=_UNMETERED_CMAP, vmin=0, vmax=1,
                 interpolation='nearest', zorder=0,
             )
             im = ax.imshow(
@@ -3646,9 +3671,11 @@ def create_actual_vs_predicted_maps(
             ax.set_title(panel_title, fontsize=12, fontweight='bold')
 
             is_diff = 'Difference' in panel_title
+            is_actual = 'Actual' in panel_title
             p_label = f'\u0394 {primary_label}' if is_diff else primary_label
             avp_fontsize = 10
-            cb = fig.colorbar(im, ax=ax, shrink=0.6, pad=0.04,
+            # Larger pad pushes the colorbar away from the next map.
+            cb = fig.colorbar(im, ax=ax, shrink=0.6, pad=0.12,
                               extend='both')
             cb.set_label(p_label, fontsize=avp_fontsize, fontweight='bold')
             cb.ax.tick_params(labelsize=avp_fontsize)
@@ -3662,6 +3689,16 @@ def create_actual_vs_predicted_maps(
             cb_ax2.set_ylabel(s_label, fontsize=avp_fontsize,
                               fontweight='bold')
             cb_ax2.tick_params(labelsize=avp_fontsize)
+
+            # Show 'Unmetered' legend only on panels that contain
+            # unmetered (gray) pixels — Actual and Difference.  Predicted
+            # covers all of AZ so it has none.
+            if is_actual or is_diff:
+                ax.legend(
+                    handles=[unmetered_handle],
+                    loc='lower left', framealpha=0.9,
+                    fontsize=avp_fontsize, frameon=True,
+                )
 
         out_path = os.path.join(output_dir, out_file)
         fig.savefig(out_path, dpi=600, bbox_inches='tight')
@@ -3855,6 +3892,38 @@ def _compute_zonal_trend_stats(
     return pd.DataFrame(records)
 
 
+def _slope_display_scale(max_abs: float) -> tuple[float, str]:
+    """Pick a display multiplier for small Sen's slope values.
+
+    Trend maps for capture fraction (~10⁻⁷/year) and capture volume
+    (~10⁻³ mm/year/year) have slopes far below the ``:.2f`` precision
+    floor used by basin labels and colorbar ticks, so every label
+    collapses to ``0.00``.  Withdrawal/CU slopes (~0.1–6 mm/year/year),
+    by contrast, are already in a readable range and need no scaling.
+
+    Args:
+        max_abs: Largest absolute slope across the data being plotted.
+            Used to pick the multiplier; should be the same value that
+            sets the colorbar limits so the displayed numbers and
+            colorbar are mutually consistent.
+
+    Returns:
+        Tuple ``(scale, prefix)`` where ``scale`` is the multiplier to
+        apply to slope values for display only (CSVs stay raw) and
+        ``prefix`` is the LaTeX-formatted exponent text to insert into
+        the colorbar label, e.g. ``r'$\\times 10^{-3}$ '``.
+    """
+    if max_abs <= 0 or not np.isfinite(max_abs):
+        return 1.0, ''
+    if max_abs >= 0.5:
+        return 1.0, ''
+    if max_abs >= 5e-4:
+        return 1e3, r'$\times 10^{-3}$ '
+    if max_abs >= 5e-7:
+        return 1e6, r'$\times 10^{-6}$ '
+    return 1e9, r'$\times 10^{-9}$ '
+
+
 def create_trend_maps(
     raster_dir: str,
     basin_shp: str,
@@ -3968,6 +4037,8 @@ def create_trend_maps(
 
     n_pixels = raster_shape[0] * raster_shape[1]
 
+    # ── Pass 1: compute per-period results and write CSVs ─────────────
+    period_results: dict[str, dict] = {}
     for period_name, (yr_start, yr_end) in periods.items():
         # ── Build year-sorted raster stack ──────────────────────────
         sel_years = sorted(y for y in year_paths if yr_start <= y <= yr_end)
@@ -4029,15 +4100,8 @@ def create_trend_maps(
             sub_csv = os.path.join(output_dir, f'Subbasin_Trend_{slug}.csv')
             sub_stats.to_csv(sub_csv, index=False)
 
-        # ── Plot ────────────────────────────────────────────────────
-        fig, ax = plt.subplots(1, 1, figsize=(10, 9),
-                               constrained_layout=True)
-        ax.set_facecolor('#D5D5D5')
-
-        # Symmetric color limits from data
         valid_slopes = slope_masked.compressed()
         if len(valid_slopes) == 0:
-            plt.close(fig)
             continue
         abs_max = max(
             abs(np.nanpercentile(valid_slopes, 2)),
@@ -4045,17 +4109,46 @@ def create_trend_maps(
             1e-6,
         )
 
+        # Significant-pixel summary for inset text
+        domain_pixels = int((~all_nan).sum())
+        if domain_pixels > 0:
+            n_sig_inc = int((sig_map & (slope_map > 0) & ~all_nan).sum())
+            n_sig_dec = int((sig_map & (slope_map < 0) & ~all_nan).sum())
+            pct_inc = 100 * n_sig_inc / domain_pixels
+            pct_dec = 100 * n_sig_dec / domain_pixels
+            pct_ns = 100 - pct_inc - pct_dec
+        else:
+            pct_inc = pct_dec = pct_ns = 0.0
+
+        period_results[period_name] = {
+            'slope_map': slope_map,
+            'sig_map': sig_map,
+            'all_nan': all_nan,
+            'slope_masked': slope_masked,
+            'abs_max': abs_max,
+            'basin_stats': basin_stats,
+            'pct_inc': pct_inc,
+            'pct_dec': pct_dec,
+            'pct_ns': pct_ns,
+            'slug': slug,
+        }
+
+    if not period_results:
+        logger.warning('No valid periods to plot for %s', title)
+        return
+
+    # ── Rendering helpers ────────────────────────────────────────────
+    def _draw_pixel_panel(ax, period_name, pr, color_abs, slope_scale=1.0):
+        ax.set_facecolor('#D5D5D5')
         im = ax.imshow(
-            slope_masked, extent=extent, origin='upper',
-            cmap='RdBu_r', vmin=-abs_max, vmax=abs_max,
+            pr['slope_masked'] * slope_scale, extent=extent, origin='upper',
+            cmap='RdBu_r',
+            vmin=-color_abs * slope_scale, vmax=color_abs * slope_scale,
             interpolation='nearest',
         )
-
-        # Stipple non-significant pixels (light gray dots)
-        nonsig = ~sig_map & ~all_nan
+        nonsig = ~pr['sig_map'] & ~pr['all_nan']
         if nonsig.any():
             rows, cols = np.where(nonsig)
-            # Sub-sample stipple points if too dense (max ~4000 dots)
             n_nonsig = len(rows)
             step = max(1, n_nonsig // 4000)
             row_coords = (extent[3]
@@ -4066,102 +4159,220 @@ def create_trend_maps(
                           * (extent[1] - extent[0]) / raster_shape[1])
             ax.scatter(col_coords, row_coords, s=0.15, c='#888888',
                        alpha=0.4, marker='.', linewidths=0)
+        _overlay_boundaries(ax, basins_gdf, ama_ina, name_col,
+                            label_all=True)
+        ax.set_title(period_name, fontsize=12, fontweight='bold')
+        summary = (f"Significant: \u2191{pr['pct_inc']:.1f}%  "
+                   f"\u2193{pr['pct_dec']:.1f}%  n.s. {pr['pct_ns']:.1f}%")
+        ax.text(
+            0.02, 0.02, summary, transform=ax.transAxes,
+            fontsize=8, fontweight='bold', va='bottom',
+            bbox=dict(boxstyle='round,pad=0.3', fc='white',
+                      alpha=0.85, lw=0.5),
+        )
+        return im
 
-        _overlay_boundaries(ax, basins_gdf, ama_ina, name_col)
-
-        cbar = fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02, extend='both')
-        cbar.set_label(f"Sen's slope ({unit_label}/year)", fontsize=12,
-                       fontweight='bold')
-        cbar.ax.tick_params(labelsize=10)
-
-        ax.set_title(f'{title} — Trend {period_name}\n'
-                     f"(stipple = not significant at α = {alpha})",
-                     fontsize=13, fontweight='bold')
-
-        # ── Inset: fraction of significant pixels ───────────────────
-        domain_pixels = (~all_nan).sum()
-        if domain_pixels > 0:
-            n_sig_inc = (sig_map & (slope_map > 0) & ~all_nan).sum()
-            n_sig_dec = (sig_map & (slope_map < 0) & ~all_nan).sum()
-            pct_inc = 100 * n_sig_inc / domain_pixels
-            pct_dec = 100 * n_sig_dec / domain_pixels
-            pct_ns = 100 - pct_inc - pct_dec
-            summary = (f'Significant: ↑{pct_inc:.1f}%  ↓{pct_dec:.1f}%'
-                       f'  n.s. {pct_ns:.1f}%')
-            ax.text(
-                0.02, 0.02, summary, transform=ax.transAxes,
-                fontsize=9, fontweight='bold', va='bottom',
-                bbox=dict(boxstyle='round,pad=0.3', fc='white',
-                          alpha=0.85, lw=0.5),
+    def _draw_basin_panel(ax, period_name, pr, color_abs,
+                          slope_scale=1.0, font_scale=1.0):
+        basin_stats = pr['basin_stats']
+        basin_trend_gdf = basins_gdf.merge(
+            basin_stats[['Region', 'Mean_Slope', 'Pct_Sig_Increase',
+                         'Pct_Sig_Decrease']],
+            left_on=name_col, right_on='Region', how='left',
+        )
+        basin_trend_gdf['Mean_Slope'] = basin_trend_gdf[
+            'Mean_Slope'].fillna(0)
+        # Display-only scaling: multiply slope into a scaled column for
+        # both the choropleth fill and the basin labels.  CSV outputs
+        # remain in raw units.
+        basin_trend_gdf['Mean_Slope_Display'] = (
+            basin_trend_gdf['Mean_Slope'] * slope_scale
+        )
+        basin_trend_gdf.plot(
+            column='Mean_Slope_Display', ax=ax, cmap='RdBu_r',
+            vmin=-color_abs * slope_scale, vmax=color_abs * slope_scale,
+            edgecolor='#333333', linewidth=0.5,
+            legend=False, missing_kwds={'color': '#D5D5D5'},
+        )
+        for _, row in basin_trend_gdf.iterrows():
+            if row.geometry is None:
+                continue
+            centroid = row.geometry.centroid
+            bname = row[name_col]
+            slope_val = row['Mean_Slope_Display']
+            short = bname.replace(' AMA', '').replace(' INA', '')
+            arrow = ('\u2191' if slope_val > 0
+                     else '\u2193' if slope_val < 0 else '\u2013')
+            label = f'{short}\n{arrow}{abs(slope_val):.2f}'
+            fontweight = 'bold' if bname in ama_ina else 'normal'
+            ax.annotate(
+                label, (centroid.x, centroid.y),
+                fontsize=4.5 * font_scale, fontweight=fontweight,
+                ha='center', va='center',
+                bbox=dict(boxstyle='round,pad=0.1', fc='white',
+                          alpha=0.7, lw=0),
             )
+        ax.set_title(period_name, fontsize=12, fontweight='bold')
+        ax.axis('off')
 
-        out_path = os.path.join(output_dir, f'Trend_{slug}.png')
+    # ── Pass 2: render figures ───────────────────────────────────────
+    # Identify the "Full" period (single-axis) vs the era periods
+    # (combined into a 1×3 figure).  The Full period is the one whose
+    # name starts with 'Full' (case-insensitive); everything else is
+    # treated as an era.
+    full_periods = [p for p in period_results
+                    if p.lower().startswith('full')]
+    era_periods = [p for p in period_results
+                   if not p.lower().startswith('full')]
+
+    # ── Standalone "Full" figures (1×1) ──────────────────────────────
+    for period_name in full_periods:
+        pr = period_results[period_name]
+        pixel_scale, pixel_prefix = _slope_display_scale(pr['abs_max'])
+        fig, ax = plt.subplots(1, 1, figsize=(10, 9),
+                               constrained_layout=True)
+        im = _draw_pixel_panel(ax, period_name, pr, pr['abs_max'],
+                               slope_scale=pixel_scale)
+        cbar = fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02,
+                            extend='both')
+        cbar.set_label(
+            f"Sen's slope ({pixel_prefix}{unit_label}/year)",
+            fontsize=12, fontweight='bold',
+        )
+        cbar.ax.tick_params(labelsize=10)
+        fig.suptitle(
+            f'{title} \u2014 Trend {period_name}\n'
+            f"(stipple = not significant at \u03b1 = {alpha})",
+            fontsize=13, fontweight='bold',
+        )
+        out_path = os.path.join(output_dir,
+                                f"Trend_{pr['slug']}.png")
         fig.savefig(out_path, dpi=600, bbox_inches='tight')
         plt.close(fig)
 
-        # ── Basin-level choropleth: mean Sen's slope per basin ─────────
-        if not basin_stats.empty and 'Mean_Slope' in basin_stats.columns:
+        if (not pr['basin_stats'].empty
+                and 'Mean_Slope' in pr['basin_stats'].columns):
+            slopes = pr['basin_stats']['Mean_Slope'].dropna().values
+            b_abs = (max(abs(slopes.min()), abs(slopes.max()), 1e-6)
+                     if len(slopes) > 0 else 1.0)
+            basin_scale, basin_prefix = _slope_display_scale(b_abs)
             fig_b, ax_b = plt.subplots(1, 1, figsize=(10, 9),
                                        constrained_layout=True)
-            # Merge trend stats into basin geometries
-            basin_trend_gdf = basins_gdf.merge(
-                basin_stats[['Region', 'Mean_Slope', 'Pct_Sig_Increase',
-                              'Pct_Sig_Decrease']],
-                left_on=name_col, right_on='Region', how='left',
-            )
-            basin_trend_gdf['Mean_Slope'] = basin_trend_gdf[
-                'Mean_Slope'].fillna(0)
-
-            # Symmetric color limits
-            slopes = basin_trend_gdf['Mean_Slope'].dropna().values
-            if len(slopes) > 0:
-                b_abs = max(abs(slopes.min()), abs(slopes.max()), 1e-6)
-            else:
-                b_abs = 1.0
-
-            basin_trend_gdf.plot(
-                column='Mean_Slope', ax=ax_b, cmap='RdBu_r',
-                vmin=-b_abs, vmax=b_abs,
-                edgecolor='#333333', linewidth=0.5,
-                legend=False, missing_kwds={'color': '#D5D5D5'},
-            )
-
-            # Label every basin with name + slope value
-            for _, row in basin_trend_gdf.iterrows():
-                if row.geometry is None:
-                    continue
-                centroid = row.geometry.centroid
-                bname = row[name_col]
-                slope_val = row['Mean_Slope']
-                short = bname.replace(' AMA', '').replace(' INA', '')
-                arrow = '\u2191' if slope_val > 0 else '\u2193' if slope_val < 0 else '\u2013'
-                label = f'{short}\n{arrow}{abs(slope_val):.2f}'
-                fontweight = ('bold' if bname in ama_ina else 'normal')
-                ax_b.annotate(
-                    label, (centroid.x, centroid.y),
-                    fontsize=4.5, fontweight=fontweight,
-                    ha='center', va='center',
-                    bbox=dict(boxstyle='round,pad=0.1', fc='white',
-                              alpha=0.7, lw=0),
-                )
-
+            _draw_basin_panel(ax_b, period_name, pr, b_abs,
+                              slope_scale=basin_scale)
             sm = plt.cm.ScalarMappable(
                 cmap='RdBu_r',
-                norm=plt.Normalize(vmin=-b_abs, vmax=b_abs),
+                norm=plt.Normalize(
+                    vmin=-b_abs * basin_scale,
+                    vmax=b_abs * basin_scale,
+                ),
             )
             sm.set_array([])
             cbar_b = fig_b.colorbar(sm, ax=ax_b, shrink=0.6, pad=0.02,
                                     extend='both')
-            cbar_b.set_label(f"Mean Sen's slope ({unit_label}/year)",
-                             fontsize=11, fontweight='bold')
-            ax_b.set_title(
-                f'{title} — Basin Trend {period_name}',
+            cbar_b.set_label(
+                f"Mean Sen's slope ({basin_prefix}{unit_label}/year)",
+                fontsize=11, fontweight='bold',
+            )
+            fig_b.suptitle(
+                f'{title} \u2014 Basin Trend {period_name}',
                 fontsize=13, fontweight='bold',
             )
-            ax_b.axis('off')
-
             b_out = os.path.join(output_dir,
-                                 f'Basin_Trend_{slug}.png')
+                                 f"Basin_Trend_{pr['slug']}.png")
+            fig_b.savefig(b_out, dpi=600, bbox_inches='tight')
+            plt.close(fig_b)
+
+    # ── Combined era figure (1×3) for pixel trend maps ──────────────
+    if era_periods:
+        # Shared symmetric color limit across all era panels so the
+        # single colorbar is comparable.
+        eras_abs = max(
+            (period_results[p]['abs_max'] for p in era_periods),
+            default=1e-6,
+        )
+        eras_scale, eras_prefix = _slope_display_scale(eras_abs)
+        n_eras = len(era_periods)
+        fig, axes = plt.subplots(
+            1, n_eras, figsize=(8 * n_eras, 9),
+            constrained_layout=True,
+        )
+        if n_eras == 1:
+            axes = [axes]
+        last_im = None
+        for ax, period_name in zip(axes, era_periods):
+            last_im = _draw_pixel_panel(
+                ax, period_name, period_results[period_name], eras_abs,
+                slope_scale=eras_scale,
+            )
+        cbar = fig.colorbar(last_im, ax=axes, shrink=0.7, pad=0.02,
+                            extend='both', location='right')
+        cbar.set_label(
+            f"Sen's slope ({eras_prefix}{unit_label}/year)",
+            fontsize=12, fontweight='bold',
+        )
+        cbar.ax.tick_params(labelsize=10)
+        fig.suptitle(
+            f'{title} \u2014 Trend by Era\n'
+            f"(stipple = not significant at \u03b1 = {alpha})",
+            fontsize=14, fontweight='bold',
+        )
+        eras_slug = (f'{title}_Eras'
+                     .replace(' ', '_').replace('/', '_'))
+        out_path = os.path.join(output_dir, f'Trend_{eras_slug}.png')
+        fig.savefig(out_path, dpi=600, bbox_inches='tight')
+        plt.close(fig)
+
+        # ── Combined era figure (1×3) for basin choropleth ──────────
+        # Shared symmetric color limit across the 3 basin choropleths.
+        all_basin_slopes = []
+        for p in era_periods:
+            bs = period_results[p]['basin_stats']
+            if not bs.empty and 'Mean_Slope' in bs.columns:
+                all_basin_slopes.append(
+                    bs['Mean_Slope'].dropna().values,
+                )
+        if all_basin_slopes:
+            cat_slopes = np.concatenate(all_basin_slopes)
+            b_abs_eras = (max(abs(cat_slopes.min()),
+                              abs(cat_slopes.max()), 1e-6)
+                          if len(cat_slopes) > 0 else 1.0)
+            basin_eras_scale, basin_eras_prefix = _slope_display_scale(
+                b_abs_eras,
+            )
+            fig_b, axes_b = plt.subplots(
+                1, n_eras, figsize=(8 * n_eras, 9),
+                constrained_layout=True,
+            )
+            if n_eras == 1:
+                axes_b = [axes_b]
+            for ax_b, period_name in zip(axes_b, era_periods):
+                _draw_basin_panel(
+                    ax_b, period_name, period_results[period_name],
+                    b_abs_eras, slope_scale=basin_eras_scale,
+                )
+            sm = plt.cm.ScalarMappable(
+                cmap='RdBu_r',
+                norm=plt.Normalize(
+                    vmin=-b_abs_eras * basin_eras_scale,
+                    vmax=b_abs_eras * basin_eras_scale,
+                ),
+            )
+            sm.set_array([])
+            cbar_b = fig_b.colorbar(
+                sm, ax=axes_b, shrink=0.6, pad=0.02,
+                extend='both', location='right',
+            )
+            cbar_b.set_label(
+                f"Mean Sen's slope ({basin_eras_prefix}{unit_label}/year)",
+                fontsize=11, fontweight='bold',
+            )
+            fig_b.suptitle(
+                f'{title} \u2014 Basin Trend by Era',
+                fontsize=14, fontweight='bold',
+            )
+            b_out = os.path.join(output_dir,
+                                 f'Basin_Trend_{eras_slug}.png')
             fig_b.savefig(b_out, dpi=600, bbox_inches='tight')
             plt.close(fig_b)
 
@@ -4200,7 +4411,7 @@ def plot_intercomp_time_series(
         basin_names (list[str]): Basin identifiers.
         basin_areas_m2 (dict[str, float]): Basin areas for depth conversion.
         output_dir (str): Directory for saved plots.
-        colors (dict[str, str]): Per-source colours.
+        colors (dict[str, str]): Per-source colors.
         markers (dict[str, str]): Per-source markers.
         labels (dict or None): Display labels per source.
         title_prefix (str): Prepended to plot titles.
@@ -4208,7 +4419,7 @@ def plot_intercomp_time_series(
         mode (str): ``'volume'`` → 2-row (depth + volume).
             ``'ratio'`` → 1-row (dimensionless).
         af_to_m3 (float): Conversion factor AF to m³.
-        m_to_mm (float): Conversion factor metres to mm.
+        m_to_mm (float): Conversion factor meters to mm.
         mm_to_ft (float): Conversion factor mm to ft.
         m3_to_af (float): Conversion factor m³ to AF.
 
@@ -4351,7 +4562,7 @@ def plot_intercomp_scatter(
         mode (str): ``'volume'`` → 2 rows (AF, mm).
             ``'ratio'`` → 1 row.
         af_to_m3 (float): Conversion factor AF to m³.
-        m_to_mm (float): Conversion factor metres to mm.
+        m_to_mm (float): Conversion factor meters to mm.
 
     Returns:
         None.
@@ -4504,12 +4715,12 @@ def plot_intercomp_taylor(
                     r_arc.append(np.cos(t) + np.sqrt(disc))
                 else:
                     r_arc.append(np.nan)
-            ax.plot(theta_arc, r_arc, 'grey', lw=0.5, alpha=0.4)
+            ax.plot(theta_arc, r_arc, 'gray', lw=0.5, alpha=0.4)
             valid = [(t, r) for t, r in zip(theta_arc, r_arc) if np.isfinite(r)]
             if valid:
                 t_mid, r_mid = valid[len(valid) // 2]
                 ax.annotate(f'{rmsd_val:.2f}', (t_mid, r_mid), fontsize=6,
-                            color='grey', alpha=0.7)
+                            color='gray', alpha=0.7)
 
         for src_a, src_b in pairs:
             pair_key = f'{src_a} vs {src_b}'
@@ -4670,7 +4881,7 @@ def plot_temporal_box_violin(
             ax.set_xticklabels(pair_list, rotation=30, ha='right', fontsize=9)
             ax.set_title(cat, fontsize=12)
             ax.set_ylabel(ylabel)
-            ax.axhline(0, color='grey', linewidth=0.8, linestyle='--')
+            ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
             ax.grid(True, alpha=0.3, axis='y', linestyle='--')
 
         out_path = os.path.join(output_dir, f'BoxViolin_{metric}.png')
@@ -4693,7 +4904,7 @@ def plot_temporal_r_vs_nse(
             Pair, Basin, Pearson_r, NSE.
         output_dir (str): Directory for saved plots.
         pair_colors (dict or None): ``{'pair_label': '#color'}``.  Falls
-            back to grey if missing.
+            back to gray if missing.
 
     Returns:
         None.
@@ -4720,8 +4931,8 @@ def plot_temporal_r_vs_nse(
             ax.scatter(psub['Pearson_r'], psub['NSE'], s=35, alpha=0.7,
                        edgecolors='white', linewidths=0.5, color=color)
 
-            ax.axhline(0, color='grey', linewidth=0.8, linestyle='--')
-            ax.axvline(0, color='grey', linewidth=0.8, linestyle='--')
+            ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
+            ax.axvline(0, color='gray', linewidth=0.8, linestyle='--')
 
             q1 = ((psub['Pearson_r'] > 0) & (psub['NSE'] > 0)).sum()
             q2 = ((psub['Pearson_r'] < 0) & (psub['NSE'] > 0)).sum()

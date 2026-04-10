@@ -9,7 +9,7 @@ Compares three datasets:
     2. **USGS NHM Withdrawals** — HUC12-scale monthly data (2000-2020),
        converted to mean annual rasters using AZ HUC12 polygons.
     3. **USGS Reitz Irrigation** — County-scale 800 m annual rasters
-       (``GW_irr_YYYY.tif`` / ``SW_irr_YYYY.tif``, 1980-2018, in metres).
+       (``GW_irr_YYYY.tif`` / ``SW_irr_YYYY.tif``, 1980-2018, in meters).
 
 Because the three products live at different native resolutions (2 km,
 HUC12 polygons, 800 m), the intercomparison aggregates each dataset to
@@ -28,7 +28,7 @@ Also compares non-irrigation predictions with:
 References
 ----------
 NHM metadata: IR_metadata.xml — withdrawals in million gallons per day.
-Reitz metadata: HistoricalET_metadata.xml — irrigation in metres/year.
+Reitz metadata: HistoricalET_metadata.xml — irrigation in meters/year.
 PS metadata: PS_WU_reanalysis_v2.xml — public supply in Mgal/d.
 """
 
@@ -64,8 +64,8 @@ logger = logging.getLogger(__name__)
 # ── Unit-conversion constants ────────────────────────────────────────────────
 MGAL_TO_M3 = 3785.41178                # 1 Mgal → m³
 M3_TO_AF = 1 / 1233.48184              # m³ → acre-feet
-M_TO_MM = 1000.0                        # metres → millimetres
-MM_TO_FT = 1.0 / 304.8                 # millimetres → feet
+M_TO_MM = 1000.0                        # meters → millimeters
+MM_TO_FT = 1.0 / 304.8                 # millimeters → feet
 
 # NHM sentinel values (no irrigated area or null ET)
 NHM_SENTINEL = {999, 888}
@@ -88,7 +88,7 @@ def _raster_basin_volumes(
         raster_path (str): Path to a single-band depth raster (mm or m).
         basin_gdf (gpd.GeoDataFrame): Basin polygons in the same CRS as *raster_path*.
         basin_col (str): Column in *basin_gdf* identifying basins.
-        pixel_area_m2 (float): Pixel area in square metres.
+        pixel_area_m2 (float): Pixel area in square meters.
         depth_unit (str): ``'mm'`` or ``'m'`` — unit of pixel values.
 
     Returns:
@@ -443,7 +443,7 @@ def load_reitz_basin_volumes(
     Read annual Reitz GW/SW rasters, reproject to the ML grid, compute
     mean-annual depth, and aggregate to basin volumes (AF).
 
-    The Reitz rasters are in **metres/year** at ~800 m geographic resolution.
+    The Reitz rasters are in **meters/year** at ~800 m geographic resolution.
 
     Args:
         reitz_base_dir (str): Parent directory containing ``Irrigation_groundwater_1980-2018/``
@@ -487,7 +487,7 @@ def load_reitz_basin_volumes(
             arr = read_raster_as_arr(reproj_path, get_file=False).astype(np.float64)
             arr[np.isnan(arr)] = 0.0
             arr[arr < 0] = 0.0
-            # Convert metres → mm
+            # Convert meters → mm
             arr *= M_TO_MM
 
             if mean_depth is None:
@@ -519,7 +519,7 @@ def load_reitz_basin_volumes(
             out_tif, basin_reproj, basin_col, pixel_area_m2, depth_unit='mm',
         )
 
-        # Per-year basin volumes from reprojected rasters (on-disk units are metres)
+        # Per-year basin volumes from reprojected rasters (on-disk units are meters)
         yearly_vols = {}
         for year in range(start_yr, end_yr + 1):
             reproj_path = os.path.join(

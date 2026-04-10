@@ -43,7 +43,7 @@ disaggregation.  A well's start year is determined by:
 3. Conservative default (``start_year``) if both are missing — the well
    is included for all years.
 
-Capacity weights are re-normalised per year within each pixel using only
+Capacity weights are re-normalized per year within each pixel using only
 the active wells, so the pixel total is always fully distributed.
 
 Wells that fall in raster nodata pixels are excluded before weighting.
@@ -89,9 +89,9 @@ def _compute_capacity_weights(
         3. Equal-share fallback (weight = 1.0).
 
     Args:
-        normalize: If True (default), normalise weights within each pixel
-            to sum to 1.  If False, return the raw (un-normalised) weights
-            so the caller can normalise per year using only active wells.
+        normalize: If True (default), normalize weights within each pixel
+            to sum to 1.  If False, return the raw (un-normalized) weights
+            so the caller can normalize per year using only active wells.
     """
     n = len(wells)
     raw_weight = np.ones(n, dtype=np.float64)   # fallback
@@ -137,7 +137,7 @@ def _compute_capacity_weights(
     if not normalize:
         return raw_weight
 
-    # --- Normalise within each pixel ---
+    # --- Normalize within each pixel ---
     unique_keys, inverse = np.unique(pixel_keys, return_inverse=True)
     well_share = np.empty(n, dtype=np.float64)
     for ui, uk in enumerate(unique_keys):
@@ -168,10 +168,13 @@ def create_well_package(
     computed arithmetically, reducing I/O by 75 %.
 
     When called after the UQ augmentation step, the mm rasters are 6-band
-    GeoTIFFs.  Band 1 is the prediction and band 2 is σ.  Both are sampled
-    and weighted identically, producing per-well uncertainty columns
-    (``{Cat}_{unit}_sigma``, ``{Cat}_{unit}_ci_lower``,
-    ``{Cat}_{unit}_ci_upper``).
+    GeoTIFFs.  Band 1 (prediction) and band 2 (σ) are both sampled and
+    weighted identically, producing a per-well sigma column
+    (``{Cat}_{unit}_sigma``) alongside the prediction column.  CI bounds
+    are not stored in the output: callers that need them should compute
+    ``max(pred - 1.96 * sigma, 0)`` and ``pred + 1.96 * sigma`` from the
+    prediction and sigma columns, mirroring the per-pixel raster bands 5
+    and 6 written by the UQ augmentation step.
 
     Args:
         well_registry_file (str): Path to the (reprojected) ADWR Well Registry shapefile.

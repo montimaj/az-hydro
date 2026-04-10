@@ -1448,7 +1448,7 @@ def evaluate_spatial_loo(az_df: pd.DataFrame,
     avg_df.to_csv(os.path.join(spatial_dir, 'Averaged_Metrics.csv'), index=False)
     logger.info(f'\nAveraged spatial metrics:\n{avg_df.to_string(index=False)}')
 
-    # Visualisations
+    # Visualizations
     strategy_label = f'Spatial LOO (seed {seed_pct}%)' if seed_fraction > 0 else 'Spatial LOO'
     vizops.plot_loo_heatmap(
         per_basin_df, 'Basin', spatial_dir,
@@ -1751,7 +1751,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     )
 
     # Build a valid-pixel mask from the GW_Basin raster (same for all years).
-    # In create_az_data_parquet, pixels with NaN or 0 in GW_Basin are labelled
+    # In create_az_data_parquet, pixels with NaN or 0 in GW_Basin are labeled
     # 'OUTSIDE AZ' and dropped.  The remaining rows — in ravel order — are
     # what appears in az_df for each year.
     ref_basin_file = os.path.join(PRED_DATA_DIR, f'GW_Basin_{YEAR_LIST[0]}.tif')
@@ -2141,11 +2141,16 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                           if 'canal_weighted_streamflow_mm' in year_df.columns
                           else np.zeros(len(wtd_vals)))
 
-            # Compute capture for Total GW, Irrigation GW, Non-Irrigation GW
+            # Compute SW capture for Total GW, Irrigation GW, Non-Irrigation GW.
+            # The dict keys (Total_SW, Irrigation_SW, Non_Irrigation_SW) name
+            # the *captured* surface water; the values are the GW pumping pools
+            # that drive the capture.  Reading the directory names this way:
+            # ``Total_SW_Capture_Fraction`` = "fraction of Total GW pumping that
+            # captures surface water".
             cap_categories = {
-                'Total_GW': cat_predictions['Total_GW'],
-                'Irrigation_GW': cat_predictions['Irrigation_GW'],
-                'Non_Irrigation_GW': cat_predictions['Non_Irrigation_GW'],
+                'Total_SW': cat_predictions['Total_GW'],
+                'Irrigation_SW': cat_predictions['Irrigation_GW'],
+                'Non_Irrigation_SW': cat_predictions['Non_Irrigation_GW'],
             }
             sw_cap_dir = os.path.join(prediction_dir, 'SW_Capture')
 
@@ -2183,7 +2188,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
 
                 # Write capture volume in all 4 units (central estimate only)
                 cap_mm = _valid_pixels_to_raster(
-                    capture['SW_Capture_Central'], valid_mask, raster_shape)
+                    capture['Capture_Volume_Central'], valid_mask, raster_shape)
                 cap_dirs = {}
                 for unit_key in ('mm', 'ft', 'm3', 'AF'):
                     d = os.path.join(sw_cap_dir,
@@ -2205,7 +2210,8 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                         # Volume-weighted mean fraction: what % of GW
                         # pumping captures surface water statewide
                         gw_sum = float(np.nansum(gw_pred))
-                        cap_vol_key = key.replace('Fraction', 'Capture')
+                        cap_vol_key = key.replace('Capture_Fraction',
+                                                  'Capture_Volume')
                         if cap_vol_key in capture and gw_sum > 0:
                             val = (float(np.nansum(capture[cap_vol_key]))
                                    / gw_sum)
@@ -2220,7 +2226,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                 # Per-basin and per-sub-basin volume-weighted fraction
                 # (central λ=10m only)
                 cap_frac = capture['Capture_Fraction_Central']
-                cap_vol = capture['SW_Capture_Central']
+                cap_vol = capture['Capture_Volume_Central']
                 basins_arr = year_df['GW_Basin'].values
                 for level, zone_arr, zone_list in [
                     ('Basin', basins_arr, all_basins),
@@ -2486,8 +2492,8 @@ def create_well_package_step() -> None:
         }
     # SW capture volume rasters (same unit structure as CU)
     sw_cap_base = os.path.join(prediction_dir, 'SW_Capture')
-    for cap_cat in ('Total_GW_Capture', 'Irrigation_GW_Capture',
-                    'Non_Irrigation_GW_Capture'):
+    for cap_cat in ('Total_SW_Capture', 'Irrigation_SW_Capture',
+                    'Non_Irrigation_SW_Capture'):
         base = os.path.join(sw_cap_base, f'{cap_cat}_Rasters')
         if os.path.isdir(os.path.join(base, 'Depth_mm')):
             cu_raster_dirs[cap_cat] = {
@@ -2689,7 +2695,7 @@ def create_all_raster_maps() -> None:
 
     # ── SW Capture Index era maps ───────────────────────────────────
     sw_cap_base = os.path.join(prediction_dir, 'SW_Capture')
-    for cap_cat in ('Total_GW', 'Irrigation_GW', 'Non_Irrigation_GW'):
+    for cap_cat in ('Total_SW', 'Irrigation_SW', 'Non_Irrigation_SW'):
         pretty = cap_cat.replace('_', ' ')
         # Capture fraction (band 2 = central λ=10m)
         frac_dir = os.path.join(sw_cap_base, f'{cap_cat}_Capture_Fraction')
@@ -2761,8 +2767,8 @@ def create_all_raster_maps() -> None:
 
     # SW Capture Index categories — volume and fraction
     sw_cap_base = os.path.join(prediction_dir, 'SW_Capture')
-    for cap_cat in ('Total_GW_Capture', 'Irrigation_GW_Capture',
-                    'Non_Irrigation_GW_Capture'):
+    for cap_cat in ('Total_SW_Capture', 'Irrigation_SW_Capture',
+                    'Non_Irrigation_SW_Capture'):
         # Volume trends (mm)
         cap_dir = os.path.join(sw_cap_base, f'{cap_cat}_Rasters', 'Depth_mm')
         if os.path.isdir(cap_dir):
@@ -3118,7 +3124,7 @@ UQ sub-steps (use with --skip-uq to skip individual σ components):
   sigma-lulc       Skip σ_LULC (LULC projection spread)
   sigma-gw         Skip σ_gw (GW fraction snapshot spread)
   density-sensitivity   Skip density-ratio partitioning sensitivity (±20%)
-  sigma-total      Skip σ_total quadrature, basin σ, visualisations, and raster augmentation
+  sigma-total      Skip σ_total quadrature, basin σ, visualizations, and raster augmentation
   sigma-cu         Skip σ_CU (consumptive use uncertainty)
 """
 
