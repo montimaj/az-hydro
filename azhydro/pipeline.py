@@ -2455,7 +2455,7 @@ def create_all_raster_maps() -> None:
             raster_dir=raster_dir,
             basin_shp=AZ_GW_BASIN,
             output_dir=maps_dir,
-            title=f'{title} (Volume)',
+            title=f'{title} Volume',
             unit_label=r'Volume (m$^3$)',
             cmap='Spectral_r',
         )
