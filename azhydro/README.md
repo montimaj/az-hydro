@@ -914,10 +914,9 @@ all splits.  Heatmaps and bar plots (`vizops.plot_loo_heatmap()`,
 hyperparameters directly on the test set (without cross-validation), making
 its reported test metrics analogous to validation scores.  The current study
 uses Optuna with `GroupKFold` (grouped by year), ensuring strict separation
-between tuning and evaluation.  The current CV metrics show comparable or
-improved R² and RMSE relative to the previous study's test metrics, while the current test metrics are only
-marginally lower, confirming that the model generalizes well without
-relying on test-set information during training.
+between tuning and evaluation.  The current CV metrics show improved R² and RMSE relative to the 
+previous study's test metrics, while the current test metrics are similar, confirming that the model generalizes 
+well without relying on test-set information during training.
 
 **Outputs:** `{MODEL_DIR}Model_Evaluation/Temporal_LOO/`
 
