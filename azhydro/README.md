@@ -2752,28 +2752,40 @@ Key trends:
   for the full discussion and the supporting [Grafton et al. (2018)](https://doi.org/10.1126/science.aat9314)
   citation.
 - **Surface Water Capture Index**: The statewide volume-weighted
-  capture fraction is ~0.2 % (central estimate, λ=10 m), translating
-  to 0.02–0.04 MAF of GW pumping that physically captures surface
-  water via stream depletion.  Capture grows from ~0.001 MAF (1900)
-  to a peak of ~0.038 MAF (2015–2024) as pumping infrastructure
-  expanded near canal corridors, then declines slightly in projections
-  as irrigation stabilizes.  Irrigation GW accounts for ~90 % of total
-  capture (~0.034 MAF), with non-irrigation contributing ~0.003 MAF.
-  While the statewide impact is small (<1 % of total GW), the capture
-  is spatially concentrated in shallow-water-table areas near rivers
-  and canal infrastructure.  Basin-level volume-weighted capture
-  fractions (2017, central λ=10 m):
+  capture fraction is ~1.1 % during the 1984–2024 historical era
+  (central estimate, λ=10 m), translating to 0.02–0.04 MAF of GW
+  pumping that physically captures surface water via stream depletion
+  in any given year.  Capture grows from <0.001 MAF (1900) through the
+  20th century as pumping infrastructure expanded near canal corridors,
+  averages ~0.037 MAF over the 2015–2024 historical decade, peaks at
+  ~0.040 MAF in 2025, then **declines substantially in the projection
+  era — to ~0.022 MAF by 2050 and ~0.023 MAF by 2099, a ~44 % drop**.
+  This decline is *not* driven by falling Total_GW (which actually
+  rises from 3.33 MAF in 2024 to 3.99 MAF in 2099); it reflects a
+  spatial reweighting of pumping toward non-irrigation pixels outside
+  the canal-corridor footprint, so the volume-weighted statewide
+  capture fraction itself falls from ~1.2 % (2025) to ~0.6 % (2099).
+  Irrigation GW accounts for ~90 % of total capture in the historical
+  era (~0.033 MAF), with non-irrigation contributing ~0.003 MAF.
+  While the statewide impact is small relative to total GW, the
+  capture is spatially concentrated in shallow-water-table areas near
+  rivers and canal infrastructure.  Basin-level GW volume, SW volume, capture
+  volume, volume-weighted capture fractions, and WTD (2017, central λ=10 m):
 
-  | Basin | Capture Fraction | Mean WTD (m) | Context |
-  |-------|-----------------|-------------|---------|
-  | Parker | 9.7 % | 51 | Colorado River alluvial aquifer |
-  | Lower Gila | 6.9 % | 55 | Gila River corridor |
-  | Yuma | 3.7 % | 42 | Colorado River diversions, alluvial wells |
-  | Lake Havasu | 3.3 % | 73 | Colorado River adjacent |
-  | Safford | 2.1 % | 34 | Upper Gila River valley, shallowest WTD |
-  | Phoenix AMA | 0.4 % | 64 | Deep wells dominate; SRP corridor localized |
-  | Willcox AMA | 0.0 % | 44 | Negative control: no canals despite moderate WTD |
-  | Butler Valley | 0.0 % | 72 | Negative control: no canal infrastructure |
+  | Basin | GW Pumping Volume | SW Withdrawal Volume | SW Capture Volume | Capture Fraction | Mean WTD (m) | Context |
+  |-------|-------------------|----------------------|-------------------|-----------------|-------------|---------|
+  | Parker        |  42.3 kAF (52.1 Mm³)  |  17.2 kAF (21.3 Mm³)  |  4,099 AF (5.06 Mm³)  | 9.7 % | 51 | Colorado River alluvial aquifer |
+  | Lower Gila    | 342.7 kAF (422.7 Mm³) |  26.0 kAF (32.1 Mm³)  | 23,782 AF (29.34 Mm³) | 6.9 % | 55 | Gila River corridor |
+  | Yuma          |  93.2 kAF (115.0 Mm³) | 148.1 kAF (182.7 Mm³) |  3,461 AF (4.27 Mm³)  | 3.7 % | 42 | Colorado River diversions, alluvial wells |
+  | Lake Havasu   |   9.0 kAF (11.2 Mm³)  |   0.0 kAF (0 Mm³)     |    297 AF (0.37 Mm³)  | 3.3 % | 73 | Colorado River adjacent |
+  | Safford       | 119.6 kAF (147.5 Mm³) |  63.3 kAF (78.1 Mm³)  |  2,545 AF (3.14 Mm³)  | 2.1 % | 34 | Upper Gila River valley, shallowest WTD |
+  | Phoenix AMA   | 413.3 kAF (509.8 Mm³) | 697.1 kAF (859.8 Mm³) |  1,589 AF (1.96 Mm³)  | 0.4 % | 64 | Deep wells dominate; SRP corridor localized |
+  | Willcox AMA   | 319.2 kAF (393.7 Mm³) |   0.0 kAF (0 Mm³)     |      0 AF (0 Mm³)     | 0.0 % | 44 | Negative control: no canals despite moderate WTD |
+  | Butler Valley |  10.4 kAF (12.9 Mm³)  |   0.0 kAF (0 Mm³)     |      0 AF (0 Mm³)     | 0.0 % | 72 | Negative control: no canal infrastructure |
+
+  Note: SW Withdrawal Volume above is the model's predicted Total_SW from the density-ratio partition (HarDWR surface-water rights density modulated by canal-weighted streamflow). It does *not* include the ~2.26 MAF/yr of direct Bureau of Reclamation Yuma- and Gila-Project canal deliveries (WMIDD, YCWUA, Gila Project Yuma Mesa Division, Unit B) that bypass the ADWR Well Registry entirely and are reconciled separately as the federal-delivery offset (see [Federal-delivery reconciliation](#federal-delivery-reconciliation-yuma-and-the-22526-maf-water-budget-gap)). Yuma's model SW total of ~148 kAF is therefore only the well-routed SW share — the basin's full surface-water economy is roughly 6× larger once the federal offset is added back.
+
+  **What the nonzero Yuma capture fraction tells us.** Yuma's 3.7 % capture fraction (3,461 AF of well-mediated stream depletion on 93.2 kAF of GW pumping) is small in absolute terms but physically diagnostic: it is the framework's strongest single signal that **the small slice of Yuma's pumping that is in fact groundwater (the ADWR-Well-Registry-routed share) is itself drawing from the Colorado River alluvium, not from a separate ambient stored aquifer**. Yuma has the second-shallowest mean WTD in the table (42 m), which puts the connectivity term `exp(−42/10) ≈ 0.015` right in the regime where wells are physically capable of pulling from river-recharged alluvium; combined with the canal-corridor footprint (`cw_norm > 0` across most of the basin) the partition correctly infers that those wells are screened in alluvium hydraulically connected to the river. Read together with the SW Withdrawal column, the picture is consistent: ~148 kAF of model-routed SW + ~93 kAF of GW + the externally reconciled federal-delivery offset (~0.79 MAF for Yuma alone) all draw on the same Colorado River alluvial system, and the GW slice is *not* a separate ambient aquifer being mined alongside the SW economy. The corollary on the infrastructure side is that subsidence and well-field-decline risk for these specific wells should be correspondingly *low*, because the storage being depleted is being continuously recharged from the river — the "loss" is showing up downstream in the Colorado rather than in compaction of the Yuma alluvium, which is exactly the accounting boundary the Wellton-Mohawk drain system already enforces under the 1944 U.S.–Mexico Treaty ([Frisvold et al., 2018](https://doi.org/10.3390/su10051548) §6.7). The stewardship question for the Yuma GW-righted wells is therefore better framed as a Colorado River allocation question (every acre-foot pulled is an acre-foot the river does not carry past Imperial Dam) than as a basin-storage question.
 
   The spatial pattern is consistent with
   [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757), which
