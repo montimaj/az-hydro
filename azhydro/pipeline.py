@@ -47,7 +47,6 @@ import hydrolibs.streamflowops as streamflowops
 import hydrolibs.uncertaintyops as uncops
 import hydrolibs.visualops as vizops
 import hydrolibs.wellops as wellops
-import rasterio
 from hydrolibs.rasterops import read_raster_as_arr, write_raster
 from hydrolibs.sysops import makedirs
 
@@ -2401,7 +2400,7 @@ def create_well_package_step() -> None:
         )
 
 
-def create_all_raster_maps() -> None:
+def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
     """Create era-mean raster maps for every predicted output category
     and an actual-vs-predicted comparison for the metered GW period.
 
@@ -2409,11 +2408,26 @@ def create_all_raster_maps() -> None:
     partitions, CU, OOD, and uncertainty) and produces 2×2
     era-mean panel figures with basin boundaries and AMA/INA labels.
 
+    Args:
+        skip_maps: Optional set of map-generation sub-step tokens to
+            skip.  Supported tokens:
+
+              ``trends``
+                Skip the full Mann-Kendall + Sen's slope trend-map
+                suite (withdrawals, CU, SW capture depth/volume/
+                fraction, per-basin and per-sub-basin trend CSVs).
+                This is the slowest sub-step in Step 3g and is
+                worth skipping when only the era-mean raster maps
+                and graphical abstract are needed.
+
     Returns:
         None.
     """
+    skip_maps = skip_maps or set()
     logger.info('=' * 60)
     logger.info('Step 3g: Creating raster maps for all output categories')
+    if skip_maps:
+        logger.info(f'  Skipping map sub-steps: {sorted(skip_maps)}')
     logger.info('=' * 60)
 
     prediction_dir = os.path.join(MODEL_DIR, f'Full_Prediction_{PREDICTION_MODEL}')
@@ -2460,6 +2474,29 @@ def create_all_raster_maps() -> None:
             cmap='Spectral_r',
         )
 
+    # ── Volume-based σ (band 2 of the same augmented volume rasters) ──
+    # The 6-band augmented volume rasters written by
+    # augment_prediction_rasters / augment_category_rasters carry
+    # band 2 = σ in m³, so a second pass over the same directories
+    # with band=2 produces σ volume era maps that pair 1:1 with the
+    # central-value Volume era maps above.  The Purples colormap
+    # matches the mm σ std-dev maps rendered from the σ-component
+    # rasters later in this step.
+    for folder, title in depth_categories:
+        raster_dir = os.path.join(prediction_dir, folder, 'Volume_m3')
+        if not os.path.isdir(raster_dir):
+            continue
+        vizops.create_era_raster_maps(
+            raster_dir=raster_dir,
+            basin_shp=AZ_GW_BASIN,
+            output_dir=maps_dir,
+            title=f'{title} Volume \u2014 Std Dev',
+            unit_label=r'Volume (m$^3$)',
+            cmap='Purples',
+            band=2,
+            cbar_extend='max',
+        )
+
     # ── OOD Rasters (probability, 0 = in-distribution, 1 = OOD) ─────
     ood_dir = os.path.join(prediction_dir, 'OOD_Rasters')
     if os.path.isdir(ood_dir):
@@ -2483,7 +2520,12 @@ def create_all_raster_maps() -> None:
         if not os.path.isdir(raster_dir):
             continue
         pretty = comp.replace('_', ' ')
-        # Band 1: σ (standard deviation in mm)
+        # Band 1: σ (standard deviation in mm).  The σ-component
+        # rasters under Uncertainty/{component}/Rasters/ are
+        # 1-band only (just σ in mm); there is no band-2 CV
+        # channel.  CV at the aggregate level is rendered by the
+        # Prediction CV map below (band 3 of the 6-band augmented
+        # Total_Predicted rasters under Predicted_Rasters/Depth_mm/).
         vizops.create_era_raster_maps(
             raster_dir=raster_dir,
             basin_shp=AZ_GW_BASIN,
@@ -2493,30 +2535,100 @@ def create_all_raster_maps() -> None:
             cmap='Purples',
             band=1,
         )
-        # Band 2: CV (coefficient of variation).  CV is heavily
-        # right-skewed — most pixels cluster near 0–0.02 with a
-        # long tail at OOD upland pixels — so the default P2–P98
-        # auto-range and linear normalization leaves the bulk of
-        # the map near the bottom of the colorbar. Tighten the
-        # upper percentile and apply a γ=0.5 power-law norm so
-        # that the low-CV bulk of the distribution gets most of
-        # the visual range.
-        vizops.create_era_raster_maps(
-            raster_dir=raster_dir,
-            basin_shp=AZ_GW_BASIN,
-            output_dir=maps_dir,
-            title=f'{pretty} — CV',
-            unit_label='CV (σ / |prediction|)',
-            cmap='inferno',
-            band=2,
-            mask_nan_only=True,
-            percentile_clip=(2.0, 95.0),
-            gamma=0.5,
-        )
+
+    # ── σ attribution diagnostic suite ──────────────────────────────
+    # All eight figure families write to Raster_Maps/Sigma_Attribution/
+    # so they stay isolated from the main era-mean, trend-analysis, and
+    # SW-capture outputs. Basin-level only — sub-basin attribution is
+    # deferred because ADWR stewardship decisions are basin-scale.
+    #
+    # Eight figure families sharing the same data pipeline:
+    #   (1) Binary headline withdrawal (Total_GW + Total_SW).
+    #   (2) Binary detailed withdrawal (Irrigation_GW/SW,
+    #       Non_Irrigation_GW/SW), 4-panel per era.
+    #   (3) Binary σ_CU attribution via the IE × Withdrawal
+    #       error-propagation decomposition.
+    #   (4) Ternary headline withdrawal (continuous RGB mix of
+    #       Mgmt/Clim/Model shares).
+    #   (5) Ternary detailed withdrawal.
+    #   (6) Ternary σ_CU attribution.
+    #   (7) Per-basin per-year stacked-area timeseries for eight
+    #       headline basins × two pools.
+    #   (8) Projection-era (σ_clim, σ_mgmt) log-log bubble scatter.
+    attr_dir = os.path.join(maps_dir, 'Sigma_Attribution')
+    os.makedirs(attr_dir, exist_ok=True)
+
+    # (1) Binary headline — Total_GW + Total_SW
+    vizops.create_sigma_attribution_map(
+        unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
+        pools=('Total_GW', 'Total_SW'),
+        eras=('Hindcast', 'Historical', 'Projection'),
+    )
+
+    # (2) Binary detailed — per-use-type breakdown
+    vizops.create_sigma_attribution_map(
+        unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
+        pools=(
+            'Irrigation_GW', 'Irrigation_SW',
+            'Non_Irrigation_GW', 'Non_Irrigation_SW',
+        ),
+        eras=('Hindcast', 'Historical', 'Projection'),
+        filename_tag='Detailed',
+    )
+
+    # (3) Binary σ_CU — IE × Withdrawal error-propagation decomposition
+    vizops.create_sigma_cu_attribution_map(
+        unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
+        pools=('Irrigation_CU', 'Irrigation_GW_CU', 'Irrigation_SW_CU'),
+        eras=('Hindcast', 'Historical', 'Projection'),
+    )
+
+    # (4) Ternary headline — continuous RGB three-way disclosure
+    vizops.create_sigma_attribution_ternary_map(
+        unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
+        pools=('Total_GW', 'Total_SW'),
+        eras=('Hindcast', 'Historical', 'Projection'),
+    )
+
+    # (5) Ternary detailed
+    vizops.create_sigma_attribution_ternary_map(
+        unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
+        pools=(
+            'Irrigation_GW', 'Irrigation_SW',
+            'Non_Irrigation_GW', 'Non_Irrigation_SW',
+        ),
+        eras=('Hindcast', 'Historical', 'Projection'),
+        filename_tag='Detailed',
+    )
+
+    # (6) Ternary σ_CU — reuses the same IE propagation as (3)
+    vizops.create_sigma_attribution_ternary_map(
+        unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
+        pools=('Irrigation_CU', 'Irrigation_GW_CU', 'Irrigation_SW_CU'),
+        eras=('Hindcast', 'Historical', 'Projection'),
+        for_cu=True,
+    )
+
+    # (7) Per-year stacked-area timeseries for headline basins
+    vizops.create_sigma_attribution_timeseries(
+        unc_dir=unc_dir, output_dir=attr_dir,
+        pools=('Total_GW', 'Total_SW'),
+    )
+
+    # (8) Bubble-chart scatter, Projection era only
+    vizops.create_sigma_attribution_bubble(
+        unc_dir=unc_dir, output_dir=attr_dir,
+        pools=('Total_GW', 'Total_SW'),
+        era='Projection',
+    )
 
     # ── Augmented prediction rasters (band 3 = CV, band 4 = SNR) ────
     pred_mm_dir = os.path.join(prediction_dir, 'Predicted_Rasters', 'Depth_mm')
     if os.path.isdir(pred_mm_dir):
+        # Prediction CV: same tight P2–P95 auto-range as the σ
+        # component CV maps.  The actual CV distribution for
+        # Total_Predicted is in [0, ~0.3] so the colorbar settles
+        # naturally to that range.
         vizops.create_era_raster_maps(
             raster_dir=pred_mm_dir,
             basin_shp=AZ_GW_BASIN,
@@ -2527,8 +2639,13 @@ def create_all_raster_maps() -> None:
             band=3,
             mask_nan_only=True,
             percentile_clip=(2.0, 95.0),
-            gamma=0.5,
+            cbar_extend='max',
         )
+        # Prediction SNR: P5–P95 auto-range.  Drop P5 (not P2)
+        # because the lower tail of SNR is where the framework is
+        # under-constrained; P95 caps the upper tail where σ → 0
+        # pushes SNR → ∞.  extend='max' is correct because SNR is
+        # non-negative.
         vizops.create_era_raster_maps(
             raster_dir=pred_mm_dir,
             basin_shp=AZ_GW_BASIN,
@@ -2538,8 +2655,8 @@ def create_all_raster_maps() -> None:
             cmap='viridis',
             band=4,
             mask_nan_only=True,
-            percentile_clip=(5.0, 98.0),
-            gamma=0.5,
+            percentile_clip=(5.0, 95.0),
+            cbar_extend='max',
         )
 
     # ── Actual vs Predicted comparison (metered GW, 1984-2024) ──────
@@ -2570,7 +2687,18 @@ def create_all_raster_maps() -> None:
         'Non_Irrigation_SW_Capture': 'Non-Irrigation SW Capture',
     }
     for cap_cat, pretty in _cap_pretty.items():
-        # Capture fraction (band 2 = central λ=10m)
+        # Capture fraction (band 2 = central λ=10m).  The default
+        # branch of _compute_era_means masks zero-valued pixels as
+        # no-data, which is what we want for the fraction map: the
+        # vast upland / canal-less area has cw_norm = 0 and
+        # therefore a structural zero capture fraction that is not
+        # interesting to colormap.  With zeros masked the
+        # auto-derived P2–P98 range runs over only the positive
+        # river-corridor pixels, so the YlOrRd low end actually
+        # engages.  Config matches the central capture volume map
+        # below (same cmap, same default percentile_clip, same
+        # cbar_extend) per the user's guidance: "make the color
+        # ramp for the fractions similar to the SW capture volume".
         frac_dir = os.path.join(sw_cap_base, f'{cap_cat}_Fraction')
         if os.path.isdir(frac_dir):
             vizops.create_era_raster_maps(
@@ -2581,7 +2709,7 @@ def create_all_raster_maps() -> None:
                 unit_label='Capture Fraction',
                 cmap='YlOrRd',
                 band=2,
-                mask_nan_only=True,
+                cbar_extend='max',
             )
         # 6-band augmented capture depth rasters: band 1 = central,
         # band 2 = σ, band 3 = CV, bands 5/6 = lower/upper 95 % CI.
@@ -2597,6 +2725,7 @@ def create_all_raster_maps() -> None:
                 unit_label='Capture (mm)',
                 cmap='YlOrRd',
                 band=1,
+                cbar_extend='max',
             )
             # Band 2: σ_cap — uses σ-friendly Purples colormap to
             # match the other σ era maps.
@@ -2608,10 +2737,15 @@ def create_all_raster_maps() -> None:
                 unit_label='σ (mm)',
                 cmap='Purples',
                 band=2,
+                cbar_extend='max',
             )
-            # Band 3: CV — heavily right-skewed like the withdrawal
-            # CV maps, so apply the same P95 + γ=0.5 power-law norm
-            # that fixes the dark-pixel problem.
+            # Band 3: CV — same tight P2–P95 auto-range strategy as
+            # the withdrawal and σ-component CV maps.  No hard
+            # vmax because SW capture CV has very different
+            # magnitudes in different basins (near-zero in upland
+            # basins, up to ~0.5 in mid-range river-corridor
+            # basins).  Auto-ranging gives each map its own
+            # natural colorbar.
             vizops.create_era_raster_maps(
                 raster_dir=depth_dir,
                 basin_shp=AZ_GW_BASIN,
@@ -2622,109 +2756,149 @@ def create_all_raster_maps() -> None:
                 band=3,
                 mask_nan_only=True,
                 percentile_clip=(2.0, 95.0),
-                gamma=0.5,
+                cbar_extend='max',
+            )
+
+        # 6-band augmented capture volume rasters (m³): band 1 =
+        # central, band 2 = σ in m³.  Pair with the Depth_mm
+        # central and σ era maps above so the SW capture story
+        # is told in both depth and volume units.
+        vol_dir = os.path.join(sw_cap_base, f'{cap_cat}_Rasters',
+                               'Volume_m3')
+        if os.path.isdir(vol_dir):
+            # Band 1: central capture volume
+            vizops.create_era_raster_maps(
+                raster_dir=vol_dir,
+                basin_shp=AZ_GW_BASIN,
+                output_dir=maps_dir,
+                title=f'{pretty} Volume',
+                unit_label=r'Volume (m$^3$)',
+                cmap='YlOrRd',
+                band=1,
+                cbar_extend='max',
+            )
+            # Band 2: σ capture volume (Purples, matches other
+            # σ volume era maps)
+            vizops.create_era_raster_maps(
+                raster_dir=vol_dir,
+                basin_shp=AZ_GW_BASIN,
+                output_dir=maps_dir,
+                title=f'{pretty} Volume \u2014 Std Dev',
+                unit_label=r'Volume (m$^3$)',
+                cmap='Purples',
+                band=2,
+                cbar_extend='max',
             )
 
     # ── Trend analysis (Mann-Kendall + Sen's slope) ────────────────
-    trend_dir = os.path.join(maps_dir, 'Trend_Analysis')
+    # Gated on --skip-maps trends because this is the slowest
+    # sub-step in Step 3g (per-pixel MK + Sen on 204 annual rasters
+    # × ~15 product families × 4 periods).  Skipping is useful when
+    # iterating on era-mean maps or the graphical abstract.
+    if 'trends' not in skip_maps:
+        trend_dir = os.path.join(maps_dir, 'Trend_Analysis')
 
-    # Conversion factors for the trend-map secondary axes
-    _MM_TO_FT = 1.0 / 304.8
-    _M3_TO_AF = 1.0 / 1233.48
+        # Conversion factors for the trend-map secondary axes
+        _MM_TO_FT = 1.0 / 304.8
+        _M3_TO_AF = 1.0 / 1233.48
 
-    # Total predicted annual withdrawal
-    if os.path.isdir(predicted_mm_dir):
-        vizops.create_trend_maps(
-            raster_dir=predicted_mm_dir,
-            basin_shp=AZ_GW_BASIN,
-            output_dir=trend_dir,
-            title='Total Predicted Annual Withdrawal',
-            unit_label='mm',
-            secondary_unit_label='ft',
-            secondary_unit_factor=_MM_TO_FT,
-            subbasin_shp=ADWR_SUBBASIN_SHP,
-        )
-
-    # All depth-based partition categories
-    for cat in partops.CATEGORIES:
-        cat_dir = os.path.join(prediction_dir, f'{cat}_Rasters', 'Depth_mm')
-        if not os.path.isdir(cat_dir):
-            continue
-        vizops.create_trend_maps(
-            raster_dir=cat_dir,
-            basin_shp=AZ_GW_BASIN,
-            output_dir=trend_dir,
-            title=cat.replace('_', ' '),
-            unit_label='mm',
-            secondary_unit_label='ft',
-            secondary_unit_factor=_MM_TO_FT,
-            subbasin_shp=ADWR_SUBBASIN_SHP,
-        )
-
-    # Consumptive Use categories
-    for cu in CU_CATEGORIES:
-        cu_dir = os.path.join(prediction_dir, f'{cu}_Rasters', 'Depth_mm')
-        if not os.path.isdir(cu_dir):
-            continue
-        vizops.create_trend_maps(
-            raster_dir=cu_dir,
-            basin_shp=AZ_GW_BASIN,
-            output_dir=trend_dir,
-            title=cu.replace('_', ' '),
-            unit_label='mm',
-            secondary_unit_label='ft',
-            secondary_unit_factor=_MM_TO_FT,
-            subbasin_shp=ADWR_SUBBASIN_SHP,
-        )
-
-    # SW Capture Index categories — depth, volume, and fraction trends
-    sw_cap_base = os.path.join(prediction_dir, 'SW_Capture')
-    for cap_cat in ('Total_SW_Capture', 'Irrigation_SW_Capture',
-                    'Non_Irrigation_SW_Capture'):
-        pretty = cap_cat.replace('_', ' ')
-
-        # Depth trends (mm raster source, mm/ft colorbar)
-        depth_dir = os.path.join(sw_cap_base, f'{cap_cat}_Rasters',
-                                 'Depth_mm')
-        if os.path.isdir(depth_dir):
+        # Total predicted annual withdrawal
+        if os.path.isdir(predicted_mm_dir):
             vizops.create_trend_maps(
-                raster_dir=depth_dir,
+                raster_dir=predicted_mm_dir,
                 basin_shp=AZ_GW_BASIN,
                 output_dir=trend_dir,
-                title=f'{pretty} Depth',
+                title='Total Predicted Annual Withdrawal',
                 unit_label='mm',
                 secondary_unit_label='ft',
                 secondary_unit_factor=_MM_TO_FT,
                 subbasin_shp=ADWR_SUBBASIN_SHP,
             )
 
-        # Volume trends (m³ raster source, m³/AF colorbar)
-        vol_dir = os.path.join(sw_cap_base, f'{cap_cat}_Rasters',
-                               'Volume_m3')
-        if os.path.isdir(vol_dir):
+        # All depth-based partition categories
+        for cat in partops.CATEGORIES:
+            cat_dir = os.path.join(prediction_dir, f'{cat}_Rasters',
+                                   'Depth_mm')
+            if not os.path.isdir(cat_dir):
+                continue
             vizops.create_trend_maps(
-                raster_dir=vol_dir,
+                raster_dir=cat_dir,
                 basin_shp=AZ_GW_BASIN,
                 output_dir=trend_dir,
-                title=f'{pretty} Volume',
-                unit_label=r'm$^3$',
-                secondary_unit_label='AF',
-                secondary_unit_factor=_M3_TO_AF,
+                title=cat.replace('_', ' '),
+                unit_label='mm',
+                secondary_unit_label='ft',
+                secondary_unit_factor=_MM_TO_FT,
                 subbasin_shp=ADWR_SUBBASIN_SHP,
             )
 
-        # Fraction trends (dimensionless, band 2 = central λ=10m)
-        frac_dir = os.path.join(sw_cap_base, f'{cap_cat}_Fraction')
-        if os.path.isdir(frac_dir):
+        # Consumptive Use categories
+        for cu in CU_CATEGORIES:
+            cu_dir = os.path.join(prediction_dir, f'{cu}_Rasters',
+                                  'Depth_mm')
+            if not os.path.isdir(cu_dir):
+                continue
             vizops.create_trend_maps(
-                raster_dir=frac_dir,
+                raster_dir=cu_dir,
                 basin_shp=AZ_GW_BASIN,
                 output_dir=trend_dir,
-                title=f'{pretty} Fraction',
-                unit_label='fraction',
-                band=2,  # central estimate (λ=10m)
+                title=cu.replace('_', ' '),
+                unit_label='mm',
+                secondary_unit_label='ft',
+                secondary_unit_factor=_MM_TO_FT,
                 subbasin_shp=ADWR_SUBBASIN_SHP,
             )
+
+        # SW Capture Index categories — depth, volume, and fraction
+        sw_cap_base = os.path.join(prediction_dir, 'SW_Capture')
+        for cap_cat in ('Total_SW_Capture', 'Irrigation_SW_Capture',
+                        'Non_Irrigation_SW_Capture'):
+            pretty = cap_cat.replace('_', ' ')
+
+            # Depth trends (mm raster source, mm/ft colorbar)
+            depth_dir = os.path.join(sw_cap_base, f'{cap_cat}_Rasters',
+                                     'Depth_mm')
+            if os.path.isdir(depth_dir):
+                vizops.create_trend_maps(
+                    raster_dir=depth_dir,
+                    basin_shp=AZ_GW_BASIN,
+                    output_dir=trend_dir,
+                    title=f'{pretty} Depth',
+                    unit_label='mm',
+                    secondary_unit_label='ft',
+                    secondary_unit_factor=_MM_TO_FT,
+                    subbasin_shp=ADWR_SUBBASIN_SHP,
+                )
+
+            # Volume trends (m³ raster source, m³/AF colorbar)
+            vol_dir = os.path.join(sw_cap_base, f'{cap_cat}_Rasters',
+                                   'Volume_m3')
+            if os.path.isdir(vol_dir):
+                vizops.create_trend_maps(
+                    raster_dir=vol_dir,
+                    basin_shp=AZ_GW_BASIN,
+                    output_dir=trend_dir,
+                    title=f'{pretty} Volume',
+                    unit_label=r'm$^3$',
+                    secondary_unit_label='AF',
+                    secondary_unit_factor=_M3_TO_AF,
+                    subbasin_shp=ADWR_SUBBASIN_SHP,
+                )
+
+            # Fraction trends (dimensionless, band 2 = central λ=10m)
+            frac_dir = os.path.join(sw_cap_base, f'{cap_cat}_Fraction')
+            if os.path.isdir(frac_dir):
+                vizops.create_trend_maps(
+                    raster_dir=frac_dir,
+                    basin_shp=AZ_GW_BASIN,
+                    output_dir=trend_dir,
+                    title=f'{pretty} Fraction',
+                    unit_label='fraction',
+                    band=2,  # central estimate (λ=10m)
+                    subbasin_shp=ADWR_SUBBASIN_SHP,
+                )
+    else:
+        logger.info('  Trend-map suite skipped per --skip-maps trends.')
 
     # ── Graphical abstract / Figure 1 (after UQ for augmented rasters) ──
     summary_dir = os.path.join(prediction_dir, 'Annual_Summaries')
@@ -2838,6 +3012,99 @@ def create_all_raster_maps() -> None:
         )
 
     logger.info(f'All raster maps saved to {maps_dir}')
+
+
+def create_graphical_abstract_only() -> None:
+    """Regenerate only the graphical abstract / Figure 1.
+
+    This is a lightweight sub-step of Step 3 that reads the cached
+    Annual_Summaries CSVs from disk (Total_Predicted.csv,
+    Basin_Total.csv, and the per-scenario volume CSVs under
+    Sigma_LULC/Scenario_Volumes/) plus the Uncertainty_Summary_Total.csv
+    produced by Step 3b, and calls ``vizops.create_graphical_abstract``
+    directly without regenerating the era-mean raster maps, the trend
+    analysis, or anything else under ``create_all_raster_maps``.
+
+    Intended for iterating on the Figure 1 layout after Step 3 / 3b
+    have already completed.  Runs in ≈ 30 seconds against the on-disk
+    caches.
+
+    Returns:
+        None.
+    """
+    logger.info('=' * 60)
+    logger.info(
+        'Step 3h: Regenerating graphical abstract / Figure 1 only',
+    )
+    logger.info('=' * 60)
+
+    prediction_dir = os.path.join(
+        MODEL_DIR, f'Full_Prediction_{PREDICTION_MODEL}',
+    )
+    summary_dir = os.path.join(prediction_dir, 'Annual_Summaries')
+    total_csv = os.path.join(summary_dir, 'Total_Predicted.csv')
+    basin_csv = os.path.join(summary_dir, 'Basin_Total.csv')
+
+    if not os.path.isfile(total_csv):
+        logger.warning(
+            'Step 3h skipped: %s not found.  Run Step 3 first to '
+            'populate Annual_Summaries/.', total_csv,
+        )
+        return
+
+    # Load statewide totals
+    yearly_predictions: dict = {}
+    tdf = pd.read_csv(total_csv)
+    for _, row in tdf.iterrows():
+        yearly_predictions[int(row['Year'])] = {
+            k: row[k] for k in row.index if k != 'Year'
+        }
+
+    # Load per-basin totals (optional; only Phoenix AMA is used by the
+    # current graphical abstract Panel B but basin_yearly is passed for
+    # future-proofing)
+    basin_yearly: dict = {}
+    if os.path.isfile(basin_csv):
+        bdf = pd.read_csv(basin_csv)
+        for y, grp in bdf.groupby('Year'):
+            basin_yearly[int(y)] = {
+                row['Basin']: {
+                    k: row[k] for k in row.index
+                    if k not in ('Year', 'Basin')
+                }
+                for _, row in grp.iterrows()
+            }
+
+    # Load σ_total time series for the 95 % CI ribbon (optional; if
+    # Step 3b has not run, the graphical abstract renders without the
+    # uncertainty ribbon)
+    sigma_yearly: dict = {}
+    sigma_csv = os.path.join(
+        prediction_dir, 'Uncertainty', 'Sigma_Total',
+        'Uncertainty_Summary_Total.csv',
+    )
+    if os.path.isfile(sigma_csv):
+        sdf = pd.read_csv(sigma_csv)
+        for _, row in sdf.iterrows():
+            sigma_yearly[int(row['Year'])] = {
+                k: row[k] for k in row.index if k != 'Year'
+            }
+
+    vizops.create_graphical_abstract(
+        raster_dir=os.path.join(
+            prediction_dir, 'Predicted_Rasters', 'Depth_mm',
+        ),
+        basin_shp=AZ_GW_BASIN,
+        output_dir=prediction_dir,
+        start_year=START_YEAR,
+        end_year=END_YEAR,
+        yearly_predictions=yearly_predictions,
+        basin_yearly=basin_yearly,
+        sigma_yearly=sigma_yearly or None,
+    )
+    logger.info(
+        f'Graphical abstract saved to {prediction_dir}/Graphical_Abstract_Fig1.png',
+    )
 
 
 # =============================================================================
@@ -3026,6 +3293,10 @@ Pipeline steps (comma-separated or 'all'):
   3b   Hybrid uncertainty quantification
   3e   Well package (per-well GeoPackage with uncertainty)
   3g   Raster maps, actual vs predicted, and trend analysis
+  3h   Graphical abstract / Figure 1 only (lightweight; reads
+       Annual_Summaries/ from disk). Must be explicitly requested —
+       excluded from --steps all because 3g already produces this
+       figure. Intended for iterating on the Figure 1 layout.
   4    USGS intercomparison
   4b   CU intercomparison
   4c   CAP/SRP surface-water validation
@@ -3064,6 +3335,16 @@ UQ sub-steps (use with --skip-uq to skip individual σ components):
                    combined λ + σ_total 95 % CI bounds and the per-well σ_capture
                    disaggregation.  Depends on sigma-total; skipping means no SW
                    capture outputs are produced.
+
+Step 3g sub-steps (use with --skip-maps to skip individual map families):
+  trends           Skip the full Mann-Kendall + Sen's slope trend-map suite
+                   (withdrawals, CU, SW capture depth/volume/fraction, per-basin
+                   and per-sub-basin trend CSVs).  This is the slowest sub-step
+                   in Step 3g — per-pixel MK + Sen on 204 annual rasters ×
+                   ~15 product families × 4 periods takes the bulk of the step's
+                   runtime, so skipping is useful when iterating on the era-mean
+                   raster maps or the graphical abstract.  Era-mean raster maps
+                   and the graphical abstract are still produced.
 """
 
 
@@ -3138,6 +3419,14 @@ def main() -> None:
             'sw-capture-sigma.'
         ),
     )
+    parser.add_argument(
+        '--skip-maps', type=str, default='',
+        help=(
+            'Comma-separated Step 3g map-generation sub-steps to '
+            'skip: trends (skip the full Mann-Kendall + Sen\'s slope '
+            'trend-map suite, which is the slowest Step 3g sub-step).'
+        ),
+    )
     args = parser.parse_args()
 
     if args.verbose:
@@ -3150,6 +3439,7 @@ def main() -> None:
     skip_prep = set(s.strip().lower() for s in args.skip_prep.split(',') if s.strip())
     skip_eval = set(s.strip().lower() for s in args.skip_eval.split(',') if s.strip())
     skip_uq = set(s.strip().lower() for s in args.skip_uq.split(',') if s.strip())
+    skip_maps = set(s.strip().lower() for s in args.skip_maps.split(',') if s.strip())
 
     data_band_names = None
 
@@ -3310,7 +3600,15 @@ def main() -> None:
 
     # Step 3g — Era-mean raster maps for all output categories
     if should_run('3g'):
-        create_all_raster_maps()
+        create_all_raster_maps(skip_maps=skip_maps or None)
+
+    # Step 3h — Graphical abstract / Figure 1 only (lightweight, reads
+    # Annual_Summaries/ and Uncertainty_Summary_Total.csv from disk).
+    # Must be *explicitly* requested — it is redundant with Step 3g
+    # (which produces the same figure as part of its full raster-map
+    # suite), so ``--steps all`` intentionally skips it.
+    if '3h' in selected:
+        create_graphical_abstract_only()
 
     # Step 4
     if should_run('4'):

@@ -3256,11 +3256,17 @@ def create_graphical_abstract(
 
         # Render bullets evenly spaced down the panel.  The panel is
         # ~2.0 inches tall (0.45 height ratio out of 2.65 total × 10.5
-        # inches), with the title taking the top ~10% and the bullets
-        # filling y in [0.05, 0.78].
-        line_h = (0.78 - 0.10) / max(len(bullets), 1)
+        # inches).  The header sits at y = 0.92; the first bullet
+        # starts at y = 0.74 (previously 0.78) to open a visible
+        # breathing gap between the "Key Contributions" header and
+        # the first bullet.  Bullets fill y in [0.05, 0.74], which
+        # still gives each of the five bullets ~0.14 panel-height
+        # units of vertical space.
+        bullet_top = 0.74
+        bullet_bot = 0.05
+        line_h = (bullet_top - bullet_bot) / max(len(bullets), 1)
         for i, text in enumerate(bullets):
-            y = 0.78 - i * line_h
+            y = bullet_top - i * line_h
             ax_contrib.text(
                 0.025, y, '\u2022',
                 transform=ax_contrib.transAxes,
@@ -3413,6 +3419,7 @@ def create_era_raster_maps(
     mask_nan_only: bool = False,
     percentile_clip: tuple[float, float] = (2.0, 98.0),
     gamma: float | None = None,
+    cbar_extend: str = 'both',
 ) -> None:
     """Create a 2×2 panel figure of era-mean raster maps.
 
@@ -3455,6 +3462,12 @@ def create_era_raster_maps(
             most pixels cluster near zero); ``gamma > 1`` does the
             opposite.  Ignored when ``symmetric=True`` (diverging
             colormaps use linear norm).
+        cbar_extend (str): Colorbar ``extend`` direction — one of
+            ``'neither'``, ``'min'``, ``'max'``, ``'both'``.  Default
+            ``'both'`` is right for most products.  Use ``'max'`` for
+            non-negative bounded-below quantities (CV, SNR, capture
+            fraction) so the colorbar terminates cleanly at zero
+            instead of rendering a spurious lower triangle.
 
     Returns:
         None.
@@ -3564,9 +3577,34 @@ def create_era_raster_maps(
     era_cbar_fontsize = 10
     cbar = fig.colorbar(
         im, ax=axes_flat, shrink=0.5, pad=0.06,
-        orientation='horizontal', aspect=40, extend='both',
+        orientation='horizontal', aspect=40, extend=cbar_extend,
     )
-    cbar.set_label(unit_label, fontsize=era_cbar_fontsize, fontweight='bold')
+
+    # Detect volume maps and inline the 10⁶ scale factor into the
+    # primary label + tick formatter.  Volume values in m³ run
+    # into the 10⁶–10⁸ range for typical per-pixel annual
+    # withdrawals, so matplotlib's default offset text renders as
+    # "1e8" at the end of the colorbar axis — small, easy to miss,
+    # and inconsistent with the rest of the framework which
+    # reports volumes in ×10⁶ m³.  We bake the scale factor into
+    # the label ("Volume (×10⁶ m³)") and divide tick values by
+    # 1e6 via a FuncFormatter so the offset text goes away and
+    # tick labels read as clean 1–100 range numbers.
+    is_volume_m3 = 'm$^3$' in unit_label or 'm3' in unit_label.lower()
+    if is_volume_m3:
+        import matplotlib.ticker as mticker
+        volume_label = r'Volume ($\times$10$^{6}$ m$^3$)'
+        cbar.set_label(
+            volume_label, fontsize=era_cbar_fontsize, fontweight='bold',
+        )
+        cbar.formatter = mticker.FuncFormatter(
+            lambda x, _: f'{x / 1e6:g}',
+        )
+        cbar.update_ticks()
+    else:
+        cbar.set_label(
+            unit_label, fontsize=era_cbar_fontsize, fontweight='bold',
+        )
     cbar.ax.tick_params(labelsize=era_cbar_fontsize)
 
     # Add secondary unit axis on top of the colorbar
@@ -3577,7 +3615,7 @@ def create_era_raster_maps(
         cb_ax2.set_xlabel('Depth (ft)', fontsize=era_cbar_fontsize,
                           fontweight='bold')
         cb_ax2.tick_params(labelsize=era_cbar_fontsize)
-    elif 'm$^3$' in unit_label or 'm3' in unit_label.lower():
+    elif is_volume_m3:
         cb_ax2 = cbar.ax.twiny()
         cb_lo, cb_hi = cbar.ax.get_xlim()
         cb_ax2.set_xlim(cb_lo / _AF_TO_M3, cb_hi / _AF_TO_M3)
@@ -3592,6 +3630,1247 @@ def create_era_raster_maps(
     fig.savefig(out_path, dpi=600, bbox_inches='tight')
     plt.close(fig)
     logger.info(f'Era raster maps saved to {out_path}')
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# σ attribution diagnostics
+# -----------------------------------------------------------------------------
+# Basin-level three-way variance decomposition of σ_total into:
+#   * Management: σ_irr² + σ_LULC² + σ_GW²      (fixable by better data)
+#   * Climate:    σ_MACA²                        (inherent to GCM spread)
+#   * Model:      σ_Model²                       (training-procedure floor)
+#
+# Two complementary visual products share the same underlying per-basin
+# DataFrame:
+#   - Binary 5-bin discrete choropleth (NV-style) — readable at a glance
+#     via a 2-way classification metric whose axis depends on the era.
+#     Projection uses Climate↔Management; Hindcast/Historical use
+#     Model↔Management (σ_clim is zero in those eras). Projection basins
+#     where σ_Model is the single largest contributor are flagged with a
+#     bold black polygon edge + an on-figure disclosure box.
+#   - Ternary RGB-mixed continuous choropleth — an honest three-way
+#     disclosure of Mgmt/Clim/Model share on one color axis in every era.
+#
+# CU attribution propagates the IE × Withdrawal uncertainty
+# (σ_CU = √((IE·σ_wd)² + (wd·σ_IE)²)) into the same three-way share
+# decomposition, using the cached NHM basin IE + std.
+#
+# All outputs (attribution maps, CSVs, timeseries grid, bubble chart)
+# are written to the Raster_Maps/Sigma_Attribution/ subdirectory to keep
+# them isolated from the main era-mean, trend, and SW capture outputs.
+# ═════════════════════════════════════════════════════════════════════════════
+
+# 5-bin discrete classification edges (matches NV reference figure)
+_SIGMA_ATTR_CLASS_EDGES = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
+
+# Projection palette (blue → gray → orange)
+_SIGMA_ATTR_PALETTE_PROJECTION = (
+    '#1f4fa5', '#5a9ad0', '#b0b0b0', '#e8a582', '#d04e1f',
+)
+# Hindcast/Historical palette (purple → gray → orange), distinct from the
+# Projection palette so readers don't confuse Model-dominated basins with
+# Climate-dominated basins.
+_SIGMA_ATTR_PALETTE_MODEL_ERA = (
+    '#5e4fa2', '#8c7eb8', '#b0b0b0', '#e8a582', '#d04e1f',
+)
+
+# Shared directional tags for the 5 bins, indexed by [left_label, right_label]
+_SIGMA_ATTR_ERA_TAGS = {
+    'Projection': ('Climate Dominated', 'Management Dominated'),
+    'Historical': ('Model Dominated', 'Management Dominated'),
+    'Hindcast':   ('Model Dominated', 'Management Dominated'),
+}
+
+_SIGMA_ATTR_SHARE_LABELS = (
+    '0–25%', '25–50%', '50–50%', '50–75%', '75–100%',
+)
+
+# Headline basins for the per-year attribution timeseries grid
+_SIGMA_ATTR_HEADLINE_BASINS = (
+    'PHOENIX AMA', 'TUCSON AMA', 'YUMA', 'PARKER',
+    'LOWER GILA', 'SAFFORD', 'WILLCOX AMA', 'BUTLER VALLEY',
+)
+
+# Withdrawal → CU pool mapping for σ_CU propagation
+_SIGMA_CU_POOL_MAP = {
+    'Irrigation_CU':    'Irrigation',
+    'Irrigation_GW_CU': 'Irrigation_GW',
+    'Irrigation_SW_CU': 'Irrigation_SW',
+}
+
+# σ components in the three-way decomposition
+_SIGMA_MGMT_COMPONENTS = ('Irr', 'LULC', 'GW')
+_SIGMA_CLIM_COMPONENTS = ('MACA',)
+_SIGMA_MODEL_COMPONENTS = ('Model',)
+_ALL_SIGMA_COMPONENTS = (
+    _SIGMA_MGMT_COMPONENTS + _SIGMA_CLIM_COMPONENTS + _SIGMA_MODEL_COMPONENTS
+)
+
+_SIGMA_COMPONENT_DIRS = {
+    'MACA':  'Sigma_MACA',
+    'Model': 'Sigma_Model',
+    'Irr':   'Sigma_Irr',
+    'LULC':  'Sigma_LULC',
+    'GW':    'Sigma_GW',
+}
+
+
+def _load_nhm_basin_ie_cache(unc_dir: str) -> dict[str, tuple[float, float]] | None:
+    """Load the NHM basin IE cache written by Step 3b.
+
+    Returns ``{basin: (mean_ie, std_ie)}`` or ``None`` if the cache is
+    missing. Used by the σ_CU attribution to propagate withdrawal-side
+    σ through ``CU = IE × Withdrawal``.
+    """
+    cache_csv = os.path.join(
+        unc_dir, 'Sigma_CU', 'NHM_IE', 'NHM_basin_IE_cache.csv',
+    )
+    if not os.path.isfile(cache_csv):
+        logger.warning(
+            'NHM basin IE cache not found at %s — σ_CU attribution disabled',
+            cache_csv,
+        )
+        return None
+    df = pd.read_csv(cache_csv)
+    mean_rows = df[df['year'].astype(str) == 'mean']
+    if mean_rows.empty:
+        logger.warning(
+            'NHM basin IE cache at %s has no "mean" rows — σ_CU disabled',
+            cache_csv,
+        )
+        return None
+    result: dict[str, tuple[float, float]] = {}
+    for _, row in mean_rows.iterrows():
+        basin = str(row['basin'])
+        ie_mean = float(row['ie']) if np.isfinite(row['ie']) else np.nan
+        ie_std = (
+            float(row['std_ie'])
+            if 'std_ie' in row and np.isfinite(row.get('std_ie', np.nan))
+            else 0.0
+        )
+        result[basin] = (ie_mean, ie_std)
+    return result
+
+
+def _read_basin_sigma_category_csv(
+    unc_dir: str,
+    component: str,
+    pool: str,
+) -> pd.DataFrame | None:
+    """Read ``Uncertainty/{component_dir}/Basin_Sigma_{comp}_{pool}.csv``.
+
+    Returns ``None`` if the file is missing.
+    """
+    comp_dir = _SIGMA_COMPONENT_DIRS[component]
+    csv_path = os.path.join(
+        unc_dir, comp_dir, f'Basin_Sigma_{component}_{pool}.csv',
+    )
+    if not os.path.isfile(csv_path):
+        return None
+    return pd.read_csv(csv_path)
+
+
+def _load_sigma_attribution_data(
+    unc_dir: str,
+    pool: str,
+    era: str,
+) -> pd.DataFrame | None:
+    """Load per-basin σ components for a pool, filter by era, and compute
+    the three-way variance-share decomposition.
+
+    Returns a DataFrame indexed by basin name with columns:
+    ``Region, Sigma_MACA_m3, Sigma_Irr_m3, Sigma_LULC_m3, Sigma_GW_m3,
+    Sigma_Model_m3, Mean_Wd_m3, Sigma_Mgmt_m3, Sigma_Clim_m3,
+    Sigma_Model_Total_m3, Sigma_TotalQ_m3, Mgmt_Share, Clim_Share,
+    Model_Share``.
+
+    Era filtering uses ``ERA_PERIODS``. Per-era σ per basin is the mean
+    of ``Sigma_Volume_m3`` across all years in the era (matches the
+    per-year σ that the framework treats as the typical annual
+    uncertainty). Components with no rows in an era collapse to 0.
+
+    Returns ``None`` if *every* per-category CSV is missing (which means
+    Step 3b has not been rerun with the per-category extension).
+    """
+    yr_start, yr_end = ERA_PERIODS[era]
+    per_basin: dict[str, dict[str, float]] = {}
+    any_loaded = False
+    mean_wd_per_basin: dict[str, float] = {}
+    for comp in _ALL_SIGMA_COMPONENTS:
+        df = _read_basin_sigma_category_csv(unc_dir, comp, pool)
+        if df is None:
+            continue
+        any_loaded = True
+        era_df = df[(df['Year'] >= yr_start) & (df['Year'] <= yr_end)]
+        if era_df.empty:
+            continue
+        grp_sigma = era_df.groupby('Region')['Sigma_Volume_m3'].mean()
+        grp_mean = era_df.groupby('Region')['Mean_Volume_m3'].mean()
+        for basin, sigma in grp_sigma.items():
+            per_basin.setdefault(basin, {})[f'Sigma_{comp}_m3'] = float(sigma)
+        # Any component works as a source of mean withdrawal; σ_Model has
+        # coverage in every era so it is the most reliable. Still, take
+        # whichever loads first and leave it — the mean is the same
+        # physical quantity.
+        for basin, wd in grp_mean.items():
+            mean_wd_per_basin.setdefault(basin, float(wd))
+    if not any_loaded:
+        return None
+    if not per_basin:
+        return pd.DataFrame(columns=['Region'])
+    rows = []
+    for basin, sigmas in per_basin.items():
+        s_maca = sigmas.get('Sigma_MACA_m3', 0.0)
+        s_irr = sigmas.get('Sigma_Irr_m3', 0.0)
+        s_lulc = sigmas.get('Sigma_LULC_m3', 0.0)
+        s_gw = sigmas.get('Sigma_GW_m3', 0.0)
+        s_model = sigmas.get('Sigma_Model_m3', 0.0)
+        sigma_mgmt_sq = s_irr ** 2 + s_lulc ** 2 + s_gw ** 2
+        sigma_clim_sq = s_maca ** 2
+        sigma_model_sq = s_model ** 2
+        sigma_total_sq = sigma_mgmt_sq + sigma_clim_sq + sigma_model_sq
+        if sigma_total_sq > 0:
+            mgmt_share = sigma_mgmt_sq / sigma_total_sq
+            clim_share = sigma_clim_sq / sigma_total_sq
+            model_share = sigma_model_sq / sigma_total_sq
+        else:
+            mgmt_share = clim_share = model_share = np.nan
+        rows.append({
+            'Region': basin,
+            'Sigma_MACA_m3': s_maca,
+            'Sigma_Irr_m3': s_irr,
+            'Sigma_LULC_m3': s_lulc,
+            'Sigma_GW_m3': s_gw,
+            'Sigma_Model_m3': s_model,
+            'Mean_Wd_m3': mean_wd_per_basin.get(basin, np.nan),
+            'Sigma_Mgmt_m3': np.sqrt(sigma_mgmt_sq),
+            'Sigma_Clim_m3': np.sqrt(sigma_clim_sq),
+            'Sigma_Model_Total_m3': np.sqrt(sigma_model_sq),
+            'Sigma_TotalQ_m3': np.sqrt(sigma_total_sq),
+            'Mgmt_Share': mgmt_share,
+            'Clim_Share': clim_share,
+            'Model_Share': model_share,
+        })
+    return pd.DataFrame(rows)
+
+
+def _load_sigma_cu_attribution_data(
+    unc_dir: str,
+    pool: str,
+    era: str,
+) -> pd.DataFrame | None:
+    """Load per-basin σ_CU three-way decomposition via the IE × Withdrawal
+    error propagation.
+
+    The CU pool is mapped to its parent withdrawal pool
+    (``Irrigation_CU → Irrigation``, etc.). For each basin::
+
+        σ_cu_mgmt²  = (IE × σ_wd_mgmt)² + (wd × σ_IE)²
+        σ_cu_clim²  = (IE × σ_wd_clim)²
+        σ_cu_model² = (IE × σ_wd_model)²
+
+    σ_IE is absorbed into the management class because it is an
+    irrigation-data-quality problem.
+
+    Returns ``None`` if the parent withdrawal CSVs or the NHM IE cache
+    are missing.
+    """
+    parent_pool = _SIGMA_CU_POOL_MAP.get(pool)
+    if parent_pool is None:
+        logger.warning(
+            'σ_CU attribution: unknown pool %s (not in %s)',
+            pool, sorted(_SIGMA_CU_POOL_MAP),
+        )
+        return None
+    wd_df = _load_sigma_attribution_data(unc_dir, parent_pool, era)
+    if wd_df is None or wd_df.empty:
+        return None
+    ie_map = _load_nhm_basin_ie_cache(unc_dir)
+    if ie_map is None:
+        return None
+
+    rows = []
+    for _, row in wd_df.iterrows():
+        basin = row['Region']
+        wd = row['Mean_Wd_m3'] if np.isfinite(row['Mean_Wd_m3']) else 0.0
+        ie_mean, ie_std = ie_map.get(basin, (np.nan, np.nan))
+        if not np.isfinite(ie_mean):
+            continue
+        s_wd_mgmt = row['Sigma_Mgmt_m3']
+        s_wd_clim = row['Sigma_Clim_m3']
+        s_wd_model = row['Sigma_Model_Total_m3']
+        sigma_cu_mgmt_sq = (
+            (ie_mean * s_wd_mgmt) ** 2 + (wd * ie_std) ** 2
+        )
+        sigma_cu_clim_sq = (ie_mean * s_wd_clim) ** 2
+        sigma_cu_model_sq = (ie_mean * s_wd_model) ** 2
+        sigma_cu_total_sq = (
+            sigma_cu_mgmt_sq + sigma_cu_clim_sq + sigma_cu_model_sq
+        )
+        if sigma_cu_total_sq > 0:
+            mgmt_share = sigma_cu_mgmt_sq / sigma_cu_total_sq
+            clim_share = sigma_cu_clim_sq / sigma_cu_total_sq
+            model_share = sigma_cu_model_sq / sigma_cu_total_sq
+        else:
+            mgmt_share = clim_share = model_share = np.nan
+        rows.append({
+            'Region': basin,
+            'Sigma_MACA_m3': row['Sigma_MACA_m3'] * ie_mean,
+            'Sigma_Irr_m3':  row['Sigma_Irr_m3'] * ie_mean,
+            'Sigma_LULC_m3': row['Sigma_LULC_m3'] * ie_mean,
+            'Sigma_GW_m3':   row['Sigma_GW_m3'] * ie_mean,
+            'Sigma_Model_m3': row['Sigma_Model_m3'] * ie_mean,
+            'Mean_Wd_m3': wd,
+            'IE_Mean': ie_mean,
+            'IE_Std': ie_std,
+            'Sigma_Mgmt_m3': np.sqrt(sigma_cu_mgmt_sq),
+            'Sigma_Clim_m3': np.sqrt(sigma_cu_clim_sq),
+            'Sigma_Model_Total_m3': np.sqrt(sigma_cu_model_sq),
+            'Sigma_TotalQ_m3': np.sqrt(sigma_cu_total_sq),
+            'Mgmt_Share': mgmt_share,
+            'Clim_Share': clim_share,
+            'Model_Share': model_share,
+        })
+    if not rows:
+        return None
+    return pd.DataFrame(rows)
+
+
+def _compute_binary_share(
+    df: pd.DataFrame,
+    era: str,
+) -> np.ndarray:
+    """Era-specific binary share metric used as the color axis of the
+    NV-style 5-bin discrete map.
+
+    * Projection: ``Mgmt / (Mgmt + Clim)`` — climate↔management trade-off.
+    * Hindcast / Historical: ``Mgmt / (Mgmt + Model)`` — model floor vs
+      management-driven data gaps. σ_clim is structurally zero in these
+      eras, so it drops out of the classification.
+    """
+    mgmt = df['Mgmt_Share'].to_numpy(dtype=float)
+    if era == 'Projection':
+        other = df['Clim_Share'].to_numpy(dtype=float)
+    else:
+        other = df['Model_Share'].to_numpy(dtype=float)
+    denom = mgmt + other
+    with np.errstate(invalid='ignore', divide='ignore'):
+        share = np.where(denom > 0, mgmt / denom, np.nan)
+    return share
+
+
+def _classify_share_bins(share: np.ndarray) -> np.ndarray:
+    """Return integer bin indices in [0, 4] for a share array in [0, 1]."""
+    bins = np.full(share.shape, -1, dtype=np.int8)
+    finite = np.isfinite(share)
+    if not finite.any():
+        return bins
+    cls = np.digitize(share[finite], _SIGMA_ATTR_CLASS_EDGES[1:-1])
+    bins[finite] = np.clip(cls, 0, 4)
+    return bins
+
+
+def _palette_for_era(era: str) -> tuple[str, ...]:
+    """Return the 5-bin palette for *era*."""
+    if era == 'Projection':
+        return _SIGMA_ATTR_PALETTE_PROJECTION
+    return _SIGMA_ATTR_PALETTE_MODEL_ERA
+
+
+def _draw_sigma_attribution_legend(
+    fig,
+    era: str,
+) -> None:
+    """Render the shared bottom 5-swatch legend with directional tags."""
+    palette = _palette_for_era(era)
+    left_tag, right_tag = _SIGMA_ATTR_ERA_TAGS[era]
+    handles = [
+        mpatches.Patch(facecolor=palette[i], edgecolor='#333333',
+                       linewidth=0.6, label=_SIGMA_ATTR_SHARE_LABELS[i])
+        for i in range(5)
+    ]
+    leg = fig.legend(
+        handles=handles,
+        loc='lower center',
+        ncol=5,
+        bbox_to_anchor=(0.5, 0.01),
+        frameon=False,
+        fontsize=9,
+        handlelength=1.4,
+        columnspacing=1.2,
+        title=(
+            f'Management share of classifiable variance    '
+            f'({left_tag}  ←  Mixed (50 / 50)  →  {right_tag})'
+        ),
+        title_fontsize=10,
+    )
+    leg._legend_box.align = 'center'
+
+
+def _draw_sigma_attribution_disclosure_box(
+    ax,
+    df: pd.DataFrame,
+) -> None:
+    """Render the Projection-era disclosure text box reporting σ_Model
+    dominance on the first panel of a binary attribution map."""
+    if df.empty:
+        return
+    model_share = df['Model_Share'].to_numpy(dtype=float)
+    mgmt = df['Mgmt_Share'].to_numpy(dtype=float)
+    clim = df['Clim_Share'].to_numpy(dtype=float)
+    finite = np.isfinite(model_share) & np.isfinite(mgmt) & np.isfinite(clim)
+    if not finite.any():
+        return
+    model_share_f = model_share[finite]
+    mgmt_f = mgmt[finite]
+    clim_f = clim[finite]
+    n_model_dom = int(
+        ((model_share_f > mgmt_f) & (model_share_f > clim_f)).sum()
+    )
+    n_total = int(finite.sum())
+    median_model = float(np.median(model_share_f)) * 100.0
+    txt = (
+        f'σ_Model dominant in {n_model_dom}/{n_total} basins '
+        f'({n_model_dom / n_total * 100:.0f}%); median Model share '
+        f'{median_model:.0f}%.\n'
+        f'Color axis classifies Management vs Climate within the '
+        f'remaining variance;\nbasins with a bold black edge are '
+        f'Model-dominated overall.'
+    )
+    ax.text(
+        0.02, 0.02, txt,
+        transform=ax.transAxes,
+        fontsize=7,
+        ha='left', va='bottom',
+        bbox=dict(
+            boxstyle='round,pad=0.35', facecolor='white',
+            edgecolor='#555555', linewidth=0.6, alpha=0.9,
+        ),
+        zorder=10,
+    )
+
+
+def _draw_sigma_attribution_ternary_legend(fig) -> None:
+    """Render the small RGB-mixed ternary triangle inset at bottom-left."""
+    from matplotlib.patches import Polygon
+    ax_inset = fig.add_axes([0.04, 0.04, 0.14, 0.19])
+    ax_inset.set_aspect('equal')
+    ax_inset.axis('off')
+    # Paint the triangle interior by tiling a grid of small polygons
+    # colored by their barycentric coordinates → RGB.
+    tri_vertices = np.array([
+        [0.5, np.sqrt(3) / 2],   # Top — Management (red)
+        [0.0, 0.0],              # Bottom-left — Climate (blue)
+        [1.0, 0.0],              # Bottom-right — Model (green)
+    ])
+    n_sub = 20
+    base_intensity = 0.9
+    for i in range(n_sub):
+        for j in range(n_sub - i):
+            # Barycentric tri-sub-cell at (i, j, k) with k = n_sub-i-j
+            a0 = i / n_sub
+            b0 = j / n_sub
+            c0 = 1 - a0 - b0
+            if c0 < 0:
+                continue
+            # Four corners of a small parallelogram tile; we render it as
+            # two triangles for speed.
+            def bary_to_xy(a, b):
+                c = 1 - a - b
+                return (
+                    a * tri_vertices[0] + b * tri_vertices[1]
+                    + c * tri_vertices[2]
+                )
+            a1 = a0 + 1 / n_sub
+            b1 = b0 + 1 / n_sub
+            p0 = bary_to_xy(a0, b0)
+            p1 = bary_to_xy(a1, b0)
+            p2 = bary_to_xy(a0, b1)
+            # The color is given by the centroid's barycentric coords
+            a_c = a0 + 1 / (3 * n_sub)
+            b_c = b0 + 1 / (3 * n_sub)
+            c_c = 1 - a_c - b_c
+            color = (
+                a_c * base_intensity,   # R = Management
+                c_c * base_intensity,   # G = Model
+                b_c * base_intensity,   # B = Climate
+            )
+            poly = Polygon(
+                np.stack([p0, p1, p2]), facecolor=color, edgecolor='none',
+            )
+            ax_inset.add_patch(poly)
+            if a0 + b0 + 1 / n_sub < 1:
+                p3 = bary_to_xy(a1, b1)
+                a_c2 = a0 + 2 / (3 * n_sub)
+                b_c2 = b0 + 2 / (3 * n_sub)
+                c_c2 = 1 - a_c2 - b_c2
+                color2 = (
+                    a_c2 * base_intensity,
+                    c_c2 * base_intensity,
+                    b_c2 * base_intensity,
+                )
+                poly2 = Polygon(
+                    np.stack([p1, p3, p2]), facecolor=color2, edgecolor='none',
+                )
+                ax_inset.add_patch(poly2)
+    # Triangle outline + labels
+    outline = Polygon(
+        tri_vertices, closed=True, fill=False,
+        edgecolor='black', linewidth=0.8,
+    )
+    ax_inset.add_patch(outline)
+    ax_inset.text(
+        0.5, np.sqrt(3) / 2 + 0.05, 'Management',
+        ha='center', va='bottom', fontsize=7, fontweight='bold', color='#8b1a0a',
+    )
+    ax_inset.text(
+        -0.05, -0.02, 'Climate',
+        ha='right', va='top', fontsize=7, fontweight='bold', color='#0a2c8b',
+    )
+    ax_inset.text(
+        1.05, -0.02, 'Model',
+        ha='left', va='top', fontsize=7, fontweight='bold', color='#0a5a1f',
+    )
+    ax_inset.set_xlim(-0.35, 1.35)
+    ax_inset.set_ylim(-0.15, np.sqrt(3) / 2 + 0.22)
+
+
+def _ternary_rgb_colors(df: pd.DataFrame) -> list[tuple[float, float, float] | str]:
+    """Convert per-basin Mgmt/Clim/Model shares to RGB colors.
+
+    R = Mgmt × 0.9   (deep red for pure Management)
+    G = Model × 0.9  (deep green for pure Model)
+    B = Clim × 0.9   (deep blue for pure Climate)
+
+    Basins with NaN shares return the no-data gray ``#D5D5D5`` hex code.
+    """
+    base_intensity = 0.9
+    colors: list[tuple[float, float, float] | str] = []
+    for _, row in df.iterrows():
+        mgmt = row['Mgmt_Share']
+        clim = row['Clim_Share']
+        model = row['Model_Share']
+        if not (np.isfinite(mgmt) and np.isfinite(clim) and np.isfinite(model)):
+            colors.append('#D5D5D5')
+            continue
+        colors.append((
+            float(mgmt) * base_intensity,
+            float(model) * base_intensity,
+            float(clim) * base_intensity,
+        ))
+    return colors
+
+
+def _merge_attr_df_to_gdf(
+    basins_gdf: gpd.GeoDataFrame,
+    attr_df: pd.DataFrame,
+    basin_col: str = 'BASIN_NAME',
+) -> gpd.GeoDataFrame:
+    """Left-merge the attribution DataFrame onto the basin shapefile."""
+    merged = basins_gdf.merge(
+        attr_df, how='left', left_on=basin_col, right_on='Region',
+    )
+    return merged
+
+
+def _save_attribution_csv(
+    attr_df: pd.DataFrame,
+    pool: str,
+    era: str,
+    output_dir: str,
+    csv_basename: str,
+) -> None:
+    """Append/write the long-format per-basin attribution CSV.
+
+    Each invocation writes a row per basin to ``{csv_basename}_{era}.csv``
+    with a ``Pool`` column so that multiple pools (headline, detailed)
+    end up in the same per-era file.
+    """
+    if attr_df.empty:
+        return
+    out_path = os.path.join(output_dir, f'{csv_basename}_{era}.csv')
+    out_df = attr_df.copy()
+    out_df.insert(0, 'Era', era)
+    out_df.insert(1, 'Pool', pool)
+    if os.path.isfile(out_path):
+        existing = pd.read_csv(out_path)
+        existing = existing[existing['Pool'] != pool]
+        out_df = pd.concat([existing, out_df], ignore_index=True)
+    out_df.to_csv(out_path, index=False)
+
+
+def _setup_attr_figure(
+    n_panels: int,
+    title: str,
+) -> tuple:
+    """Create a 1×n figure with a suptitle and return (fig, axes)."""
+    fig, axes = plt.subplots(
+        1, n_panels, figsize=(6 * n_panels, 7), constrained_layout=False,
+    )
+    if n_panels == 1:
+        axes = [axes]
+    else:
+        axes = list(axes)
+    fig.suptitle(title, fontsize=16, fontweight='bold', y=0.98)
+    plt.subplots_adjust(
+        left=0.04, right=0.98, top=0.90, bottom=0.14, wspace=0.06,
+    )
+    return fig, axes
+
+
+def _draw_attribution_basin_panel(
+    ax,
+    basins_gdf: gpd.GeoDataFrame,
+    attr_df: pd.DataFrame,
+    era: str,
+    *,
+    ternary: bool,
+    panel_title: str,
+    panel_label: str,
+    basin_col: str = 'BASIN_NAME',
+) -> None:
+    """Draw a single basin-level attribution choropleth panel."""
+    ax.set_facecolor('#EEEEEE')
+    merged = _merge_attr_df_to_gdf(basins_gdf, attr_df, basin_col=basin_col)
+    palette = _palette_for_era(era)
+    # Default edge styling (thin gray)
+    edge_colors = np.full(len(merged), '#666666', dtype=object)
+    linewidths = np.full(len(merged), 0.5, dtype=float)
+
+    face_colors: list
+    if ternary:
+        face_colors = _ternary_rgb_colors(merged)
+    else:
+        share = _compute_binary_share(merged, era)
+        bins = _classify_share_bins(share)
+        face_colors = [
+            palette[b] if b >= 0 else '#D5D5D5' for b in bins
+        ]
+        if era == 'Projection':
+            # Bold black edge for basins where σ_Model dominates.
+            model_share = merged['Model_Share'].to_numpy(dtype=float)
+            mgmt_share = merged['Mgmt_Share'].to_numpy(dtype=float)
+            clim_share = merged['Clim_Share'].to_numpy(dtype=float)
+            finite = (
+                np.isfinite(model_share)
+                & np.isfinite(mgmt_share)
+                & np.isfinite(clim_share)
+            )
+            dominant = np.zeros(len(merged), dtype=bool)
+            dominant[finite] = (
+                (model_share[finite] > mgmt_share[finite])
+                & (model_share[finite] > clim_share[finite])
+            )
+            edge_colors[dominant] = 'black'
+            linewidths[dominant] = 1.5
+
+    merged.plot(
+        ax=ax,
+        color=face_colors,
+        edgecolor=list(edge_colors),
+        linewidth=list(linewidths),
+    )
+
+    # AMA/INA labels as minor visual guide
+    ama_ina = get_ama_ina_basin_names()
+    _overlay_boundaries(
+        ax, basins_gdf, ama_ina, basin_col,
+        label_fontsize=5.5, label_all=False,
+    )
+    ax.set_title(
+        f'{panel_label} {panel_title}',
+        fontsize=11, fontweight='bold',
+    )
+
+
+def create_sigma_attribution_map(
+    unc_dir: str,
+    basin_shp: str,
+    output_dir: str,
+    *,
+    pools: tuple[str, ...] = ('Total_GW', 'Total_SW'),
+    eras: tuple[str, ...] = ('Hindcast', 'Historical', 'Projection'),
+    filename_tag: str | None = None,
+    csv_basename: str = 'Sigma_Attribution',
+    load_fn=None,
+    title_prefix: str = 'σ Attribution',
+) -> None:
+    """Binary 5-bin discrete σ-attribution choropleth, one figure per era.
+
+    Reads per-basin per-category σ CSVs written by Step 3b, computes the
+    three-way variance-share decomposition, and renders a 1×len(pools)
+    panel figure for each era in *eras*.
+
+    The binary color axis metric varies with era:
+      - Projection: Management / (Management + Climate)
+      - Hindcast/Historical: Management / (Management + Model)
+
+    In the Projection era, basins whose σ_Model is larger than both
+    σ_mgmt and σ_clim (i.e. Model-dominant) are flagged with a bold
+    black polygon edge and an on-figure disclosure box reporting the
+    count and median Model share.
+
+    Args:
+        unc_dir: ``.../Uncertainty`` directory holding per-component
+            per-category basin CSVs.
+        basin_shp: Path to the AZ groundwater basin shapefile.
+        output_dir: Output directory (typically
+            ``Raster_Maps/Sigma_Attribution/``).
+        pools: Withdrawal pools to render as side-by-side panels in each
+            figure.
+        eras: Eras to render. Each era produces one figure.
+        filename_tag: Optional filename suffix (e.g. ``'Detailed'``) used
+            to distinguish headline vs detailed vs CU invocations.
+        csv_basename: Filename stem for the companion long-format CSV.
+        load_fn: Internal override for the per-pool loader (used by the
+            CU variant). Defaults to ``_load_sigma_attribution_data``.
+        title_prefix: Figure suptitle prefix (e.g. ``σ Attribution`` or
+            ``σ_CU Attribution``).
+
+    Returns:
+        None. Writes ``Era_Maps_Sigma_Attribution_{Era}[_Tag].png`` and a
+        companion long-format CSV per era to *output_dir*.
+    """
+    apply_journal_style()
+    makedirs(output_dir)
+    basins_gdf = gpd.read_file(basin_shp)
+    basin_col = (
+        'BASIN_NAME' if 'BASIN_NAME' in basins_gdf.columns
+        else basins_gdf.columns[0]
+    )
+    loader = load_fn if load_fn is not None else _load_sigma_attribution_data
+
+    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)']
+    for era in eras:
+        # Load data for every pool first so we can bail early if none
+        pool_dfs: dict[str, pd.DataFrame] = {}
+        for pool in pools:
+            df = loader(unc_dir, pool, era)
+            if df is None or df.empty:
+                logger.warning(
+                    '  [σ attribution] no data for pool=%s era=%s — '
+                    'skipping this panel', pool, era,
+                )
+                continue
+            pool_dfs[pool] = df
+        if not pool_dfs:
+            logger.warning(
+                '  [σ attribution] era=%s has no pool data — skipping figure',
+                era,
+            )
+            continue
+
+        n_panels = len(pools)
+        fig, axes = _setup_attr_figure(
+            n_panels=n_panels,
+            title=f'{title_prefix} — {era} ({ERA_PERIODS[era][0]}–'
+                  f'{ERA_PERIODS[era][1]})',
+        )
+        for idx, pool in enumerate(pools):
+            ax = axes[idx]
+            df = pool_dfs.get(pool)
+            if df is None:
+                ax.set_facecolor('#EEEEEE')
+                ax.text(
+                    0.5, 0.5, f'{pool.replace("_", " ")}\n(no data)',
+                    transform=ax.transAxes, ha='center', va='center',
+                    fontsize=11,
+                )
+                ax.axis('off')
+                continue
+            n_class = int(
+                np.isfinite(df['Mgmt_Share']).sum()
+            )
+            pretty = pool.replace('_', ' ')
+            _draw_attribution_basin_panel(
+                ax, basins_gdf, df, era,
+                ternary=False,
+                panel_title=f'{pretty} — n={n_class}',
+                panel_label=panel_labels[idx],
+                basin_col=basin_col,
+            )
+            if era == 'Projection' and idx == 0:
+                _draw_sigma_attribution_disclosure_box(ax, df)
+            _save_attribution_csv(df, pool, era, output_dir, csv_basename)
+
+        _draw_sigma_attribution_legend(fig, era)
+
+        # Build output filename
+        base = 'Era_Maps_Sigma_Attribution'
+        if csv_basename.endswith('CU_Attribution'):
+            base = 'Era_Maps_Sigma_CU_Attribution'
+        parts = [base, era]
+        if filename_tag:
+            parts.append(filename_tag)
+        out_path = os.path.join(output_dir, '_'.join(parts) + '.png')
+        fig.savefig(out_path, dpi=600, bbox_inches='tight')
+        plt.close(fig)
+        logger.info('  σ attribution map saved to %s', out_path)
+
+
+def create_sigma_cu_attribution_map(
+    unc_dir: str,
+    basin_shp: str,
+    output_dir: str,
+    *,
+    pools: tuple[str, ...] = (
+        'Irrigation_CU', 'Irrigation_GW_CU', 'Irrigation_SW_CU',
+    ),
+    eras: tuple[str, ...] = ('Hindcast', 'Historical', 'Projection'),
+) -> None:
+    """σ_CU binary attribution map via the ``IE × Withdrawal`` propagation.
+
+    Delegates to :func:`create_sigma_attribution_map` with the
+    CU-specific loader so the same NV-style 5-bin classification, black
+    edge flag, and disclosure box apply to the CU decomposition.
+    """
+    create_sigma_attribution_map(
+        unc_dir=unc_dir,
+        basin_shp=basin_shp,
+        output_dir=output_dir,
+        pools=pools,
+        eras=eras,
+        filename_tag=None,
+        csv_basename='Sigma_CU_Attribution',
+        load_fn=_load_sigma_cu_attribution_data,
+        title_prefix='σ_CU Attribution',
+    )
+
+
+def create_sigma_attribution_ternary_map(
+    unc_dir: str,
+    basin_shp: str,
+    output_dir: str,
+    *,
+    pools: tuple[str, ...] = ('Total_GW', 'Total_SW'),
+    eras: tuple[str, ...] = ('Hindcast', 'Historical', 'Projection'),
+    filename_tag: str | None = None,
+    for_cu: bool = False,
+) -> None:
+    """Ternary (RGB-mixed three-way continuous) σ-attribution choropleth.
+
+    Each basin's color is an RGB mix where R=Management, G=Model,
+    B=Climate. A small equilateral-triangle inset shows the color
+    gradient with the three corners labeled. Works identically in every
+    era without an era-specific color axis swap; in Hindcast and
+    Historical the Climate share is zero so basins fall on the
+    red↔green edge of the triangle (a correct visual disclosure that
+    climate is structurally absent in those eras).
+
+    Args:
+        for_cu: When True, load data via the CU propagation instead of
+            the raw withdrawal CSVs.
+
+    Returns:
+        None. Writes ``Era_Maps_Sigma_Attribution_Ternary_{Era}[_Tag].png``
+        (or the corresponding ``Sigma_CU_Attribution_Ternary`` variant)
+        per era. The companion CSV is shared with the binary map family.
+    """
+    apply_journal_style()
+    makedirs(output_dir)
+    basins_gdf = gpd.read_file(basin_shp)
+    basin_col = (
+        'BASIN_NAME' if 'BASIN_NAME' in basins_gdf.columns
+        else basins_gdf.columns[0]
+    )
+    loader = (
+        _load_sigma_cu_attribution_data if for_cu
+        else _load_sigma_attribution_data
+    )
+    csv_basename = (
+        'Sigma_CU_Attribution' if for_cu else 'Sigma_Attribution'
+    )
+    title_prefix = (
+        'σ_CU Attribution (Ternary)' if for_cu
+        else 'σ Attribution (Ternary)'
+    )
+    file_base = (
+        'Era_Maps_Sigma_CU_Attribution_Ternary' if for_cu
+        else 'Era_Maps_Sigma_Attribution_Ternary'
+    )
+
+    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)']
+    for era in eras:
+        pool_dfs: dict[str, pd.DataFrame] = {}
+        for pool in pools:
+            df = loader(unc_dir, pool, era)
+            if df is None or df.empty:
+                continue
+            pool_dfs[pool] = df
+        if not pool_dfs:
+            logger.warning(
+                '  [ternary] era=%s has no pool data — skipping figure', era,
+            )
+            continue
+
+        fig, axes = _setup_attr_figure(
+            n_panels=len(pools),
+            title=f'{title_prefix} — {era} ({ERA_PERIODS[era][0]}–'
+                  f'{ERA_PERIODS[era][1]})',
+        )
+        for idx, pool in enumerate(pools):
+            ax = axes[idx]
+            df = pool_dfs.get(pool)
+            if df is None:
+                ax.set_facecolor('#EEEEEE')
+                ax.text(
+                    0.5, 0.5, f'{pool.replace("_", " ")}\n(no data)',
+                    transform=ax.transAxes, ha='center', va='center',
+                    fontsize=11,
+                )
+                ax.axis('off')
+                continue
+            pretty = pool.replace('_', ' ')
+            _draw_attribution_basin_panel(
+                ax, basins_gdf, df, era,
+                ternary=True,
+                panel_title=pretty,
+                panel_label=panel_labels[idx],
+                basin_col=basin_col,
+            )
+            # Ensure CSV is written (may already be if binary map ran,
+            # but _save_attribution_csv is idempotent per Pool).
+            _save_attribution_csv(df, pool, era, output_dir, csv_basename)
+
+        _draw_sigma_attribution_ternary_legend(fig)
+        parts = [file_base, era]
+        if filename_tag:
+            parts.append(filename_tag)
+        out_path = os.path.join(output_dir, '_'.join(parts) + '.png')
+        fig.savefig(out_path, dpi=600, bbox_inches='tight')
+        plt.close(fig)
+        logger.info('  σ attribution ternary map saved to %s', out_path)
+
+
+def _load_year_resolved_attribution(
+    unc_dir: str,
+    pool: str,
+    basin: str,
+) -> pd.DataFrame | None:
+    """Load per-year three-way variance shares for a single basin + pool.
+
+    Used by the timeseries grid. Returns a DataFrame indexed by Year
+    with columns ``Mgmt_Share, Clim_Share, Model_Share``. Rows for
+    years where every σ component is zero (or missing) drop out.
+    """
+    merged: dict[int, dict[str, float]] = {}
+    any_loaded = False
+    for comp in _ALL_SIGMA_COMPONENTS:
+        df = _read_basin_sigma_category_csv(unc_dir, comp, pool)
+        if df is None:
+            continue
+        any_loaded = True
+        sub = df[df['Region'] == basin]
+        for _, row in sub.iterrows():
+            year = int(row['Year'])
+            merged.setdefault(year, {})[f'Sigma_{comp}_m3'] = (
+                float(row['Sigma_Volume_m3'])
+            )
+    if not any_loaded or not merged:
+        return None
+    rows = []
+    for year in sorted(merged):
+        sigmas = merged[year]
+        s_maca = sigmas.get('Sigma_MACA_m3', 0.0)
+        s_irr = sigmas.get('Sigma_Irr_m3', 0.0)
+        s_lulc = sigmas.get('Sigma_LULC_m3', 0.0)
+        s_gw = sigmas.get('Sigma_GW_m3', 0.0)
+        s_model = sigmas.get('Sigma_Model_m3', 0.0)
+        sigma_mgmt_sq = s_irr ** 2 + s_lulc ** 2 + s_gw ** 2
+        sigma_clim_sq = s_maca ** 2
+        sigma_model_sq = s_model ** 2
+        sigma_total_sq = sigma_mgmt_sq + sigma_clim_sq + sigma_model_sq
+        if sigma_total_sq <= 0:
+            continue
+        rows.append({
+            'Year': year,
+            'Mgmt_Share': sigma_mgmt_sq / sigma_total_sq,
+            'Clim_Share': sigma_clim_sq / sigma_total_sq,
+            'Model_Share': sigma_model_sq / sigma_total_sq,
+        })
+    if not rows:
+        return None
+    return pd.DataFrame(rows).set_index('Year')
+
+
+def create_sigma_attribution_timeseries(
+    unc_dir: str,
+    output_dir: str,
+    *,
+    basins: tuple[str, ...] = _SIGMA_ATTR_HEADLINE_BASINS,
+    pools: tuple[str, ...] = ('Total_GW', 'Total_SW'),
+    era_years: tuple[int, int] = (1896, 2099),
+) -> None:
+    """Per-year stacked-area plot of the three-way variance decomposition
+    for a short-list of headline basins × pools.
+
+    Renders a 4×len(pools) grid (default 4×2 = 8 basins × 2 pools) where
+    each panel stacks Management (red), Model (teal), and Climate (blue)
+    share in [0, 1] across all years in ``era_years``. Era shading
+    reproduces the Hindcast/Historical/Projection boundaries.
+
+    Also writes a long-format companion CSV
+    ``Sigma_Attribution_Timeseries.csv`` with one row per basin × pool ×
+    year.
+    """
+    apply_journal_style()
+    makedirs(output_dir)
+
+    n_basins = len(basins)
+    n_pools = len(pools)
+    fig, axes = plt.subplots(
+        n_basins, n_pools,
+        figsize=(5.5 * n_pools, 2.1 * n_basins),
+        sharex=True,
+        constrained_layout=True,
+    )
+    if n_basins == 1 and n_pools == 1:
+        axes = np.array([[axes]])
+    elif n_basins == 1:
+        axes = axes.reshape(1, -1)
+    elif n_pools == 1:
+        axes = axes.reshape(-1, 1)
+
+    fig.suptitle(
+        'σ Attribution — Annual Variance Shares per Basin',
+        fontsize=14, fontweight='bold',
+    )
+
+    csv_rows = []
+    band_colors = {
+        'Management': '#d04e1f',
+        'Model': '#2a9d8f',
+        'Climate': '#1f4fa5',
+    }
+
+    for ib, basin in enumerate(basins):
+        for ip, pool in enumerate(pools):
+            ax = axes[ib, ip]
+            ax.set_xlim(era_years[0], era_years[1])
+            ax.set_ylim(0.0, 1.0)
+            df = _load_year_resolved_attribution(unc_dir, pool, basin)
+            if df is None or df.empty:
+                ax.set_facecolor('#F5F5F5')
+                ax.text(
+                    0.5, 0.5, f'{basin}\n(no data)',
+                    transform=ax.transAxes, ha='center', va='center',
+                    fontsize=8, color='#888888',
+                )
+            else:
+                years = df.index.to_numpy()
+                mgmt = df['Mgmt_Share'].to_numpy()
+                model = df['Model_Share'].to_numpy()
+                clim = df['Clim_Share'].to_numpy()
+                ax.stackplot(
+                    years, mgmt, model, clim,
+                    colors=(
+                        band_colors['Management'],
+                        band_colors['Model'],
+                        band_colors['Climate'],
+                    ),
+                    edgecolor='none',
+                )
+                for _, row in df.reset_index().iterrows():
+                    csv_rows.append({
+                        'Basin': basin,
+                        'Pool': pool,
+                        'Year': int(row['Year']),
+                        'Mgmt_Share': row['Mgmt_Share'],
+                        'Clim_Share': row['Clim_Share'],
+                        'Model_Share': row['Model_Share'],
+                    })
+            for era, (s, e) in ERA_PERIODS.items():
+                ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.05, zorder=0)
+            ax.set_title(
+                f'{basin.title()} — {pool.replace("_", " ")}',
+                fontsize=9, fontweight='bold',
+            )
+            if ip == 0:
+                ax.set_ylabel('Variance share', fontsize=9)
+            if ib == n_basins - 1:
+                ax.set_xlabel('Year', fontsize=9)
+            ax.tick_params(labelsize=8)
+            ax.grid(alpha=0.2, linestyle='--')
+
+    handles = [
+        mpatches.Patch(color=band_colors['Management'], label='Management'),
+        mpatches.Patch(color=band_colors['Model'], label='Model'),
+        mpatches.Patch(color=band_colors['Climate'], label='Climate'),
+    ]
+    fig.legend(
+        handles=handles,
+        loc='lower center', ncol=3,
+        bbox_to_anchor=(0.5, -0.015),
+        frameon=False, fontsize=10,
+    )
+
+    out_path = os.path.join(output_dir, 'Sigma_Attribution_Timeseries.png')
+    fig.savefig(out_path, dpi=600, bbox_inches='tight')
+    plt.close(fig)
+    logger.info('  σ attribution timeseries saved to %s', out_path)
+
+    if csv_rows:
+        pd.DataFrame(csv_rows).to_csv(
+            os.path.join(output_dir, 'Sigma_Attribution_Timeseries.csv'),
+            index=False,
+        )
+
+
+def create_sigma_attribution_bubble(
+    unc_dir: str,
+    output_dir: str,
+    *,
+    pools: tuple[str, ...] = ('Total_GW', 'Total_SW'),
+    era: str = 'Projection',
+) -> None:
+    """Projection-era log-log bubble scatter of (σ_clim, σ_mgmt).
+
+    One figure with 1×len(pools) panels. Each bubble is a basin;
+    bubble size is proportional to ``√(σ_mgmt² + σ_clim²)`` and bubble
+    color encodes the same 5-bin discrete classification as the binary
+    attribution map. A ``y = x`` diagonal marks the 50/50 boundary.
+
+    Basins whose σ_Model is the single largest contributor are flagged
+    with a bold black bubble edge (mirroring the map-level flag). Only
+    the top 20% of basins by total σ are labeled to avoid clutter.
+
+    Hindcast/Historical eras are explicitly excluded because σ_clim is
+    structurally zero in those eras, which would place every bubble on
+    the y-axis (a degenerate visualization).
+    """
+    if era != 'Projection':
+        logger.info(
+            '  σ attribution bubble chart is Projection-only; skipping era=%s',
+            era,
+        )
+        return
+    apply_journal_style()
+    makedirs(output_dir)
+
+    n_panels = len(pools)
+    fig, axes = plt.subplots(
+        1, n_panels, figsize=(6 * n_panels, 6), constrained_layout=True,
+    )
+    if n_panels == 1:
+        axes = [axes]
+    else:
+        axes = list(axes)
+    fig.suptitle(
+        f'σ Attribution — (σ_Clim, σ_Mgmt) per Basin, {era}',
+        fontsize=14, fontweight='bold',
+    )
+
+    palette = _palette_for_era(era)
+    for idx, pool in enumerate(pools):
+        ax = axes[idx]
+        df = _load_sigma_attribution_data(unc_dir, pool, era)
+        if df is None or df.empty:
+            ax.set_facecolor('#F5F5F5')
+            ax.text(
+                0.5, 0.5, f'{pool}\n(no data)',
+                transform=ax.transAxes, ha='center', va='center', fontsize=11,
+            )
+            ax.axis('off')
+            continue
+        sigma_mgmt = df['Sigma_Mgmt_m3'].to_numpy() / 1e6
+        sigma_clim = df['Sigma_Clim_m3'].to_numpy() / 1e6
+        sigma_total = np.sqrt(sigma_mgmt ** 2 + sigma_clim ** 2)
+        share = _compute_binary_share(df, era)
+        bins = _classify_share_bins(share)
+        colors = [palette[b] if b >= 0 else '#D5D5D5' for b in bins]
+        # Bubble size: scale total σ into a visually reasonable marker range
+        finite_tot = sigma_total[np.isfinite(sigma_total) & (sigma_total > 0)]
+        max_tot = finite_tot.max() if finite_tot.size else 1.0
+        with np.errstate(invalid='ignore'):
+            sizes = 40.0 + 500.0 * (sigma_total / max_tot)
+        sizes = np.where(np.isfinite(sizes), sizes, 40.0)
+
+        # Model-dominant edge flag
+        model_share = df['Model_Share'].to_numpy(dtype=float)
+        mgmt_share = df['Mgmt_Share'].to_numpy(dtype=float)
+        clim_share = df['Clim_Share'].to_numpy(dtype=float)
+        model_dom = (
+            np.isfinite(model_share)
+            & (model_share > mgmt_share)
+            & (model_share > clim_share)
+        )
+        edge_colors = np.where(model_dom, 'black', '#333333')
+        linewidths = np.where(model_dom, 1.5, 0.5)
+
+        # Plot with log-log axes; clip any zero/NaN values above the
+        # minimum plottable value on each axis.
+        x_safe = np.where(
+            np.isfinite(sigma_clim) & (sigma_clim > 0), sigma_clim, np.nan,
+        )
+        y_safe = np.where(
+            np.isfinite(sigma_mgmt) & (sigma_mgmt > 0), sigma_mgmt, np.nan,
+        )
+        ax.scatter(
+            x_safe, y_safe, s=sizes, c=colors,
+            edgecolors=list(edge_colors), linewidths=list(linewidths),
+            alpha=0.85,
+        )
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+
+        # 1:1 diagonal
+        fx = x_safe[np.isfinite(x_safe)]
+        fy = y_safe[np.isfinite(y_safe)]
+        if fx.size and fy.size:
+            lo = min(fx.min(), fy.min()) * 0.8
+            hi = max(fx.max(), fy.max()) * 1.25
+            ax.plot(
+                [lo, hi], [lo, hi],
+                color='#555555', linestyle='--', linewidth=0.9,
+                label='σ_Mgmt = σ_Clim',
+            )
+            ax.set_xlim(lo, hi)
+            ax.set_ylim(lo, hi)
+
+        # Top-20% label annotation
+        if sigma_total.size:
+            threshold = np.nanpercentile(sigma_total, 80)
+            for i, region in enumerate(df['Region'].to_numpy()):
+                if (
+                    np.isfinite(sigma_total[i])
+                    and sigma_total[i] >= threshold
+                    and np.isfinite(x_safe[i])
+                    and np.isfinite(y_safe[i])
+                ):
+                    ax.annotate(
+                        str(region).title(),
+                        (x_safe[i], y_safe[i]),
+                        textcoords='offset points',
+                        xytext=(4, 4),
+                        fontsize=6.5,
+                        color='#222222',
+                    )
+
+        ax.set_xlabel(r'σ$_{\mathrm{Clim}}$ ($\times10^{6}$ m$^3$)', fontsize=10)
+        if idx == 0:
+            ax.set_ylabel(
+                r'σ$_{\mathrm{Mgmt}}$ ($\times10^{6}$ m$^3$)', fontsize=10,
+            )
+        ax.set_title(pool.replace('_', ' '), fontsize=11, fontweight='bold')
+        ax.grid(alpha=0.25, which='both', linestyle='--')
+        ax.legend(loc='upper left', fontsize=8, frameon=False)
+
+    fig.text(
+        0.5, -0.02,
+        r'Bubble size $\propto$ $\sqrt{\sigma_{\mathrm{Mgmt}}^{2} + '
+        r'\sigma_{\mathrm{Clim}}^{2}}$. '
+        'Basins with a bold black edge are Model-dominated overall '
+        r'($\sigma_{\mathrm{Model}}$ > both $\sigma_{\mathrm{Mgmt}}$ '
+        r'and $\sigma_{\mathrm{Clim}}$).',
+        ha='center', fontsize=8, color='#555555',
+    )
+
+    out_path = os.path.join(
+        output_dir, f'Sigma_Attribution_Bubble_{era}.png',
+    )
+    fig.savefig(out_path, dpi=600, bbox_inches='tight')
+    plt.close(fig)
+    logger.info('  σ attribution bubble saved to %s', out_path)
 
 
 def create_actual_vs_predicted_maps(
@@ -4300,9 +5579,13 @@ def create_trend_maps(
     # Helper: attach a secondary-unit twin axis to a colorbar so the
     # primary metric unit (e.g. mm, m³) sits on the LEFT side of the
     # colorbar and the secondary unit (e.g. ft, AF) sits on the RIGHT.
-    # No-op if secondary_unit_label / secondary_unit_factor are not set.
+    # No-op if secondary_unit_label / secondary_unit_factor are not
+    # set.  ``label_fontsize`` should match the primary axis label
+    # size so the two sides read at the same weight; ``tick_fontsize``
+    # should match the primary tick label size so the two tick rows
+    # are visually aligned.
     def _add_secondary_unit_axis(cbar, slope_scale, unit_prefix,
-                                 fontsize=10):
+                                 label_fontsize=12, tick_fontsize=10):
         if secondary_unit_label is None or secondary_unit_factor is None:
             return
         # Move the primary axis to the LEFT of the colorbar
@@ -4315,9 +5598,9 @@ def create_trend_maps(
                         cb_hi * secondary_unit_factor)
         cb_ax2.set_ylabel(
             f"Sen's slope ({unit_prefix}{secondary_unit_label}/year)",
-            fontsize=fontsize, fontweight='bold',
+            fontsize=label_fontsize, fontweight='bold',
         )
-        cb_ax2.tick_params(labelsize=fontsize)
+        cb_ax2.tick_params(labelsize=tick_fontsize)
         cb_ax2.yaxis.set_label_position('right')
         cb_ax2.yaxis.tick_right()
 
@@ -4435,7 +5718,7 @@ def create_trend_maps(
         )
         cbar.ax.tick_params(labelsize=10)
         _add_secondary_unit_axis(cbar, pixel_scale, pixel_prefix,
-                                 fontsize=10)
+                                 label_fontsize=12, tick_fontsize=10)
         fig.suptitle(
             f'{title} \u2014 Trend {period_name}\n'
             f"(stipple = not significant at \u03b1 = {alpha})",
@@ -4471,8 +5754,9 @@ def create_trend_maps(
                 f"Mean Sen's slope ({basin_prefix}{unit_label}/year)",
                 fontsize=11, fontweight='bold',
             )
+            cbar_b.ax.tick_params(labelsize=10)
             _add_secondary_unit_axis(cbar_b, basin_scale, basin_prefix,
-                                     fontsize=10)
+                                     label_fontsize=11, tick_fontsize=10)
             fig_b.suptitle(
                 f'{title} \u2014 Basin Trend {period_name}',
                 fontsize=13, fontweight='bold',
@@ -4512,7 +5796,7 @@ def create_trend_maps(
         )
         cbar.ax.tick_params(labelsize=10)
         _add_secondary_unit_axis(cbar, eras_scale, eras_prefix,
-                                 fontsize=10)
+                                 label_fontsize=12, tick_fontsize=10)
         fig.suptitle(
             f'{title} \u2014 Trend by Era\n'
             f"(stipple = not significant at \u03b1 = {alpha})",
@@ -4568,8 +5852,11 @@ def create_trend_maps(
                 f"Mean Sen's slope ({basin_eras_prefix}{unit_label}/year)",
                 fontsize=11, fontweight='bold',
             )
-            _add_secondary_unit_axis(cbar_b, basin_eras_scale,
-                                     basin_eras_prefix, fontsize=10)
+            cbar_b.ax.tick_params(labelsize=10)
+            _add_secondary_unit_axis(
+                cbar_b, basin_eras_scale, basin_eras_prefix,
+                label_fontsize=11, tick_fontsize=10,
+            )
             fig_b.suptitle(
                 f'{title} \u2014 Basin Trend by Era',
                 fontsize=14, fontweight='bold',

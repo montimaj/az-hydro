@@ -373,11 +373,58 @@ def _aggregate_member_volumes(
     return basin_vols, subbasin_vols
 
 
+def _aggregate_category_member_volumes(
+        member_cats: list[dict[str, np.ndarray]],
+        year_df: pd.DataFrame,
+        mm_to_m3: float,
+) -> dict[str, dict[str, np.ndarray]]:
+    """Per-category variant of ``_aggregate_member_volumes`` (basin-only).
+
+    For each partition category in the first member's dict, aggregate the
+    per-pixel predictions from every member to per-basin volumes in
+    acre-feet.
+
+    Sub-basin aggregation is intentionally omitted — ADWR stewardship
+    decisions are made at the basin level, and the sub-basin variant is
+    deferred (see σ attribution plan).
+
+    Args:
+        member_cats (list[dict[str, np.ndarray]]): Ensemble members; each
+            dict maps a category name to a 1-D array of length = number
+            of valid pixels.
+        year_df (pd.DataFrame): Must contain ``GW_Basin``.
+        mm_to_m3 (float): Pixel depth (mm) → volume (m³) conversion.
+
+    Returns:
+        dict[str, dict[str, np.ndarray]]: ``{category: {basin: np.ndarray(n_members)}}``
+            where each inner array holds per-member volume in acre-feet.
+    """
+    basins = year_df['GW_Basin'].values
+    n_members = len(member_cats)
+    m3_to_af = M3_TO_AF
+    unique_basins = np.unique(basins)
+
+    result: dict[str, dict[str, np.ndarray]] = {}
+    for cat_name in member_cats[0]:
+        cat_basin_vols: dict[str, np.ndarray] = {}
+        for b in unique_basins:
+            bmask = basins == b
+            vols = np.empty(n_members, dtype=np.float64)
+            for i, mc in enumerate(member_cats):
+                vols[i] = (
+                    float(np.nansum(mc[cat_name][bmask]))
+                    * mm_to_m3 * m3_to_af
+                )
+            cat_basin_vols[b] = vols
+        result[cat_name] = cat_basin_vols
+    return result
+
+
 def _accumulate_basin_sigma(
         accum: dict,
         year: int,
         basin_vols: dict[str, np.ndarray],
-        subbasin_vols: dict[str, np.ndarray],
+        subbasin_vols: dict[str, np.ndarray] | None,
 ) -> None:
     """Store per-year basin/sub-basin member volumes into *accum*.
 
@@ -387,15 +434,35 @@ def _accumulate_basin_sigma(
             'basin': {year: {name: np.ndarray(n_members)}},
             'subbasin': {year: {name: np.ndarray(n_members)}},
         }
+
+    If ``subbasin_vols`` is ``None``, the sub-basin entry for *year* is
+    set to an empty dict (used by the per-category basin-only path).
     """
     accum['basin'][year] = basin_vols
-    accum['subbasin'][year] = subbasin_vols
+    accum.setdefault('subbasin', {})[year] = (
+        subbasin_vols if subbasin_vols is not None else {}
+    )
+
+
+def _accumulate_category_basin_sigma(
+        cat_accum: dict[str, dict],
+        year: int,
+        cat_basin_vols: dict[str, dict[str, np.ndarray]],
+) -> None:
+    """Store per-year per-category basin volumes into *cat_accum*.
+
+    Each key in ``cat_accum`` is a category name mapping to
+    ``{'basin': {year: {basin: np.ndarray(n_members)}}}``.
+    """
+    for cat_name, basin_vols in cat_basin_vols.items():
+        cat_accum[cat_name]['basin'][year] = basin_vols
 
 
 def _write_basin_sigma_csv(
         accum: dict,
         output_dir: str,
         label: str,
+        basin_only: bool = False,
 ) -> None:
     """Write basin-scale and sub-basin-scale σ CSVs from accumulated data.
 
@@ -403,9 +470,13 @@ def _write_basin_sigma_csv(
     ``Year, Region, Mean_Volume_m3, Sigma_Volume_m3, Mean_Volume_AF,
     Sigma_Volume_AF, CV, Lower_95CI_m3, Upper_95CI_m3, Lower_95CI_AF,
     Upper_95CI_AF, N_Members``.
+
+    When ``basin_only=True`` only the basin-level CSV is written (used by
+    the per-category CSV extension for σ attribution).
     """
     af_to_m3 = 1.0 / M3_TO_AF  # 1233.48
-    for level in ('basin', 'subbasin'):
+    levels = ('basin',) if basin_only else ('basin', 'subbasin')
+    for level in levels:
         rows = []
         level_data = accum[level]
         for year in sorted(level_data):
@@ -546,6 +617,9 @@ def compute_sigma_maca(
     sigma_maca = {}
     yearly_stats = {}
     basin_accum = {'basin': {}, 'subbasin': {}}
+    cat_basin_accum: dict[str, dict] = {
+        c: {'basin': {}} for c in partops.CATEGORIES
+    }
     cat_sigma_maca: dict[str, dict[int, np.ndarray]] = {
         c: {} for c in partops.CATEGORIES
     }
@@ -589,6 +663,8 @@ def compute_sigma_maca(
 
         bv, sbv = _aggregate_member_volumes(gcm_preds, year_df, mm_to_m3)
         _accumulate_basin_sigma(basin_accum, year, bv, sbv)
+        cat_bv = _aggregate_category_member_volumes(gcm_cats, year_df, mm_to_m3)
+        _accumulate_category_basin_sigma(cat_basin_accum, year, cat_bv)
 
         _write_std_raster(std, basin_flat, valid_mask, raster_shape,
                           ref_raster_file,
@@ -603,6 +679,13 @@ def compute_sigma_maca(
 
     _save_summary(yearly_stats, os.path.join(output_dir, 'Sigma_MACA'), 'MACA')
     _write_basin_sigma_csv(basin_accum, os.path.join(output_dir, 'Sigma_MACA'), 'MACA')
+    for cat in partops.CATEGORIES:
+        _write_basin_sigma_csv(
+            cat_basin_accum[cat],
+            os.path.join(output_dir, 'Sigma_MACA'),
+            f'MACA_{cat}',
+            basin_only=True,
+        )
     _save_climate_input_spread(climate_spread, os.path.join(output_dir, 'Sigma_MACA'))
     _plot_climate_input_spread(climate_spread, os.path.join(output_dir, 'Sigma_MACA'))
     logger.info('  σ_MACA complete.')
@@ -809,6 +892,9 @@ def compute_sigma_model(
     sigma_model = {}
     yearly_stats = {}
     basin_accum = {'basin': {}, 'subbasin': {}}
+    cat_basin_accum: dict[str, dict] = {
+        c: {'basin': {}} for c in partops.CATEGORIES
+    }
     cat_sigma_model: dict[str, dict[int, np.ndarray]] = {
         c: {} for c in partops.CATEGORIES
     }
@@ -837,6 +923,8 @@ def compute_sigma_model(
 
         bv, sbv = _aggregate_member_volumes(seed_preds, year_df, mm_to_m3)
         _accumulate_basin_sigma(basin_accum, year, bv, sbv)
+        cat_bv = _aggregate_category_member_volumes(seed_cats, year_df, mm_to_m3)
+        _accumulate_category_basin_sigma(cat_basin_accum, year, cat_bv)
 
         _write_std_raster(std, basin_flat, valid_mask, raster_shape,
                           ref_raster_file,
@@ -851,6 +939,10 @@ def compute_sigma_model(
 
     _save_summary(yearly_stats, base_dir, 'Model')
     _write_basin_sigma_csv(basin_accum, base_dir, 'Model')
+    for cat in partops.CATEGORIES:
+        _write_basin_sigma_csv(
+            cat_basin_accum[cat], base_dir, f'Model_{cat}', basin_only=True,
+        )
     logger.info('  σ_model complete.')
     return sigma_model, cat_sigma_model
 
@@ -944,6 +1036,9 @@ def compute_sigma_irr(
     sigma_irr = {}
     yearly_stats = {}
     basin_accum = {'basin': {}, 'subbasin': {}}
+    cat_basin_accum: dict[str, dict] = {
+        c: {'basin': {}} for c in partops.CATEGORIES
+    }
     cat_sigma_irr: dict[str, dict[int, np.ndarray]] = {
         c: {} for c in partops.CATEGORIES
     }
@@ -983,8 +1078,9 @@ def compute_sigma_irr(
 
             std = np.abs(pred_orig - pred_alt) / 2.0
             irr_members = [pred_orig, pred_alt]
+            irr_cat_members = [cat_orig, cat_alt]
             cat_std = _compute_category_sigmas(
-                [cat_orig, cat_alt], mode='half_range',
+                irr_cat_members, mode='half_range',
             )
         else:
             # Outside IrrMapper era: constant σ from regression RMSE
@@ -1010,8 +1106,9 @@ def compute_sigma_irr(
 
             std = np.abs(pred_plus - pred_minus) / 2.0
             irr_members = [pred_plus, pred_minus]
+            irr_cat_members = [cat_plus, cat_minus]
             cat_std = _compute_category_sigmas(
-                [cat_plus, cat_minus], mode='half_range',
+                irr_cat_members, mode='half_range',
             )
 
         sigma_irr[year] = std
@@ -1021,6 +1118,10 @@ def compute_sigma_irr(
 
         bv, sbv = _aggregate_member_volumes(irr_members, year_df, mm_to_m3)
         _accumulate_basin_sigma(basin_accum, year, bv, sbv)
+        cat_bv = _aggregate_category_member_volumes(
+            irr_cat_members, year_df, mm_to_m3,
+        )
+        _accumulate_category_basin_sigma(cat_basin_accum, year, cat_bv)
 
         _write_std_raster(std, basin_flat, valid_mask, raster_shape,
                           ref_raster_file,
@@ -1035,6 +1136,10 @@ def compute_sigma_irr(
 
     _save_summary(yearly_stats, base_dir, 'Irr')
     _write_basin_sigma_csv(basin_accum, base_dir, 'Irr')
+    for cat in partops.CATEGORIES:
+        _write_basin_sigma_csv(
+            cat_basin_accum[cat], base_dir, f'Irr_{cat}', basin_only=True,
+        )
     logger.info('  σ_irr complete.')
     return sigma_irr, cat_sigma_irr
 
@@ -1157,6 +1262,9 @@ def compute_sigma_lulc(
     sigma_lulc = {}
     yearly_stats = {}
     basin_accum = {'basin': {}, 'subbasin': {}}
+    cat_basin_accum: dict[str, dict] = {
+        c: {'basin': {}} for c in partops.CATEGORIES
+    }
     cat_sigma_lulc: dict[str, dict[int, np.ndarray]] = {
         c: {} for c in partops.CATEGORIES
     }
@@ -1313,6 +1421,10 @@ def compute_sigma_lulc(
             scenario_preds, year_df, mm_to_m3,
         )
         _accumulate_basin_sigma(basin_accum, year, bv, sbv)
+        cat_bv = _aggregate_category_member_volumes(
+            scenario_cats, year_df, mm_to_m3,
+        )
+        _accumulate_category_basin_sigma(cat_basin_accum, year, cat_bv)
 
         _write_std_raster(std, basin_flat, valid_mask, raster_shape,
                           ref_raster_file,
@@ -1327,6 +1439,10 @@ def compute_sigma_lulc(
 
     _save_summary(yearly_stats, base_dir, 'LULC')
     _write_basin_sigma_csv(basin_accum, base_dir, 'LULC')
+    for cat in partops.CATEGORIES:
+        _write_basin_sigma_csv(
+            cat_basin_accum[cat], base_dir, f'LULC_{cat}', basin_only=True,
+        )
 
     # Save per-scenario volume projections
     sc_vol_dir = os.path.join(base_dir, 'Scenario_Volumes')
@@ -1460,6 +1576,9 @@ def compute_sigma_gw(
     sigma_gw = {}
     yearly_stats = {}
     basin_accum = {'basin': {}, 'subbasin': {}}
+    cat_basin_accum: dict[str, dict] = {
+        c: {'basin': {}} for c in partops.CATEGORIES
+    }
     cat_sigma_gw: dict[str, dict[int, np.ndarray]] = {
         c: {} for c in partops.CATEGORIES
     }
@@ -1491,6 +1610,10 @@ def compute_sigma_gw(
         bv, sbv = _aggregate_member_volumes(snapshot_preds, year_df,
                                             mm_to_m3)
         _accumulate_basin_sigma(basin_accum, year, bv, sbv)
+        cat_bv = _aggregate_category_member_volumes(
+            snapshot_cats, year_df, mm_to_m3,
+        )
+        _accumulate_category_basin_sigma(cat_basin_accum, year, cat_bv)
 
         _write_std_raster(std, basin_flat, valid_mask, raster_shape,
                           ref_raster_file,
@@ -1505,6 +1628,10 @@ def compute_sigma_gw(
 
     _save_summary(yearly_stats, base_dir, 'GW')
     _write_basin_sigma_csv(basin_accum, base_dir, 'GW')
+    for cat in partops.CATEGORIES:
+        _write_basin_sigma_csv(
+            cat_basin_accum[cat], base_dir, f'GW_{cat}', basin_only=True,
+        )
     logger.info('  σ_gw complete.')
     return sigma_gw, cat_sigma_gw
 

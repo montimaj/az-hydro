@@ -112,7 +112,22 @@ UQ components (Step 3b) support `--skip-uq`:
 python pipeline.py --steps 3b --skip-uq sigma-maca,sigma-lulc   # skip GEE-dependent components
 python pipeline.py --steps 3b --skip-uq sigma-maca              # skip only inter-GCM spread
 python pipeline.py --steps 3b --skip-uq sigma-model,density-sensitivity # skip seed ensemble + partition sensitivity
+python pipeline.py --steps 3b --skip-uq sw-capture-sigma         # skip SW Capture Index w/ σ_GW propagation
 ```
+
+Step 3g map families support `--skip-maps`:
+
+```bash
+python pipeline.py --steps 3g --skip-maps trends                 # era-mean maps + graphical abstract only (skip slow trend-map suite)
+```
+
+Step 3h is a lightweight graphical-abstract-only iteration loop (~30 s) that reads the cached Annual_Summaries CSVs from disk — no UQ, no era-mean maps, no trends:
+
+```bash
+python pipeline.py --steps 3h                                    # regenerate Figure 1 only (~30 s)
+```
+
+Step 3h is excluded from `--steps all` because Step 3g already produces the graphical abstract as part of its full raster-map suite; use Step 3h when iterating on the Figure 1 layout after Step 3 and 3b have already run.
 
 #### Available steps
 
@@ -127,9 +142,10 @@ python pipeline.py --steps 3b --skip-uq sigma-model,density-sensitivity # skip s
 | `2c-seed` | Evaluate seeded LOO spatial holdout (10% local calibration) |
 | `2s` | Cross-strategy summary (can run standalone from saved results) |
 | `3`  | Full-period XGBRF prediction (1896–2099) |
-| `3b` | Hybrid uncertainty quantification |
-| `3e` | Well package (per-well Parquet + GPKG locations with uncertainty) |
+| `3b` | Hybrid uncertainty quantification (incl. σ-propagated SW Capture Index and per-well σ disaggregation) |
+| `3e` | Well package (per-well Parquet + GPKG locations with uncertainty, incl. SW capture + σ) |
 | `3g` | Raster maps, actual vs predicted, and trend analysis for all output categories |
+| `3h` | Graphical abstract / Figure 1 only (lightweight; reads `Annual_Summaries/` from disk). Must be explicitly requested — excluded from `--steps all` because `3g` already produces this figure. Intended for iterating on the Figure 1 layout in ~30 s without re-running anything else. |
 | `4`  | USGS intercomparison |
 | `4b` | CU intercomparison |
 | `4c` | CAP/SRP surface-water validation |
@@ -173,8 +189,15 @@ python pipeline.py --steps 3b --skip-uq sigma-model,density-sensitivity # skip s
 | `density-sensitivity` | Skip partition-level diagnostic (density-ratio ±20% + smoothing-sigma sweep {2, 8}) |
 | `sigma-total` | Skip σ_total quadrature, basin σ, visualizations, and raster augmentation |
 | `sigma-cu` | Skip σ_CU — consumptive use uncertainty (IE × Withdrawal error propagation) |
+| `sw-capture-sigma` | Skip SW Capture Index computation with σ_GW propagation. Produces the per-pool SW capture rasters (fraction, depth, volume) with combined λ + σ_total 95 % CI bounds plus per-well σ_capture disaggregation in `Well_Package.gpkg`. Depends on `sigma-total`; skipping means no SW capture outputs are produced (there is no σ-less fallback path). |
 
-> **Note on skipping individual σ components:** Per-category σ arrays (e.g., σ_model for Irrigation, Non_Irrigation, etc.) are only held in memory during computation and are never written to disk as separate rasters. When `sigma-total` runs, it can reload *total-level* per-component σ from disk (e.g., `Sigma_Model_mm_{year}.tif`), but the per-category σ_total rasters (`Sigma_Total_{cat}_mm_{year}.tif`) will be zero if the individual σ steps were skipped. This causes downstream augmented category rasters to have zero σ, which in turn makes σ_CU zero. To get correct per-category uncertainty, run all individual σ components (σ_MACA through σ_gw) without skipping. Only `density-sensitivity` (the partition-level diagnostic) can be safely skipped without affecting downstream products.
+#### Step 3g map sub-steps
+
+| Sub-step | Description |
+|----------|-------------|
+| `trends` | Skip the full Mann-Kendall + Sen's slope trend-map suite (withdrawals, CU, SW capture depth/volume/fraction, per-basin and per-sub-basin trend CSVs). This is the slowest sub-step in Step 3g — per-pixel MK + Sen on 204 annual rasters × ~15 product families × 4 periods takes the bulk of the step's runtime, so skipping is useful when iterating on the era-mean raster maps or the graphical abstract. Era-mean raster maps, σ-component CV maps, Prediction CV/SNR maps, actual-vs-predicted figures, and the graphical abstract are still produced. |
+
+> **Note on skipping individual σ components:** Per-category σ at the *pixel* level (e.g., the per-pixel σ_model array for Irrigation, Non_Irrigation, etc.) is only held in memory during computation and is never written to disk as a separate per-category raster. Per-category σ at the *basin* level, by contrast, **is** persisted to disk as `Uncertainty/{component}/Basin_Sigma_{component}_{category}.csv` (five components × eight partition categories = 40 new CSVs per full Step 3b run), where it is consumed by the σ attribution diagnostic suite in Step 3g; those files are additive and leave the existing total-level `Basin_Sigma_{component}.csv` and `SubBasin_Sigma_{component}.csv` untouched. When `sigma-total` runs, it can reload *total-level* per-component σ from disk (e.g., `Sigma_Model_mm_{year}.tif`), but the per-category σ_total rasters (`Sigma_Total_{cat}_mm_{year}.tif`) will be zero if the individual σ steps were skipped because the per-category pixel arrays they depend on are not on disk. This causes downstream augmented category rasters to have zero σ, which in turn makes σ_CU zero. To get correct per-category uncertainty in the augmented rasters *and* correct per-category basin CSVs for the σ attribution suite, run all individual σ components (σ_MACA through σ_gw) without skipping. Only `density-sensitivity` (the partition-level diagnostic) can be safely skipped without affecting downstream products.
 
 #### CLI flags
 
@@ -188,7 +211,8 @@ python pipeline.py --steps 3b --skip-uq sigma-model,density-sensitivity # skip s
 | `--skip-eda` | `False` | Skip EDA plot generation in Step 1. EDA is auto-skipped when Step 1 is not explicitly selected. |
 | `--skip-prep` | — | Comma-separated Step 0 sub-steps to skip. |
 | `--skip-eval` | — | Comma-separated evaluation strategies to skip. |
-| `--skip-uq` | — | Comma-separated UQ sub-steps to skip. |
+| `--skip-uq` | — | Comma-separated UQ sub-steps to skip (including `sw-capture-sigma`). |
+| `--skip-maps` | — | Comma-separated Step 3g map sub-steps to skip (currently `trends`). |
 | `-v`, `--verbose` | `False` | Enable verbose (DEBUG-level) logging. |
 
 The pipeline executes the selected steps in sequence (details below).
@@ -571,6 +595,7 @@ Step 3   ─  Full-Period XGBRF Prediction (1896–2099)
 Step 3b  ─  Hybrid 5-component σ_total UQ, raster augmentation, σ-propagated SW Capture Index
 Step 3e  ─  Well Package (per-well Parquet + GPKG locations with uncertainty, incl. SW capture + σ)
 Step 3g  ─  Raster Maps & Trend Analysis for All Output Categories
+Step 3h  ─  Graphical Abstract / Figure 1 only (~30 s; explicit opt-in)
 Step 4   ─  USGS Intercomparison (Withdrawals, CU, Peff)
 ```
 
@@ -1154,7 +1179,7 @@ Four temporal eras are distinguished in the plots:
 
 Generated in Step 3g (after UQ) so that augmented rasters and UQ-derived
 σ_total are available.  `vizops.create_graphical_abstract()` produces a
-three-panel publication figure:
+four-panel publication figure:
 
 - **Panel (a)**: Spatial map of mean-annual predicted withdrawal depth (mm)
   across all 204 years (1896–2099), with GW basin boundaries and
@@ -1168,8 +1193,28 @@ three-panel publication figure:
   shows ×1000 acre-ft.
 - **Panel (c)**: Era mean bar chart with 95 % CI error bars, dual volume
   axes (m³ left, acre-ft right), and in-bar value labels.
+- **Panel (d)**: Key Contributions — five single-line bullets summarising
+  the 2 km × 204-year coverage, the first statewide irrigation CU dataset,
+  out-of-distribution validation against ADWR and USGS, the novel SW
+  capture index, and the hybrid 5-component σ_total UQ framework.
 
 Saved as `{prediction_dir}Graphical_Abstract_Fig1.png` (600 dpi).
+
+**Fast iteration loop (Step 3h).** When iterating on the Figure 1 layout
+after Step 3 and Step 3b have already run, use Step 3h instead of a full
+Step 3g rerun:
+
+```bash
+python pipeline.py --steps 3h   # ≈ 30 s; reads Annual_Summaries CSVs from disk
+```
+
+Step 3h calls `create_graphical_abstract_only()`, which reads
+`Annual_Summaries/Total_Predicted.csv`, `Annual_Summaries/Basin_Total.csv`,
+and `Uncertainty/Sigma_Total/Uncertainty_Summary_Total.csv` from disk and
+calls `vizops.create_graphical_abstract()` directly — no era-mean raster
+maps, no trend analysis, no σ recomputation, no GEE traffic.  Step 3h is
+deliberately excluded from `--steps all` because Step 3g already produces
+the graphical abstract as part of its full raster-map suite.
 
 
 #### 3d. Hybrid uncertainty quantification (`uncertaintyops.run_uncertainty_quantification()`)
@@ -1543,10 +1588,12 @@ Each `compute_sigma_*` function writes per-component CSVs:
 |------|----------|
 | `{Sigma_X}/Basin_Sigma_{X}.csv` | Per-basin, per-year σ (m³ and AF) for component X |
 | `{Sigma_X}/Subbasin_Sigma_{X}.csv` | Per-sub-basin, per-year σ (m³ and AF) |
+| `{Sigma_X}/Basin_Sigma_{X}_{Category}.csv` | Per-basin, per-year σ split by withdrawal category (8 files per component — `Irrigation`, `Non_Irrigation`, `Irrigation_GW`, `Irrigation_SW`, `Non_Irrigation_GW`, `Non_Irrigation_SW`, `Total_GW`, `Total_SW`). Basin-level only — sub-basin per-category CSVs are deferred. Consumed by the σ attribution diagnostic suite rendered in Step 3g. |
 
-CSV columns: `Year, Region, Mean_Volume_m3, Sigma_Volume_m3,
-Mean_Volume_AF, Sigma_Volume_AF, CV, Lower_95CI_m3, Upper_95CI_m3,
-Lower_95CI_AF, Upper_95CI_AF, N_Members`.
+CSV columns (identical across total, category, and sub-basin files):
+`Year, Region, Mean_Volume_m3, Sigma_Volume_m3, Mean_Volume_AF,
+Sigma_Volume_AF, CV, Lower_95CI_m3, Upper_95CI_m3, Lower_95CI_AF,
+Upper_95CI_AF, N_Members`.
 
 After all components are computed, `compute_basin_sigma_total` combines
 them via quadrature at the basin/sub-basin level:
@@ -1676,9 +1723,111 @@ groundwater basin shapefile; sub-basin zones from the ADWR sub-basin
 shapefile.
 
 All outputs are saved to `{prediction_dir}Raster_Maps/` (era maps and
-actual vs predicted) and `{prediction_dir}Raster_Maps/Trend_Analysis/`
+actual vs predicted), `{prediction_dir}Raster_Maps/Trend_Analysis/`
 (pixel-level trend maps, basin choropleth maps, and zonal statistics
-CSVs).
+CSVs), and `{prediction_dir}Raster_Maps/Sigma_Attribution/` (see
+the σ attribution diagnostic suite below).
+
+**σ attribution diagnostic suite**
+(`vizops.create_sigma_attribution_map` et al.) — Basin-scale diagnostic
+maps that classify each groundwater basin by whether its total
+uncertainty is dominated by **management**-driven factors (σ_irr,
+σ_LULC, σ_GW — fixable by better data), **climate**-driven factors
+(σ_MACA — inherent to the GCM scenario spread), or the **model**
+training-procedure floor (σ_Model — inherent to the ML ensemble). The
+decomposition writes the three variance shares
+(`σ_mgmt² / σ_total²`, `σ_clim² / σ_total²`, `σ_model² / σ_total²`)
+per basin per era per withdrawal pool, summing to 1.0.
+
+Two complementary visual products are produced for every pool and era,
+sharing the same underlying three-way decomposition:
+
+- **Binary 5-bin discrete choropleth** (NV-style). The color axis
+  metric varies with the era because σ coverage differs: in the
+  Projection era it is `Mgmt / (Mgmt + Clim)` (blue = climate-
+  dominated, red = management-dominated), and in the Hindcast and
+  Historical eras it is `Mgmt / (Mgmt + Model)` (purple = model-
+  dominated, red = management-dominated) because σ_MACA is zero by
+  design in those eras. In the Projection era, basins where σ_Model is
+  the single largest variance contributor are flagged with a **bold
+  black polygon edge**, and an on-figure disclosure box reports the
+  count and median Model share so users cannot miss σ_Model's magnitude
+  when reading the Clim-vs-Mgmt classification.
+- **Ternary RGB-mixed choropleth**. Each basin's color is a continuous
+  RGB mix where R = Management share, G = Model share, B = Climate
+  share (scaled by 0.9 to avoid saturation). A small equilateral-
+  triangle inset at the bottom-left labels the three corners and shows
+  the color gradient. The ternary map works identically in every era
+  without an era-specific classification swap; in Hindcast and
+  Historical the Climate component is structurally zero so basins fall
+  on the red↔green edge of the triangle, which is the correct visual
+  disclosure that climate is unrepresentable there.
+
+Eight figure families are produced per full Step 3g run (all basin-
+level — sub-basin variants are deferred because ADWR stewardship
+decisions are made at the basin scale):
+
+| # | Family | Pools | Files |
+|---|---|---|---|
+| 1 | Binary headline withdrawal | `Total_GW`, `Total_SW` | 3 PNGs (one per era), 1×2 panels |
+| 2 | Binary detailed withdrawal | `Irrigation_GW`, `Irrigation_SW`, `Non_Irrigation_GW`, `Non_Irrigation_SW` | 3 PNGs (one per era), 1×4 panels |
+| 3 | Binary σ_CU attribution | `Irrigation_CU`, `Irrigation_GW_CU`, `Irrigation_SW_CU` | 3 PNGs (one per era), 1×3 panels |
+| 4 | Ternary headline withdrawal | `Total_GW`, `Total_SW` | 3 PNGs, 1×2 panels |
+| 5 | Ternary detailed withdrawal | same as (2) | 3 PNGs, 1×4 panels |
+| 6 | Ternary σ_CU attribution | same as (3) | 3 PNGs, 1×3 panels |
+| 7 | Per-year stacked-area timeseries | `Total_GW`, `Total_SW` × 8 headline basins | 1 PNG, 8×2 panels |
+| 8 | Projection bubble scatter | `Total_GW`, `Total_SW` | 1 PNG, 1×2 panels |
+
+**σ_CU attribution propagation.** Consumptive-use σ is propagated via
+`σ_CU = √((IE × σ_wd)² + (wd × σ_IE)²)`. The three-way decomposition
+maps each CU pool to its parent withdrawal pool
+(`Irrigation_CU → Irrigation`, etc.), reads the parent's per-category
+σ CSVs, and applies the basin-level mean IE (from the NHM cache
+written in Step 3b at `Uncertainty/Sigma_CU/NHM_IE/
+NHM_basin_IE_cache.csv`) as a scalar multiplier on each term. σ_IE is
+absorbed into the management class because it is inherently an
+irrigation-data-quality problem.
+
+**Companion CSVs.** Seven long-format CSVs are written alongside the
+figures, one per era × attribution type:
+
+- `Sigma_Attribution_{Hindcast,Historical,Projection}.csv` — binary +
+  ternary withdrawal attribution share the same CSV per era (their
+  colors are derived from the same underlying three shares). Contains
+  one row per basin × pool with columns `Era, Pool, Region,
+  Sigma_MACA_m3, Sigma_Irr_m3, Sigma_LULC_m3, Sigma_GW_m3,
+  Sigma_Model_m3, Mean_Wd_m3, Sigma_Mgmt_m3, Sigma_Clim_m3,
+  Sigma_Model_Total_m3, Sigma_TotalQ_m3, Mgmt_Share, Clim_Share,
+  Model_Share`.
+- `Sigma_CU_Attribution_{Hindcast,Historical,Projection}.csv` — same
+  columns plus `IE_Mean, IE_Std`, for the CU variant.
+- `Sigma_Attribution_Timeseries.csv` — per-year three-way shares for
+  the eight headline basins × two pools.
+
+The attribution suite complements the per-component mm σ std-dev
+raster maps that are rendered earlier in Step 3g: those show the
+**absolute** σ per component, while the attribution suite shows the
+**relative** class share per basin and answers the stewardship
+question of which lever (better data vs better scenarios vs bigger
+ensemble) would most reduce uncertainty in a given basin.
+
+**Skipping the trend-map suite (`--skip-maps trends`).** The
+Mann-Kendall + Sen's slope computation is per-pixel × 204 years ×
+~15 product families × 4 periods and dominates the Step 3g runtime.
+When iterating on the era-mean raster maps, the actual-vs-predicted
+maps, the σ-component CV maps, or the graphical abstract, skip the
+trend suite with:
+
+```bash
+python pipeline.py --steps 3g --skip-maps trends
+```
+
+All era-mean maps, Prediction CV / SNR maps, σ-component CV maps,
+actual-vs-predicted maps, SW Capture era maps, and the graphical
+abstract are still produced.  The `Trend_Analysis/` directory is
+simply not touched, so existing trend maps from previous runs remain
+in place.  If you only want the graphical abstract, Step 3h is the
+fastest path (~30 s vs ~5 min for `--steps 3g --skip-maps trends`).
 
 #### 3e. Well package (`create_well_package_step()`)
 
@@ -2923,7 +3072,7 @@ Key trends:
 
 ### Known limitations
 
-Five limitations are baked into the framework's structure rather than
+Six limitations are baked into the framework's structure rather than
 into any individual UQ component. Each is unavoidable given current
 data and is named explicitly here so it does not have to be inferred
 from the methods.
@@ -3075,6 +3224,37 @@ from the methods.
    per-basin completeness and mean-depth-vs-`wtd_m` table is provided
    in the supplementary (§S5.2 of the Earth's Future companion paper
    supplementary file).
+
+6. **Era-specific σ attribution classification.** The basin-scale σ
+   attribution diagnostic suite (Step 3g,
+   `Raster_Maps/Sigma_Attribution/`) uses **two different** binary
+   classification metrics in different eras because the underlying σ
+   coverage dictates what is meaningful. In the Projection era all
+   five σ components are non-zero, so the binary map classifies
+   basins along `Mgmt / (Mgmt + Clim)` — the
+   management-vs-climate trade-off that maps onto the stewardship
+   decision space (better data vs better GCM scenarios). In the
+   Hindcast and Historical eras, σ_MACA is structurally zero by
+   design (the climate ensemble spans Projection-era GCM scenarios
+   only, 2026–2099), and σ_LULC is likewise zero, so the binary map
+   instead classifies basins along `Mgmt / (Mgmt + Model)` —
+   management-vs-model-floor. The two metrics are therefore **not**
+   directly comparable across eras, and users cannot read a single
+   basin-level number like "management share" and apply it uniformly
+   across the 1896–2099 window. The ternary RGB-mixed map family is
+   the cross-era harmonized view: it shows all three shares (Mgmt,
+   Clim, Model) on one continuous color axis and works identically
+   in every era without swapping the classification metric. σ_Model
+   is disclosed as a third axis rather than forced into the binary
+   classification because empirically it is the single largest
+   variance contributor in the majority of Arizona basins in the
+   Projection era; a three-way argmax map would otherwise read as
+   largely monochromatic "model-dominated" and hide the management-
+   vs-climate trade-off that is the actual decision-relevant signal.
+   Sub-basin attribution is deferred (ADWR stewardship decisions are
+   made at the basin scale, and a per-sub-basin choropleth at ~150
+   polygons without in-polygon labels is redundant with the basin
+   view).
 
 We document these limitations alongside the methods so that users of
 the published outputs inherit them explicitly rather than discovering
