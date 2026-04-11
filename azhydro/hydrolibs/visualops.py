@@ -3632,6 +3632,182 @@ def create_era_raster_maps(
     logger.info(f'Era raster maps saved to {out_path}')
 
 
+def create_ood_era_raster_maps(
+    raster_dir: str,
+    basin_shp: str,
+    output_dir: str,
+    *,
+    title: str = 'Out-of-Distribution Probability',
+    cmap: str = 'RdYlGn_r',
+    fully_ood_threshold: float = 0.999,
+    fully_ood_color: str = '#888888',
+    out_filename: str | None = None,
+) -> None:
+    """Era-mean OOD probability maps with two-class rendering.
+
+    OOD probability is a per-pixel (mean over years) fraction of
+    prediction samples flagged as out-of-distribution. In practice, the
+    majority of Arizona pixels saturate to 1.0 across every era, which
+    compresses the visually interesting <1.0 range into a sliver at the
+    bottom of a continuous colorbar (most of the map renders as the top
+    color of the palette). This function splits the rendering into two
+    disjoint classes so the <1 variation is legible:
+
+    1. **Partial OOD** (``0 <= mean OOD < fully_ood_threshold``) is
+       rendered on a continuous ``cmap`` colorbar with ``vmin=0`` and
+       ``vmax=fully_ood_threshold``. This gives the sub-saturation range
+       the full dynamic range of the colormap.
+    2. **Fully OOD** (``mean OOD >= fully_ood_threshold``) is rendered
+       as a uniform gray fill (``fully_ood_color``) and labeled via a
+       separate legend patch that sits next to the continuous colorbar.
+
+    ``fully_ood_threshold`` defaults to 0.999 to absorb floating-point
+    error from the era-mean arithmetic; treat any era-mean within
+    ``1e-3`` of 1.0 as fully OOD.
+
+    Args:
+        raster_dir: Directory containing OOD probability rasters named
+            with years, readable by ``_compute_era_means``.
+        basin_shp: GW basin shapefile path.
+        output_dir: Output directory for the PNG.
+        title: Figure suptitle.
+        cmap: Matplotlib colormap for the partial-OOD range.
+        fully_ood_threshold: Inclusive lower bound for the fully-OOD
+            class. Defaults to 0.999.
+        fully_ood_color: Hex color for the fully-OOD class in both the
+            map and the legend patch.
+        out_filename: Optional override for the output PNG filename.
+            Defaults to ``Era_Maps_{title_slug}.png``.
+
+    Returns:
+        None. Writes the PNG to ``output_dir``.
+    """
+    import rasterio as rio
+    from matplotlib.colors import ListedColormap
+
+    apply_journal_style()
+    makedirs(output_dir)
+
+    tif_files = sorted(f for f in os.listdir(raster_dir) if f.endswith('.tif'))
+    if not tif_files:
+        logger.warning('No .tif files in %s — skipping OOD era maps.', raster_dir)
+        return
+
+    template = os.path.join(raster_dir, tif_files[0])
+    with rio.open(template) as src:
+        extent = [src.bounds.left, src.bounds.right,
+                  src.bounds.bottom, src.bounds.top]
+        crs = src.crs
+        raster_shape = src.shape
+
+    era_means = _compute_era_means(raster_dir, raster_shape, band=1,
+                                    mask_nan_only=True)
+
+    basins_gdf = gpd.read_file(basin_shp)
+    if basins_gdf.crs != crs:
+        basins_gdf = basins_gdf.to_crs(crs)
+    name_col = (
+        'BASIN_NAME' if 'BASIN_NAME' in basins_gdf.columns
+        else basins_gdf.columns[0]
+    )
+    ama_ina = get_ama_ina_basin_names()
+
+    n_eras = len(ERA_PERIODS)
+    fig, axes = plt.subplots(
+        1, n_eras, figsize=(6 * n_eras, 7), constrained_layout=True,
+    )
+    fig.suptitle(f'{title} — Era Mean', fontsize=16, fontweight='bold')
+    if n_eras == 1:
+        axes = [axes]
+    axes_flat = list(axes) if isinstance(axes, np.ndarray) else axes
+
+    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)']
+    last_partial_im = None
+    for idx, (era, (y1, y2)) in enumerate(ERA_PERIODS.items()):
+        ax = axes_flat[idx]
+        ax.set_facecolor('#D5D5D5')  # no-data gray background
+
+        era_arr = era_means.get(era)
+        if era_arr is None or era_arr.count() == 0:
+            blank = np.ma.masked_all(raster_shape)
+            ax.imshow(
+                blank, extent=extent, origin='upper',
+                interpolation='nearest', cmap=cmap,
+            )
+        else:
+            # Split into partial vs fully-OOD. Both are masked arrays
+            # that inherit era_arr.mask for no-data pixels.
+            fully_mask = era_arr >= fully_ood_threshold
+            partial_arr = np.ma.masked_where(
+                era_arr.mask | fully_mask, era_arr,
+            )
+            fully_arr = np.ma.masked_where(
+                era_arr.mask | ~fully_mask, era_arr,
+            )
+
+            # Layer 1: fully-OOD as uniform gray
+            fully_cmap = ListedColormap([fully_ood_color])
+            ax.imshow(
+                fully_arr, extent=extent, origin='upper',
+                interpolation='nearest', cmap=fully_cmap,
+                vmin=0, vmax=1,
+            )
+            # Layer 2: partial-OOD on the continuous colormap
+            last_partial_im = ax.imshow(
+                partial_arr, extent=extent, origin='upper',
+                interpolation='nearest', cmap=cmap,
+                vmin=0.0, vmax=fully_ood_threshold,
+            )
+
+        _overlay_boundaries(
+            ax, basins_gdf, ama_ina, name_col, label_all=True,
+        )
+        ax.set_title(
+            f'{panel_labels[idx]} {era} ({y1}–{y2})',
+            fontsize=12, fontweight='bold',
+        )
+
+    era_cbar_fontsize = 10
+    if last_partial_im is not None:
+        cbar = fig.colorbar(
+            last_partial_im, ax=axes_flat, shrink=0.5, pad=0.06,
+            orientation='horizontal', aspect=40, extend='neither',
+        )
+        cbar.set_label(
+            'Mean OOD Probability (partial)',
+            fontsize=era_cbar_fontsize, fontweight='bold',
+        )
+        cbar.ax.tick_params(labelsize=era_cbar_fontsize)
+        # Append the fully-OOD class as a proxy Patch glued to the
+        # right side of the colorbar's own axis so the swatch + label
+        # always sit on the same baseline as the colorbar itself and
+        # can't collide with the cbar label no matter how the figure
+        # bbox is trimmed by bbox_inches='tight'.
+        fully_handle = mpatches.Patch(
+            facecolor=fully_ood_color, edgecolor='#333333', linewidth=0.6,
+            label=(
+                f'Fully OOD (\u2265 {fully_ood_threshold:.3g})'
+            ),
+        )
+        cbar.ax.legend(
+            handles=[fully_handle],
+            loc='center left',
+            bbox_to_anchor=(1.04, 0.5),
+            frameon=False,
+            fontsize=era_cbar_fontsize - 1,
+            handlelength=1.4,
+            handletextpad=0.5,
+        )
+
+    if out_filename is None:
+        slug = title.replace(' ', '_').replace('/', '_')
+        out_filename = f'Era_Maps_{slug}.png'
+    out_path = os.path.join(output_dir, out_filename)
+    fig.savefig(out_path, dpi=600, bbox_inches='tight')
+    plt.close(fig)
+    logger.info('OOD era raster maps saved to %s', out_path)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # σ attribution diagnostics
 # -----------------------------------------------------------------------------
@@ -4008,11 +4184,17 @@ def _draw_sigma_attribution_legend(
 
 
 def _draw_sigma_attribution_disclosure_box(
-    ax,
+    fig,
     df: pd.DataFrame,
 ) -> None:
     """Render the Projection-era disclosure text box reporting σ_Model
-    dominance on the first panel of a binary attribution map."""
+    dominance, centered above the shared bottom legend of the figure.
+
+    Also bumps the bottom subplots-adjust margin so the panels do not
+    overlap the two-line disclosure, and lowers the legend's anchor
+    slightly so the text sits cleanly between the panels and the
+    5-swatch legend.
+    """
     if df.empty:
         return
     model_share = df['Model_Share'].to_numpy(dtype=float)
@@ -4034,16 +4216,20 @@ def _draw_sigma_attribution_disclosure_box(
         f'({n_model_dom / n_total * 100:.0f}%); median Model share '
         f'{median_model:.0f}%.\n'
         f'Color axis classifies Management vs Climate within the '
-        f'remaining variance;\nbasins with a bold black edge are '
+        f'remaining variance; basins with a bold black edge are '
         f'Model-dominated overall.'
     )
-    ax.text(
-        0.02, 0.02, txt,
-        transform=ax.transAxes,
-        fontsize=7,
-        ha='left', va='bottom',
+    # Make room for the two-line disclosure between the map panels and
+    # the bottom legend. The legend is anchored at y=0.01 in the shared
+    # setup; placing the text at y ≈ 0.12 leaves a comfortable gap above
+    # the legend title and below the panel axes after we bump `bottom`.
+    fig.subplots_adjust(bottom=0.20)
+    fig.text(
+        0.5, 0.13, txt,
+        ha='center', va='bottom',
+        fontsize=8,
         bbox=dict(
-            boxstyle='round,pad=0.35', facecolor='white',
+            boxstyle='round,pad=0.4', facecolor='white',
             edgecolor='#555555', linewidth=0.6, alpha=0.9,
         ),
         zorder=10,
@@ -4135,23 +4321,29 @@ def _draw_sigma_attribution_ternary_legend(fig) -> None:
     ax_inset.set_ylim(-0.15, np.sqrt(3) / 2 + 0.22)
 
 
-def _ternary_rgb_colors(df: pd.DataFrame) -> list[tuple[float, float, float] | str]:
+def _ternary_rgb_colors(df: pd.DataFrame) -> list[tuple[float, float, float]]:
     """Convert per-basin Mgmt/Clim/Model shares to RGB colors.
 
     R = Mgmt × 0.9   (deep red for pure Management)
     G = Model × 0.9  (deep green for pure Model)
     B = Clim × 0.9   (deep blue for pure Climate)
 
-    Basins with NaN shares return the no-data gray ``#D5D5D5`` hex code.
+    Basins with NaN shares return a no-data gray RGB tuple (the literal
+    ``#D5D5D5`` hex converted to ``(0.8353, 0.8353, 0.8353)``). Returning
+    tuples uniformly — rather than mixing hex strings with RGB tuples —
+    lets ``GeoSeries.plot(color=...)`` build a homogeneous numpy array
+    from the list; otherwise geopandas crashes with
+    ``setting an array element with a sequence``.
     """
     base_intensity = 0.9
-    colors: list[tuple[float, float, float] | str] = []
+    nodata_rgb = (0xD5 / 255.0, 0xD5 / 255.0, 0xD5 / 255.0)
+    colors: list[tuple[float, float, float]] = []
     for _, row in df.iterrows():
         mgmt = row['Mgmt_Share']
         clim = row['Clim_Share']
         model = row['Model_Share']
         if not (np.isfinite(mgmt) and np.isfinite(clim) and np.isfinite(model)):
-            colors.append('#D5D5D5')
+            colors.append(nodata_rgb)
             continue
         colors.append((
             float(mgmt) * base_intensity,
@@ -4203,19 +4395,48 @@ def _setup_attr_figure(
     n_panels: int,
     title: str,
 ) -> tuple:
-    """Create a 1×n figure with a suptitle and return (fig, axes)."""
+    """Create an attribution map figure and return (fig, axes_flat).
+
+    Layout rule:
+      * n_panels == 1  → 1×1
+      * n_panels in {2, 3} → 1×n (side-by-side headline or CU)
+      * n_panels == 4  → 2×2 (detailed Irrigation/Non-Irrigation × GW/SW)
+      * n_panels >= 5  → 2×ceil(n/2) fallback
+
+    Axes are always returned as a flat list so callers can index by
+    pool-order regardless of the underlying grid shape.
+    """
+    if n_panels <= 1:
+        n_rows, n_cols = 1, 1
+    elif n_panels <= 3:
+        n_rows, n_cols = 1, n_panels
+    elif n_panels == 4:
+        n_rows, n_cols = 2, 2
+    else:
+        n_cols = (n_panels + 1) // 2
+        n_rows = 2
+    # Slightly more vertical height per row when stacking, to keep AZ's
+    # tall aspect ratio legible in a 2-row grid.
+    fig_height = 7 if n_rows == 1 else 12
     fig, axes = plt.subplots(
-        1, n_panels, figsize=(6 * n_panels, 7), constrained_layout=False,
+        n_rows, n_cols,
+        figsize=(6 * n_cols, fig_height),
+        constrained_layout=False,
     )
     if n_panels == 1:
-        axes = [axes]
+        axes_flat = [axes]
     else:
-        axes = list(axes)
+        axes_flat = list(np.asarray(axes).ravel())
+    # Hide any trailing axes that have no pool assigned to them (e.g.
+    # a 5-pool request on a 2×3 grid would leave one axis blank).
+    for idx in range(n_panels, len(axes_flat)):
+        axes_flat[idx].axis('off')
     fig.suptitle(title, fontsize=16, fontweight='bold', y=0.98)
     plt.subplots_adjust(
-        left=0.04, right=0.98, top=0.90, bottom=0.14, wspace=0.06,
+        left=0.04, right=0.98, top=0.90, bottom=0.14,
+        wspace=0.06, hspace=0.12,
     )
-    return fig, axes
+    return fig, axes_flat
 
 
 def _draw_attribution_basin_panel(
@@ -4389,10 +4610,14 @@ def create_sigma_attribution_map(
                 panel_label=panel_labels[idx],
                 basin_col=basin_col,
             )
-            if era == 'Projection' and idx == 0:
-                _draw_sigma_attribution_disclosure_box(ax, df)
             _save_attribution_csv(df, pool, era, output_dir, csv_basename)
 
+        if era == 'Projection':
+            first_pool_df = next(
+                (pool_dfs[p] for p in pools if p in pool_dfs), None,
+            )
+            if first_pool_df is not None:
+                _draw_sigma_attribution_disclosure_box(fig, first_pool_df)
         _draw_sigma_attribution_legend(fig, era)
 
         # Build output filename

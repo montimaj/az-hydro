@@ -2481,7 +2481,11 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
     # with band=2 produces σ volume era maps that pair 1:1 with the
     # central-value Volume era maps above.  The Purples colormap
     # matches the mm σ std-dev maps rendered from the σ-component
-    # rasters later in this step.
+    # rasters later in this step.  Uses the default cbar_extend='both'
+    # so the horizontal colorbar renders triangular ends on both sides
+    # that match the corresponding central-value Volume maps — the
+    # previous 'max' setting produced a visually inconsistent
+    # flat-ended colorbar pair when placed next to the non-σ map.
     for folder, title in depth_categories:
         raster_dir = os.path.join(prediction_dir, folder, 'Volume_m3')
         if not os.path.isdir(raster_dir):
@@ -2494,19 +2498,23 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
             unit_label=r'Volume (m$^3$)',
             cmap='Purples',
             band=2,
-            cbar_extend='max',
         )
 
     # ── OOD Rasters (probability, 0 = in-distribution, 1 = OOD) ─────
+    # Uses the dedicated OOD era-map renderer: in practice most AZ
+    # pixels saturate at mean OOD ≈ 1 across every era, which compresses
+    # the interesting <1 variation into a sliver at the bottom of a
+    # continuous colorbar. create_ood_era_raster_maps splits the
+    # rendering into two disjoint classes — a continuous 0–0.999 color
+    # axis for partial-OOD pixels, and a uniform gray "Fully OOD"
+    # legend patch for pixels that reach the saturation threshold —
+    # so the sub-saturation dynamic range is legible.
     ood_dir = os.path.join(prediction_dir, 'OOD_Rasters')
     if os.path.isdir(ood_dir):
-        vizops.create_era_raster_maps(
+        vizops.create_ood_era_raster_maps(
             raster_dir=ood_dir,
             basin_shp=AZ_GW_BASIN,
             output_dir=maps_dir,
-            title='Out-of-Distribution Probability',
-            unit_label='Mean OOD Probability',
-            cmap='RdYlGn_r',
         )
 
     # ── Uncertainty (Sigma components: band 1 = σ, band 2 = CV) ────
