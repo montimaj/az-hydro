@@ -2629,6 +2629,29 @@ def run_uncertainty_quantification(
     else:
         logger.info('  σ_total + augmentation skipped.')
 
+    # ── Surface Water Capture Index with propagated σ_GW ──
+    #
+    # Runs after ``augment_category_rasters`` so the per-category
+    # rasters contain band-1 prediction and band-2 σ_total that
+    # ``compute_sw_capture_with_sigma`` reads directly.  The resulting
+    # 6-band augmented capture rasters are automatically picked up by
+    # the downstream well-level disaggregation in ``wellops.py`` via
+    # its existing ``src.count >= 6`` σ branch, giving per-well
+    # capture and σ_capture columns in ``Well_Package.gpkg`` with no
+    # wellops changes required.
+    if 'sw-capture-sigma' not in skip:
+        compute_sw_capture_with_sigma(
+            prediction_dir=full_pred_dir,
+            az_df=az_df,
+            pred_data_dir=pred_data_dir,
+            start_year=start_year,
+            end_year=end_year,
+            year_list=year_list,
+            mosaic_res=mosaic_res,
+        )
+    else:
+        logger.info('  SW Capture Index with σ_GW propagation skipped.')
+
     # ── σ_CU (error propagation: CU = IE × Withdrawal) ──
     if 'sigma-cu' not in skip:
         compute_sigma_cu(
@@ -2949,6 +2972,418 @@ def augment_cu_rasters(
     logger.info('  CU raster augmentation complete.')
 
 
+def compute_sw_capture_with_sigma(
+        prediction_dir: str,
+        az_df: pd.DataFrame,
+        pred_data_dir: str,
+        start_year: int,
+        end_year: int,
+        year_list: list[int],
+        mosaic_res: int | float,
+) -> None:
+    """Compute the Surface Water Capture Index with propagated σ_GW.
+
+    Runs *after* ``augment_category_rasters`` so that the per-category
+    augmented rasters contain band-1 prediction and band-2 σ_total
+    (from the 5-component UQ framework) in matching depth units.  For
+    each year and each of the three GW pumping pools (Total_GW,
+    Irrigation_GW, Non_Irrigation_GW), this function:
+
+    1. Reads the augmented Depth_mm category raster for that pool and
+       year, extracting band 1 (prediction, mm) and band 2 (σ_total, mm).
+    2. Calls ``partitionops.compute_sw_capture_index`` with the real
+       ``sigma_gw`` populated, which produces the asymmetric combined
+       95 % CI bounds:
+           ``vol_lower = max(gw − 1.96 σ, 0) × cf_lower`` (λ = 5 m)
+           ``vol_upper = (gw + 1.96 σ) × cf_upper`` (λ = 20 m)
+       with ``vol_central = gw × cf_central`` (λ = 10 m) unchanged.
+    3. Derives a per-pixel σ_cap at the central λ via
+       ``σ_cap = 0.5 × (vol_upper − vol_lower) / 1.96``, keeping σ
+       orthogonal to the λ dimension so downstream users can decompose
+       the two uncertainty sources.
+    4. Writes a 3-band capture-fraction raster (λ = 5/10/20) under
+       ``{cap_cat}_Capture_Fraction/`` (unchanged convention).
+    5. Writes the central capture volume in four units (mm, ft, m³, AF)
+       as a **6-band augmented raster** (band 1 = pred, band 2 = σ_cap,
+       bands 3–6 = CV, SNR, lower 95 % CI, upper 95 % CI) under the
+       existing ``{cap_cat}_Capture_Rasters/{Depth_mm, Depth_ft,
+       Volume_m3, Volume_AF}/`` convention.  This mirrors the 6-band
+       layout already used for Total_GW, Irrigation_GW, CU rasters, etc.
+       so the existing per-well disaggregation in ``wellops.py`` picks
+       up the new σ columns automatically via its ``src.count >= 6``
+       branch.
+    6. Writes ``SW_Capture_Time_Series.csv``, ``Basin_Capture_Fraction.csv``,
+       and ``Subbasin_Capture_Fraction.csv`` using the existing schema
+       plus three new per-pool σ columns
+       (``{cap_cat}_Capture_Volume_Sigma_AF``).
+
+    The existing ``SW_Capture_Time_Series.csv`` Lower/Central/Upper
+    column names are preserved; the meaning of Lower/Upper changes from
+    "λ envelope" to "combined σ + λ envelope" as computed by the
+    asymmetric bounds in ``compute_sw_capture_index``.
+
+    Args:
+        prediction_dir (str): Base directory
+            (``Full_Prediction_{model}``) containing ``{pool}_Rasters/``
+            (augmented by ``augment_category_rasters``), ``SW_Capture/``,
+            and ``Annual_Summaries/``.
+        az_df (pd.DataFrame): Arizona training DataFrame with
+            per-year ``GW_Basin``, ``GW_Subbasin``, ``wtd_m``, and
+            ``canal_weighted_streamflow_mm`` columns.
+        pred_data_dir (str): Directory containing the reference basin
+            raster (used to build ``valid_mask`` / ``raster_shape``).
+        start_year (int): First prediction year.
+        end_year (int): Last prediction year.
+        year_list (list[int]): Full prediction year list (used to pick
+            the reference raster at ``year_list[0]``).
+        mosaic_res (int or float): Raster resolution in metres.
+
+    Returns:
+        None.
+    """
+    import hydrolibs.partitionops as partops
+    from hydrolibs.rasterops import read_raster_as_arr
+    from hydrolibs.sysops import makedirs
+
+    logger.info('=' * 60)
+    logger.info('Computing Surface Water Capture Index with σ_GW propagation')
+    logger.info('=' * 60)
+
+    # Reference basin raster → valid_mask, raster_shape (same pattern
+    # as every other σ_* function in this module)
+    ref_basin_file = os.path.join(
+        pred_data_dir, f'GW_Basin_{year_list[0]}.tif'
+    )
+    basin_arr, bfile = read_raster_as_arr(ref_basin_file, get_file=True)
+    basin_flat = basin_arr.ravel()
+    valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
+    raster_shape = basin_arr.shape
+    bfile.close()
+    ref_raster_file = os.path.join(
+        pred_data_dir, f'Predictor_{year_list[0]}.tif'
+    )
+
+    # Unit conversion factors (identical to pipeline.py)
+    pixel_area_m2 = mosaic_res ** 2
+    mm_to_ft = 1 / 304.8
+    mm_to_m3 = pixel_area_m2 / 1000
+    m3_to_af = 1 / 1233.48
+
+    unit_scales = {
+        'mm': 1.0,
+        'ft': mm_to_ft,
+        'm3': mm_to_m3,
+        'AF': mm_to_m3 * m3_to_af,
+    }
+    unit_subdirs = {
+        'mm': 'Depth_mm',
+        'ft': 'Depth_ft',
+        'm3': 'Volume_m3',
+        'AF': 'Volume_AF',
+    }
+
+    # Map pumping pool → capture-category name.  The capture category
+    # names the *captured* SW pool; the pool names the GW pumping that
+    # drives it.  Reading the directory layout: ``Total_SW_Capture`` =
+    # "fraction of Total_GW pumping that captures surface water".
+    pool_to_cap_cat = {
+        'Total_GW': 'Total_SW',
+        'Irrigation_GW': 'Irrigation_SW',
+        'Non_Irrigation_GW': 'Non_Irrigation_SW',
+    }
+
+    # All AZ basin names (filter DROP_GW_BASINS — same convention as
+    # pipeline.predict_full_period)
+    from hydrolibs import partitionops as _partops  # for CATEGORIES
+    all_basins = sorted(az_df['GW_Basin'].dropna().unique().tolist())
+    # Keep only basins that ever have at least one row with nonzero
+    # GW well density (matches predict_full_period's all_basins, minus
+    # DROP_GW_BASINS which is a pipeline-level configuration).
+    all_basins = [b for b in all_basins if b]
+    subbasins = sorted(
+        az_df['GW_Subbasin'].dropna().unique().tolist()
+        if 'GW_Subbasin' in az_df.columns else []
+    )
+
+    sw_cap_dir = os.path.join(prediction_dir, 'SW_Capture')
+    makedirs(sw_cap_dir)
+
+    sw_capture_yearly: dict[str, dict] = {}
+
+    for year in range(start_year, end_year + 1):
+        year_df = az_df[az_df.Year == year]
+        if year_df.empty:
+            continue
+        if 'wtd_m' not in year_df.columns:
+            continue
+
+        wtd_vals = year_df['wtd_m'].values
+        cw_sf_vals = (
+            year_df['canal_weighted_streamflow_mm'].values
+            if 'canal_weighted_streamflow_mm' in year_df.columns
+            else np.zeros(len(wtd_vals))
+        )
+
+        for pool, cap_cat in pool_to_cap_cat.items():
+            # Load prediction (band 1) and σ_total (band 2) from the
+            # augmented category Depth_mm raster
+            cat_mm_file = os.path.join(
+                prediction_dir, f'{pool}_Rasters', 'Depth_mm',
+                f'{pool}_{year}_mm.tif',
+            )
+            if not os.path.exists(cat_mm_file):
+                logger.warning(
+                    '  Missing %s — skipping %s capture for year %d',
+                    cat_mm_file, cap_cat, year,
+                )
+                continue
+
+            with rio.open(cat_mm_file) as src:
+                gw_2d = src.read(1)
+                has_sigma = src.count >= 2
+                sigma_2d = src.read(2) if has_sigma else None
+
+            gw_flat = gw_2d.ravel()[valid_mask]
+            if has_sigma:
+                sigma_flat = sigma_2d.ravel()[valid_mask]
+                # Floor σ at zero (numerical noise in CI band 5)
+                sigma_flat = np.maximum(np.nan_to_num(sigma_flat, nan=0.0),
+                                        0.0)
+            else:
+                sigma_flat = None
+
+            capture = partops.compute_sw_capture_index(
+                total_gw=gw_flat,
+                sigma_gw=sigma_flat,
+                wtd_m=wtd_vals,
+                cw_streamflow=cw_sf_vals,
+                raster_shape=raster_shape,
+                valid_mask=valid_mask,
+            )
+
+            # Derive σ_cap at the central λ as the half-width of the
+            # propagated 95 % CI.  The asymmetric form of
+            # compute_sw_capture_index couples gw ± 1.96 σ with the
+            # λ = 5 m (narrow) and λ = 20 m (wide) connectivity
+            # scales, so inverting at the central λ (via the full
+            # upper − lower range) decomposes cleanly: when σ = 0 the
+            # inverted σ_cap reflects only the λ envelope; when σ > 0
+            # it adds the pumping-side contribution.
+            sigma_cap_flat = (
+                0.5 * (capture['Capture_Volume_Upper']
+                       - capture['Capture_Volume_Lower']) / CI_Z
+            )
+            sigma_cap_flat = np.maximum(sigma_cap_flat, 0.0)
+
+            # ── 3-band capture fraction raster (λ = 5/10/20) ──
+            frac_dir = os.path.join(
+                sw_cap_dir, f'{cap_cat}_Capture_Fraction'
+            )
+            makedirs(frac_dir)
+            cf_grid = np.stack([
+                _valid_to_grid(capture[f'Capture_Fraction_{b}'],
+                               valid_mask, raster_shape)
+                for b in ('Lower', 'Central', 'Upper')
+            ])
+            with rio.open(ref_raster_file) as ref:
+                profile = ref.profile.copy()
+            profile.update(count=3, dtype='float32', nodata=np.nan)
+            with rio.open(
+                os.path.join(frac_dir,
+                             f'{cap_cat}_Capture_Fraction_{year}.tif'),
+                'w', **profile,
+            ) as dst:
+                for bi in range(3):
+                    dst.write(cf_grid[bi], bi + 1)
+                dst.set_band_description(1, 'lower_lambda5m')
+                dst.set_band_description(2, 'central_lambda10m')
+                dst.set_band_description(3, 'upper_lambda20m')
+
+            # ── 6-band augmented central capture volume rasters in
+            # all four units (mm, ft, m³, AF).  σ in band 2 is the
+            # σ_cap derived above; bands 3–6 follow the standard
+            # (CV, SNR, lower 95 % CI, upper 95 % CI) convention. ──
+            cap_central_mm = _valid_to_grid(
+                capture['Capture_Volume_Central'], valid_mask,
+                raster_shape,
+            )
+            sigma_cap_mm = _valid_to_grid(
+                sigma_cap_flat, valid_mask, raster_shape,
+            )
+
+            for unit, subdir in unit_subdirs.items():
+                scale = unit_scales[unit]
+                out_dir = os.path.join(
+                    sw_cap_dir, f'{cap_cat}_Capture_Rasters', subdir,
+                )
+                makedirs(out_dir)
+                out_path = os.path.join(
+                    out_dir, f'{cap_cat}_Capture_{year}_{unit}.tif',
+                )
+
+                pred_scaled = (cap_central_mm * scale).astype(np.float32)
+                sigma_scaled = (sigma_cap_mm * scale).astype(np.float32)
+
+                with rio.open(ref_raster_file) as ref:
+                    band_profile = ref.profile.copy()
+
+                band_descriptions = [
+                    f'prediction_{unit}', f'sigma_{unit}', 'CV', 'SNR',
+                    f'lower_95CI_{unit}', f'upper_95CI_{unit}',
+                ]
+                _write_augmented_raster(
+                    pred_scaled, sigma_scaled, out_path, band_profile,
+                    band_descriptions,
+                )
+
+            # ── Statewide annual scalars for the time-series CSV ──
+            for key in capture:
+                ts_key = f'{cap_cat}_{key}'
+                if ts_key not in sw_capture_yearly:
+                    sw_capture_yearly[ts_key] = {}
+                if 'Fraction' in key:
+                    # Volume-weighted mean fraction: what fraction of
+                    # GW pumping captures surface water statewide.
+                    gw_sum = float(np.nansum(gw_flat))
+                    cap_vol_key = key.replace(
+                        'Capture_Fraction', 'Capture_Volume',
+                    )
+                    if cap_vol_key in capture and gw_sum > 0:
+                        val = (float(np.nansum(capture[cap_vol_key]))
+                               / gw_sum)
+                    else:
+                        val = float(np.nanmean(capture[key]))
+                else:
+                    # Volume: sum mm depths → m³ → AF
+                    val = (float(np.nansum(capture[key]))
+                           * mm_to_m3 * m3_to_af)
+                sw_capture_yearly[ts_key][year] = val
+
+            # Per-pool σ scalar (AF) for the explicit σ columns
+            sigma_scalar_af = (
+                float(np.nansum(sigma_cap_flat)) * mm_to_m3 * m3_to_af
+            )
+            ts_sigma_key = f'{cap_cat}_Capture_Volume_Sigma'
+            if ts_sigma_key not in sw_capture_yearly:
+                sw_capture_yearly[ts_sigma_key] = {}
+            sw_capture_yearly[ts_sigma_key][year] = sigma_scalar_af
+
+            # ── Per-basin and per-sub-basin VW capture fraction
+            #    (central λ = 10 m only) ──
+            cap_vol_arr = capture['Capture_Volume_Central']
+            basins_arr = year_df['GW_Basin'].values
+            subbasins_arr = (
+                year_df['GW_Subbasin'].values
+                if 'GW_Subbasin' in year_df.columns
+                else np.full(len(year_df), '', dtype=object)
+            )
+            for level, zone_arr, zone_list in [
+                ('Basin', basins_arr, all_basins),
+                ('Subbasin', subbasins_arr, subbasins),
+            ]:
+                ts_basin_key = f'{cap_cat}_Capture_Fraction_{level}'
+                if ts_basin_key not in sw_capture_yearly:
+                    sw_capture_yearly[ts_basin_key] = {}
+                zone_fracs = {}
+                for zone in zone_list:
+                    zmask = zone_arr == zone
+                    gw_z = float(np.nansum(gw_flat[zmask]))
+                    cap_z = float(np.nansum(cap_vol_arr[zmask]))
+                    zone_fracs[zone] = cap_z / gw_z if gw_z > 0 else 0.0
+                sw_capture_yearly[ts_basin_key][year] = zone_fracs
+
+        if year % 20 == 0 or year == end_year:
+            central_af = sw_capture_yearly.get(
+                'Total_SW_Capture_Volume_Central', {},
+            ).get(year, 0.0)
+            sigma_af = sw_capture_yearly.get(
+                'Total_SW_Capture_Volume_Sigma', {},
+            ).get(year, 0.0)
+            logger.info(
+                '  Year %d: statewide capture = %.4f MAF, σ_cap = %.4f MAF',
+                year, central_af / 1e6, sigma_af / 1e6,
+            )
+
+    # ── Write the three CSVs ──
+    _write_sw_capture_csvs(sw_cap_dir, sw_capture_yearly)
+
+    logger.info(
+        'SW Capture Index with σ_GW propagation complete. Results in %s',
+        sw_cap_dir,
+    )
+
+
+def _valid_to_grid(
+        values: np.ndarray,
+        valid_mask: np.ndarray,
+        raster_shape: tuple,
+) -> np.ndarray:
+    """Map valid-pixel values back to a full 2-D raster grid."""
+    grid = np.full(valid_mask.shape[0], np.nan, dtype=np.float32)
+    grid[valid_mask] = values.astype(np.float32)
+    return grid.reshape(raster_shape)
+
+
+def _write_sw_capture_csvs(
+        sw_cap_dir: str,
+        sw_capture_yearly: dict,
+) -> None:
+    """Write the three SW capture CSVs from the per-year scalar dict.
+
+    Produces:
+      - ``SW_Capture_Time_Series.csv`` — statewide per-year scalars
+        (fractions, volumes, and explicit σ columns).
+      - ``Basin_Capture_Fraction.csv`` — flat per-basin VW fractions.
+      - ``Subbasin_Capture_Fraction.csv`` — flat per-sub-basin VW
+        fractions.
+    """
+    if not sw_capture_yearly:
+        return
+
+    # Statewide scalars: keys whose values are {year: float} rather
+    # than {year: {zone: float}}
+    scalar_keys = {
+        k: v for k, v in sw_capture_yearly.items()
+        if v and not isinstance(next(iter(v.values())), dict)
+    }
+    if scalar_keys:
+        years_present = sorted(next(iter(scalar_keys.values())).keys())
+        rows = []
+        for y in years_present:
+            row = {'Year': y}
+            for key, ydict in scalar_keys.items():
+                suffix = '' if 'Fraction' in key else '_AF'
+                row[f'{key}{suffix}'] = ydict.get(y, 0)
+            rows.append(row)
+        pd.DataFrame(rows).to_csv(
+            os.path.join(sw_cap_dir, 'SW_Capture_Time_Series.csv'),
+            index=False,
+        )
+
+    # Per-basin and per-sub-basin fraction time series
+    for level in ('Basin', 'Subbasin'):
+        zone_keys = {
+            k: v for k, v in sw_capture_yearly.items()
+            if k.endswith(f'_Fraction_{level}') and v
+        }
+        if not zone_keys:
+            continue
+        zone_rows = []
+        for key, ydict in zone_keys.items():
+            cat_label = key.replace(f'_Fraction_{level}', '')
+            for y, zone_fracs in sorted(ydict.items()):
+                for zone, frac in zone_fracs.items():
+                    zone_rows.append({
+                        'Year': y,
+                        level: zone,
+                        'Category': cat_label,
+                        'VW_Capture_Fraction': round(frac, 6),
+                    })
+        if zone_rows:
+            pd.DataFrame(zone_rows).to_csv(
+                os.path.join(sw_cap_dir, f'{level}_Capture_Fraction.csv'),
+                index=False,
+            )
 
 
 def _replot_with_uncertainty(

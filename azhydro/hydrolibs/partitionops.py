@@ -376,12 +376,30 @@ def compute_sw_capture_index(
 
     ``capture_fraction = exp(-wtd / λ) × cw_norm``
 
-    Three λ values (5, 10, 20 m) produce lower/central/upper bounds.
-    Volume bounds optionally incorporate Total_GW uncertainty (σ).
+    Three λ values (5, 10, 20 m) produce lower/central/upper bounds
+    on the connectivity scale.  When ``sigma_gw`` is supplied (the
+    per-pixel σ_total from the 5-component UQ framework, in mm),
+    the volume bounds combine the λ envelope with σ_GW propagation
+    via the asymmetric form
+
+        ``gw_lower = max(gw − 1.96 σ, 0)``
+        ``gw_upper = gw + 1.96 σ``
+        ``vol_lower = gw_lower × cf_lower``  (narrow connectivity)
+        ``vol_central = gw × cf_central``    (central)
+        ``vol_upper = gw_upper × cf_upper``  (wide connectivity)
+
+    so the Lower/Upper bounds encode the combined 95 % CI of the
+    capture volume under both the pumping-side uncertainty and the
+    connectivity-scale uncertainty.  The production pipeline always
+    supplies ``sigma_gw`` via
+    ``uncertaintyops.compute_sw_capture_with_sigma``; ``None`` is
+    retained only as an escape hatch for callers that need a λ-only
+    envelope.
 
     Args:
         total_gw: 1-D array of Total_GW withdrawal (mm) for valid pixels.
-        sigma_gw: 1-D array of σ_total for Total_GW (mm), or None.
+        sigma_gw: 1-D array of σ_total for Total_GW (mm), or None for
+            a λ-only envelope without σ propagation.
         wtd_m: 1-D array of water table depth (m) for valid pixels.
         cw_streamflow: 1-D array of canal-weighted streamflow (mm) for
             valid pixels.

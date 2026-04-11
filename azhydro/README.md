@@ -349,19 +349,51 @@ capture_fraction = exp(-wtd_m / λ) × cw_norm
 sw_capture_mm    = Total_GW × capture_fraction
 ```
 
-Three λ values (5, 10, 20 m) produce lower/central/upper bounds
-without tunable parameters.  Volume bounds additionally incorporate
-Total_GW uncertainty (σ_total from the UQ framework).
+Three λ values (5, 10, 20 m) produce the connectivity-scale bounds
+without tunable parameters.  Volume bounds incorporate **both** the
+three-λ connectivity envelope **and** the per-pixel σ_total from the
+5-component UQ framework, combined via the asymmetric form
+
+```
+gw_lower = max(gw - 1.96·σ, 0)
+gw_upper = gw + 1.96·σ
+vol_lower   = gw_lower × cf_lower     (λ = 5 m, narrow)
+vol_central = gw × cf_central         (λ = 10 m)
+vol_upper   = gw_upper × cf_upper     (λ = 20 m, wide)
+```
+
+so the Lower/Upper columns in `SW_Capture_Time_Series.csv` are the
+combined 95 % CI on the capture volume, not a λ-only envelope.  A
+per-pixel σ_SW_capture is derived at the central λ as the half-width
+of the propagated interval (`σ_cap = 0.5 × (vol_upper − vol_lower) /
+1.96`) and is shipped inside the 6-band augmented capture rasters
+(band 1 = prediction, band 2 = σ, bands 3–6 = CV, SNR, lower 95 % CI,
+upper 95 % CI) — the same schema used by every other output in the
+pipeline.  This means the existing per-well disaggregation in
+`wellops.py` automatically picks up SW-capture σ and CI columns for
+the three pools (`Total_SW_Capture`, `Irrigation_SW_Capture`,
+`Non_Irrigation_SW_Capture`) with zero additional configuration.
+
+The computation runs as part of Step 3b's
+`run_uncertainty_quantification` (after the per-category rasters have
+been augmented with band-2 σ_total), not inside the Step 3 prediction
+loop, because the σ needed for the propagation does not exist until
+Step 3b finishes.  The skip token `--skip-uq sw-capture-sigma` turns
+the whole SW capture step off (no capture outputs are produced in that
+case; users who want the old λ-only bounds can run an earlier commit).
 
 Output rasters are organized by GW pumping pool — Total, Irrigation,
 Non-Irrigation — under `SW_Capture/{Total,Irrigation,Non_Irrigation}_SW_Capture_Fraction/`
 (3-band, dimensionless [0, 1] for λ = 5/10/20 m) and
-`SW_Capture/{Total,Irrigation,Non_Irrigation}_SW_Capture_Rasters/Depth_{unit}/`
-(central capture volume in mm/ft/m³/AF).  Reading the directory names:
+`SW_Capture/{Total,Irrigation,Non_Irrigation}_SW_Capture_Rasters/{Depth_mm,Depth_ft,Volume_m3,Volume_AF}/`
+(6-band augmented: central capture volume + σ_cap + CV + SNR + lower
+95 % CI + upper 95 % CI, in mm/ft/m³/AF).  Reading the directory names:
 `Total_SW_Capture_Fraction` is "the fraction of Total GW pumping that
 captures surface water," and so on for the irrigation and non-irrigation
-splits.  A time series CSV
-(`SW_Capture/SW_Capture_Time_Series.csv`) and era-mean maps are also
+splits.  The time series CSV
+(`SW_Capture/SW_Capture_Time_Series.csv`) carries the same
+Lower/Central/Upper schema as before plus three new explicit σ columns
+per pool (`{pool}_Capture_Volume_Sigma_AF`).  Era-mean maps are also
 produced.
 
 **What "SW capture" actually means in this model.** The index measures
@@ -536,10 +568,19 @@ Step 0   ─  Data Preparation
 Step 1   ─  Create AZ Predictor DataFrame
 Step 2   ─  Model Evaluation (5 strategies: Random, Pixel Holdout, Temporal LOO, Spatial LOO, Seeded Spatial LOO)
 Step 3   ─  Full-Period XGBRF Prediction (1896–2099)
-Step 3e  ─  Well Package (per-well Parquet + GPKG locations with uncertainty)
+Step 3b  ─  Hybrid 5-component σ_total UQ, raster augmentation, σ-propagated SW Capture Index
+Step 3e  ─  Well Package (per-well Parquet + GPKG locations with uncertainty, incl. SW capture + σ)
 Step 3g  ─  Raster Maps & Trend Analysis for All Output Categories
 Step 4   ─  USGS Intercomparison (Withdrawals, CU, Peff)
 ```
+
+The SW Capture Index with σ_GW propagation runs **inside** Step 3b
+(`run_uncertainty_quantification → compute_sw_capture_with_sigma`)
+right after the per-category rasters have been augmented with σ_total
+band 2. Skip with `--skip-uq sw-capture-sigma` to turn the whole
+capture step off. Skipping produces no capture outputs (the pipeline
+deliberately has a single source of truth for capture; there is no
+σ-less fallback path).
 
 ### Configuration constants
 
@@ -1658,19 +1699,43 @@ per-well uncertainty columns are included:
 | Column pattern | Description |
 |---|---|
 | `{Cat}_{unit}` | Prediction (capacity-weighted share of pixel value) |
-| `{Cat}_{unit}_sigma` | σ (capacity-weighted share of pixel σ) |
+| `{Cat}_{unit}_sigma` | σ (capacity-weighted share of pixel σ, correlated-sum rule) |
 
 Categories include 9 withdrawal categories (Total + 8 partitions),
 3 CU categories (Irrigation_CU, Irrigation_GW_CU, Irrigation_SW_CU),
 and 3 SW capture categories (Total_SW_Capture, Irrigation_SW_Capture,
-Non_Irrigation_SW_Capture) — when the SW Capture rasters are available.
-The SW capture category names refer to the surface water captured by
-each GW pumping pool: e.g. `Total_SW_Capture` is "SW captured by Total
-GW pumping" within the parent `SW_Capture/` folder context.
+Non_Irrigation_SW_Capture).  Because the SW Capture rasters are now
+6-band augmented (written by Step 3b's `compute_sw_capture_with_sigma`
+with σ_GW propagation baked in), the disaggregation loop in
+`create_well_package` picks up their band-2 σ automatically through
+the same `src.count >= 6` branch that handles the withdrawal and CU
+categories — no SW-capture-specific code path is needed.  Every well
+therefore carries `{pool}_Capture_Volume_{unit}`,
+`{pool}_Capture_Volume_{unit}_sigma` columns in the parquet for all
+three capture pools.  The SW capture category names refer to the
+surface water captured by each GW pumping pool: e.g.
+`Total_SW_Capture` is "SW captured by Total GW pumping" within the
+parent `SW_Capture/` folder context.
+
+**Per-well σ disaggregation rule.** The well package applies the
+**correlated-sum rule** `σ_well_i = w_i × σ_pixel` (not quadrature),
+where `w_i` is the per-well capacity-proportional weight summing to
+1 across all active wells in a pixel.  This reflects that per-well
+contributions to a pixel's withdrawal / CU / capture share a common
+pumping-σ driver (the same pixel-level σ_total propagated through the
+same downstream fraction or coefficient), so they are perfectly
+correlated rather than independent.  The correlated-sum rule preserves
+`Σ σ_well_i = σ_pixel` across the wells in each pixel, which is the
+right mass-conservation identity for this physical setup.  95 % CI
+bounds on per-well values are derived by consumers on-the-fly as
+`ci_lower = max(central − 1.96 × sigma, 0)` and
+`ci_upper = central + 1.96 × sigma`; they are not stored as separate
+columns to keep the parquet compact.
 
 **Caveat:** Per-well σ assumes pixel-level uncertainty distributes
-proportionally to capacity weight.  This is a simplification — true
-per-well uncertainty would require well-specific error models.
+proportionally to capacity weight.  True per-well uncertainty would
+require well-specific error models (pump efficiency variability,
+metering error distributions) that are not currently available.
 
 **Outputs:** `{MODEL_DIR}Full_Prediction_XGB/Well_Package/`
 
@@ -2989,6 +3054,27 @@ from the methods.
    model and is out of scope for this study; the static-WTD assumption
    is documented here so users of the capture-index outputs know what
    they are inheriting.
+
+   The ADWR Well Registry `WELL_DEPTH` column was evaluated as a
+   potential alternative or supplement to `wtd_m` in the connectivity
+   term. It is reasonably complete (74.8 % overall, 97.2 % post-1980,
+   67–76 % in the eight SW-capture river-corridor basins), but the
+   mean well depth exceeds mean `wtd_m` by a factor of 2.1–9.6× in
+   every river-corridor basin — wells are drilled *into* the
+   saturated zone rather than *to the top of* it — so substituting
+   `WELL_DEPTH` into `exp(−depth/λ)` would drive the connectivity
+   term to ≈ 0 everywhere and mis-represent the pressure-propagation
+   physics that the exponential-decay form is modelling. And
+   `WELL_DEPTH` is the total drilled depth, not the perforation/screen
+   interval, so it does not even provide the information needed for a
+   defensible hybrid formula. A future methodological extension could
+   parse per-well screen-interval metadata (`PERFORATION_TOP`,
+   `PERFORATION_BOTTOM`, or equivalent) if a richer well-construction
+   dataset becomes available; for the present release, `wtd_m` is the
+   correct term and `WELL_DEPTH` is not used in the formula. The full
+   per-basin completeness and mean-depth-vs-`wtd_m` table is provided
+   in the supplementary (§S5.2 of the Earth's Future companion paper
+   supplementary file).
 
 We document these limitations alongside the methods so that users of
 the published outputs inherit them explicitly rather than discovering

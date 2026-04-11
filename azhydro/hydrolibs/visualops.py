@@ -3411,6 +3411,8 @@ def create_era_raster_maps(
     symmetric: bool = False,
     band: int = 1,
     mask_nan_only: bool = False,
+    percentile_clip: tuple[float, float] = (2.0, 98.0),
+    gamma: float | None = None,
 ) -> None:
     """Create a 2×2 panel figure of era-mean raster maps.
 
@@ -3429,17 +3431,36 @@ def create_era_raster_maps(
         cmap (str): Matplotlib colormap name.
         out_filename (str or None): Output PNG filename.  Defaults to
             ``Era_Maps_{title_slug}.png``.
-        vmin (float or None): Explicit colorbar minimum.
-        vmax (float or None): Explicit colorbar maximum.
+        vmin (float or None): Explicit colorbar minimum.  When None,
+            derived from ``percentile_clip[0]`` over the pooled era
+            values.
+        vmax (float or None): Explicit colorbar maximum.  When None,
+            derived from ``percentile_clip[1]`` over the pooled era
+            values.
         symmetric (bool): If True, center colorbar on zero.
         band (int): Band number to read from each raster (1-based).
         mask_nan_only (bool): If True, only mask NaN pixels (keep zeros
             visible).
+        percentile_clip (tuple[float, float]): (low, high) percentiles
+            used to auto-derive vmin/vmax when they are not supplied
+            explicitly.  Default is (2, 98).  For heavily right-skewed
+            ratio bands (CV, SNR) pass a tighter tuple like (2, 95) or
+            (5, 90) so that a long upper tail does not compress the
+            bulk of the distribution into the bottom few percent of
+            the colorbar.
+        gamma (float or None): When set, uses
+            ``matplotlib.colors.PowerNorm(gamma, vmin, vmax)`` instead
+            of a linear normalization.  ``gamma < 1`` gives more
+            visual range to small values (useful for CV maps where
+            most pixels cluster near zero); ``gamma > 1`` does the
+            opposite.  Ignored when ``symmetric=True`` (diverging
+            colormaps use linear norm).
 
     Returns:
         None.
     """
     import rasterio as rio
+    from matplotlib.colors import PowerNorm
 
     apply_journal_style()
     makedirs(output_dir)
@@ -3478,13 +3499,23 @@ def create_era_raster_maps(
             logger.warning('All era means are empty for %s — skipping.', title)
             return
         all_vals = np.concatenate(valid_arrays)
+        lo_pct, hi_pct = percentile_clip
         if vmin is None:
-            vmin = float(np.nanpercentile(all_vals, 2))
+            vmin = float(np.nanpercentile(all_vals, lo_pct))
         if vmax is None:
-            vmax = float(np.nanpercentile(all_vals, 98))
+            vmax = float(np.nanpercentile(all_vals, hi_pct))
     if symmetric:
         abs_max = max(abs(vmin), abs(vmax))
         vmin, vmax = -abs_max, abs_max
+
+    # Power-law normalization for heavily skewed ratio bands (CV, SNR)
+    # gives more visual range to the bulk of the distribution while
+    # still allowing the tail to saturate at vmax.  Only applied when
+    # vmin >= 0 (PowerNorm requires non-negative range) and the map
+    # is not symmetric.
+    norm = None
+    if gamma is not None and not symmetric and vmin >= 0 and vmax > vmin:
+        norm = PowerNorm(gamma=gamma, vmin=vmin, vmax=vmax)
 
     # ---- Create figure ----
     n_eras = len(ERA_PERIODS)
@@ -3497,6 +3528,13 @@ def create_era_raster_maps(
 
     panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)']
     axes_flat = list(axes) if isinstance(axes, np.ndarray) else axes
+    # When a PowerNorm is in play, pass it in lieu of vmin/vmax so
+    # imshow uses the non-linear mapping consistently across all panels.
+    imshow_kwargs = (
+        {'cmap': cmap, 'norm': norm}
+        if norm is not None
+        else {'cmap': cmap, 'vmin': vmin, 'vmax': vmax}
+    )
     for idx, (era, (y1, y2)) in enumerate(ERA_PERIODS.items()):
         ax = axes_flat[idx]
         ax.set_facecolor('#D5D5D5')  # gray for no-data
@@ -3505,16 +3543,14 @@ def create_era_raster_maps(
         if era_arr is not None and era_arr.count() > 0:
             im = ax.imshow(
                 era_arr, extent=extent, origin='upper',
-                cmap=cmap, vmin=vmin, vmax=vmax,
-                interpolation='nearest',
+                interpolation='nearest', **imshow_kwargs,
             )
         else:
             # Blank panel
             blank = np.ma.masked_all(raster_shape)
             im = ax.imshow(
                 blank, extent=extent, origin='upper',
-                cmap=cmap, vmin=vmin, vmax=vmax,
-                interpolation='nearest',
+                interpolation='nearest', **imshow_kwargs,
             )
 
         _overlay_boundaries(ax, basins_gdf, ama_ina, name_col,
@@ -4286,7 +4322,8 @@ def create_trend_maps(
         cb_ax2.yaxis.tick_right()
 
     # ── Rendering helpers ────────────────────────────────────────────
-    def _draw_pixel_panel(ax, period_name, pr, color_abs, slope_scale=1.0):
+    def _draw_pixel_panel(ax, period_name, pr, color_abs, slope_scale=1.0,
+                          show_title=True):
         ax.set_facecolor('#D5D5D5')
         im = ax.imshow(
             pr['slope_masked'] * slope_scale, extent=extent, origin='upper',
@@ -4309,7 +4346,12 @@ def create_trend_maps(
                        alpha=0.4, marker='.', linewidths=0)
         _overlay_boundaries(ax, basins_gdf, ama_ina, name_col,
                             label_all=True)
-        ax.set_title(period_name, fontsize=12, fontweight='bold')
+        # Panel-level title only when there are multiple panels in the
+        # figure (era 1×3 composites).  For single-axis Full-period
+        # figures the period name is already carried by the suptitle,
+        # so a panel title would be a duplicate.
+        if show_title:
+            ax.set_title(period_name, fontsize=12, fontweight='bold')
         summary = (f"Significant: \u2191{pr['pct_inc']:.1f}%  "
                    f"\u2193{pr['pct_dec']:.1f}%  n.s. {pr['pct_ns']:.1f}%")
         ax.text(
@@ -4321,7 +4363,7 @@ def create_trend_maps(
         return im
 
     def _draw_basin_panel(ax, period_name, pr, color_abs,
-                          slope_scale=1.0, font_scale=1.0):
+                          slope_scale=1.0, font_scale=1.0, show_title=True):
         basin_stats = pr['basin_stats']
         basin_trend_gdf = basins_gdf.merge(
             basin_stats[['Region', 'Mean_Slope', 'Pct_Sig_Increase',
@@ -4360,7 +4402,8 @@ def create_trend_maps(
                 bbox=dict(boxstyle='round,pad=0.1', fc='white',
                           alpha=0.7, lw=0),
             )
-        ax.set_title(period_name, fontsize=12, fontweight='bold')
+        if show_title:
+            ax.set_title(period_name, fontsize=12, fontweight='bold')
         ax.axis('off')
 
     # ── Pass 2: render figures ───────────────────────────────────────
@@ -4379,8 +4422,11 @@ def create_trend_maps(
         pixel_scale, pixel_prefix = _slope_display_scale(pr['abs_max'])
         fig, ax = plt.subplots(1, 1, figsize=(10, 9),
                                constrained_layout=True)
+        # show_title=False suppresses the per-axis title because the
+        # suptitle below already carries the period name.
         im = _draw_pixel_panel(ax, period_name, pr, pr['abs_max'],
-                               slope_scale=pixel_scale)
+                               slope_scale=pixel_scale,
+                               show_title=False)
         cbar = fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02,
                             extend='both')
         cbar.set_label(
@@ -4409,7 +4455,8 @@ def create_trend_maps(
             fig_b, ax_b = plt.subplots(1, 1, figsize=(10, 9),
                                        constrained_layout=True)
             _draw_basin_panel(ax_b, period_name, pr, b_abs,
-                              slope_scale=basin_scale)
+                              slope_scale=basin_scale,
+                              show_title=False)
             sm = plt.cm.ScalarMappable(
                 cmap='RdBu_r',
                 norm=plt.Normalize(
