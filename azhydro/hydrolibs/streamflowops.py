@@ -795,9 +795,7 @@ def create_streamflow_rasters(
                 if total_canal > 0:
                     # Redistribute: total volume preserved, weighted by canal density
                     cw_arr[mask] = flow_mm * n_pixels * (yr_canal_arr[mask] / total_canal)
-                else:
-                    # No canals in watershed: fall back to uniform
-                    cw_arr[mask] = flow_mm
+                # No active canals in watershed → zero canal-weighted streamflow
 
             # CAP overlay weighted by canal density
             cap_mask = cap_arr > 0
@@ -808,8 +806,7 @@ def create_streamflow_rasters(
             if yr_cap_canal_sum > 0:
                 n_cap = int(cap_mask.sum())
                 cw_arr[cap_mask] += co_flow * n_cap * (yr_canal_arr[cap_mask] / yr_cap_canal_sum)
-            else:
-                cw_arr[cap_mask] += co_flow
+            # No active CAP canals → no CAP canal-weighted streamflow
 
             cw_arr[np.isnan(cw_arr)] = 0.0
             cw_file = os.path.join(output_dir, f'Canal_Weighted_Streamflow_{year}.tif')

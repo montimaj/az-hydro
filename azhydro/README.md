@@ -160,7 +160,7 @@ Step 3h is excluded from `--steps all` because Step 3g already produces the grap
 | `gw-csv` | GW CSV → per-year shapefiles |
 | `vectors` | Reproject vectors |
 | `gw-rasters` | GW volume → depth → cropped rasters |
-| `streamflow` | Canal density (temporally scaled via HarDWR v2.0) & streamflow rasters |
+| `streamflow` | Canal density (temporally masked per canal segment) & streamflow rasters |
 | `basin-rasters` | GW basin, sub-basin, well density & irr capacity fraction rasters |
 | `wtd` | Water table depth raster ([Ma et al., 2026](https://doi.org/10.1038/s43247-025-03094-3)) |
 | `rights-rasters` | HarDWR v2.0 SW access year, irr/non-irr SW rights density rasters |
@@ -345,9 +345,48 @@ channels.  The canal-weighted streamflow variant (`Canal_Weighted_Streamflow_*.t
 partially mitigates this by redistributing streamflow proportionally to
 canal density (segment count per pixel) derived from the GRAIN dataset
 ([Suresh et al., 2026](https://doi.org/10.5194/essd-18-1855-2026)),
-concentrating flow where delivery infrastructure exists.  A further refinement could use distance-to-NHD
-flowlines as a weighting factor, but this data product is not currently
-in the pipeline.
+concentrating flow where delivery infrastructure exists.  Both canal
+density and canal-weighted streamflow are **temporally masked per canal
+segment** using historical construction dates and HarDWR SW rights
+nearest-neighbor dating (see "Temporal canal masking" below), so
+pre-infrastructure pixels correctly receive zero canal features.  A
+further refinement could use distance-to-NHD flowlines as a weighting
+factor, but this data product is not currently in the pipeline.
+
+#### Temporal canal masking
+
+Each GRAIN canal segment is assigned a `first_delivery_year` using a
+three-tier hierarchy:
+
+1. **Named major canal** — matched against a lookup table of 13 regex
+   patterns tied to documented construction dates (e.g., SRP/Arizona
+   Canal system → 1868, CAP → 1985, Wellton-Mohawk → 1952, Gila
+   Gravity Main → 1943).
+2. **Unnamed canal with a nearby HarDWR POD** — spatial nearest-neighbor
+   to the closest surface-water POD from HarDWR v2.0
+   ([Lisk et al., 2024](https://doi.org/10.57931/2475303)) within
+   20 km; uses the POD's priority year.  All SW right types
+   (irrigation, livestock, domestic, industrial, environmental) are
+   included so that basins without irrigation PODs (e.g., Lake Havasu,
+   Peach Springs) still receive dates.
+3. **No nearby POD** — falls back to the earliest SW right priority
+   year in the same GW basin, determined by joining all HarDWR SW PODs
+   to the nearest ADWR groundwater basin polygon.
+
+For each prediction year, `create_canal_density_raster()` and
+`create_streamflow_rasters()` include only segments where
+`first_delivery_year ≤ year`.  This produces truly time-varying
+`Canal_Density_{year}.tif` and `Canal_Weighted_Streamflow_{year}.tif`
+rasters that reflect actual infrastructure build-out — for example, CAP
+canal pixels appear only from 1985 onward, while SRP canals in Phoenix
+are present from 1868.
+
+**Known limitation for unnamed canals:** The nearest-neighbor POD proxy
+assumes that a canal segment's construction date correlates with the
+priority date of the closest surface-water right.  This is a reasonable
+approximation — a lateral branching off the CAP picks up a post-1985
+right, while a ditch near old Colorado River diversions picks up a
+pre-1900 right — but it is not exact for individual segments.
 
 ### Water table depth (WTD)
 
@@ -671,8 +710,13 @@ Downloads, mosaics, and aligns all input datasets to a common 2 km grid.
 3. **Streamflow & canal density** — `streamflowops.create_canal_density_raster()`
    and `streamflowops.create_streamflow_rasters()` build predictor layers
    from USGS/USBR gauge data and GRAIN canal geometry ([Suresh et al., 2026](https://doi.org/10.5194/essd-18-1855-2026)).
-   Canal density is **temporally scaled** using watershed-level SW rights
-   build-out from HarDWR v2.0 ([Lisk et al., 2024](https://doi.org/10.57931/2475303)).
+   Canal density is **temporally masked per canal segment** using a
+   three-tier dating hierarchy: (1) named major canals matched to
+   documented construction dates, (2) unnamed canals dated via spatial
+   nearest-neighbor to HarDWR v2.0 SW PODs
+   ([Lisk et al., 2024](https://doi.org/10.57931/2475303)) within 20 km,
+   (3) basin-level earliest SW right fallback.  For each prediction year,
+   only segments with `first_delivery_year ≤ year` are rasterized.
 4. **Basin & well rasters** — `gwops.create_gw_basin_rasters()`,
    `gwops.create_well_density_raster()`, and
    `gwops.create_irr_capacity_fraction_raster()` rasterize ADWR basins,
@@ -1127,6 +1171,11 @@ For each year the pipeline:
    source-mismatch (1984↔1985 USGS→NLCD and 2025↔2026 NLCD→USGS) is
    handled upstream via basin-scale delta correction baked into the
    parquet (see "Data harmonization" above).
+4b. **Applies basin-level delivery-ratio scaling** via
+   `partitionops.apply_basin_sw_scaling()`.  Per-basin ratios are
+   computed from observed CAP/SRP delivery data vs ML `Total_SW`
+   volumes, and all eight partition categories are adjusted to correct
+   SW magnitude while preserving `Total = GW + SW` conservation.
 5. **Computes consumptive use (CU)** using USGS NHM basin-level
    irrigation efficiencies:
    ```
@@ -1242,6 +1291,15 @@ so all downstream CI computation uses a single multiplier (z = 1.96).
 structural uncertainty rather than estimating population variance, so
 they retain z = 1.96 (scale = 1.0).  Ensemble sizes (N) are reported
 in all σ_total CSVs.
+
+**Delivery-ratio scaling in UQ:** Each ensemble member's partitioned
+predictions are scaled by the same basin-level delivery ratios used for
+the central prediction (via `apply_basin_sw_scaling()` inside
+`_predict_total()`).  This ensures that per-category σ is computed from
+delivery-scaled ensemble members, keeping the CI bounds consistent with
+the scaled central prediction.  The `basin_ratios` dict is passed to
+`run_uncertainty_quantification()` and stored as a module-level variable
+so all five `compute_sigma_*` functions apply it automatically.
 
 ##### σ_MACA — Inter-GCM climate spread (future only, 2026–2099)
 
@@ -1979,21 +2037,31 @@ overlay), a scatter plot of ML vs observed AF per basin-year with 1:1 line
 and R², metrics CSV, and time series CSV, written to
 `{prediction_dir}CAP_SRP_Validation/`.
 
-**Why this validation is significant.** The CAP/SRP comparison is an
-entirely out-of-sample test of the density-ratio GW/SW partitioning
-scheme. Neither the CAP delivery volumes nor the SRP delivery records
-enter the model at any stage — the XGBRF training labels are total GW
-pumping from ADWR meters, and the GW/SW split is driven by two
-infrastructure-proxy features (ADWR well density vs. HarDWR surface-water
-rights density, modulated by canal-weighted streamflow). The CAP/SRP
-delivery data is an independently reported accounting of how much
-surface water was actually delivered to each basin, compiled by the
-delivery agencies themselves. The agreement between ML `Total_SW` and
-observed CAP+SRP deliveries therefore validates that the canal-weighted
-streamflow + rights-density proxy captures the real spatial and temporal
-pattern of surface-water use across Arizona without being calibrated to
-it, making this one of the strongest pieces of emergent validation in
-the framework alongside the ADWR/USGS volume reconciliations.
+**Dual role: validation and calibration.** The CAP/SRP delivery data
+serves two purposes in the pipeline:
+
+1. **Validation** — the density-ratio GW/SW partitioning is not trained
+   on any delivery data; the XGBRF labels are total GW pumping from ADWR
+   meters, and the GW/SW split is driven by infrastructure-proxy features
+   (well density vs. SW rights density, modulated by canal-weighted
+   streamflow).  The agreement between the *unscaled* ML `Total_SW` and
+   observed deliveries validates that the proxy captures the real spatial
+   and temporal pattern of surface-water use.
+2. **Calibration** — after validation, per-basin delivery ratios
+   (`ratio = mean(observed) / mean(ML_SW)`) are used to scale the
+   *magnitude* of the partitioned SW categories via
+   `apply_basin_sw_scaling()`.  This corrects systematic over- or
+   under-estimation of SW use while preserving the model's spatial and
+   temporal patterns.  The scaling also propagates into UQ ensemble
+   members so that uncertainty bounds remain consistent with the
+   calibrated central prediction.
+
+This separation is important: the partitioning *mechanism* (density
+ratio + canal-weighted streamflow) is validated out-of-sample, while
+the *magnitude* is calibrated using observed deliveries.  The validation
+confirms the mechanism works; the calibration corrects for the fact
+that a ratio of infrastructure proxies does not directly predict
+physical delivery volumes.
 
 #### Step 4d — Effective precipitation intercomparison (`run_peff_usgs_intercomparison()`)
 
@@ -2213,7 +2281,16 @@ Key functions:
   onto the 2 km grid using watershed polygons.
 - **`create_canal_density_raster()`** — Rasterizes canal geometry from the
   GRAIN dataset ([Suresh et al., 2026](https://doi.org/10.5194/essd-18-1855-2026))
-  into a canal-density layer used for SW-fraction estimation.
+  into per-year canal-density layers.  Each GRAIN segment is assigned a
+  `first_delivery_year` via `assign_canal_delivery_years()`, and only
+  segments active by that year are rasterized.
+- **`assign_canal_delivery_years()`** — Assigns a `first_delivery_year` to
+  each GRAIN canal segment using a three-tier hierarchy: (1) named major
+  canals matched against 13 regex patterns tied to documented construction
+  dates (e.g., SRP 1868, CAP 1985, Wellton-Mohawk 1952), (2) unnamed
+  canals dated via spatial nearest-neighbor to the closest HarDWR v2.0 SW
+  POD within 20 km, (3) basin-level earliest SW right fallback.  The
+  `CANAL_FIRST_DELIVERY` lookup table is defined as a module-level constant.
 
 ### `partitionops.py` — Water-budget partitioning
 
@@ -2283,6 +2360,22 @@ Affected pixels include all of Willcox AMA, Butler Valley, Parker,
 Ranegras Plain, and most of McMullen Valley.  Canal-served pixels
 in any basin retain their density-ratio + canal-boost split.
 
+**Basin-level delivery-ratio scaling:** After partitioning, basin-level
+SW volumes are calibrated against observed CAP/SRP delivery records.
+`compute_basin_delivery_ratios()` computes per-basin ratios:
+
+```
+ratio[basin] = mean(observed_delivery_AF) / mean(ML_Total_SW_AF)
+```
+
+`apply_basin_sw_scaling()` then multiplies each pixel's SW categories
+by its basin's ratio and adjusts GW categories to preserve conservation
+(`Total = GW + SW`).  The same scaling is applied inside each UQ
+ensemble member (via `_predict_total()`) so that per-category σ values
+reflect the delivery-scaled central prediction.  Ratios are capped at
+`max_ratio=10.0` to prevent extreme amplification in basins with very
+small ML SW estimates.
+
 **Physics-constrained input data correction:** Published datasets are
 treated as informative priors, not ground truth.  For example, the
 [Hung et al. (2025)](https://doi.org/10.1038/s41597-025-05920-x)
@@ -2323,6 +2416,10 @@ Key helpers:
 - **`partition_predictions()`** — orchestrates all splits (irr/nonirr,
   GW/SW with density-ratio + canal boost, zero-SW constraint), applies
   well-density masking, and returns a dict keyed by the eight category names.
+- **`compute_basin_delivery_ratios()`** — computes per-basin scaling ratios
+  from observed CAP/SRP delivery volumes vs ML `Total_SW` volumes.
+- **`apply_basin_sw_scaling()`** — applies delivery-ratio scaling to all
+  eight partition categories, preserving `Total = GW + SW` conservation.
 
 All partitions use subtraction from the parent total (e.g., `nonirr = total − irr`)
 to guarantee exact budget closure with no floating-point drift.
@@ -2339,7 +2436,9 @@ Key functions:
   summary CSVs, generates time-series plots, augments all prediction
   rasters with uncertainty bands, and regenerates all time-series plots
   with uncertainty bounds via zonal statistics.  Accepts `basin_shp` and
-  `subbasin_shp` parameters for basin/sub-basin shapefiles.
+  `subbasin_shp` parameters for basin/sub-basin shapefiles.  When
+  `basin_ratios` is provided, all ensemble members are delivery-ratio
+  scaled before computing per-category σ.
 - **`compute_sigma_maca()`** — Inter-GCM climate spread (5 GCMs, future
   only).  Returns per-year total σ, per-category σ, and per-GCM mosaic
   directories (reused by σ_CU).  Also records per-GCM AZ-mean values of
@@ -2538,8 +2637,10 @@ before the model sees the data:
   per pixel (all consumptive sectors, excluding environmental in-stream
   flow rights), capturing the progressive build-out of surface-water
   infrastructure over 200 years.
-- **Watershed-scaled canal density** — modern GRAIN canal density scaled
-  backward in time using per-watershed SW rights build-out from HarDWR v2.0.
+- **Temporally masked canal density** — per-year GRAIN canal density
+  where each segment is included only after its `first_delivery_year`,
+  assigned via named-canal construction dates, HarDWR SW POD nearest-
+  neighbor dating (20 km), or basin-level earliest SW right fallback.
 - **Multi-era climate harmonization** — no single ET or ETo dataset covers
   1896–2099, so overlapping-period bias-correction ratios stitch together
   three eras for each variable (see [gee/README.md](../gee/README.md)):
@@ -2571,9 +2672,16 @@ Physical constraints that must hold exactly are enforced after prediction:
 
 - **Conservation-consistent partitioning** — `Irrigation + Non-Irrigation =
   Total` and `GW + SW = Total` hold exactly for every pixel and year.
-- **Temporal GW fraction adjustment** — pre-canal pixels set to 100 % GW
-  using HarDWR v2.0 irrigation SW priority dates, ensuring the irrigation
-  GW/SW split reflects actual infrastructure availability.
+- **Temporal canal masking** — canal density and canal-weighted streamflow
+  are zero at pixels before the canal's `first_delivery_year` (assigned per
+  GRAIN segment via construction dates + HarDWR POD nearest-neighbor),
+  ensuring the GW/SW split reflects actual infrastructure availability at
+  the pixel level.
+- **Basin-level delivery-ratio scaling** — after partitioning, basin-level
+  SW volumes are scaled by `ratio = mean(observed_CAP_SRP_delivery) /
+  mean(ML_Total_SW)` to correct the magnitude of SW use using observed
+  CAP/SRP delivery data.  The scaling preserves conservation
+  (`Total = GW + SW`) by adjusting all eight partition categories.
 - **Non-irrigation GW/SW split** — temporally varying HarDWR v2.0 non-irrigation
   SW rights density (domestic, industrial, livestock) replaces the static
   canal-density proxy.
