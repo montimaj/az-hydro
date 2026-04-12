@@ -373,13 +373,38 @@ three-tier hierarchy:
    year in the same GW basin, determined by joining all HarDWR SW PODs
    to the nearest ADWR groundwater basin polygon.
 
+After the three-tier assignment, a **basin-level delivery-start
+enforcement** step bumps `first_delivery_year` to the basin's actual
+first delivery date (from observed CAP/SRP records) when the segment's
+date is earlier.  This handles cases where canal infrastructure was
+built before deliveries began to a specific basin — for example, the
+CAP canal traverses Tucson AMA from 1985 but actual CAP deliveries to
+Tucson did not start until 1990.  Basin delivery-start dates
+(`BASIN_DELIVERY_START` in `streamflowops.py`):
+
+| Basin | First delivery | Source |
+|---|---|---|
+| Phoenix AMA | 1868 | SRP (predates CAP) |
+| Pinal AMA | 1922 | San Carlos Irrigation Project |
+| Harquahala INA | 1985 | CAP |
+| Ranegras Plain | 1989 | CAP |
+| Tucson AMA | 1990 | CAP |
+
+Basins not in this table (e.g., Parker, Yuma, Safford) retain the
+per-segment dates from the three-tier hierarchy, since they have
+pre-CAP diversions from local rivers that predate any basin-level
+delivery program.
+
 For each prediction year, `create_canal_density_raster()` and
 `create_streamflow_rasters()` include only segments where
 `first_delivery_year ≤ year`.  This produces truly time-varying
 `Canal_Density_{year}.tif` and `Canal_Weighted_Streamflow_{year}.tif`
 rasters that reflect actual infrastructure build-out — for example, CAP
 canal pixels appear only from 1985 onward, while SRP canals in Phoenix
-are present from 1868.
+are present from 1868.  The regular `Streamflow_{year}.tif` rasters
+also gate the CAP Colorado River overlay to 1985 onward, so pre-CAP
+years do not receive imported Colorado River streamflow in the CAP
+service area.
 
 **Known limitation for unnamed canals:** The nearest-neighbor POD proxy
 assumes that a canal segment's construction date correlates with the
@@ -2289,8 +2314,12 @@ Key functions:
   canals matched against 13 regex patterns tied to documented construction
   dates (e.g., SRP 1868, CAP 1985, Wellton-Mohawk 1952), (2) unnamed
   canals dated via spatial nearest-neighbor to the closest HarDWR v2.0 SW
-  POD within 20 km, (3) basin-level earliest SW right fallback.  The
-  `CANAL_FIRST_DELIVERY` lookup table is defined as a module-level constant.
+  POD within 20 km, (3) basin-level earliest SW right fallback.  A final
+  basin-level enforcement step (`BASIN_DELIVERY_START`) bumps segments
+  to the basin's actual first delivery year from CAP/SRP records when it
+  is later than the segment's construction date.  Module-level constants:
+  `CANAL_FIRST_DELIVERY` (per-canal regex patterns) and
+  `BASIN_DELIVERY_START` (per-basin first delivery years).
 
 ### `partitionops.py` — Water-budget partitioning
 
@@ -2674,9 +2703,11 @@ Physical constraints that must hold exactly are enforced after prediction:
   Total` and `GW + SW = Total` hold exactly for every pixel and year.
 - **Temporal canal masking** — canal density and canal-weighted streamflow
   are zero at pixels before the canal's `first_delivery_year` (assigned per
-  GRAIN segment via construction dates + HarDWR POD nearest-neighbor),
+  GRAIN segment via construction dates + HarDWR POD nearest-neighbor +
+  basin-level delivery-start enforcement from observed CAP/SRP records),
   ensuring the GW/SW split reflects actual infrastructure availability at
-  the pixel level.
+  the pixel level.  The regular streamflow rasters also gate the CAP
+  Colorado River overlay to 1985 onward.
 - **Basin-level delivery-ratio scaling** — after partitioning, basin-level
   SW volumes are scaled by `ratio = mean(observed_CAP_SRP_delivery) /
   mean(ML_Total_SW)` to correct the magnitude of SW use using observed

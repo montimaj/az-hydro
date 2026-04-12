@@ -1969,8 +1969,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                 )
                 logger.info(
                     f'  CAP/SRP delivery scaling: {len(basin_ratios)} '
-                    f'basins with ratios, {len(basin_delivery_start)} '
-                    f'basins with delivery start years'
+                    f'basins with ratios'
                 )
             else:
                 logger.info(

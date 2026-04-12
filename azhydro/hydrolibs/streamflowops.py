@@ -57,6 +57,19 @@ CANAL_FIRST_DELIVERY: list[tuple[str, int]] = [
     (r'Dome Lateral|Thacker Lateral', 1920),
 ]
 
+# Basin-level first delivery years from CAP/SRP observed records.
+# Used to override per-segment dates: if a canal segment is inside a
+# basin where deliveries started later than the canal's construction
+# date, the segment's first_delivery_year is bumped to the basin date.
+# SRP canals in Phoenix AMA predate CAP (1868), so they are unaffected.
+BASIN_DELIVERY_START: dict[str, int] = {
+    'PHOENIX AMA': 1868,
+    'PINAL AMA': 1922,
+    'TUCSON AMA': 1990,
+    'HARQUAHALA INA': 1985,
+    'RANEGRAS PLAIN': 1989,
+}
+
 
 def _load_usbr_data(usbr_dir, usbr_id):
     """Load and average USBR ensemble data for a given USBR site ID."""
@@ -753,12 +766,14 @@ def create_streamflow_rasters(
             out_arr[ws_arr == oid] = flow_val
 
         # Overlay CAP service area with Colorado River streamflow (mm/yr)
-        if year in co_annual.index:
-            co_flow = co_annual.loc[year]
-        else:
-            co_flow = co_annual.mean() if not co_annual.empty else 0.0
-        cap_mask = cap_arr > 0
-        out_arr[cap_mask] += co_flow
+        # CAP first deliveries began in 1985
+        if year >= 1985:
+            if year in co_annual.index:
+                co_flow = co_annual.loc[year]
+            else:
+                co_flow = co_annual.mean() if not co_annual.empty else 0.0
+            cap_mask = cap_arr > 0
+            out_arr[cap_mask] += co_flow
 
         out_arr[np.isnan(out_arr)] = 0.0
         out_file = os.path.join(output_dir, f'Streamflow_{year}.tif')
@@ -992,6 +1007,40 @@ def assign_canal_delivery_years(
             f'  Global fallback: {int(still_nan.sum())} segments → '
             f'{global_earliest}'
         )
+
+    # Basin-level delivery-start enforcement: bump segments in basins
+    # where actual deliveries started later than the segment's
+    # construction date.  This handles cases like CAP segments in
+    # Tucson (canal built 1985, deliveries started 1990).
+    if basin_gdf is not None and BASIN_DELIVERY_START:
+        all_centroids = gpd.GeoDataFrame(
+            {'idx': gdf.index},
+            geometry=gdf.geometry.centroid.values,
+            crs=gdf.crs,
+        )
+        basin_proj = basin_gdf.to_crs(gdf.crs)
+        all_seg_basins = gpd.sjoin_nearest(
+            all_centroids, basin_proj[[basin_col, 'geometry']],
+            how='left',
+        ).drop_duplicates(subset='idx')
+        n_bumped = 0
+        for _, row in all_seg_basins.iterrows():
+            bname = row.get(basin_col)
+            if pd.isna(bname):
+                continue
+            basin_start = BASIN_DELIVERY_START.get(bname)
+            if basin_start is None:
+                continue
+            idx = row['idx']
+            cur = gdf.loc[idx, 'first_delivery_year']
+            if cur < basin_start:
+                gdf.loc[idx, 'first_delivery_year'] = basin_start
+                n_bumped += 1
+        if n_bumped:
+            logger.info(
+                f'  Basin delivery-start enforcement: bumped '
+                f'{n_bumped} segments to basin delivery dates'
+            )
 
     gdf['first_delivery_year'] = gdf['first_delivery_year'].astype(int)
     logger.info(
