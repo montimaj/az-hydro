@@ -385,7 +385,7 @@ Tucson did not start until 1990.  Basin delivery-start dates
 | Basin | First delivery | Source |
 |---|---|---|
 | Phoenix AMA | 1868 | SRP (predates CAP) |
-| Pinal AMA | 1922 | San Carlos Irrigation Project |
+| Pinal AMA | 1924 | San Carlos Irrigation Project |
 | Harquahala INA | 1985 | CAP |
 | Ranegras Plain | 1989 | CAP |
 | Tucson AMA | 1990 | CAP |

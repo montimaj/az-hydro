@@ -64,7 +64,7 @@ CANAL_FIRST_DELIVERY: list[tuple[str, int]] = [
 # SRP canals in Phoenix AMA predate CAP (1868), so they are unaffected.
 BASIN_DELIVERY_START: dict[str, int] = {
     'PHOENIX AMA': 1868,
-    'PINAL AMA': 1922,
+    'PINAL AMA': 1924, # Florence Casa Grande system expansion and San Carlos Irrigation Project deliveries
     'TUCSON AMA': 1990,
     'HARQUAHALA INA': 1985,
     'RANEGRAS PLAIN': 1989,
