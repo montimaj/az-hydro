@@ -36,7 +36,7 @@ CANAL_FIRST_DELIVERY: list[tuple[str, int]] = [
     # Central Arizona Project — first deliveries 1985
     (r'Central Arizona Project|Hayden.Rhodes|Buckskin.*Tunnel', 1985),
     # Florence-Casa Grande system — San Carlos Irrigation Project
-    (r'Florence.*Canal|Casa Grande Canal|Florence Casa Grande', 1922),
+    (r'Florence.*Canal|Casa Grande Canal|Florence Casa Grande', 1924),
     # Buckeye Canal — Buckeye Canal Co. 1888
     (r'Buckeye Canal', 1888),
     # Gila Bend Canal — 1887
@@ -51,10 +51,10 @@ CANAL_FIRST_DELIVERY: list[tuple[str, int]] = [
     (r'Yuma Main', 1912),
     # Pima Lateral — San Carlos Irrigation Project extension 1928
     (r'Pima Lateral', 1928),
-    # Santa Rosa Canal — 1930
-    (r'Santa Rosa Canal', 1930),
-    # Dome/Thacker laterals — Yuma-area ~1920
-    (r'Dome Lateral|Thacker Lateral', 1920),
+    # Santa Rosa Canal — 1987
+    (r'Santa Rosa Canal', 1987),
+    # Dome/Thacker laterals — part of Wellton-Mohawk system
+    (r'Dome Lateral|Thacker Lateral', 1952),
 ]
 
 # Basin-level first delivery years from CAP/SRP observed records.
