@@ -394,7 +394,20 @@ def load_nhm_basin_volumes(
                 for b in basin_reproj[basin_col]
             }
 
-        result[category] = {'mean': basin_vols, 'yearly': yearly_vols}
+        # Compute mean-annual basin volumes from the overlay-based
+        # yearly_vols (which does the correct mass-conserving
+        # volume × area_frac aggregation) rather than from the
+        # rasterize-then-sum path via _raster_basin_volumes, which
+        # over-counts volume because the HUC12 depth values get
+        # replicated across all pixels inside the basin polygon.
+        mean_basin_vols: dict[str, float] = {}
+        for b in basin_reproj[basin_col]:
+            yr_vals = [
+                yearly_vols[yr].get(b, 0.0)
+                for yr in yearly_vols
+            ]
+            mean_basin_vols[b] = float(np.mean(yr_vals)) if yr_vals else 0.0
+        result[category] = {'mean': mean_basin_vols, 'yearly': yearly_vols}
 
     return result
 
@@ -1110,12 +1123,10 @@ def _nhm_cu_volume_path(
         dst.write(nhm_raster, 1)
     logger.info(f'  Wrote NHM {raster_label} raster: {out_tif}')
 
-    # Basin volumes
-    basin_vols = _raster_basin_volumes(
-        out_tif, basin_reproj, basin_col, pixel_area_m2, depth_unit='mm',
-    )
-
-    # Per-year basin volumes via spatial overlay
+    # Per-year basin volumes via spatial overlay (correct mass-conserving
+    # aggregation: volume × area_frac).  The rasterize-then-sum path
+    # via _raster_basin_volumes over-counts for HUC12-level polygon
+    # rasters, so we derive 'mean' from yearly_vols instead.
     yearly_vols = {}
     overlay = gpd.overlay(
         huc_reproj[['huc12', 'area_m2', 'geometry']],
@@ -1136,7 +1147,11 @@ def _nhm_cu_volume_path(
             for b in basin_reproj[basin_col]
         }
 
-    return {'mean': basin_vols, 'yearly': yearly_vols}
+    mean_basin_vols: dict[str, float] = {}
+    for b in basin_reproj[basin_col]:
+        yr_vals = [yearly_vols[yr].get(b, 0.0) for yr in yearly_vols]
+        mean_basin_vols[b] = float(np.mean(yr_vals)) if yr_vals else 0.0
+    return {'mean': mean_basin_vols, 'yearly': yearly_vols}
 
 
 def _nhm_ie_ratio_path(
@@ -2056,7 +2071,7 @@ def run_cu_intercomparison(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Effective Precipitation Intercomparison (ML Peff vs ML Peff PCML vs NHM)
+# Effective Precipitation Intercomparison (USDA-SCS Peff vs ML Peff PCML vs NHM)
 
 
 def _load_ml_peff_to_basins(
@@ -2181,7 +2196,7 @@ def run_peff_intercomparison(
     """
     Compare irrigated effective precipitation across three sources:
 
-        1. **ML Peff** — SCS formula-based (predictor band 4 × irr_fraction)
+        1. **USDA-SCS Peff** — SCS formula-based (predictor band 4 × irr_fraction)
         2. **ML Peff PCML** — observation-based (predictor band 5 × irr_fraction)
         3. **NHM Peff** — USGS NHM PPTeff HUC12 data (Mgal/day → basin AF)
 
@@ -2242,8 +2257,8 @@ def run_peff_intercomparison(
     }
     af_to_m3 = 1.0 / M3_TO_AF
 
-    # ── 1. ML Peff (SCS) ────────────────────────────────────────────────
-    logger.info('--- Loading ML Peff (SCS formula) ---')
+    # ── 1. USDA-SCS Peff ──────────────────────────────────────────────
+    logger.info('--- Loading USDA-SCS Peff (SCS formula) ---')
     ml_peff_out = os.path.join(output_dir, 'ML_Peff_Rasters/')
     ml_peff = _load_ml_peff_to_basins(
         predictor_dir, basin_gdf, basin_col, ml_year_range,
@@ -2278,6 +2293,11 @@ def run_peff_intercomparison(
         'ML_Peff_PCML': ml_peff_pcml,
         'NHM_Peff': nhm_peff,
     }
+    _peff_display_name = {
+        'ML_Peff': 'USDA_SCS_Peff',
+        'ML_Peff_PCML': 'ML_Peff_PCML',
+        'NHM_Peff': 'NHM_Peff',
+    }
     all_metrics = []
     pairs = [
         ('ML_Peff', 'NHM_Peff'),
@@ -2289,7 +2309,8 @@ def run_peff_intercomparison(
             basin_names,
             all_sources[label_a]['mean'],
             all_sources[label_b]['mean'],
-            label_a, label_b,
+            _peff_display_name[label_a],
+            _peff_display_name[label_b],
             basin_areas_m2=basin_areas_m2,
         )
         m['Category'] = 'Effective_Precipitation'
@@ -2311,9 +2332,10 @@ def run_peff_intercomparison(
         area = basin_areas_m2.get(basin, 1.0)
         row = {'Basin': basin}
         for src_key in ('ML_Peff', 'ML_Peff_PCML', 'NHM_Peff'):
+            display = _peff_display_name[src_key]
             af_val = all_sources[src_key]['mean'].get(basin, 0.0)
-            row[f'{src_key}_mm'] = round(af_val * af_to_m3 / area * M_TO_MM, 4)
-            row[f'{src_key}_AF'] = round(af_val, 2)
+            row[f'{display}_mm'] = round(af_val * af_to_m3 / area * M_TO_MM, 4)
+            row[f'{display}_AF'] = round(af_val, 2)
         rows.append(row)
     basin_df = pd.DataFrame(rows)
     basin_csv = os.path.join(output_dir, 'peff_per_basin.csv')
@@ -2329,7 +2351,7 @@ def run_peff_intercomparison(
                 af_val = yearly[year].get(basin, 0.0)
                 area = basin_areas_m2.get(basin, 1.0)
                 ts_rows.append({
-                    'Source': src_key,
+                    'Source': _peff_display_name.get(src_key, src_key),
                     'Year': year,
                     'Basin': basin,
                     'Volume_mm': round(
@@ -2354,15 +2376,25 @@ def run_peff_intercomparison(
         basin_names=basin_names, basin_areas_m2=basin_areas_m2,
         output_dir=plot_dir,
         colors=_peff_colors, markers=_peff_markers,
-        labels={k: k.replace('_', ' ') for k in all_sources},
+        labels={
+            'ML_Peff': 'USDA-SCS Peff',
+            'ML_Peff_PCML': 'ML Peff PCML',
+            'NHM_Peff': 'NHM Peff',
+        },
         title_prefix='Effective Precipitation — ', file_prefix='TS_Peff',
     )
 
     # ── 8. Scatter plots ─────────────────────────────────────────────────
     scatter_dir = os.path.join(output_dir, 'Scatter/')
+    _peff_display = {
+        'ML_Peff': 'USDA-SCS Peff',
+        'ML_Peff_PCML': 'ML Peff PCML',
+        'NHM_Peff': 'NHM Peff',
+    }
     source_keys = list(all_sources.keys())
     peff_scatter_pairs = [
-        (source_keys[i].replace('_', ' '), source_keys[j].replace('_', ' '),
+        (_peff_display.get(source_keys[i], source_keys[i]),
+         _peff_display.get(source_keys[j], source_keys[j]),
          all_sources[source_keys[i]]['mean'], all_sources[source_keys[j]]['mean'])
         for i in range(len(source_keys))
         for j in range(i + 1, len(source_keys))
@@ -2378,7 +2410,7 @@ def run_peff_intercomparison(
     logger.info('Peff Intercomparison Summary')
     logger.info('=' * 60)
     logger.info(f'\n{metrics_df.to_string(index=False)}')
-    logger.info(f'\nML Peff year range: {ml_year_range}')
+    logger.info(f'\nUSDA-SCS Peff year range: {ml_year_range}')
     logger.info(f'ML Peff PCML year range: {ml_pcml_year_range}')
     logger.info(f'NHM Peff year range: {nhm_year_range}')
 

@@ -6418,9 +6418,10 @@ def plot_intercomp_time_series(
             else:
                 total_area = basin_areas_m2.get(basin, 1.0)
 
+            has_any_data = False
             for source, src_data in all_sources.items():
                 yearly = src_data.get(cat, {}).get('yearly', {})
-                years = sorted(yearly.keys())
+                years = sorted(int(y) for y in yearly.keys())
                 if not years:
                     continue
 
@@ -6428,20 +6429,24 @@ def plot_intercomp_time_series(
                 marker = markers.get(source, 'o')
                 label = labels.get(source, source)
 
+                # Build a lookup that handles both int and float year keys
+                yearly_int = {int(k): v for k, v in yearly.items()}
                 if mode == 'volume':
                     if basin == 'AZ_Total':
                         af_vals = np.array([
-                            sum(yearly[yr].values()) for yr in years
+                            sum(yearly_int[yr].values()) for yr in years
                         ])
                     else:
                         af_vals = np.array([
-                            yearly[yr].get(basin, 0.0) for yr in years
+                            yearly_int[yr].get(basin, 0.0) for yr in years
                         ])
 
                     m3_vals = af_vals * af_to_m3
                     mm_vals = (m3_vals / total_area * m_to_mm
                                if total_area > 0 else m3_vals * 0)
 
+                    if np.any(np.isfinite(af_vals) & (af_vals != 0)):
+                        has_any_data = True
                     axes[0].plot(years, mm_vals, label=label, color=color,
                                  marker=marker, markersize=3, linewidth=1.2)
                     axes[1].plot(years, m3_vals, label=label, color=color,
@@ -6451,7 +6456,7 @@ def plot_intercomp_time_series(
                     if basin == 'AZ_Total':
                         ie_vals = []
                         for yr in years:
-                            yr_d = yearly[yr]
+                            yr_d = yearly_int[yr]
                             vals = [yr_d.get(b, np.nan) for b in basin_names]
                             areas = [basin_areas_m2.get(b, 0) for b in basin_names]
                             finite = [(v, a) for v, a in zip(vals, areas)
@@ -6465,16 +6470,28 @@ def plot_intercomp_time_series(
                         plot_vals = np.array(ie_vals)
                     else:
                         plot_vals = np.array([
-                            yearly[yr].get(basin, np.nan) for yr in years
+                            yearly_int[yr].get(basin, np.nan) for yr in years
                         ])
+                    if np.any(np.isfinite(plot_vals)):
+                        has_any_data = True
                     axes[0].plot(years, plot_vals, label=label, color=color,
                                  marker=marker, markersize=3, linewidth=1.2)
 
+            # Skip blank plots (no source had data for this basin/category)
+            if not has_any_data:
+                plt.close(fig)
+                continue
+
             # ── Axis formatting ──
+            # Force integer-only year ticks on every x-axis to prevent
+            # matplotlib from rendering "2000.0" or cluttering the axis
+            # with sub-year gridlines.
+            from matplotlib.ticker import MaxNLocator
             if mode == 'volume':
                 axes[0].set_ylabel('Depth (mm)')
                 axes[0].grid(True, alpha=0.3, linestyle='--')
                 axes[0].legend(fontsize=9)
+                axes[0].xaxis.set_major_locator(MaxNLocator(integer=True))
                 ax_ft = axes[0].twinx()
                 ax_ft.set_ylabel('Depth (ft)')
                 lo, hi = axes[0].get_ylim()
@@ -6484,6 +6501,7 @@ def plot_intercomp_time_series(
                 axes[1].set_xlabel('Year')
                 axes[1].grid(True, alpha=0.3, linestyle='--')
                 axes[1].legend(fontsize=9)
+                axes[1].xaxis.set_major_locator(MaxNLocator(integer=True))
                 ax_af = axes[1].twinx()
                 ax_af.set_ylabel('Volume (AF)')
                 lo, hi = axes[1].get_ylim()
@@ -6493,6 +6511,7 @@ def plot_intercomp_time_series(
                 axes[0].set_xlabel('Year')
                 axes[0].grid(True, alpha=0.3, linestyle='--')
                 axes[0].legend(fontsize=9)
+                axes[0].xaxis.set_major_locator(MaxNLocator(integer=True))
 
             clean = basin.replace(' ', '_').replace('/', '_').replace('.', '')
             out_path = os.path.join(output_dir,
