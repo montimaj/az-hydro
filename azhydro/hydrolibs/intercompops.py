@@ -51,6 +51,8 @@ from shapely.geometry import box, mapping
 from hydrolibs.rasterops import read_raster_as_arr
 from hydrolibs.sysops import makedirs
 from hydrolibs.visualops import (
+    _overlay_boundaries,
+    get_ama_ina_basin_names,
     plot_intercomp_scatter,
     plot_intercomp_taylor,
     plot_intercomp_time_series,
@@ -71,6 +73,9 @@ MM_TO_FT = 1.0 / 304.8                 # millimeters → feet
 NHM_SENTINEL = {999, 888}
 
 
+_filter_huc12_cache: dict[str, set[str]] | None = None
+
+
 def _filter_huc12_within_az(
     huc_gdf: gpd.GeoDataFrame,
     basin_gdf: gpd.GeoDataFrame,
@@ -85,19 +90,28 @@ def _filter_huc12_within_az(
     differences in the spatial-diff maps and inflate the basin-level
     volume aggregation for border basins.
 
-    Both GeoDataFrames are reprojected to a common projected CRS
-    before computing the geometric intersection so that area
-    calculations are in meters, not degrees.
+    The result is cached at module level keyed by the number of input
+    HUC12s so the expensive ``union_all`` + ``intersection`` geometry
+    computation runs only once per session regardless of how many times
+    the function is called.
     """
-    # Ensure both are in the same projected CRS for area computation.
-    # Use basin_gdf's CRS as the target (it's typically already projected).
+    global _filter_huc12_cache
+    cache_key = str(len(huc_gdf))
+    if _filter_huc12_cache is not None and cache_key in _filter_huc12_cache:
+        kept_ids = _filter_huc12_cache[cache_key]
+        huc_ids = huc_gdf['huc12'].astype(str)
+        result = huc_gdf[huc_ids.isin(kept_ids)].copy()
+        logger.info(
+            f'  HUC12 filter (cached): {len(result)} AZ-interior HUC12s'
+        )
+        return result
+
     target_crs = basin_gdf.crs
     huc_proj = (
         huc_gdf.to_crs(target_crs) if huc_gdf.crs != target_crs
         else huc_gdf
     )
-    basin_proj = basin_gdf
-    az_union = basin_proj.geometry.union_all()
+    az_union = basin_gdf.geometry.union_all()
     frac = huc_proj.geometry.intersection(az_union).area / huc_proj.geometry.area
     keep = frac >= threshold
     n_dropped = int((~keep).sum())
@@ -109,8 +123,15 @@ def _filter_huc12_within_az(
             f'{n_kept} HUC12s retained'
         )
     else:
-        logger.info(f'  All {n_kept} HUC12s within AZ basins (no cross-border drops)')
-    # Return in the ORIGINAL CRS so downstream code can reproject as needed.
+        logger.info(
+            f'  All {n_kept} HUC12s within AZ basins (no cross-border drops)'
+        )
+
+    kept_ids = set(huc_gdf.loc[keep.values, 'huc12'].astype(str))
+    if _filter_huc12_cache is None:
+        _filter_huc12_cache = {}
+    _filter_huc12_cache[cache_key] = kept_ids
+
     return huc_gdf[keep.values].copy()
 
 
@@ -908,6 +929,94 @@ def _compute_metrics(
         result['MAD_ft'] = round(float(np.mean(np.abs(diff_ft))), 6)
 
     return result
+
+
+def _huc12_temporal_diagnostics(
+    huc12_yearly_sources: dict[str, dict[int, dict[str, float]]],
+    pairs: list[tuple[str, str]],
+    huc12_ids: list[str],
+    category: str,
+    output_dir: str,
+    huc_areas: dict[str, float] | None = None,
+) -> None:
+    """Compute temporal agreement at HUC12 level and render diagnostics.
+
+    Produces:
+    - ``huc12_temporal_agreement.csv`` — per-HUC12 Pearson r and NSE
+    - ``Temporal_Agreement/BoxViolin_*.png`` — distribution plots
+    - ``Taylor/Taylor_HUC12_*.png`` — Taylor diagrams
+
+    Args:
+        huc12_yearly_sources: ``{source_label: {year: {huc12: AF}}}``
+        pairs: List of ``(src_a, src_b)`` — second is treated as
+            reference for NSE.
+        huc12_ids: List of HUC12 IDs to evaluate.
+        category: Category label (e.g. ``'Irrigation_GW'``).
+        output_dir: Root HUC12 comparison directory.
+        huc_areas: Optional ``{huc12: area_m2}`` for Taylor diagram.
+    """
+    from hydrolibs.visualops import (
+        plot_temporal_box_violin,
+        plot_intercomp_taylor,
+    )
+
+    # Temporal metrics
+    all_per_huc = []
+    all_summary = []
+    for label_a, label_b in pairs:
+        yearly_a = huc12_yearly_sources.get(label_a, {})
+        yearly_b = huc12_yearly_sources.get(label_b, {})
+        tm = _compute_temporal_metrics(
+            huc12_ids, yearly_a, yearly_b, label_a, label_b,
+        )
+        summary = {
+            'Category': category,
+            'Level': 'HUC12',
+            'Pair': tm['Pair'],
+            'Pearson_r_mean': tm['Pearson_r_mean'],
+            'Pearson_r_median': tm['Pearson_r_median'],
+            'NSE_mean': tm['NSE_mean'],
+            'NSE_median': tm['NSE_median'],
+            'n_common_years': tm['n_common_years'],
+            'n_zones_with_data': tm['n_basins_with_data'],
+        }
+        all_summary.append(summary)
+        for pb in tm.get('per_basin', []):
+            pb['Category'] = category
+            pb['Pair'] = tm['Pair']
+            all_per_huc.append(pb)
+        logger.info(
+            f'    {tm["Pair"]} (HUC12): r_mean={tm["Pearson_r_mean"]}, '
+            f'NSE_mean={tm["NSE_mean"]}, n={tm["n_basins_with_data"]}'
+        )
+
+    if all_summary:
+        pd.DataFrame(all_summary).to_csv(
+            os.path.join(output_dir, 'huc12_temporal_agreement.csv'),
+            index=False,
+        )
+    if all_per_huc:
+        per_huc_df = pd.DataFrame(all_per_huc)
+        per_huc_df.to_csv(
+            os.path.join(output_dir, 'huc12_temporal_per_zone.csv'),
+            index=False,
+        )
+        # Box-violin
+        ta_dir = os.path.join(output_dir, 'Temporal_Agreement/')
+        plot_temporal_box_violin(per_huc_df, ta_dir)
+
+    # Taylor diagram
+    taylor_sources = {}
+    for src_label, yearly in huc12_yearly_sources.items():
+        taylor_sources[src_label] = {
+            category: {'yearly': yearly},
+        }
+    taylor_dir = os.path.join(output_dir, 'Taylor/')
+    plot_intercomp_taylor(
+        taylor_sources, pairs, [category], huc12_ids, taylor_dir,
+        title_prefix='HUC12-Level ', file_prefix='Taylor_HUC12',
+    )
+    logger.info(f'  HUC12 temporal diagnostics saved to {output_dir}')
 
 
 def _compute_temporal_metrics(
@@ -2512,6 +2621,76 @@ def run_intercomparison(
 
         logger.info(f'  HUC12-level diff maps saved to {huc12_diff_dir}')
 
+        # ── HUC12-level temporal diagnostics (box-violin + Taylor) ──
+        # Rebuild per-year {year: {huc12: AF}} dicts from the raw CSVs
+        # and zonal stats for temporal agreement computation.
+        logger.info(f'  Computing HUC12-level temporal diagnostics for {cat}...')
+
+        # NHM yearly: {year: {huc12: AF}}
+        nhm_yearly_huc: dict[int, dict[str, float]] = {}
+        for year in range(nhm_start, nhm_end + 1):
+            yr_df = nhm_sub[nhm_sub.Year == year]
+            annual_vol = np.zeros(len(az_cols))
+            for _, row in yr_df.iterrows():
+                month = int(row['Month'])
+                ndays = days_in_month[month - 1]
+                if month == 2 and year % 4 == 0 and (
+                        year % 100 != 0 or year % 400 == 0):
+                    ndays = 29
+                vals = row[az_cols].values.astype(np.float64)
+                annual_vol += vals * ndays * MGAL_TO_M3
+            nhm_yearly_huc[year] = {
+                az_cols[i]: annual_vol[i] * M3_TO_AF
+                for i in range(len(az_cols))
+            }
+
+        # ML yearly: {year: {huc12: AF}}
+        ml_yearly_huc: dict[int, dict[str, float]] = {}
+        for year in range(max(ml_start, nhm_start), min(ml_end, nhm_end) + 1):
+            cat_prefix = 'Irrigation_GW' if cat == 'GW' else 'Irrigation_SW'
+            raster_path = os.path.join(
+                ml_cat_dir, f'{cat_prefix}_{year}_mm.tif',
+            )
+            if not os.path.isfile(raster_path):
+                continue
+            yr_stats = _compute_huc12_zonal_stats(
+                raster_path, huc_reproj, pixel_area_m2, depth_unit='mm',
+            )
+            ml_yearly_huc[year] = {
+                h: yr_stats.get(h, {}).get('volume_AF', 0.0)
+                for h in az_huc12_ids
+            }
+
+        # Reitz yearly: {year: {huc12: AF}}
+        reitz_yearly_huc: dict[int, dict[str, float]] = {}
+        for year in range(
+                max(reitz_start, nhm_start), min(reitz_end, nhm_end) + 1):
+            reproj_path = os.path.join(
+                reitz_out, f'Reitz_{cat}_{year}_reproj.tif',
+            )
+            if not os.path.isfile(reproj_path):
+                continue
+            yr_stats = _compute_huc12_zonal_stats(
+                reproj_path, huc_reproj, pixel_area_m2, depth_unit='m',
+            )
+            reitz_yearly_huc[year] = {
+                h: yr_stats.get(h, {}).get('volume_AF', 0.0)
+                for h in az_huc12_ids
+            }
+
+        _huc12_temporal_diagnostics(
+            huc12_yearly_sources={
+                'ML': ml_yearly_huc,
+                'NHM': nhm_yearly_huc,
+                'Reitz': reitz_yearly_huc,
+            },
+            pairs=[('ML', 'NHM'), ('ML', 'Reitz'), ('NHM', 'Reitz')],
+            huc12_ids=common_hucs,
+            category=f'Irrigation_{cat}',
+            output_dir=huc12_dir,
+            huc_areas=huc_areas,
+        )
+
     if huc12_metrics:
         huc12_metrics_df = pd.DataFrame(huc12_metrics)
         huc12_metrics_df.to_csv(
@@ -2864,6 +3043,42 @@ def run_cu_intercomparison(
                         dpi=600, bbox_inches='tight')
             plt.close(fig)
         logger.info(f'  HUC12-level CU diff maps saved to {huc12_diff_dir}')
+
+        # ── HUC12-level temporal diagnostics ──
+        logger.info('  Computing HUC12-level CU temporal diagnostics...')
+        # NHM yearly {year: {huc12: AF}}
+        nhm_yearly_huc_cu: dict[int, dict[str, float]] = {}
+        days_per_year = 365.25
+        for year in range(nhm_year_range[0], nhm_year_range[1] + 1):
+            yr_row = nhm_sub[nhm_sub.Year == year]
+            if yr_row.empty:
+                continue
+            nhm_yearly_huc_cu[year] = {
+                h: float(yr_row[h].values[0]) * days_per_year * MGAL_TO_M3 * M3_TO_AF
+                if h in yr_row.columns else 0.0
+                for h in az_cols
+            }
+        # ML yearly {year: {huc12: AF}}
+        ml_yearly_huc_cu: dict[int, dict[str, float]] = {}
+        for year in range(max(ml_start, nhm_start), min(ml_end, nhm_end) + 1):
+            rpath = os.path.join(irr_cu_dir, f'Irrigation_CU_{year}_mm.tif')
+            if not os.path.isfile(rpath):
+                continue
+            yr_stats = _compute_huc12_zonal_stats(
+                rpath, huc_reproj, pixel_area_m2, depth_unit='mm',
+            )
+            ml_yearly_huc_cu[year] = {
+                h: yr_stats.get(h, {}).get('volume_AF', 0.0)
+                for h in az_huc12_ids
+            }
+        _huc12_temporal_diagnostics(
+            huc12_yearly_sources={'ML': ml_yearly_huc_cu, 'NHM': nhm_yearly_huc_cu},
+            pairs=[('ML', 'NHM')],
+            huc12_ids=common_hucs,
+            category='Irrigation_CU',
+            output_dir=huc12_dir,
+            huc_areas=huc_areas,
+        )
 
     # ── Summary ──────────────────────────────────────────────────────────
     logger.info('\n' + '=' * 60)
@@ -3441,6 +3656,63 @@ def run_peff_intercomparison(
             )
             plt.close(fig)
         logger.info(f'  HUC12-level Peff diff maps saved to {huc12_diff_dir}')
+
+        # ── HUC12-level Peff temporal diagnostics ──
+        logger.info('  Computing HUC12-level Peff temporal diagnostics...')
+        # NHM yearly {year: {huc12: AF}}
+        nhm_yearly_huc_peff: dict[int, dict[str, float]] = {}
+        days_per_year = 365.25
+        for year in range(nhm_year_range[0], nhm_year_range[1] + 1):
+            yr_row = nhm_sub[nhm_sub.Year == year]
+            if yr_row.empty:
+                continue
+            nhm_yearly_huc_peff[year] = {
+                h: float(yr_row[h].values[0]) * days_per_year * MGAL_TO_M3 * M3_TO_AF
+                if h in yr_row.columns else 0.0
+                for h in az_cols
+            }
+        # ML Peff (SCS) yearly {year: {huc12: AF}}
+        ml_yearly_huc_peff: dict[int, dict[str, float]] = {}
+        for year in range(common_start, common_end + 1):
+            rpath = os.path.join(ml_peff_raster_dir, f'ML_Peff_{year}_mm.tif')
+            if not os.path.isfile(rpath):
+                continue
+            yr_stats = _compute_huc12_zonal_stats(
+                rpath, huc_reproj, pixel_area_m2, depth_unit='mm',
+            )
+            ml_yearly_huc_peff[year] = {
+                h: yr_stats.get(h, {}).get('volume_AF', 0.0)
+                for h in az_huc12_ids
+            }
+        # ML Peff PCML yearly {year: {huc12: AF}}
+        pcml_yearly_huc_peff: dict[int, dict[str, float]] = {}
+        for year in range(common_start, pcml_common_end + 1):
+            rpath = os.path.join(ml_pcml_raster_dir, f'ML_Peff_PCML_{year}_mm.tif')
+            if not os.path.isfile(rpath):
+                continue
+            yr_stats = _compute_huc12_zonal_stats(
+                rpath, huc_reproj, pixel_area_m2, depth_unit='mm',
+            )
+            pcml_yearly_huc_peff[year] = {
+                h: yr_stats.get(h, {}).get('volume_AF', 0.0)
+                for h in az_huc12_ids
+            }
+        _huc12_temporal_diagnostics(
+            huc12_yearly_sources={
+                'USDA_SCS_Peff': ml_yearly_huc_peff,
+                'ML_Peff_PCML': pcml_yearly_huc_peff,
+                'NHM_Peff': nhm_yearly_huc_peff,
+            },
+            pairs=[
+                ('USDA_SCS_Peff', 'NHM_Peff'),
+                ('ML_Peff_PCML', 'NHM_Peff'),
+                ('USDA_SCS_Peff', 'ML_Peff_PCML'),
+            ],
+            huc12_ids=common_hucs,
+            category='Effective_Precipitation',
+            output_dir=huc12_dir,
+            huc_areas=huc_areas,
+        )
 
     # ── Summary ──────────────────────────────────────────────────────────
     logger.info('\n' + '=' * 60)
