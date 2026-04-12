@@ -6554,12 +6554,25 @@ def plot_intercomp_scatter(
     """
     makedirs(output_dir)
     n_pairs = len(pairs)
-    n_rows = 2 if mode == 'volume' else 1
+    n_units = 2 if mode == 'volume' else 1
 
-    fig, axes = plt.subplots(
-        n_rows, n_pairs, figsize=(7 * n_pairs, 5 * n_rows),
-        constrained_layout=True, squeeze=False,
-    )
+    # When there are multiple pairs, stack units (AF/mm) in rows and
+    # pairs in columns.  When there's only one pair with two units,
+    # put the two unit panels side-by-side as columns (1×2) so the
+    # figure is landscape rather than a tall 2×1 stack.
+    single_pair_landscape = (n_pairs == 1 and n_units == 2)
+    if single_pair_landscape:
+        fig, _axes_flat = plt.subplots(
+            1, 2, figsize=(14, 5), constrained_layout=True,
+        )
+        # Build a (2, 1) index array so axes[row_i, col_i=0] still
+        # works with the existing loop code.
+        axes = np.array([[_axes_flat[0]], [_axes_flat[1]]])
+    else:
+        fig, axes = plt.subplots(
+            n_units, n_pairs, figsize=(7 * n_pairs, 5 * n_units),
+            constrained_layout=True, squeeze=False,
+        )
     fig.suptitle(title, fontsize=14, fontweight='bold')
 
     for col_i, (label_a, label_b, mean_a, mean_b) in enumerate(pairs):

@@ -1979,6 +1979,22 @@ overlay), a scatter plot of ML vs observed AF per basin-year with 1:1 line
 and R², metrics CSV, and time series CSV, written to
 `{prediction_dir}CAP_SRP_Validation/`.
 
+**Why this validation is significant.** The CAP/SRP comparison is an
+entirely out-of-sample test of the density-ratio GW/SW partitioning
+scheme. Neither the CAP delivery volumes nor the SRP delivery records
+enter the model at any stage — the XGBRF training labels are total GW
+pumping from ADWR meters, and the GW/SW split is driven by two
+infrastructure-proxy features (ADWR well density vs. HarDWR surface-water
+rights density, modulated by canal-weighted streamflow). The CAP/SRP
+delivery data is an independently reported accounting of how much
+surface water was actually delivered to each basin, compiled by the
+delivery agencies themselves. The agreement between ML `Total_SW` and
+observed CAP+SRP deliveries therefore validates that the canal-weighted
+streamflow + rights-density proxy captures the real spatial and temporal
+pattern of surface-water use across Arizona without being calibrated to
+it, making this one of the strongest pieces of emergent validation in
+the framework alongside the ADWR/USGS volume reconciliations.
+
 #### Step 4d — Effective precipitation intercomparison (`run_peff_usgs_intercomparison()`)
 
 Compares irrigated effective precipitation across three sources:

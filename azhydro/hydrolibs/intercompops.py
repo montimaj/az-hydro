@@ -2630,25 +2630,43 @@ def _compute_cap_srp_metrics(
         denom = (np.mean(ml_vals) + np.mean(obs_vals)) / 2.0
         pct_diff = float(mad_af / denom * 100) if denom > 0 else np.nan
 
-        # Pearson correlation
-        if len(ml_vals) > 1 and np.std(ml_vals) > 0 and np.std(obs_vals) > 0:
-            pearson_r = float(np.corrcoef(ml_vals, obs_vals)[0, 1])
+        # R² (equivalent to NSE when computed as sklearn's r2_score
+        # with observed as y_true and predicted as y_pred)
+        if len(ml_vals) > 1 and np.std(obs_vals) > 0:
+            from sklearn.metrics import r2_score as _r2
+            r2 = float(_r2(obs_vals, ml_vals))
         else:
-            pearson_r = np.nan
+            r2 = np.nan
+
+        # Normalized error metrics (same as the scatter plot annotations)
+        from hydrolibs.mlops import (
+            normalized_rmse, normalized_mae, normalized_mbe,
+        )
+        rmse_pct = normalized_rmse(obs_vals, ml_vals)
+        mae_pct = normalized_mae(obs_vals, ml_vals)
+        mbe_pct = normalized_mbe(obs_vals, ml_vals)
 
         ml_m3 = ml_vals * af_to_m3
         obs_m3 = obs_vals * af_to_m3
         diff_m3 = diff * af_to_m3
 
+        mbe_af = float(np.mean(diff))
+        mbe_m3 = float(np.mean(diff_m3))
+
         row = {
             'Basin': basin,
             'N_Years': len(common_years),
             'Year_Range': f'{common_years[0]}-{common_years[-1]}',
-            'Pearson_R': round(pearson_r, 4),
-            'RMSD_AF': round(rmsd_af, 2),
-            'RMSD_m3': round(float(np.sqrt(np.mean(diff_m3 ** 2))), 2),
-            'MAD_AF': round(mad_af, 2),
-            'MAD_m3': round(float(np.mean(np.abs(diff_m3))), 2),
+            'R2': round(r2, 4),
+            'RMSE_AF': round(rmsd_af, 2),
+            'RMSE_m3': round(float(np.sqrt(np.mean(diff_m3 ** 2))), 2),
+            'MAE_AF': round(mad_af, 2),
+            'MAE_m3': round(float(np.mean(np.abs(diff_m3))), 2),
+            'MBE_AF': round(mbe_af, 2),
+            'MBE_m3': round(mbe_m3, 2),
+            'RMSE_pct': round(rmse_pct, 2),
+            'MAE_pct': round(mae_pct, 2),
+            'MBE_pct': round(mbe_pct, 2),
             'Pct_Diff': round(pct_diff, 2),
             'Mean_ML_AF': round(float(np.mean(ml_vals)), 2),
             'Mean_Obs_AF': round(float(np.mean(obs_vals)), 2),
@@ -2659,8 +2677,9 @@ def _compute_cap_srp_metrics(
             ml_mm = ml_m3 / area * M_TO_MM
             obs_mm = obs_m3 / area * M_TO_MM
             diff_mm = diff * af_to_m3 / area * M_TO_MM
-            row['RMSD_mm'] = round(float(np.sqrt(np.mean(diff_mm ** 2))), 4)
-            row['MAD_mm'] = round(float(np.mean(np.abs(diff_mm))), 4)
+            row['RMSE_mm'] = round(float(np.sqrt(np.mean(diff_mm ** 2))), 4)
+            row['MAE_mm'] = round(float(np.mean(np.abs(diff_mm))), 4)
+            row['MBE_mm'] = round(float(np.mean(diff_mm)), 4)
             row['Mean_ML_mm'] = round(float(np.mean(ml_mm)), 4)
             row['Mean_Obs_mm'] = round(float(np.mean(obs_mm)), 4)
 
