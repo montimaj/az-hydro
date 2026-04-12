@@ -58,6 +58,13 @@ import rasterio as rio
 
 logger = logging.getLogger(__name__)
 
+# ── Module-level delivery-ratio state ────────────────────────────────────────
+# Set by ``run_uncertainty_quantification`` before the compute_sigma_*
+# calls so that ``_predict_total`` can apply the same delivery-calibrated
+# GW/SW scaling to every UQ ensemble member without threading the dict
+# through five function signatures.
+_module_basin_ratios: dict[str, float] | None = None
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 # 5 representative GCMs spanning the Southwest US climate space
@@ -196,7 +203,8 @@ def _safe_nanstd(stack, axis=0, ddof=1):
 
 
 def _predict_total(model, pred_features, year_df, partops,
-                   raster_shape, valid_mask):
+                   raster_shape, valid_mask,
+                   basin_ratios=None):
     """Predict and partition, returning total pumping and category dict.
 
     Args:
@@ -206,6 +214,13 @@ def _predict_total(model, pred_features, year_df, partops,
         partops: Module providing ``partition_predictions``.
         raster_shape (tuple): (rows, cols) of the full raster grid.
         valid_mask (np.ndarray): Boolean mask of valid pixels (ravelled).
+        basin_ratios (dict or None): ``{basin: ratio}`` from
+            ``partops.compute_basin_delivery_ratios()``. When provided,
+            ``partops.apply_basin_sw_scaling()`` is called after
+            partitioning to scale per-basin Total_SW by the observed
+            delivery ratio. This ensures UQ ensemble members receive
+            the same delivery-calibrated partitioning as the central
+            prediction in Step 3.
 
     Returns:
         tuple[np.ndarray, dict[str, np.ndarray]]: (total_1d, categories) where
@@ -214,6 +229,15 @@ def _predict_total(model, pred_features, year_df, partops,
     """
     raw = np.abs(model.predict(pred_features))
     cat = partops.partition_predictions(raw, year_df, raster_shape, valid_mask)
+    # Apply delivery-ratio scaling: prefer the explicit kwarg, fall
+    # back to the module-level variable set by run_uncertainty_quantification.
+    ratios = basin_ratios if basin_ratios is not None else _module_basin_ratios
+    if ratios:
+        partops.apply_basin_sw_scaling(
+            cat,
+            pixel_basins=year_df['GW_Basin'].values,
+            basin_ratios=ratios,
+        )
     return cat['Irrigation'] + cat['Non_Irrigation'], cat
 
 
@@ -2565,6 +2589,7 @@ def run_uncertainty_quantification(
         basin_shp: str = '',
         prediction_model: str = 'XGB',
         skip_uq_steps: set[str] | None = None,
+        basin_ratios: dict[str, float] | None = None,
 ) -> None:
     """
     Run the full hybrid uncertainty quantification pipeline.
@@ -2615,6 +2640,16 @@ def run_uncertainty_quantification(
     pred_base = f'Full_Prediction_{prediction_model}'
     unc_dir = os.path.join(model_dir, pred_base, 'Uncertainty')
     makedirs(unc_dir)
+
+    # Set module-level delivery ratios so _predict_total applies the
+    # same delivery-calibrated GW/SW scaling to every ensemble member.
+    global _module_basin_ratios
+    _module_basin_ratios = basin_ratios
+    if basin_ratios:
+        logger.info(
+            f'  Delivery-ratio scaling active for {len(basin_ratios)} basins '
+            f'in all compute_sigma_* ensemble members'
+        )
 
     skip = skip_uq_steps or set()
     if skip:

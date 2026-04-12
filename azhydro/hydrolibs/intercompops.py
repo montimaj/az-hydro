@@ -3765,7 +3765,7 @@ _CAP_AMA_TO_BASIN = {
 }
 
 
-def _load_cap_srp_annual_sw(
+def load_cap_srp_annual_sw(
     cap_xlsx: str,
     srp_xlsx: str,
     include_spill_water: bool = False,
@@ -3863,7 +3863,7 @@ def _load_cap_srp_annual_sw(
     return basin_year
 
 
-def _load_ml_total_sw_basin_volumes(
+def load_ml_total_sw_basin_volumes(
     total_sw_dir: str,
     basin_gdf: gpd.GeoDataFrame,
     basin_col: str,
@@ -4068,8 +4068,8 @@ def run_cap_srp_validation(
 
     # ── Load observed CAP + SRP deliveries ───────────────────────────────
     logger.info('Loading CAP/SRP delivery data...')
-    obs_basin_yearly = _load_cap_srp_annual_sw(cap_xlsx, srp_xlsx)
-    obs_spill_basin_yearly = _load_cap_srp_annual_sw(
+    obs_basin_yearly = load_cap_srp_annual_sw(cap_xlsx, srp_xlsx)
+    obs_spill_basin_yearly = load_cap_srp_annual_sw(
         cap_xlsx, srp_xlsx, include_spill_water=True,
     )
     obs_basins = sorted(obs_basin_yearly.keys())
@@ -4080,7 +4080,7 @@ def run_cap_srp_validation(
 
     # ── Load ML Total_SW rasters → basin volumes ────────────────────────
     logger.info('Loading ML Total_SW rasters...')
-    ml_basin_yearly = _load_ml_total_sw_basin_volumes(
+    ml_basin_yearly = load_ml_total_sw_basin_volumes(
         total_sw_dir, basin_gdf, basin_col, year_range,
     )
     if not ml_basin_yearly:
@@ -4150,13 +4150,22 @@ def run_cap_srp_validation(
         'ML': 'ML (Total SW)', 'CAP_SRP': 'CAP + SRP',
         'CAP_SRP_spill': 'CAP + SRP (+ Spill)',
     }
+    # Transpose {basin: {year: AF}} → {year: {basin: AF}} for the
+    # time-series plotter which expects the year-keyed format.
+    def _transpose_basin_yearly(d):
+        out = {}
+        for basin, yr_dict in d.items():
+            for yr, val in yr_dict.items():
+                out.setdefault(yr, {})[basin] = val
+        return out
+
     cap_ts_sources = {
-        'ML': {'SW': {'yearly': ml_basin_yearly}},
-        'CAP_SRP': {'SW': {'yearly': obs_basin_yearly}},
+        'ML': {'SW': {'yearly': _transpose_basin_yearly(ml_basin_yearly)}},
+        'CAP_SRP': {'SW': {'yearly': _transpose_basin_yearly(obs_basin_yearly)}},
     }
     if obs_spill_basin_yearly:
         cap_ts_sources['CAP_SRP_spill'] = {
-            'SW': {'yearly': obs_spill_basin_yearly},
+            'SW': {'yearly': _transpose_basin_yearly(obs_spill_basin_yearly)},
         }
     plot_dir = os.path.join(output_dir, 'Time_Series/')
     plot_intercomp_time_series(

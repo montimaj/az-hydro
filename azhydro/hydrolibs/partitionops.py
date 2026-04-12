@@ -11,8 +11,12 @@ Categories produced by ``partition_predictions``:
     Total_GW, Total_SW
 """
 
+import logging
+
 import numpy as np
 from scipy.ndimage import maximum_filter, uniform_filter
+
+logger = logging.getLogger(__name__)
 
 # Category keys (also used for raster sub-folder names)
 CATEGORIES = (
@@ -459,3 +463,130 @@ def compute_sw_capture_index(
         'Capture_Volume_Central': vol_central,
         'Capture_Volume_Upper': vol_upper,
     }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CAP/SRP delivery-calibrated GW/SW scaling
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def compute_basin_delivery_ratios(
+    obs_basin_yearly: dict[str, dict[int, float]],
+    ml_basin_yearly: dict[str, dict[int, float]],
+    max_ratio: float = 10.0,
+) -> dict[str, float]:
+    """Compute time-averaged delivery ratios per basin.
+
+    For each basin present in both dicts, finds the overlapping years
+    and computes ``ratio = mean(observed) / mean(ml_total_sw)``.
+
+    Args:
+        obs_basin_yearly: ``{basin: {year: delivery_AF}}`` from
+            CAP/SRP delivery records.
+        ml_basin_yearly: ``{basin: {year: volume_AF}}`` from ML
+            Total_SW predictions.
+        max_ratio: Cap on the ratio to prevent extreme amplification.
+
+    Returns:
+        ``{basin: ratio}`` for basins with valid data.
+    """
+    ratios: dict[str, float] = {}
+    for basin, obs_years in obs_basin_yearly.items():
+        ml_years = ml_basin_yearly.get(basin, {})
+        common = sorted(set(obs_years.keys()) & set(ml_years.keys()))
+        if not common:
+            continue
+        mean_obs = float(np.mean([obs_years[yr] for yr in common]))
+        mean_ml = float(np.mean([ml_years[yr] for yr in common]))
+        if mean_ml <= 0:
+            logger.warning(
+                'Basin %s: ML Total_SW mean is zero over common years; '
+                'skipping delivery scaling', basin,
+            )
+            continue
+        ratio = mean_obs / mean_ml
+        if ratio > max_ratio:
+            logger.warning(
+                'Basin %s: delivery ratio %.2f exceeds cap %.1f; '
+                'clamping', basin, ratio, max_ratio,
+            )
+            ratio = max_ratio
+        ratios[basin] = ratio
+        logger.info(
+            '  Delivery ratio %s: %.3f '
+            '(obs=%.0f AF, ml=%.0f AF, n=%d common years)',
+            basin, ratio, mean_obs, mean_ml, len(common),
+        )
+    return ratios
+
+
+def apply_basin_sw_scaling(
+    cat_predictions: dict[str, np.ndarray],
+    pixel_basins: np.ndarray,
+    basin_ratios: dict[str, float],
+) -> dict[str, np.ndarray]:
+    """Apply basin-level delivery-ratio scaling to the GW/SW partition.
+
+    Modifies the 8-category dict **in-place** after
+    ``partition_predictions()`` returns. For each basin with a delivery
+    ratio, scales ``Total_SW *= ratio`` (clamped to ``<= Total``) and
+    cascades through all sub-categories to maintain conservation:
+
+    - ``Total_GW = Total - Total_SW``
+    - ``Irrigation_SW *= sw_factor``; ``Non_Irrigation_SW *= sw_factor``
+    - ``Irrigation_GW = Irrigation - Irrigation_SW``
+    - ``Non_Irrigation_GW = Non_Irrigation - Non_Irrigation_SW``
+
+    Pre-delivery temporal zeroing is handled **upstream** by the
+    temporally-masked canal density and canal-weighted streamflow
+    rasters (which produce zero canal features before a canal's
+    first-delivery year, causing ``partition_predictions()`` to set
+    ``gw_frac = 1.0`` at those pixels). This function only corrects
+    the **magnitude** of SW via observed delivery ratios.
+
+    Basins not in *basin_ratios* keep their unscaled density-ratio
+    partitioning.
+
+    Args:
+        cat_predictions: Mutable dict of 8 category arrays from
+            ``partition_predictions()``.
+        pixel_basins: Per-pixel basin name array (same length as the
+            category arrays).
+        basin_ratios: ``{basin: ratio}`` from
+            ``compute_basin_delivery_ratios()``.
+
+    Returns:
+        The same ``cat_predictions`` dict (mutated in-place).
+    """
+    total = cat_predictions['Irrigation'] + cat_predictions['Non_Irrigation']
+
+    for basin, ratio in basin_ratios.items():
+        if ratio == 1.0:
+            continue
+        bmask = pixel_basins == basin
+        if not bmask.any():
+            continue
+
+        old_sw = cat_predictions['Total_SW'][bmask].copy()
+        new_sw = np.minimum(old_sw * ratio, total[bmask])
+        new_sw = np.maximum(new_sw, 0.0)
+
+        with np.errstate(invalid='ignore', divide='ignore'):
+            sw_factor = np.where(old_sw > 0, new_sw / old_sw, 0.0)
+
+        cat_predictions['Total_SW'][bmask] = new_sw
+        cat_predictions['Total_GW'][bmask] = total[bmask] - new_sw
+
+        cat_predictions['Irrigation_SW'][bmask] *= sw_factor
+        cat_predictions['Non_Irrigation_SW'][bmask] *= sw_factor
+
+        cat_predictions['Irrigation_GW'][bmask] = (
+            cat_predictions['Irrigation'][bmask]
+            - cat_predictions['Irrigation_SW'][bmask]
+        )
+        cat_predictions['Non_Irrigation_GW'][bmask] = (
+            cat_predictions['Non_Irrigation'][bmask]
+            - cat_predictions['Non_Irrigation_SW'][bmask]
+        )
+
+    return cat_predictions

@@ -22,6 +22,41 @@ from hydrolibs.vectorops import shp2raster
 
 logger = logging.getLogger(__name__)
 
+# ── Major AZ canal first-delivery years ────────────────────────────────────
+# Regex patterns (case-insensitive) matched against GRAIN ``osm_name``.
+# Each tuple is ``(pattern, first_delivery_year)``.
+# For unnamed canals not matched here, a spatial nearest-neighbor join
+# to HarDWR irrigation SW PODs provides the priority-date fallback.
+CANAL_FIRST_DELIVERY: list[tuple[str, int]] = [
+    # SRP / Arizona Canal system — original Phoenix canals from 1868
+    (r'Arizona Canal|South Canal|Grand Canal|Western Canal|Eastern Canal'
+     r'|Consolidated Canal|Highline|Crosscut Canal', 1868),
+    # Roosevelt Canal — associated with Roosevelt Dam (1911)
+    (r'Roosevelt Canal', 1911),
+    # Central Arizona Project — first deliveries 1985
+    (r'Central Arizona Project|Hayden.Rhodes|Buckskin.*Tunnel', 1985),
+    # Florence-Casa Grande system — San Carlos Irrigation Project
+    (r'Florence.*Canal|Casa Grande Canal|Florence Casa Grande', 1922),
+    # Buckeye Canal — Buckeye Canal Co. 1888
+    (r'Buckeye Canal', 1888),
+    # Gila Bend Canal — 1887
+    (r'Gila Bend Canal', 1887),
+    # Wellton-Mohawk system — USBR 1952
+    (r'Wellton|Mohawk', 1952),
+    # Gila Gravity Main Canal — USBR Gila Project 1943
+    (r'Gila (?:Gravity Main|Main Gravity) Canal', 1943),
+    # North/South Gila canals — Yuma Project 1912
+    (r'North Gila|South Gila', 1912),
+    # Yuma Main Canal — Yuma Project 1912
+    (r'Yuma Main', 1912),
+    # Pima Lateral — San Carlos Irrigation Project extension 1928
+    (r'Pima Lateral', 1928),
+    # Santa Rosa Canal — 1930
+    (r'Santa Rosa Canal', 1930),
+    # Dome/Thacker laterals — Yuma-area ~1920
+    (r'Dome Lateral|Thacker Lateral', 1920),
+]
+
 
 def _load_usbr_data(usbr_dir, usbr_id):
     """Load and average USBR ensemble data for a given USBR site ID."""
@@ -792,6 +827,183 @@ def create_streamflow_rasters(
         logger.info(f'Created {n_rasters} canal-weighted streamflow rasters in {output_dir}')
 
 
+def assign_canal_delivery_years(
+    canal_gdf: gpd.GeoDataFrame,
+    pod_shapefile: str | None = None,
+    basin_gdf: gpd.GeoDataFrame | None = None,
+    basin_col: str = 'BASIN_NAME',
+    nn_distance_m: float = 20000.0,
+) -> gpd.GeoDataFrame:
+    """Assign a ``first_delivery_year`` to each canal segment.
+
+    Hierarchy:
+    1. **Named major canal** — matched against ``CANAL_FIRST_DELIVERY``
+       regex patterns; assigned the documented construction date.
+    2. **Unnamed canal with a nearby HarDWR POD** — spatial nearest-
+       neighbor to the closest irrigation SW POD within
+       ``nn_distance_m``; uses the POD's priority year.
+    3. **Unnamed canal with no nearby POD** — falls back to the
+       earliest irrigation SW right priority year in the same GW basin.
+
+    Args:
+        canal_gdf: GRAIN canal segments (must have ``osm_name`` column).
+            Modified in-place with a new ``first_delivery_year`` column.
+        pod_shapefile: Path to ``arizonaStatePOD.shp`` (HarDWR v2.0).
+        basin_gdf: GW basin polygons for the basin-level fallback.
+        basin_col: Basin name column in *basin_gdf*.
+        nn_distance_m: Max distance (meters) for nearest-neighbor POD.
+
+    Returns:
+        The same GeoDataFrame with ``first_delivery_year`` column added.
+    """
+    import re
+
+    gdf = canal_gdf.copy()
+    gdf['first_delivery_year'] = np.nan
+
+    # Step 1: Match named canals against the lookup table
+    names = gdf['osm_name'].fillna('')
+    for pattern, year in CANAL_FIRST_DELIVERY:
+        mask = names.str.contains(pattern, case=False, flags=re.IGNORECASE, na=False)
+        matched = mask & gdf['first_delivery_year'].isna()
+        gdf.loc[matched, 'first_delivery_year'] = year
+        n = int(matched.sum())
+        if n > 0:
+            logger.info(f'  Canal match "{pattern}": {n} segments → {year}')
+
+    n_matched = int(gdf['first_delivery_year'].notna().sum())
+    n_unmatched = len(gdf) - n_matched
+    logger.info(
+        f'  Major canal matching: {n_matched} matched, '
+        f'{n_unmatched} unnamed/unmatched'
+    )
+
+    # Step 2: Nearest-neighbor to HarDWR irrigation SW PODs
+    if pod_shapefile and os.path.isfile(pod_shapefile) and n_unmatched > 0:
+        logger.info('  Loading HarDWR PODs for nearest-neighbor dating...')
+        pods = gpd.read_file(pod_shapefile)
+        # Filter to SW rights with valid priority dates
+        irr_sw = pods[
+            pods['source'] == 'Surface Water'
+        ].copy()
+        irr_sw['priority_year'] = pd.to_datetime(
+            irr_sw['priorityD0'], errors='coerce',
+        ).dt.year
+        irr_sw = irr_sw.dropna(subset=['priority_year'])
+        irr_sw = irr_sw.to_crs(gdf.crs)
+        logger.info(f'  {len(irr_sw)} SW PODs loaded')
+
+        if not irr_sw.empty:
+            unmatched_mask = gdf['first_delivery_year'].isna()
+            unmatched = gdf[unmatched_mask].copy()
+
+            # Use centroids of canal segments for nearest-neighbor
+            unmatched_centroids = unmatched.geometry.centroid
+            pod_points = irr_sw.geometry
+
+            # Spatial nearest-neighbor via geopandas sjoin_nearest
+            unmatched_pts = gpd.GeoDataFrame(
+                {'idx': unmatched.index},
+                geometry=unmatched_centroids.values,
+                crs=gdf.crs,
+            )
+            joined = gpd.sjoin_nearest(
+                unmatched_pts, irr_sw[['priority_year', 'geometry']],
+                how='left', max_distance=nn_distance_m,
+                distance_col='nn_dist',
+            )
+            # Take the minimum priority year if multiple PODs at same distance
+            best = joined.groupby('idx')['priority_year'].min()
+            for idx, yr in best.items():
+                if np.isfinite(yr):
+                    gdf.loc[idx, 'first_delivery_year'] = int(yr)
+
+            n_nn = int(
+                gdf.loc[unmatched_mask, 'first_delivery_year'].notna().sum()
+            )
+            logger.info(
+                f'  Nearest-neighbor POD: {n_nn} segments dated, '
+                f'{n_unmatched - n_nn} still unmatched'
+            )
+
+    # Step 3: Basin-level fallback for remaining unmatched
+    still_unmatched = gdf['first_delivery_year'].isna()
+    n_still = int(still_unmatched.sum())
+    if n_still > 0 and basin_gdf is not None and pod_shapefile:
+        logger.info(
+            f'  Applying basin-level earliest-right fallback for '
+            f'{n_still} remaining segments...'
+        )
+        # Assign each unmatched segment to nearest basin (using
+        # sjoin_nearest instead of sjoin/within so segments on basin
+        # boundaries or in gaps still get matched).
+        unmatched_gdf = gdf[still_unmatched].copy()
+        unmatched_centroids = gpd.GeoDataFrame(
+            {'idx': unmatched_gdf.index},
+            geometry=unmatched_gdf.geometry.centroid.values,
+            crs=gdf.crs,
+        )
+        basin_proj = basin_gdf.to_crs(gdf.crs)
+        seg_basins = gpd.sjoin_nearest(
+            unmatched_centroids, basin_proj[[basin_col, 'geometry']],
+            how='left',
+        )
+
+        # Compute earliest irrigation SW right per basin
+        try:
+            _ = irr_sw
+        except NameError:
+            pods = gpd.read_file(pod_shapefile)
+            irr_sw = pods[
+                pods['source'] == 'Surface Water'
+            ].copy()
+            irr_sw['priority_year'] = pd.to_datetime(
+                irr_sw['priorityD0'], errors='coerce',
+            ).dt.year
+            irr_sw = irr_sw.dropna(subset=['priority_year'])
+            irr_sw = irr_sw.to_crs(basin_proj.crs)
+        pod_basins = gpd.sjoin_nearest(
+            irr_sw[['priority_year', 'geometry']],
+            basin_proj[[basin_col, 'geometry']],
+            how='left',
+        )
+        basin_earliest = pod_basins.groupby(basin_col)['priority_year'].min()
+
+        # Vectorized merge: map each segment's nearest basin to its
+        # earliest SW right priority year.
+        seg_basins = seg_basins.drop_duplicates(subset='idx')
+        seg_basins = seg_basins.merge(
+            basin_earliest.rename('basin_earliest_yr'),
+            left_on=basin_col, right_index=True, how='left',
+        )
+        valid = seg_basins['basin_earliest_yr'].notna()
+        n_filled = int(valid.sum())
+        for _, row in seg_basins[valid].iterrows():
+            gdf.loc[row['idx'], 'first_delivery_year'] = int(
+                row['basin_earliest_yr']
+            )
+        logger.info(f'  Basin-level fallback: {n_filled} segments dated')
+
+    # Final fallback: any still-NaN segments get the global earliest year
+    still_nan = gdf['first_delivery_year'].isna()
+    if still_nan.any():
+        global_earliest = int(
+            gdf['first_delivery_year'].dropna().min()
+        ) if gdf['first_delivery_year'].notna().any() else 1896
+        gdf.loc[still_nan, 'first_delivery_year'] = global_earliest
+        logger.info(
+            f'  Global fallback: {int(still_nan.sum())} segments → '
+            f'{global_earliest}'
+        )
+
+    gdf['first_delivery_year'] = gdf['first_delivery_year'].astype(int)
+    logger.info(
+        f'  Delivery year range: {gdf["first_delivery_year"].min()} – '
+        f'{gdf["first_delivery_year"].max()}'
+    )
+    return gdf
+
+
 def create_canal_density_raster(
         grain_parquet: str,
         az_boundary_file: str,
@@ -803,6 +1015,8 @@ def create_canal_density_raster(
         already_created: bool = False,
         pod_shapefile: str | None = None,
         watershed_file: str | None = None,
+        basin_shp: str | None = None,
+        basin_col: str = 'BASIN_NAME',
 ) -> str:
     """
     Create per-year canal density rasters (segment count per pixel) from GRAIN.
@@ -846,103 +1060,69 @@ def create_canal_density_raster(
     gdf = gpd.clip(gdf, az)
     logger.info(f'Clipped {len(gdf)} canal segments for rasterization')
 
-    # Add count attribute for segment count density
-    gdf = gdf.copy()
-    gdf['_count'] = 1.0
-
-    # Save as temp shapefile
-    tmp_dir = os.path.join(output_dir, '_canal_temp')
-    makedirs(tmp_dir)
-    tmp_shp = os.path.join(tmp_dir, 'canals.shp')
-    gdf[['_count', 'geometry']].to_file(tmp_shp)
-
-    # Rasterize: segment count per pixel (modern/full density)
-    shp2raster(
-        tmp_shp, base_raster,
-        value_field='_count',
-        xres=xres, yres=yres,
-        add_value=True
+    # Assign first-delivery years to each canal segment using the
+    # major-canal lookup + HarDWR nearest-neighbor + basin fallback.
+    basin_gdf = None
+    if basin_shp and os.path.isfile(basin_shp):
+        basin_gdf = gpd.read_file(basin_shp)
+        basin_gdf = basin_gdf.to_crs(gdf.crs)
+    gdf = assign_canal_delivery_years(
+        gdf, pod_shapefile=pod_shapefile,
+        basin_gdf=basin_gdf, basin_col=basin_col,
     )
 
-    # Read the base raster for scaling
-    base_file = rio.open(base_raster)
-    base_arr = base_file.read(1).astype(np.float32)
-    base_arr[np.isnan(base_arr)] = 0.0
-    no_data = base_file.nodata
-    base_file.close()
+    # Add count attribute for segment count density
+    gdf['_count'] = 1.0
 
-    # ---- Temporal scaling via HarDWR SW rights ----
-    ws_scale = None
-    if pod_shapefile and watershed_file and os.path.exists(pod_shapefile):
-        ws_scale = _compute_watershed_sw_scale(
-            pod_shapefile, watershed_file, base_raster,
-            start_year, end_year,
-        )
+    tmp_dir = os.path.join(output_dir, '_canal_temp')
+    makedirs(tmp_dir)
 
-    if ws_scale is not None:
-        logger.info(
-            'Scaling canal density per year using watershed-level SW '
-            'rights build-out from HarDWR (%d-%d).', start_year, end_year,
-        )
-        # Read watershed raster for per-pixel watershed assignment
-        ws_raster = os.path.join(
-            os.path.dirname(output_dir), 'Streamflow', 'watershed_template.tif',
-        )
-        if not os.path.exists(ws_raster):
-            # Fallback: replicate if watershed template not yet created
-            ws_raster = None
+    # Identify the distinct delivery-year thresholds to minimize
+    # redundant rasterizations. Years with the same set of active
+    # segments can reuse the same raster.
+    unique_thresholds = sorted(gdf['first_delivery_year'].unique())
+    logger.info(
+        f'Canal delivery years span {unique_thresholds[0]}–'
+        f'{unique_thresholds[-1]} ({len(unique_thresholds)} thresholds)'
+    )
 
-        ws_arr = None
-        if ws_raster:
-            ws_f = rio.open(ws_raster)
-            ws_arr_raw = ws_f.read(1).astype(np.float32)
-            ws_f.close()
-            # Align to base raster shape if needed
-            if ws_arr_raw.shape == base_arr.shape:
-                ws_arr = ws_arr_raw
+    prev_raster = None
+    prev_n_segments = -1
+    for year in range(start_year, end_year + 1):
+        out_file = os.path.join(output_dir, f'Canal_Density_{year}.tif')
+        active = gdf[gdf['first_delivery_year'] <= year]
 
-        prev_raster = None
-        prev_year_scales = None
-        for year in range(start_year, end_year + 1):
-            out_file = os.path.join(output_dir, f'Canal_Density_{year}.tif')
-
-            # Build per-pixel scale array from watershed scales
-            year_scales = ws_scale.get(year, {})
-            if year_scales == prev_year_scales and prev_raster is not None:
-                copy_file(prev_raster, out_file, verbose=False)
-            else:
-                if ws_arr is not None:
-                    scale_arr = np.ones_like(base_arr)
-                    for oid, s in year_scales.items():
-                        scale_arr[ws_arr == oid] = s
-                    scaled = base_arr * scale_arr
-                else:
-                    # No watershed raster: use statewide mean scale
-                    mean_s = (np.mean(list(year_scales.values()))
-                              if year_scales else 1.0)
-                    scaled = base_arr * mean_s
-
-                scaled = np.where(
-                    base_arr == (no_data if no_data else -32767.0),
-                    no_data if no_data else -32767.0,
-                    scaled,
-                )
-                with rio.open(base_raster) as ref:
+        if len(active) == prev_n_segments and prev_raster is not None:
+            # Same set of segments as previous year → copy
+            copy_file(prev_raster, out_file, verbose=False)
+        elif active.empty:
+            # No canals exist yet in this year → write zeros
+            if prev_raster is not None:
+                with rio.open(prev_raster) as ref:
                     profile = ref.profile.copy()
+                    arr = np.zeros((ref.height, ref.width), dtype=np.float32)
+                    arr[:] = ref.nodata if ref.nodata else -32767.0
                 with rio.open(out_file, 'w', **profile) as dst:
-                    dst.write(scaled.astype(np.float32), 1)
+                    dst.write(arr, 1)
+            prev_raster = out_file
+            prev_n_segments = 0
+        else:
+            # Rasterize only the active segments
+            tmp_shp = os.path.join(tmp_dir, f'canals_{year}.shp')
+            active[['_count', 'geometry']].to_file(tmp_shp)
+            shp2raster(
+                tmp_shp, out_file,
+                value_field='_count',
+                xres=xres, yres=yres,
+                add_value=True,
+            )
+            prev_raster = out_file
+            prev_n_segments = len(active)
 
-                prev_raster = out_file
-                prev_year_scales = year_scales
-    else:
-        logger.warning(
-            'Canal density is static for all years (%d-%d): no HarDWR '
-            'POD data provided for temporal scaling.',
-            start_year, end_year,
-        )
-        for year in range(start_year + 1, end_year + 1):
-            out_file = os.path.join(output_dir, f'Canal_Density_{year}.tif')
-            copy_file(base_raster, out_file, verbose=False)
+        if year % 20 == 0 or year == end_year:
+            logger.info(
+                f'  Canal density {year}: {len(active)} active segments'
+            )
 
     # Clean up temp files
     shutil.rmtree(tmp_dir, ignore_errors=True)

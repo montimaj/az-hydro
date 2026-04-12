@@ -286,6 +286,7 @@ def prepare_data(
         already_created=skip_streamflow,
         pod_shapefile=pod_shapefile,
         watershed_file=az_sw_watershed,
+        basin_shp=AZ_GW_BASIN,
     )
     streamflowops.create_streamflow_rasters(
         watershed_geojson=az_sw_watershed,
@@ -1933,6 +1934,60 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     # dataops._apply_basin_scale_lulc_delta (baked into the parquet). No
     # partition-time URBAN mutation needed here.
 
+    # ── CAP/SRP delivery-calibrated GW/SW scaling ──────────────────
+    # Load observed CAP/SRP delivery data and compute basin-level
+    # ratios to correct the density-ratio GW/SW partition.  Basins
+    # with delivery data get their Total_SW scaled to match the
+    # time-averaged delivery magnitude; pre-delivery years get SW
+    # zeroed.  Basins without delivery data (Yuma, Lower Gila, etc.)
+    # keep their unscaled density-ratio partitioning.
+    import hydrolibs.intercompops as intercompops
+    cap_xlsx = os.path.join(VECTOR_DIR, 'CAP',
+                            'CAP Delivery Data DRI Request.xlsx')
+    srp_xlsx = os.path.join(VECTOR_DIR, 'SRP',
+                            'SRP WATER DELVS HISTORY.xlsx')
+    basin_ratios: dict[str, float] = {}
+    if os.path.isfile(cap_xlsx):
+        obs_basin_yearly = intercompops.load_cap_srp_annual_sw(
+            cap_xlsx, srp_xlsx,
+        )
+        # Load ML Total_SW basin volumes from existing rasters (if
+        # available from a prior run).  On a fresh run these won't
+        # exist and the ratios will be empty — the prediction loop
+        # runs unscaled, and the user re-runs Step 3 after the first
+        # pass to pick up the scaling.
+        total_sw_dir = os.path.join(prediction_dir, 'Total_SW_Rasters',
+                                     'Depth_mm')
+        if os.path.isdir(total_sw_dir):
+            basin_gdf = gpd.read_file(AZ_GW_BASIN)
+            ml_basin_yearly = intercompops.load_ml_total_sw_basin_volumes(
+                total_sw_dir, basin_gdf, 'BASIN_NAME', (1985, 2024),
+            )
+            if ml_basin_yearly:
+                basin_ratios = partops.compute_basin_delivery_ratios(
+                    obs_basin_yearly, ml_basin_yearly,
+                )
+                logger.info(
+                    f'  CAP/SRP delivery scaling: {len(basin_ratios)} '
+                    f'basins with ratios, {len(basin_delivery_start)} '
+                    f'basins with delivery start years'
+                )
+            else:
+                logger.info(
+                    '  No prior Total_SW rasters found; running unscaled. '
+                    'Re-run Step 3 to apply delivery scaling.'
+                )
+        else:
+            logger.info(
+                '  Total_SW_Rasters/Depth_mm not found; running unscaled. '
+                'Re-run Step 3 to apply delivery scaling.'
+            )
+    else:
+        logger.warning(
+            '  CAP delivery file not found: %s; skipping SW scaling',
+            cap_xlsx,
+        )
+
     for year in range(START_YEAR, END_YEAR + 1):
         if _skip_loop:
             break
@@ -2034,6 +2089,20 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         cat_predictions = partops.partition_predictions(
             predictions, year_df, raster_shape, valid_mask,
         )
+
+        # Apply CAP/SRP delivery-calibrated GW/SW scaling.
+        # This adjusts the basin-level magnitude of Total_SW to match
+        # observed delivery ratios and cascades through all sub-categories
+        # to maintain conservation (Total = GW + SW). Pre-delivery
+        # temporal zeroing is handled upstream by the temporally-masked
+        # canal density rasters.
+        if basin_ratios:
+            partops.apply_basin_sw_scaling(
+                cat_predictions,
+                pixel_basins=year_df['GW_Basin'].values,
+                basin_ratios=basin_ratios,
+            )
+
         predictions = cat_predictions['Irrigation'] + cat_predictions['Non_Irrigation']
 
         # Reconstruct raster: valid_mask marks the pixels that survived
@@ -3628,6 +3697,33 @@ def main() -> None:
         if model is None:
             logger.warning('Step 3b requires a trained model from step 3. Skipping.')
         else:
+            # Compute delivery ratios for UQ (same ratios as Step 3)
+            _uq_basin_ratios: dict[str, float] = {}
+            _cap_xlsx = os.path.join(
+                VECTOR_DIR, 'CAP', 'CAP Delivery Data DRI Request.xlsx',
+            )
+            _srp_xlsx = os.path.join(
+                VECTOR_DIR, 'SRP', 'SRP WATER DELVS HISTORY.xlsx',
+            )
+            if os.path.isfile(_cap_xlsx):
+                import hydrolibs.intercompops as _ic
+                _obs = _ic.load_cap_srp_annual_sw(_cap_xlsx, _srp_xlsx)
+                _pred_dir = os.path.join(
+                    MODEL_DIR, f'Full_Prediction_{PREDICTION_MODEL}',
+                )
+                _sw_dir = os.path.join(
+                    _pred_dir, 'Total_SW_Rasters', 'Depth_mm',
+                )
+                if os.path.isdir(_sw_dir):
+                    _bg = gpd.read_file(AZ_GW_BASIN)
+                    _ml = _ic.load_ml_total_sw_basin_volumes(
+                        _sw_dir, _bg, 'BASIN_NAME', (1985, 2024),
+                    )
+                    if _ml:
+                        _uq_basin_ratios = partops.compute_basin_delivery_ratios(
+                            _obs, _ml,
+                        )
+
             uncops.run_uncertainty_quantification(
                 model=model,
                 feature_cols=feature_cols,
@@ -3657,6 +3753,7 @@ def main() -> None:
                 basin_shp=AZ_GW_BASIN,
                 prediction_model=PREDICTION_MODEL,
                 skip_uq_steps=skip_uq or None,
+                basin_ratios=_uq_basin_ratios or None,
             )
 
     # Step 3e — Well package (after UQ so augmented rasters include σ)
