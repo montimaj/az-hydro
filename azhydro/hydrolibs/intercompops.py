@@ -54,6 +54,7 @@ from hydrolibs.visualops import (
     _overlay_boundaries,
     get_ama_ina_basin_names,
     plot_intercomp_scatter,
+    plot_intercomp_stacked_bars,
     plot_intercomp_taylor,
     plot_intercomp_time_series,
     plot_temporal_box_violin,
@@ -2250,6 +2251,17 @@ def run_intercomparison(
             filename=f'Scatter_{cat}.png',
         )
 
+    # ── 8b. Statewide stacked bar plots ────────────────────────────────
+    bar_dir = os.path.join(output_dir, 'Stacked_Bar/')
+    plot_intercomp_stacked_bars(
+        all_sources, source_order=['ML', 'NHM', 'Reitz'],
+        output_dir=bar_dir,
+        stack_cats=['GW', 'SW'],
+        stack_labels={'GW': 'Groundwater', 'SW': 'Surface Water'},
+        stack_colors={'GW': '#2C3E50', 'SW': '#3498DB'},
+        title_prefix='Irrigation Withdrawal — ',
+    )
+
     # ── 9. Spatial difference maps ───────────────────────────────────────
     ml_parent = os.path.dirname(ml_pred_dir.rstrip('/'))
     mean_raster_paths = {
@@ -2885,6 +2897,18 @@ def run_cu_intercomparison(
         basin_names, basin_areas_m2, scatter_dir,
         title='Irrigation CU — Per-Basin Scatter (ML vs NHM)',
         filename='Scatter_CU.png',
+    )
+
+    # Statewide stacked bar (CU is a single category, no GW/SW split)
+    bar_dir = os.path.join(output_dir, 'Stacked_Bar/')
+    plot_intercomp_stacked_bars(
+        {'ML': {'CU': ml_cu}, 'NHM': {'CU': nhm_cu}},
+        source_order=['ML', 'NHM'],
+        output_dir=bar_dir,
+        stack_cats=['CU'],
+        stack_labels={'CU': 'Irrigation CU'},
+        stack_colors={'CU': '#27AE60'},
+        title_prefix='Irrigation CU — ',
     )
 
     # ── HUC12-level comparison (ML aggregated to NHM's native unit) ────

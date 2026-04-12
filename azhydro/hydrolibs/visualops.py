@@ -6682,6 +6682,163 @@ def plot_intercomp_scatter(
     logger.info(f'Scatter plot saved to {out_path}')
 
 
+def plot_intercomp_stacked_bars(
+    all_sources: dict[str, dict],
+    source_order: list[str],
+    output_dir: str,
+    *,
+    stack_cats: list[str] = ('GW', 'SW'),
+    stack_labels: dict[str, str] | None = None,
+    stack_colors: dict[str, str] | None = None,
+    title_prefix: str = '',
+    file_prefix: str = 'Stacked_Bar',
+    af_divisor: float = 1e6,
+    af_unit_label: str = 'MAF',
+) -> None:
+    """Statewide stacked bar plots for intercomparison sources.
+
+    Produces two figures:
+
+    1. **Per-year grouped bars** — for each common year, one bar per
+       source side by side, stacked by ``stack_cats`` (e.g. GW + SW).
+    2. **Mean-annual summary** — one bar per source showing the
+       mean-annual statewide total, stacked by category.
+
+    Args:
+        all_sources: ``{source: {cat: {'yearly': {year: {basin: AF}}}}}``
+        source_order: Ordered list of source keys to plot.
+        output_dir: Directory for saved plots.
+        stack_cats: Categories to stack within each bar.
+        stack_labels: Display labels per category. Defaults to cat names.
+        stack_colors: Colors per category.
+        title_prefix: Prepended to figure titles.
+        file_prefix: Prepended to filenames.
+        af_divisor: Divide AF values by this for axis labels.
+        af_unit_label: Unit label for y-axis (e.g. 'MAF').
+    """
+    makedirs(output_dir)
+    if stack_labels is None:
+        stack_labels = {c: c for c in stack_cats}
+    if stack_colors is None:
+        default_colors = ['#2C3E50', '#3498DB', '#E67E22', '#27AE60', '#E74C3C']
+        stack_colors = {
+            c: default_colors[i % len(default_colors)]
+            for i, c in enumerate(stack_cats)
+        }
+
+    # Compute per-year statewide totals per source per category
+    all_years: set[int] = set()
+    src_cat_yearly: dict[str, dict[str, dict[int, float]]] = {}
+    for src in source_order:
+        src_cat_yearly[src] = {}
+        for cat in stack_cats:
+            yearly = all_sources.get(src, {}).get(cat, {}).get('yearly', {})
+            cat_yearly: dict[int, float] = {}
+            for yr, basins in yearly.items():
+                yr_int = int(yr)
+                cat_yearly[yr_int] = sum(basins.values())
+                all_years.add(yr_int)
+            src_cat_yearly[src][cat] = cat_yearly
+
+    common_years = sorted(all_years)
+    if not common_years:
+        logger.warning('No common years for stacked bar plot')
+        return
+
+    n_sources = len(source_order)
+
+    # ── Figure 1: Per-year grouped stacked bars ──────────────────────
+    fig, ax = plt.subplots(figsize=(max(12, len(common_years) * 0.6), 6),
+                            constrained_layout=True)
+    bar_width = 0.8 / n_sources
+    x = np.arange(len(common_years))
+
+    for si, src in enumerate(source_order):
+        bottoms = np.zeros(len(common_years))
+        for cat in stack_cats:
+            vals = np.array([
+                src_cat_yearly[src][cat].get(yr, 0.0) / af_divisor
+                for yr in common_years
+            ])
+            ax.bar(
+                x + si * bar_width, vals, bar_width,
+                bottom=bottoms,
+                label=f'{src} — {stack_labels[cat]}' if si == 0 or cat == stack_cats[0] else '',
+                color=stack_colors[cat],
+                edgecolor='white', linewidth=0.3,
+                alpha=0.7 + 0.15 * si,
+            )
+            bottoms += vals
+
+    ax.set_xticks(x + bar_width * (n_sources - 1) / 2)
+    from matplotlib.ticker import MaxNLocator
+    # Show every Nth year label to avoid clutter
+    step = max(1, len(common_years) // 15)
+    labels = [str(yr) if i % step == 0 else '' for i, yr in enumerate(common_years)]
+    ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
+    ax.set_ylabel(f'Statewide Total ({af_unit_label})', fontweight='bold')
+    ax.set_title(f'{title_prefix}Statewide Annual Totals by Source',
+                  fontweight='bold', fontsize=13)
+    ax.grid(axis='y', alpha=0.2, linestyle='--')
+
+    # Build legend: one entry per source × category
+    handles = []
+    for cat in stack_cats:
+        for si, src in enumerate(source_order):
+            handles.append(mpatches.Patch(
+                facecolor=stack_colors[cat],
+                alpha=0.7 + 0.15 * si,
+                edgecolor='white',
+                label=f'{src} — {stack_labels[cat]}',
+            ))
+    ax.legend(handles=handles, fontsize=8, loc='upper left', framealpha=0.7,
+               ncol=n_sources)
+
+    fig.savefig(
+        os.path.join(output_dir, f'{file_prefix}_Annual.png'),
+        dpi=300, bbox_inches='tight',
+    )
+    plt.close(fig)
+
+    # ── Figure 2: Mean-annual summary bars ───────────────────────────
+    fig, ax = plt.subplots(figsize=(max(6, n_sources * 2.5), 5),
+                            constrained_layout=True)
+    x = np.arange(n_sources)
+    bar_width = 0.6
+
+    for src_i, src in enumerate(source_order):
+        bottom = 0.0
+        for cat in stack_cats:
+            cat_vals = list(src_cat_yearly[src][cat].values())
+            mean_val = float(np.mean(cat_vals)) / af_divisor if cat_vals else 0.0
+            ax.bar(
+                x[src_i], mean_val, bar_width,
+                bottom=bottom,
+                color=stack_colors[cat],
+                edgecolor='black', linewidth=0.5,
+                label=stack_labels[cat] if src_i == 0 else '',
+            )
+            bottom += mean_val
+        # Label total on top
+        ax.text(x[src_i], bottom + 0.01, f'{bottom:.2f}',
+                 ha='center', fontsize=9, fontweight='bold')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(source_order, fontsize=10)
+    ax.set_ylabel(f'Mean Annual Total ({af_unit_label})', fontweight='bold')
+    ax.set_title(f'{title_prefix}Mean-Annual Statewide Totals',
+                  fontweight='bold', fontsize=13)
+    ax.legend(fontsize=9, loc='upper right', framealpha=0.7)
+    ax.grid(axis='y', alpha=0.2, linestyle='--')
+
+    fig.savefig(
+        os.path.join(output_dir, f'{file_prefix}_Mean.png'),
+        dpi=300, bbox_inches='tight',
+    )
+    plt.close(fig)
+    logger.info(f'Stacked bar plots saved to {output_dir}')
+
+
 def plot_intercomp_taylor(
     all_sources: dict[str, dict],
     pairs: list[tuple[str, str]],
