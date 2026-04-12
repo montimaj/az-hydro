@@ -4672,6 +4672,234 @@ def run_ps_intercomparison(
             filename=f'Scatter_{cat_name}.png',
         )
 
+    # ── 8b. Statewide stacked bar plots ──────────────────────────────
+    ps_bar_sources = {
+        'ML': {'GW': ml_vols['GW'], 'SW': ml_vols['SW']},
+        'PS': {'GW': ps_vols['GW'], 'SW': ps_vols['SW']},
+    }
+    bar_dir = os.path.join(output_dir, 'Stacked_Bar/')
+    plot_intercomp_stacked_bars(
+        ps_bar_sources, source_order=['ML', 'PS'],
+        output_dir=bar_dir,
+        stack_cats=['GW', 'SW'],
+        stack_labels={'GW': 'Groundwater', 'SW': 'Surface Water'},
+        stack_colors={'GW': '#2C3E50', 'SW': '#3498DB'},
+        title_prefix='Non-Irrigation (ML) vs Public Supply (PS) — ',
+    )
+
+    # ── 9. HUC12-level comparison ────────────────────────────────────
+    logger.info('--- HUC12-level PS comparison ---')
+    huc12_dir = os.path.join(output_dir, 'HUC12_Comparison/')
+    makedirs(huc12_dir)
+
+    huc_gdf_ps = gpd.read_file(huc12_geojson)
+    huc_gdf_ps = _filter_huc12_within_az(huc_gdf_ps, basin_gdf)
+    huc_gdf_ps['huc12'] = huc_gdf_ps['huc12'].astype(str)
+    with rio.open(ref_raster) as _src:
+        ps_pixel_area = abs(_src.transform.a * _src.transform.e)
+        huc_reproj_ps = huc_gdf_ps.to_crs(_src.crs)
+
+    az_huc12_ids_ps = sorted(huc_reproj_ps['huc12'].unique())
+    huc_areas_ps = {
+        str(row['huc12']): row.geometry.area
+        for _, row in huc_reproj_ps.iterrows()
+    }
+
+    # PS is already at HUC12 level via _load_ps_huc12_annual
+    # ML needs zonal stats aggregation to HUC12
+    huc12_ps_metrics = []
+    for cat_key, cat_name in cat_labels.items():
+        logger.info(f'  HUC12-level comparison for {cat_name}...')
+
+        # PS per-HUC12 mean-annual (from the annual_df already loaded)
+        ps_csv = ps_files[cat_key]
+        if not os.path.isfile(ps_csv):
+            continue
+        ps_annual = _load_ps_huc12_annual(
+            ps_csv, huc12_geojson, year_range, basin_gdf=basin_gdf,
+        )
+        ps_huc_mean: dict[str, float] = {}
+        if not ps_annual.empty:
+            for h, grp in ps_annual.groupby('huc12'):
+                ps_huc_mean[str(h)] = float(grp['volume_AF'].mean())
+
+        # ML per-HUC12 via zonal stats
+        cat_dir, pattern = ml_cats[cat_key]
+        ml_huc_accum_ps: dict[str, list[float]] = {
+            h: [] for h in az_huc12_ids_ps
+        }
+        for year in range(start_yr, end_yr + 1):
+            rpath = os.path.join(cat_dir, pattern.format(year=year))
+            if not os.path.isfile(rpath):
+                continue
+            yr_stats = _compute_huc12_zonal_stats(
+                rpath, huc_reproj_ps, ps_pixel_area, depth_unit='mm',
+            )
+            for h in az_huc12_ids_ps:
+                s = yr_stats.get(h)
+                if s:
+                    ml_huc_accum_ps[h].append(s['volume_AF'])
+        ml_huc_mean_ps = {
+            h: float(np.mean(v)) if v else 0.0
+            for h, v in ml_huc_accum_ps.items()
+        }
+
+        common_hucs_ps = [
+            h for h in az_huc12_ids_ps
+            if h in ps_huc_mean and h in ml_huc_mean_ps
+        ]
+        if common_hucs_ps:
+            m = _compute_metrics(
+                common_hucs_ps, ml_huc_mean_ps, ps_huc_mean,
+                'ML', 'PS', basin_areas_m2=huc_areas_ps,
+            )
+            m['Category'] = cat_name
+            m['Level'] = 'HUC12'
+            huc12_ps_metrics.append(m)
+            logger.info(
+                f'    ML vs PS (HUC12): RMSD={m["RMSD_AF"]:.1f} AF, '
+                f'PctDiff={m["Pct_Diff"]:.1f}%'
+            )
+
+            # HUC12 scatter
+            huc12_scatter_dir = os.path.join(huc12_dir, 'Scatter/')
+            plot_intercomp_scatter(
+                [('ML Non-Irrigation', 'USGS PS', ml_huc_mean_ps, ps_huc_mean)],
+                common_hucs_ps, huc_areas_ps, huc12_scatter_dir,
+                title=f'{cat_name} — HUC12-Level Scatter',
+                filename=f'Scatter_HUC12_{cat_name}.png',
+            )
+
+            # HUC12 spatial diff choropleth
+            _af_to_m3_local = 1.0 / M3_TO_AF
+            _mm_to_ft = 1.0 / 304.8
+            _m3_to_af_local = M3_TO_AF
+            huc12_diff_dir = os.path.join(huc12_dir, 'Spatial_Diff/')
+            makedirs(huc12_diff_dir)
+            b_reproj_ps = (
+                basin_gdf.to_crs(huc_reproj_ps.crs)
+                if basin_gdf.crs != huc_reproj_ps.crs else basin_gdf
+            )
+            b_name_ps = (
+                basin_col if basin_col in b_reproj_ps.columns
+                else b_reproj_ps.columns[0]
+            )
+            ama_ina_names_ps = get_ama_ina_basin_names()
+
+            for unit_mode, unit_label, sec_label, sec_factor, scale_fn, tick_div in [
+                ('depth', '\u0394 Depth (mm)', '\u0394 Depth (ft)', _mm_to_ft,
+                 lambda af, area: af * _af_to_m3_local / area * M_TO_MM if area > 0 else 0.0, None),
+                ('volume', r'$\Delta$ Volume ($\times$10$^{6}$ m$^3$)', '\u0394 Volume (AF)',
+                 _m3_to_af_local,
+                 lambda af, area: af * _af_to_m3_local, 1e6),
+            ]:
+                fig, ax = plt.subplots(1, 1, figsize=(8, 8), constrained_layout=True)
+                title_u = 'Depth' if unit_mode == 'depth' else 'Volume'
+                fig.suptitle(
+                    f'{cat_name} \u2014 HUC12-Level {title_u} Diff (ML \u2212 PS)',
+                    fontsize=14, fontweight='bold',
+                )
+                diff_vals = []
+                for h in common_hucs_ps:
+                    area = huc_areas_ps.get(h, 1.0)
+                    diff_vals.append(
+                        scale_fn(ml_huc_mean_ps.get(h, 0.0), area)
+                        - scale_fn(ps_huc_mean.get(h, 0.0), area)
+                    )
+                plot_gdf = huc_reproj_ps[
+                    huc_reproj_ps['huc12'].isin(common_hucs_ps)
+                ].copy()
+                plot_gdf = plot_gdf.set_index('huc12').loc[common_hucs_ps]
+                plot_gdf['diff'] = diff_vals
+                plot_gdf.loc[plot_gdf['diff'].abs() < 1e-10, 'diff'] = np.nan
+                d_arr = np.array([d for d in diff_vals if abs(d) > 1e-10])
+                vmax = (
+                    max(abs(np.nanpercentile(d_arr, 2)),
+                        abs(np.nanpercentile(d_arr, 98)), 1e-6)
+                    if d_arr.size else 1.0
+                )
+                from matplotlib.cm import ScalarMappable
+                from matplotlib.colors import Normalize
+                plot_gdf.plot(
+                    ax=ax, column='diff', cmap='RdBu_r',
+                    vmin=-vmax, vmax=vmax,
+                    edgecolor='#AAAAAA', linewidth=0.3,
+                    legend=False, missing_kwds={'color': '#EEEEEE'},
+                )
+                _overlay_boundaries(
+                    ax, b_reproj_ps, ama_ina_names_ps, b_name_ps,
+                    label_fontsize=5.0, label_all=True,
+                )
+                import matplotlib.ticker as mticker
+                sm = ScalarMappable(cmap='RdBu_r', norm=Normalize(-vmax, vmax))
+                sm.set_array([])
+                cbar = fig.colorbar(
+                    sm, ax=ax, shrink=0.5, pad=0.06,
+                    orientation='horizontal', aspect=40, extend='both',
+                )
+                if tick_div:
+                    cbar.formatter = mticker.FuncFormatter(
+                        lambda x, _: f'{x/tick_div:g}')
+                    cbar.update_ticks()
+                cbar.set_label(unit_label, fontsize=10, fontweight='bold')
+                cbar.ax.tick_params(labelsize=10)
+                secax = cbar.ax.secondary_xaxis(
+                    'top',
+                    functions=(
+                        lambda x: x * sec_factor,
+                        lambda x: x / sec_factor,
+                    ),
+                )
+                secax.set_xlabel(sec_label, fontsize=10, fontweight='bold')
+                secax.tick_params(labelsize=10)
+                suffix = '' if unit_mode == 'depth' else '_Volume'
+                fig.savefig(
+                    os.path.join(
+                        huc12_diff_dir,
+                        f'Spatial_Diff_HUC12_{cat_name}{suffix}.png',
+                    ),
+                    dpi=600, bbox_inches='tight',
+                )
+                plt.close(fig)
+
+            # HUC12 temporal diagnostics
+            # Build per-year {year: {huc12: AF}} for ML
+            ml_yearly_huc_ps: dict[int, dict[str, float]] = {}
+            for year in range(start_yr, end_yr + 1):
+                rpath = os.path.join(cat_dir, pattern.format(year=year))
+                if not os.path.isfile(rpath):
+                    continue
+                yr_stats = _compute_huc12_zonal_stats(
+                    rpath, huc_reproj_ps, ps_pixel_area, depth_unit='mm',
+                )
+                ml_yearly_huc_ps[year] = {
+                    h: yr_stats.get(h, {}).get('volume_AF', 0.0)
+                    for h in az_huc12_ids_ps
+                }
+            # PS per-year {year: {huc12: AF}}
+            ps_yearly_huc: dict[int, dict[str, float]] = {}
+            if not ps_annual.empty:
+                for yr, grp in ps_annual.groupby('year'):
+                    ps_yearly_huc[int(yr)] = {
+                        str(row['huc12']): row['volume_AF']
+                        for _, row in grp.iterrows()
+                    }
+            _huc12_temporal_diagnostics(
+                huc12_yearly_sources={
+                    'ML': ml_yearly_huc_ps, 'PS': ps_yearly_huc,
+                },
+                pairs=[('ML', 'PS')],
+                huc12_ids=common_hucs_ps,
+                category=cat_name,
+                output_dir=huc12_dir,
+                huc_areas=huc_areas_ps,
+            )
+
+    if huc12_ps_metrics:
+        pd.DataFrame(huc12_ps_metrics).to_csv(
+            os.path.join(huc12_dir, 'huc12_ps_metrics.csv'), index=False,
+        )
+
     # ── Summary ───────────────────────────────────────────────────────
     logger.info('\n' + '=' * 60)
     logger.info('PS Intercomparison Summary')
