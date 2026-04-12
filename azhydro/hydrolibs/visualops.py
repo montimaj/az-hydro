@@ -6551,6 +6551,8 @@ def plot_intercomp_scatter(
     af_to_m3: float = 1233.48184,
     m_to_mm: float = 1000.0,
     is_validation: bool = False,
+    af_divisor: float = 1.0,
+    af_unit_label: str = 'AF',
 ) -> None:
     """Generic intercomparison scatter plots with 1:1 line and linear fit.
 
@@ -6605,9 +6607,11 @@ def plot_intercomp_scatter(
 
         if mode == 'volume':
             areas = np.array([basin_areas_m2.get(b, 1.0) for b in basin_names])
+            af_a = vals_a / af_divisor
+            af_b = vals_b / af_divisor
             mm_a = vals_a * af_to_m3 / areas * m_to_mm
             mm_b = vals_b * af_to_m3 / areas * m_to_mm
-            row_data = [(vals_a, vals_b, 'AF'), (mm_a, mm_b, 'mm')]
+            row_data = [(af_a, af_b, af_unit_label), (mm_a, mm_b, 'mm')]
         else:
             row_data = [(vals_a, vals_b, '')]
 

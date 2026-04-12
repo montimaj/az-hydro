@@ -71,6 +71,33 @@ MM_TO_FT = 1.0 / 304.8                 # millimeters → feet
 NHM_SENTINEL = {999, 888}
 
 
+def _filter_huc12_within_az(
+    huc_gdf: gpd.GeoDataFrame,
+    basin_gdf: gpd.GeoDataFrame,
+    threshold: float = 0.95,
+) -> gpd.GeoDataFrame:
+    """Keep only HUC12 polygons that fall (almost) entirely within AZ.
+
+    A HUC12 is kept if at least ``threshold`` (default 95 %) of its
+    area overlaps the union of AZ basin polygons. This removes
+    cross-border HUC12s whose NHM values represent irrigated area
+    partially outside Arizona, which would otherwise create spurious
+    differences in the spatial-diff maps and inflate the basin-level
+    volume aggregation for border basins.
+    """
+    az_union = basin_gdf.geometry.union_all()
+    frac = huc_gdf.geometry.intersection(az_union).area / huc_gdf.geometry.area
+    keep = frac >= threshold
+    n_dropped = int((~keep).sum())
+    if n_dropped > 0:
+        logger.info(
+            f'  Dropped {n_dropped} cross-border HUC12s '
+            f'(< {threshold * 100:.0f}% within AZ basins); '
+            f'{int(keep.sum())} HUC12s retained'
+        )
+    return huc_gdf[keep].copy()
+
+
 def _get_huc_basin_overlay(
     huc_reproj: gpd.GeoDataFrame,
     basin_reproj: gpd.GeoDataFrame,
@@ -200,6 +227,63 @@ def _raster_basin_means(
     return means
 
 
+def _compute_huc12_zonal_stats(
+    raster_path: str,
+    huc_gdf: gpd.GeoDataFrame,
+    pixel_area_m2: float,
+    depth_unit: str = 'mm',
+) -> dict[str, dict[str, float]]:
+    """Compute per-HUC12 zonal statistics from a depth raster.
+
+    For each HUC12 polygon in *huc_gdf*, clips the raster, sums the
+    pixel depths to get volume, and computes the area-weighted mean
+    depth.
+
+    Args:
+        raster_path: Path to a single-band depth raster.
+        huc_gdf: HUC12 polygons (must already be in the raster CRS).
+        pixel_area_m2: Pixel area in m².
+        depth_unit: ``'mm'`` or ``'m'``.
+
+    Returns:
+        ``{huc12_id: {'depth_mm': ..., 'volume_m3': ..., 'volume_AF': ...}}``
+    """
+    depth_to_m = 1.0 / M_TO_MM if depth_unit == 'mm' else 1.0
+    result: dict[str, dict[str, float]] = {}
+    with rio.open(raster_path) as src:
+        raster_bounds = src.bounds
+        for _, row in huc_gdf.iterrows():
+            huc_id = str(row['huc12'])
+            geom = [mapping(row.geometry)]
+            try:
+                if not row.geometry.intersects(box(*raster_bounds)):
+                    result[huc_id] = {
+                        'depth_mm': 0.0, 'volume_m3': 0.0, 'volume_AF': 0.0,
+                    }
+                    continue
+                clipped, _ = rio_mask(src, geom, crop=True, nodata=np.nan)
+                arr = clipped[0].astype(np.float64)
+                valid = arr[np.isfinite(arr) & (arr > 0)]
+                if valid.size > 0:
+                    mean_depth_mm = float(np.mean(valid)) * (
+                        1.0 if depth_unit == 'mm' else M_TO_MM
+                    )
+                    vol_m3 = float(np.sum(valid)) * depth_to_m * pixel_area_m2
+                else:
+                    mean_depth_mm = 0.0
+                    vol_m3 = 0.0
+                result[huc_id] = {
+                    'depth_mm': mean_depth_mm,
+                    'volume_m3': vol_m3,
+                    'volume_AF': vol_m3 * M3_TO_AF,
+                }
+            except (ValueError, rio.errors.WindowError):
+                result[huc_id] = {
+                    'depth_mm': 0.0, 'volume_m3': 0.0, 'volume_AF': 0.0,
+                }
+    return result
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # 1. Load USGS NHM HUC12 data → mean-annual basin volumes
 # ═════════════════════════════════════════════════════════════════════════════
@@ -267,17 +351,22 @@ def load_nhm_basin_volumes(
         df = pd.read_csv(csv_path, dtype={'Year': int, 'Month': int})
         huc_cols = [c for c in df.columns if c not in ('Year', 'Month')]
 
-        # Load AZ HUC12 polygons and determine which HUC12s are in AZ
+        # Load AZ HUC12 polygons, drop cross-border HUC12s that extend
+        # outside AZ basin boundaries, and determine the column set.
         huc_gdf = gpd.read_file(huc12_geojson)
+        huc_gdf = _filter_huc12_within_az(huc_gdf, basin_gdf)
         az_huc12_set = set(huc_gdf['huc12'].astype(str).values)
 
-        # Filter CSV columns to AZ HUC12s only
+        # Filter CSV columns to AZ-interior HUC12s only
         az_cols = [c for c in huc_cols if c in az_huc12_set]
-        logger.info(f'  {len(az_cols)} AZ HUC12 regions found in NHM data')
+        logger.info(f'  {len(az_cols)} AZ-interior HUC12 regions found in NHM data')
 
         if not az_cols:
             logger.warning(f'  No AZ HUC12 matches for {category}')
-            result[category] = {b: 0.0 for b in basin_gdf[basin_col]}
+            result[category] = {
+                'mean': {b: 0.0 for b in basin_gdf[basin_col]},
+                'yearly': {},
+            }
             continue
 
         # Subset data
@@ -555,7 +644,10 @@ def load_reitz_basin_volumes(
             mean_depth /= n_years
         else:
             logger.warning(f'  No Reitz {category} rasters in year range')
-            result[category] = {b: 0.0 for b in basin_gdf[basin_col]}
+            result[category] = {
+                'mean': {b: 0.0 for b in basin_gdf[basin_col]},
+                'yearly': {},
+            }
             continue
 
         # Write mean-annual raster
@@ -686,7 +778,10 @@ def load_ml_basin_volumes(
             mean_depth /= n_years
         else:
             logger.warning(f'No ML {cat} rasters in year range')
-            result[cat] = {b: 0.0 for b in basin_gdf[basin_col]}
+            result[cat] = {
+                'mean': {b: 0.0 for b in basin_gdf[basin_col]},
+                'yearly': {},
+            }
             continue
 
         with rio.open(ref_raster) as src:
@@ -947,80 +1042,152 @@ def _plot_spatial_diff_maps(
 
     pairs = [('ML', 'NHM'), ('ML', 'Reitz'), ('NHM', 'Reitz')]
 
+    # Pixel area for depth → volume conversion
+    with rio.open(ref_raster) as src:
+        pixel_area_m2 = abs(src.transform.a * src.transform.e)
+    mm_to_m3 = pixel_area_m2 / 1000.0  # 1 mm depth × pixel_area → m³
+    _mm_to_ft = 1.0 / 304.8
+    _m3_to_af = 1.0 / 1233.48184
+
+    # Render both depth and volume figures for each category
+    unit_configs = [
+        {
+            'label': '\u0394 Depth (mm)',
+            'secondary_label': '\u0394 Depth (ft)',
+            'scale': 1.0,
+            'secondary_factor': _mm_to_ft,
+            'suffix': '',
+        },
+        {
+            'label': r'$\Delta$ Volume ($\times$10$^{6}$ m$^3$)',
+            'secondary_label': '\u0394 Volume (AF)',
+            'scale': mm_to_m3,
+            'secondary_factor': _m3_to_af,
+            'suffix': '_Volume',
+            'tick_div': 1e6,
+        },
+    ]
+
     for cat in ('GW', 'SW'):
-        fig, axes = plt.subplots(1, 3, figsize=(20, 7), constrained_layout=True)
-        fig.suptitle(f'Irrigation {cat} \u2014 Mean-Annual Depth Difference (mm)',
-                     fontsize=14, fontweight='bold')
+        # Build AZ domain mask from the ML raster
+        ml_path = mean_raster_paths.get('ML', {}).get(cat)
+        az_mask = None
+        if ml_path and os.path.isfile(ml_path):
+            ml_arr = read_raster_as_arr(ml_path, get_file=False).astype(np.float64)
+            az_mask = np.isfinite(ml_arr)
 
-        # First pass: compute shared vmax across all three pairs
-        global_vmax = 1e-6
-        for src_a, src_b in pairs:
-            path_a = mean_raster_paths.get(src_a, {}).get(cat)
-            path_b = mean_raster_paths.get(src_b, {}).get(cat)
-            if path_a and path_b and os.path.isfile(path_a) and os.path.isfile(path_b):
-                a = read_raster_as_arr(path_a, get_file=False).astype(np.float64)
-                b = read_raster_as_arr(path_b, get_file=False).astype(np.float64)
-                a[np.isnan(a)] = 0.0
-                b[np.isnan(b)] = 0.0
-                d = a - b
-                m = (a == 0) & (b == 0)
-                d_valid = d[~m]
-                if d_valid.size > 0:
-                    global_vmax = max(
-                        global_vmax,
-                        abs(np.nanpercentile(d_valid, 2)),
-                        abs(np.nanpercentile(d_valid, 98)),
+        # Load and clip all raster arrays once
+        raster_arrays: dict[str, np.ndarray] = {}
+        for source in ('ML', 'NHM', 'Reitz'):
+            path = mean_raster_paths.get(source, {}).get(cat)
+            if path and os.path.isfile(path):
+                arr = read_raster_as_arr(path, get_file=False).astype(np.float64)
+                arr[np.isnan(arr)] = 0.0
+                if az_mask is not None:
+                    arr[~az_mask] = 0.0
+                raster_arrays[source] = arr
+
+        for ucfg in unit_configs:
+            scale = ucfg['scale']
+            fig, axes = plt.subplots(1, 3, figsize=(20, 7),
+                                     constrained_layout=True)
+            title_unit = 'Depth' if scale == 1.0 else 'Volume'
+            fig.suptitle(
+                f'Irrigation {cat} \u2014 Mean-Annual {title_unit} Difference',
+                fontsize=14, fontweight='bold',
+            )
+
+            # Compute shared vmax across all three pairs
+            global_vmax = 1e-6
+            for src_a, src_b in pairs:
+                if src_a in raster_arrays and src_b in raster_arrays:
+                    d = (raster_arrays[src_a] - raster_arrays[src_b]) * scale
+                    m = (raster_arrays[src_a] == 0) & (raster_arrays[src_b] == 0)
+                    d_valid = d[~m]
+                    if d_valid.size > 0:
+                        global_vmax = max(
+                            global_vmax,
+                            abs(np.nanpercentile(d_valid, 2)),
+                            abs(np.nanpercentile(d_valid, 98)),
+                        )
+
+            last_im = None
+            for col_i, (src_a, src_b) in enumerate(pairs):
+                ax = axes[col_i]
+                ax.set_facecolor('#D5D5D5')
+                if src_a not in raster_arrays or src_b not in raster_arrays:
+                    ax.set_title(
+                        f'{src_a} \u2212 {src_b}  (data unavailable)',
                     )
+                    ax.axis('off')
+                    continue
 
-        # Second pass: render panels with shared color scale
-        last_im = None
-        for col_i, (src_a, src_b) in enumerate(pairs):
-            ax = axes[col_i]
-            ax.set_facecolor('#D5D5D5')
-            path_a = mean_raster_paths.get(src_a, {}).get(cat)
-            path_b = mean_raster_paths.get(src_b, {}).get(cat)
-
-            if path_a is None or path_b is None or \
-               not os.path.isfile(path_a) or not os.path.isfile(path_b):
-                ax.set_title(f'{src_a} \u2212 {src_b}  (data unavailable)')
-                ax.axis('off')
-                continue
-
-            arr_a = read_raster_as_arr(path_a, get_file=False).astype(np.float64)
-            arr_b = read_raster_as_arr(path_b, get_file=False).astype(np.float64)
-            arr_a[np.isnan(arr_a)] = 0.0
-            arr_b[np.isnan(arr_b)] = 0.0
-
-            diff = arr_a - arr_b
-            mask = (arr_a == 0) & (arr_b == 0)
-            diff_masked = np.ma.masked_where(mask, diff)
-
-            last_im = ax.imshow(
-                diff_masked, extent=extent, origin='upper',
-                cmap='RdBu_r', vmin=-global_vmax, vmax=global_vmax,
-                interpolation='nearest',
-            )
-            if basins_gdf is not None:
-                _overlay_boundaries(
-                    ax, basins_gdf, ama_ina, name_col,
-                    label_fontsize=5.0, label_all=True,
+                diff = (raster_arrays[src_a] - raster_arrays[src_b]) * scale
+                mask = (
+                    (raster_arrays[src_a] == 0)
+                    & (raster_arrays[src_b] == 0)
                 )
-            ax.set_title(f'{src_a} \u2212 {src_b}', fontweight='bold')
+                diff_masked = np.ma.masked_where(mask, diff)
 
-        # Single shared horizontal colorbar below all three panels
-        if last_im is not None:
-            cbar = fig.colorbar(
-                last_im, ax=list(axes), shrink=0.5, pad=0.06,
-                orientation='horizontal', aspect=40, extend='both',
-            )
-            cbar.set_label(
-                '\u0394 Depth (mm)', fontsize=10, fontweight='bold',
-            )
-            cbar.ax.tick_params(labelsize=10)
+                last_im = ax.imshow(
+                    diff_masked, extent=extent, origin='upper',
+                    cmap='RdBu_r', vmin=-global_vmax, vmax=global_vmax,
+                    interpolation='nearest',
+                )
+                if basins_gdf is not None:
+                    _overlay_boundaries(
+                        ax, basins_gdf, ama_ina, name_col,
+                        label_fontsize=5.0, label_all=True,
+                    )
+                ax.set_title(f'{src_a} \u2212 {src_b}', fontweight='bold')
 
-        out_path = os.path.join(output_dir, f'Spatial_Diff_{cat}.png')
-        fig.savefig(out_path, dpi=600, bbox_inches='tight')
-        plt.close(fig)
+            if last_im is not None:
+                import matplotlib.ticker as mticker
+                cbar = fig.colorbar(
+                    last_im, ax=list(axes), shrink=0.5, pad=0.06,
+                    orientation='horizontal', aspect=40, extend='both',
+                )
+                # For volume maps, scale tick labels by 1e6
+                tick_div = ucfg.get('tick_div')
+                if tick_div:
+                    cbar.formatter = mticker.FuncFormatter(
+                        lambda x, _: f'{x / tick_div:g}',
+                    )
+                    cbar.update_ticks()
+                cbar.set_label(
+                    ucfg['label'], fontsize=10, fontweight='bold',
+                )
+                cbar.ax.tick_params(labelsize=10)
+                # Secondary unit axis
+                sec_factor = ucfg['secondary_factor']
+                if tick_div:
+                    secax = cbar.ax.secondary_xaxis(
+                        'top',
+                        functions=(
+                            lambda x: x * sec_factor,
+                            lambda x: x / sec_factor,
+                        ),
+                    )
+                else:
+                    secax = cbar.ax.secondary_xaxis(
+                        'top',
+                        functions=(
+                            lambda x: x * sec_factor,
+                            lambda x: x / sec_factor,
+                        ),
+                    )
+                secax.set_xlabel(
+                    ucfg['secondary_label'],
+                    fontsize=10, fontweight='bold',
+                )
+                secax.tick_params(labelsize=10)
+
+            suffix = ucfg['suffix']
+            out_path = os.path.join(
+                output_dir, f'Spatial_Diff_{cat}{suffix}.png',
+            )
+            fig.savefig(out_path, dpi=600, bbox_inches='tight')
+            plt.close(fig)
 
     logger.info(f'Spatial difference maps saved to {output_dir}')
 
@@ -1078,11 +1245,12 @@ def _load_nhm_annual_csv_to_basins(
     df = pd.read_csv(csv_path, dtype={'Year': int})
     huc_cols = [c for c in df.columns if c != 'Year']
 
-    # AZ HUC12 polygons
+    # AZ HUC12 polygons — drop cross-border HUC12s
     huc_gdf = gpd.read_file(huc12_geojson)
+    huc_gdf = _filter_huc12_within_az(huc_gdf, basin_gdf)
     az_huc12_set = set(huc_gdf['huc12'].astype(str).values)
     az_cols = [c for c in huc_cols if c in az_huc12_set]
-    logger.info(f'  {len(az_cols)} AZ HUC12 regions found')
+    logger.info(f'  {len(az_cols)} AZ-interior HUC12 regions found')
 
     if not az_cols:
         logger.warning('  No AZ HUC12 matches in CSV')
@@ -1973,11 +2141,376 @@ def run_intercomparison(
         basin_shp=basin_shp, basin_col=basin_col,
     )
 
-    # ── 10. Summary print ────────────────────────────────────────────────
+    # ── 10. HUC12-level comparison (ML/Reitz aggregated to NHM's native unit)
+    # NHM reports at HUC12 resolution; aggregating ML/Reitz to HUC12 via
+    # zonal statistics gives an apples-to-apples comparison without the
+    # lossy polygon→pixel→basin round-trip and without the cross-basin
+    # area-weighted split that can misattribute irrigated volume from a
+    # mixed-use HUC12 (e.g. Phoenix/Harquahala boundary).
+    logger.info('--- HUC12-level comparison (ML/Reitz → NHM native unit) ---')
+    huc12_dir = os.path.join(output_dir, 'HUC12_Comparison/')
+    makedirs(huc12_dir)
+
+    huc_gdf = gpd.read_file(huc12_geojson)
+    huc_gdf = _filter_huc12_within_az(huc_gdf, basin_gdf)
+    huc_gdf['huc12'] = huc_gdf['huc12'].astype(str)
+    with rio.open(ref_raster) as _src:
+        pixel_area_m2 = abs(_src.transform.a * _src.transform.e)
+        huc_reproj = huc_gdf.to_crs(_src.crs)
+
+    az_huc12_ids = sorted(huc_reproj['huc12'].unique())
+    huc12_metrics = []
+
+    # NHM raw volumes per HUC12 (already computed during load_nhm_basin_volumes
+    # as ann_df, but not exposed; recompute from CSV for cleanliness)
+    nhm_cats = {
+        'GW': os.path.join(nhm_dir, 'IR_HUC12_GW_WD_monthly_2000_2020.csv'),
+        'SW': os.path.join(nhm_dir, 'IR_HUC12_SW_WD_monthly_2000_2020.csv'),
+    }
+    days_in_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    nhm_start, nhm_end = nhm_year_range
+
+    for cat in ('GW', 'SW'):
+        logger.info(f'  HUC12-level comparison for Irrigation {cat}...')
+
+        # ── NHM per-HUC12 mean-annual volume (AF) ──
+        nhm_csv = nhm_cats[cat]
+        if not os.path.isfile(nhm_csv):
+            logger.warning(f'  NHM CSV not found: {nhm_csv}')
+            continue
+        nhm_df = pd.read_csv(nhm_csv)
+        az_cols = [c for c in nhm_df.columns
+                   if c not in ('Year', 'Month') and c in set(az_huc12_ids)]
+        if not az_cols:
+            continue
+        nhm_sub = nhm_df[['Year', 'Month'] + az_cols].copy()
+        nhm_sub = nhm_sub[
+            (nhm_sub.Year >= nhm_start) & (nhm_sub.Year <= nhm_end)
+        ]
+        for col in az_cols:
+            nhm_sub[col] = pd.to_numeric(nhm_sub[col], errors='coerce')
+            nhm_sub.loc[nhm_sub[col].isin(NHM_SENTINEL), col] = 0.0
+            nhm_sub[col] = nhm_sub[col].fillna(0.0)
+        # Annual volumes per HUC12
+        nhm_huc_annual: dict[str, list[float]] = {h: [] for h in az_cols}
+        for year in range(nhm_start, nhm_end + 1):
+            yr_df = nhm_sub[nhm_sub.Year == year]
+            annual_vol = np.zeros(len(az_cols))
+            for _, row in yr_df.iterrows():
+                month = int(row['Month'])
+                ndays = days_in_month[month - 1]
+                if month == 2 and year % 4 == 0 and (
+                        year % 100 != 0 or year % 400 == 0):
+                    ndays = 29
+                vals = row[az_cols].values.astype(np.float64)
+                annual_vol += vals * ndays * MGAL_TO_M3
+            for i, huc_id in enumerate(az_cols):
+                nhm_huc_annual[huc_id].append(annual_vol[i] * M3_TO_AF)
+        nhm_huc_mean = {
+            h: float(np.mean(v)) if v else 0.0
+            for h, v in nhm_huc_annual.items()
+        }
+
+        # ── ML per-HUC12 mean-annual volume (AF) via zonal stats ──
+        ml_cat_dir = irr_gw_dir if cat == 'GW' else irr_sw_dir
+        if ml_cat_dir is None:
+            logger.warning(f'  ML {cat} raster dir not provided')
+            continue
+        ml_huc_accum: dict[str, list[float]] = {h: [] for h in az_huc12_ids}
+        ml_start, ml_end = ml_year_range
+        for year in range(max(ml_start, nhm_start), min(ml_end, nhm_end) + 1):
+            cat_prefix = 'Irrigation_GW' if cat == 'GW' else 'Irrigation_SW'
+            raster_path = os.path.join(
+                ml_cat_dir, f'{cat_prefix}_{year}_mm.tif',
+            )
+            if not os.path.isfile(raster_path):
+                continue
+            yr_stats = _compute_huc12_zonal_stats(
+                raster_path, huc_reproj, pixel_area_m2, depth_unit='mm',
+            )
+            for huc_id in az_huc12_ids:
+                s = yr_stats.get(huc_id)
+                if s:
+                    ml_huc_accum[huc_id].append(s['volume_AF'])
+        ml_huc_mean = {
+            h: float(np.mean(v)) if v else 0.0
+            for h, v in ml_huc_accum.items()
+        }
+
+        # ── Reitz per-HUC12 mean-annual volume (AF) via zonal stats ──
+        reitz_huc_mean: dict[str, float] = {}
+        reitz_cat_subdir = (
+            'Irrigation_groundwater_1980-2018' if cat == 'GW'
+            else 'Irrigation_surfacewater_1980-2018'
+        )
+        reitz_prefix = 'GW_irr' if cat == 'GW' else 'SW_irr'
+        reitz_huc_accum: dict[str, list[float]] = {
+            h: [] for h in az_huc12_ids
+        }
+        reitz_start, reitz_end = reitz_year_range
+        for year in range(
+                max(reitz_start, nhm_start), min(reitz_end, nhm_end) + 1):
+            reitz_raw = os.path.join(
+                reitz_base_dir, reitz_cat_subdir,
+                f'{reitz_prefix}_{year}.tif',
+            )
+            reproj_path = os.path.join(
+                reitz_out, f'Reitz_{cat}_{year}_reproj.tif',
+            )
+            if os.path.isfile(reproj_path):
+                yr_stats = _compute_huc12_zonal_stats(
+                    reproj_path, huc_reproj, pixel_area_m2, depth_unit='m',
+                )
+            elif os.path.isfile(reitz_raw):
+                _reproject_reitz_to_ref(reitz_raw, ref_raster, reproj_path)
+                yr_stats = _compute_huc12_zonal_stats(
+                    reproj_path, huc_reproj, pixel_area_m2, depth_unit='m',
+                )
+            else:
+                continue
+            for huc_id in az_huc12_ids:
+                s = yr_stats.get(huc_id)
+                if s:
+                    reitz_huc_accum[huc_id].append(s['volume_AF'])
+        reitz_huc_mean = {
+            h: float(np.mean(v)) if v else 0.0
+            for h, v in reitz_huc_accum.items()
+        }
+
+        # ── Compute HUC12-level metrics ──
+        common_hucs = [h for h in az_huc12_ids
+                       if h in nhm_huc_mean and h in ml_huc_mean]
+        if common_hucs:
+            huc_areas = {
+                str(row['huc12']): row.geometry.area
+                for _, row in huc_reproj.iterrows()
+            }
+            for pair_label, dict_a, dict_b, name_a, name_b in [
+                ('ML_vs_NHM', ml_huc_mean, nhm_huc_mean, 'ML', 'NHM'),
+                ('Reitz_vs_NHM', reitz_huc_mean, nhm_huc_mean, 'Reitz', 'NHM'),
+                ('ML_vs_Reitz', ml_huc_mean, reitz_huc_mean, 'ML', 'Reitz'),
+            ]:
+                m = _compute_metrics(
+                    common_hucs, dict_a, dict_b, name_a, name_b,
+                    basin_areas_m2=huc_areas,
+                )
+                m['Category'] = f'Irrigation_{cat}'
+                m['Level'] = 'HUC12'
+                huc12_metrics.append(m)
+                logger.info(
+                    f'    {pair_label} (HUC12): RMSD={m["RMSD_AF"]:.1f} AF, '
+                    f'PctDiff={m["Pct_Diff"]:.1f}%'
+                )
+
+        # ── HUC12-level scatter ──
+        huc12_scatter_dir = os.path.join(huc12_dir, 'Scatter/')
+        makedirs(huc12_scatter_dir)
+        huc12_scatter_pairs = [
+            ('ML', 'NHM', ml_huc_mean, nhm_huc_mean),
+            ('ML', 'Reitz', ml_huc_mean, reitz_huc_mean),
+            ('NHM', 'Reitz', nhm_huc_mean, reitz_huc_mean),
+        ]
+        plot_intercomp_scatter(
+            huc12_scatter_pairs, common_hucs, huc_areas,
+            huc12_scatter_dir,
+            title=f'Irrigation {cat} — HUC12-Level Scatter',
+            filename=f'Scatter_HUC12_{cat}.png',
+        )
+
+        # ── HUC12-level per-unit CSV ──
+        huc12_rows = []
+        for huc_id in az_huc12_ids:
+            area = huc_areas.get(huc_id, 1.0)
+            af_to_m3_local = 1.0 / M3_TO_AF
+            huc12_rows.append({
+                'HUC12': huc_id,
+                'Category': f'Irrigation_{cat}',
+                'ML_AF': round(ml_huc_mean.get(huc_id, 0.0), 2),
+                'NHM_AF': round(nhm_huc_mean.get(huc_id, 0.0), 2),
+                'Reitz_AF': round(reitz_huc_mean.get(huc_id, 0.0), 2),
+                'ML_mm': round(
+                    ml_huc_mean.get(huc_id, 0.0) * af_to_m3_local
+                    / area * M_TO_MM, 4,
+                ) if area > 0 else 0.0,
+                'NHM_mm': round(
+                    nhm_huc_mean.get(huc_id, 0.0) * af_to_m3_local
+                    / area * M_TO_MM, 4,
+                ) if area > 0 else 0.0,
+                'Reitz_mm': round(
+                    reitz_huc_mean.get(huc_id, 0.0) * af_to_m3_local
+                    / area * M_TO_MM, 4,
+                ) if area > 0 else 0.0,
+            })
+        pd.DataFrame(huc12_rows).to_csv(
+            os.path.join(huc12_dir, f'per_huc12_{cat}.csv'), index=False,
+        )
+
+        # ── HUC12-level spatial diff choropleth maps ──
+        # Color each HUC12 polygon by the pairwise depth or volume
+        # difference, with GW basin boundaries and AMA/INA labels
+        # overlaid for geographic context.
+        logger.info(f'  Rendering HUC12-level spatial diff maps for {cat}...')
+        huc12_diff_dir = os.path.join(huc12_dir, 'Spatial_Diff/')
+        makedirs(huc12_diff_dir)
+
+        basin_reproj = (
+            basin_gdf.to_crs(huc_reproj.crs)
+            if basin_gdf.crs != huc_reproj.crs else basin_gdf
+        )
+        ama_ina_names = get_ama_ina_basin_names()
+        b_name_col = (
+            basin_col if basin_col in basin_reproj.columns
+            else basin_reproj.columns[0]
+        )
+
+        af_to_m3_local = 1.0 / M3_TO_AF
+        _mm_to_ft = 1.0 / 304.8
+        _m3_to_af_local = M3_TO_AF
+
+        nhm_pairs = [
+            ('ML', 'NHM', ml_huc_mean, nhm_huc_mean),
+            ('Reitz', 'NHM', reitz_huc_mean, nhm_huc_mean),
+            ('ML', 'Reitz', ml_huc_mean, reitz_huc_mean),
+        ]
+
+        for unit_mode, unit_label, sec_label, sec_factor, scale_fn, tick_div in [
+            (
+                'depth', '\u0394 Depth (mm)', '\u0394 Depth (ft)',
+                _mm_to_ft,
+                lambda af, area: af * af_to_m3_local / area * M_TO_MM if area > 0 else 0.0,
+                None,
+            ),
+            (
+                'volume',
+                r'$\Delta$ Volume ($\times$10$^{6}$ m$^3$)',
+                '\u0394 Volume (AF)',
+                _m3_to_af_local,
+                lambda af, area: af * af_to_m3_local,
+                1e6,
+            ),
+        ]:
+            fig, axes = plt.subplots(
+                1, 3, figsize=(20, 7), constrained_layout=True,
+            )
+            title_unit = 'Depth' if unit_mode == 'depth' else 'Volume'
+            fig.suptitle(
+                f'Irrigation {cat} \u2014 HUC12-Level {title_unit} Difference',
+                fontsize=14, fontweight='bold',
+            )
+
+            # Compute shared vmax
+            global_vmax = 1e-6
+            for _, _, dict_a, dict_b in nhm_pairs:
+                diffs = []
+                for h in common_hucs:
+                    area = huc_areas.get(h, 1.0)
+                    va = scale_fn(dict_a.get(h, 0.0), area)
+                    vb = scale_fn(dict_b.get(h, 0.0), area)
+                    if va != 0 or vb != 0:
+                        diffs.append(va - vb)
+                if diffs:
+                    d_arr = np.array(diffs)
+                    global_vmax = max(
+                        global_vmax,
+                        abs(np.nanpercentile(d_arr, 2)),
+                        abs(np.nanpercentile(d_arr, 98)),
+                    )
+
+            last_im = None
+            for col_i, (name_a, name_b, dict_a, dict_b) in enumerate(
+                    nhm_pairs):
+                ax = axes[col_i]
+                ax.set_facecolor('#D5D5D5')
+
+                # Compute per-HUC12 diff and assign to geometry
+                diff_vals = []
+                for h in common_hucs:
+                    area = huc_areas.get(h, 1.0)
+                    va = scale_fn(dict_a.get(h, 0.0), area)
+                    vb = scale_fn(dict_b.get(h, 0.0), area)
+                    diff_vals.append(va - vb)
+
+                plot_gdf = huc_reproj[
+                    huc_reproj['huc12'].isin(common_hucs)
+                ].copy()
+                plot_gdf = plot_gdf.set_index('huc12').loc[common_hucs]
+                plot_gdf['diff'] = diff_vals
+                # Mask HUC12s where both sources are zero
+                zero_mask = plot_gdf['diff'].abs() < 1e-10
+                plot_gdf.loc[zero_mask, 'diff'] = np.nan
+
+                last_im = plot_gdf.plot(
+                    ax=ax, column='diff', cmap='RdBu_r',
+                    vmin=-global_vmax, vmax=global_vmax,
+                    edgecolor='#AAAAAA', linewidth=0.3,
+                    legend=False, missing_kwds={'color': '#EEEEEE'},
+                )
+                # Overlay GW basin boundaries + AMA/INA labels
+                _overlay_boundaries(
+                    ax, basin_reproj, ama_ina_names, b_name_col,
+                    label_fontsize=5.0, label_all=True,
+                )
+                ax.set_title(
+                    f'{name_a} \u2212 {name_b}', fontweight='bold',
+                )
+
+            # Shared colorbar with dual units
+            import matplotlib.ticker as mticker
+            from matplotlib.cm import ScalarMappable
+            from matplotlib.colors import Normalize
+            sm = ScalarMappable(
+                cmap='RdBu_r',
+                norm=Normalize(vmin=-global_vmax, vmax=global_vmax),
+            )
+            sm.set_array([])
+            cbar = fig.colorbar(
+                sm, ax=list(axes), shrink=0.5, pad=0.06,
+                orientation='horizontal', aspect=40, extend='both',
+            )
+            if tick_div:
+                cbar.formatter = mticker.FuncFormatter(
+                    lambda x, _: f'{x / tick_div:g}',
+                )
+                cbar.update_ticks()
+            cbar.set_label(unit_label, fontsize=10, fontweight='bold')
+            cbar.ax.tick_params(labelsize=10)
+            secax = cbar.ax.secondary_xaxis(
+                'top',
+                functions=(
+                    lambda x: x * sec_factor,
+                    lambda x: x / sec_factor,
+                ),
+            )
+            secax.set_xlabel(
+                sec_label, fontsize=10, fontweight='bold',
+            )
+            secax.tick_params(labelsize=10)
+
+            suffix = '' if unit_mode == 'depth' else '_Volume'
+            out_path = os.path.join(
+                huc12_diff_dir,
+                f'Spatial_Diff_HUC12_{cat}{suffix}.png',
+            )
+            fig.savefig(out_path, dpi=600, bbox_inches='tight')
+            plt.close(fig)
+
+        logger.info(f'  HUC12-level diff maps saved to {huc12_diff_dir}')
+
+    if huc12_metrics:
+        huc12_metrics_df = pd.DataFrame(huc12_metrics)
+        huc12_metrics_df.to_csv(
+            os.path.join(huc12_dir, 'huc12_intercomparison_metrics.csv'),
+            index=False,
+        )
+        logger.info(f'\nHUC12-level metrics:\n{huc12_metrics_df.to_string(index=False)}')
+
+    # ── 11. Summary print ────────────────────────────────────────────────
     logger.info('\n' + '='*60)
     logger.info('Intercomparison Summary')
     logger.info('='*60)
-    logger.info(f'\n{metrics_df.to_string(index=False)}')
+    logger.info(f'\nBasin-level metrics:\n{metrics_df.to_string(index=False)}')
+    if huc12_metrics:
+        logger.info(f'\nHUC12-level metrics:\n{huc12_metrics_df.to_string(index=False)}')
     logger.info(f'\nML year range: {ml_year_range}')
     logger.info(f'NHM year range: {nhm_year_range}')
     logger.info(f'Reitz year range: {reitz_year_range}')
@@ -2158,6 +2691,163 @@ def run_cu_intercomparison(
         title='Irrigation CU — Per-Basin Scatter (ML vs NHM)',
         filename='Scatter_CU.png',
     )
+
+    # ── HUC12-level comparison (ML aggregated to NHM's native unit) ────
+    logger.info('--- HUC12-level CU comparison ---')
+    huc12_dir = os.path.join(output_dir, 'HUC12_Comparison/')
+    makedirs(huc12_dir)
+
+    huc_gdf = gpd.read_file(huc12_geojson)
+    huc_gdf = _filter_huc12_within_az(huc_gdf, basin_gdf)
+    huc_gdf['huc12'] = huc_gdf['huc12'].astype(str)
+    with rio.open(ref_raster) as _src:
+        pixel_area_m2 = abs(_src.transform.a * _src.transform.e)
+        huc_reproj = huc_gdf.to_crs(_src.crs)
+
+    az_huc12_ids = sorted(huc_reproj['huc12'].unique())
+    huc_areas = {
+        str(row['huc12']): row.geometry.area
+        for _, row in huc_reproj.iterrows()
+    }
+
+    # NHM CU per HUC12 (annual CSV, already in Mgal/d → AF)
+    nhm_df_raw = pd.read_csv(nhm_cu_csv, dtype={'Year': int})
+    az_cols = [c for c in nhm_df_raw.columns
+               if c != 'Year' and c in set(az_huc12_ids)]
+    nhm_huc_mean: dict[str, float] = {}
+    if az_cols:
+        nhm_sub = nhm_df_raw[['Year'] + az_cols].copy()
+        nhm_sub = nhm_sub[
+            (nhm_sub.Year >= nhm_year_range[0])
+            & (nhm_sub.Year <= nhm_year_range[1])
+        ]
+        for col in az_cols:
+            nhm_sub[col] = pd.to_numeric(nhm_sub[col], errors='coerce')
+            nhm_sub.loc[nhm_sub[col].isin(NHM_SENTINEL), col] = 0.0
+            nhm_sub[col] = nhm_sub[col].fillna(0.0)
+        # NHM CU CSV is annual Mgal/d — convert to AF/yr
+        # annual_vol = rate_Mgal_d × 365.25 × MGAL_TO_M3 × M3_TO_AF
+        days_per_year = 365.25
+        for h in az_cols:
+            vals = nhm_sub[h].values * days_per_year * MGAL_TO_M3 * M3_TO_AF
+            nhm_huc_mean[h] = float(np.mean(vals)) if len(vals) > 0 else 0.0
+
+    # ML CU per HUC12 via zonal stats
+    ml_start, ml_end = ml_year_range
+    nhm_start, nhm_end = nhm_year_range
+    ml_huc_accum: dict[str, list[float]] = {h: [] for h in az_huc12_ids}
+    for year in range(max(ml_start, nhm_start), min(ml_end, nhm_end) + 1):
+        rpath = os.path.join(irr_cu_dir, f'Irrigation_CU_{year}_mm.tif')
+        if not os.path.isfile(rpath):
+            continue
+        yr_stats = _compute_huc12_zonal_stats(
+            rpath, huc_reproj, pixel_area_m2, depth_unit='mm',
+        )
+        for h in az_huc12_ids:
+            s = yr_stats.get(h)
+            if s:
+                ml_huc_accum[h].append(s['volume_AF'])
+    ml_huc_mean = {
+        h: float(np.mean(v)) if v else 0.0
+        for h, v in ml_huc_accum.items()
+    }
+
+    common_hucs = [h for h in az_huc12_ids
+                   if h in nhm_huc_mean and h in ml_huc_mean]
+    if common_hucs:
+        m_cu_huc = _compute_metrics(
+            common_hucs, ml_huc_mean, nhm_huc_mean, 'ML', 'NHM',
+            basin_areas_m2=huc_areas,
+        )
+        m_cu_huc['Category'] = 'Irrigation_CU'
+        m_cu_huc['Level'] = 'HUC12'
+        pd.DataFrame([m_cu_huc]).to_csv(
+            os.path.join(huc12_dir, 'huc12_cu_metrics.csv'), index=False,
+        )
+        logger.info(
+            f'  ML vs NHM CU (HUC12): RMSD={m_cu_huc["RMSD_AF"]:.1f} AF, '
+            f'PctDiff={m_cu_huc["Pct_Diff"]:.1f}%'
+        )
+
+        # HUC12-level scatter
+        huc12_scatter_dir = os.path.join(huc12_dir, 'Scatter/')
+        plot_intercomp_scatter(
+            [('ML', 'NHM', ml_huc_mean, nhm_huc_mean)],
+            common_hucs, huc_areas, huc12_scatter_dir,
+            title='Irrigation CU — HUC12-Level Scatter',
+            filename='Scatter_HUC12_CU.png',
+        )
+
+        # HUC12-level spatial diff choropleth
+        _af_to_m3_local = 1.0 / M3_TO_AF
+        _mm_to_ft = 1.0 / 304.8
+        _m3_to_af_local = M3_TO_AF
+        huc12_diff_dir = os.path.join(huc12_dir, 'Spatial_Diff/')
+        makedirs(huc12_diff_dir)
+        b_reproj = (
+            basin_gdf.to_crs(huc_reproj.crs)
+            if basin_gdf.crs != huc_reproj.crs else basin_gdf
+        )
+        b_name = basin_col if basin_col in b_reproj.columns else b_reproj.columns[0]
+        ama_ina_names = get_ama_ina_basin_names()
+
+        for unit_mode, unit_label, sec_label, sec_factor, scale_fn, tick_div in [
+            ('depth', '\u0394 Depth (mm)', '\u0394 Depth (ft)', _mm_to_ft,
+             lambda af, area: af * _af_to_m3_local / area * M_TO_MM if area > 0 else 0.0, None),
+            ('volume', r'$\Delta$ Volume ($\times$10$^{6}$ m$^3$)', '\u0394 Volume (AF)',
+             _m3_to_af_local,
+             lambda af, area: af * _af_to_m3_local, 1e6),
+        ]:
+            fig, ax = plt.subplots(1, 1, figsize=(8, 8), constrained_layout=True)
+            title_u = 'Depth' if unit_mode == 'depth' else 'Volume'
+            fig.suptitle(
+                f'Irrigation CU \u2014 HUC12-Level {title_u} Difference (ML \u2212 NHM)',
+                fontsize=14, fontweight='bold',
+            )
+            diff_vals = []
+            for h in common_hucs:
+                area = huc_areas.get(h, 1.0)
+                diff_vals.append(
+                    scale_fn(ml_huc_mean.get(h, 0.0), area)
+                    - scale_fn(nhm_huc_mean.get(h, 0.0), area)
+                )
+            plot_gdf = huc_reproj[huc_reproj['huc12'].isin(common_hucs)].copy()
+            plot_gdf = plot_gdf.set_index('huc12').loc[common_hucs]
+            plot_gdf['diff'] = diff_vals
+            plot_gdf.loc[plot_gdf['diff'].abs() < 1e-10, 'diff'] = np.nan
+            d_arr = np.array([d for d in diff_vals if abs(d) > 1e-10])
+            vmax = max(abs(np.nanpercentile(d_arr, 2)), abs(np.nanpercentile(d_arr, 98)), 1e-6) if d_arr.size else 1.0
+
+            from matplotlib.cm import ScalarMappable
+            from matplotlib.colors import Normalize
+            plot_gdf.plot(
+                ax=ax, column='diff', cmap='RdBu_r',
+                vmin=-vmax, vmax=vmax,
+                edgecolor='#AAAAAA', linewidth=0.3,
+                legend=False, missing_kwds={'color': '#EEEEEE'},
+            )
+            _overlay_boundaries(ax, b_reproj, ama_ina_names, b_name,
+                                label_fontsize=5.0, label_all=True)
+            import matplotlib.ticker as mticker
+            sm = ScalarMappable(cmap='RdBu_r', norm=Normalize(-vmax, vmax))
+            sm.set_array([])
+            cbar = fig.colorbar(sm, ax=ax, shrink=0.5, pad=0.06,
+                                orientation='horizontal', aspect=40, extend='both')
+            if tick_div:
+                cbar.formatter = mticker.FuncFormatter(lambda x, _: f'{x/tick_div:g}')
+                cbar.update_ticks()
+            cbar.set_label(unit_label, fontsize=10, fontweight='bold')
+            cbar.ax.tick_params(labelsize=10)
+            secax = cbar.ax.secondary_xaxis(
+                'top', functions=(lambda x: x*sec_factor, lambda x: x/sec_factor))
+            secax.set_xlabel(sec_label, fontsize=10, fontweight='bold')
+            secax.tick_params(labelsize=10)
+
+            suffix = '' if unit_mode == 'depth' else '_Volume'
+            fig.savefig(os.path.join(huc12_diff_dir, f'Spatial_Diff_HUC12_CU{suffix}.png'),
+                        dpi=600, bbox_inches='tight')
+            plt.close(fig)
+        logger.info(f'  HUC12-level CU diff maps saved to {huc12_diff_dir}')
 
     # ── Summary ──────────────────────────────────────────────────────────
     logger.info('\n' + '=' * 60)
@@ -2505,6 +3195,237 @@ def run_peff_intercomparison(
         filename='Scatter_Peff.png',
     )
 
+    # ── HUC12-level Peff comparison ─────────────────────────────────────
+    logger.info('--- HUC12-level Peff comparison ---')
+    huc12_dir = os.path.join(output_dir, 'HUC12_Comparison/')
+    makedirs(huc12_dir)
+
+    huc_gdf = gpd.read_file(huc12_geojson)
+    huc_gdf = _filter_huc12_within_az(huc_gdf, basin_gdf)
+    huc_gdf['huc12'] = huc_gdf['huc12'].astype(str)
+    with rio.open(ref_raster) as _src:
+        pixel_area_m2 = abs(_src.transform.a * _src.transform.e)
+        huc_reproj = huc_gdf.to_crs(_src.crs)
+
+    az_huc12_ids = sorted(huc_reproj['huc12'].unique())
+    huc_areas = {
+        str(row['huc12']): row.geometry.area
+        for _, row in huc_reproj.iterrows()
+    }
+
+    # NHM Peff per HUC12 (annual CSV, Mgal/d → AF)
+    nhm_df_raw = pd.read_csv(nhm_peff_csv, dtype={'Year': int})
+    az_cols = [c for c in nhm_df_raw.columns
+               if c != 'Year' and c in set(az_huc12_ids)]
+    nhm_huc_mean: dict[str, float] = {}
+    if az_cols:
+        nhm_sub = nhm_df_raw[['Year'] + az_cols].copy()
+        nhm_sub = nhm_sub[
+            (nhm_sub.Year >= nhm_year_range[0])
+            & (nhm_sub.Year <= nhm_year_range[1])
+        ]
+        for col in az_cols:
+            nhm_sub[col] = pd.to_numeric(nhm_sub[col], errors='coerce')
+            nhm_sub.loc[nhm_sub[col].isin(NHM_SENTINEL), col] = 0.0
+            nhm_sub[col] = nhm_sub[col].fillna(0.0)
+        days_per_year = 365.25
+        for h in az_cols:
+            vals = nhm_sub[h].values * days_per_year * MGAL_TO_M3 * M3_TO_AF
+            nhm_huc_mean[h] = float(np.mean(vals)) if len(vals) > 0 else 0.0
+
+    # ML Peff (USDA-SCS) per HUC12 via zonal stats
+    ml_peff_raster_dir = os.path.join(output_dir, 'ML_Peff_Rasters/')
+    ml_huc_accum: dict[str, list[float]] = {h: [] for h in az_huc12_ids}
+    common_start = max(ml_year_range[0], nhm_year_range[0])
+    common_end = min(ml_year_range[1], nhm_year_range[1])
+    for year in range(common_start, common_end + 1):
+        rpath = os.path.join(ml_peff_raster_dir, f'ML_Peff_{year}_mm.tif')
+        if not os.path.isfile(rpath):
+            continue
+        yr_stats = _compute_huc12_zonal_stats(
+            rpath, huc_reproj, pixel_area_m2, depth_unit='mm',
+        )
+        for h in az_huc12_ids:
+            s = yr_stats.get(h)
+            if s:
+                ml_huc_accum[h].append(s['volume_AF'])
+    ml_huc_mean = {
+        h: float(np.mean(v)) if v else 0.0
+        for h, v in ml_huc_accum.items()
+    }
+
+    # ML Peff PCML per HUC12 via zonal stats
+    ml_pcml_raster_dir = os.path.join(output_dir, 'ML_Peff_PCML_Rasters/')
+    pcml_huc_accum: dict[str, list[float]] = {h: [] for h in az_huc12_ids}
+    pcml_common_end = min(ml_pcml_year_range[1], nhm_year_range[1])
+    for year in range(common_start, pcml_common_end + 1):
+        rpath = os.path.join(ml_pcml_raster_dir, f'ML_Peff_PCML_{year}_mm.tif')
+        if not os.path.isfile(rpath):
+            continue
+        yr_stats = _compute_huc12_zonal_stats(
+            rpath, huc_reproj, pixel_area_m2, depth_unit='mm',
+        )
+        for h in az_huc12_ids:
+            s = yr_stats.get(h)
+            if s:
+                pcml_huc_accum[h].append(s['volume_AF'])
+    pcml_huc_mean = {
+        h: float(np.mean(v)) if v else 0.0
+        for h, v in pcml_huc_accum.items()
+    }
+
+    common_hucs = [h for h in az_huc12_ids
+                   if h in nhm_huc_mean and h in ml_huc_mean]
+    _peff_huc_display = {
+        'ML_Peff': 'USDA_SCS_Peff',
+        'ML_Peff_PCML': 'ML_Peff_PCML',
+        'NHM_Peff': 'NHM_Peff',
+    }
+    if common_hucs:
+        huc12_peff_metrics = []
+        peff_huc_dicts = {
+            'ML_Peff': ml_huc_mean,
+            'ML_Peff_PCML': pcml_huc_mean,
+            'NHM_Peff': nhm_huc_mean,
+        }
+        peff_huc_pairs = [
+            ('ML_Peff', 'NHM_Peff'),
+            ('ML_Peff_PCML', 'NHM_Peff'),
+            ('ML_Peff', 'ML_Peff_PCML'),
+        ]
+        for key_a, key_b in peff_huc_pairs:
+            m = _compute_metrics(
+                common_hucs,
+                peff_huc_dicts[key_a], peff_huc_dicts[key_b],
+                _peff_huc_display[key_a], _peff_huc_display[key_b],
+                basin_areas_m2=huc_areas,
+            )
+            m['Category'] = 'Effective_Precipitation'
+            m['Level'] = 'HUC12'
+            huc12_peff_metrics.append(m)
+            logger.info(
+                f'    {_peff_huc_display[key_a]} vs {_peff_huc_display[key_b]} '
+                f'(HUC12): RMSD={m["RMSD_AF"]:.1f} AF, '
+                f'PctDiff={m["Pct_Diff"]:.1f}%'
+            )
+        pd.DataFrame(huc12_peff_metrics).to_csv(
+            os.path.join(huc12_dir, 'huc12_peff_metrics.csv'), index=False,
+        )
+
+        # HUC12-level scatter (3 pairs)
+        huc12_scatter_dir = os.path.join(huc12_dir, 'Scatter/')
+        plot_intercomp_scatter(
+            [
+                (_peff_huc_display['ML_Peff'], _peff_huc_display['NHM_Peff'],
+                 ml_huc_mean, nhm_huc_mean),
+                (_peff_huc_display['ML_Peff_PCML'], _peff_huc_display['NHM_Peff'],
+                 pcml_huc_mean, nhm_huc_mean),
+                (_peff_huc_display['ML_Peff'], _peff_huc_display['ML_Peff_PCML'],
+                 ml_huc_mean, pcml_huc_mean),
+            ],
+            common_hucs, huc_areas, huc12_scatter_dir,
+            title='Effective Precipitation — HUC12-Level Scatter',
+            filename='Scatter_HUC12_Peff.png',
+        )
+
+        # HUC12-level spatial diff choropleth (NHM pairs only)
+        _af_to_m3_local = 1.0 / M3_TO_AF
+        _mm_to_ft = 1.0 / 304.8
+        _m3_to_af_local = M3_TO_AF
+        huc12_diff_dir = os.path.join(huc12_dir, 'Spatial_Diff/')
+        makedirs(huc12_diff_dir)
+        b_reproj = (
+            basin_gdf.to_crs(huc_reproj.crs)
+            if basin_gdf.crs != huc_reproj.crs else basin_gdf
+        )
+        b_name = basin_col if basin_col in b_reproj.columns else b_reproj.columns[0]
+        ama_ina_names = get_ama_ina_basin_names()
+
+        nhm_peff_pairs = [
+            ('USDA-SCS Peff', 'NHM Peff', ml_huc_mean, nhm_huc_mean),
+            ('ML Peff PCML', 'NHM Peff', pcml_huc_mean, nhm_huc_mean),
+            ('USDA-SCS Peff', 'ML Peff PCML', ml_huc_mean, pcml_huc_mean),
+        ]
+
+        for unit_mode, unit_label, sec_label, sec_factor, scale_fn, tick_div in [
+            ('depth', '\u0394 Depth (mm)', '\u0394 Depth (ft)', _mm_to_ft,
+             lambda af, area: af * _af_to_m3_local / area * M_TO_MM if area > 0 else 0.0, None),
+            ('volume', r'$\Delta$ Volume ($\times$10$^{6}$ m$^3$)', '\u0394 Volume (AF)',
+             _m3_to_af_local,
+             lambda af, area: af * _af_to_m3_local, 1e6),
+        ]:
+            fig, axes = plt.subplots(1, 3, figsize=(20, 7), constrained_layout=True)
+            title_u = 'Depth' if unit_mode == 'depth' else 'Volume'
+            fig.suptitle(
+                f'Effective Precipitation \u2014 HUC12-Level {title_u} Difference',
+                fontsize=14, fontweight='bold',
+            )
+            global_vmax = 1e-6
+            for _, _, d_a, d_b in nhm_peff_pairs:
+                diffs = []
+                for h in common_hucs:
+                    area = huc_areas.get(h, 1.0)
+                    va = scale_fn(d_a.get(h, 0.0), area)
+                    vb = scale_fn(d_b.get(h, 0.0), area)
+                    if va != 0 or vb != 0:
+                        diffs.append(va - vb)
+                if diffs:
+                    d_arr = np.array(diffs)
+                    global_vmax = max(
+                        global_vmax,
+                        abs(np.nanpercentile(d_arr, 2)),
+                        abs(np.nanpercentile(d_arr, 98)),
+                    )
+            last_im = None
+            for col_i, (name_a, name_b, d_a, d_b) in enumerate(nhm_peff_pairs):
+                ax = axes[col_i]
+                ax.set_facecolor('#D5D5D5')
+                diff_vals = []
+                for h in common_hucs:
+                    area = huc_areas.get(h, 1.0)
+                    diff_vals.append(
+                        scale_fn(d_a.get(h, 0.0), area)
+                        - scale_fn(d_b.get(h, 0.0), area)
+                    )
+                plot_gdf = huc_reproj[huc_reproj['huc12'].isin(common_hucs)].copy()
+                plot_gdf = plot_gdf.set_index('huc12').loc[common_hucs]
+                plot_gdf['diff'] = diff_vals
+                plot_gdf.loc[plot_gdf['diff'].abs() < 1e-10, 'diff'] = np.nan
+                plot_gdf.plot(
+                    ax=ax, column='diff', cmap='RdBu_r',
+                    vmin=-global_vmax, vmax=global_vmax,
+                    edgecolor='#AAAAAA', linewidth=0.3,
+                    legend=False, missing_kwds={'color': '#EEEEEE'},
+                )
+                _overlay_boundaries(ax, b_reproj, ama_ina_names, b_name,
+                                    label_fontsize=5.0, label_all=True)
+                ax.set_title(f'{name_a} \u2212 {name_b}', fontweight='bold')
+
+            import matplotlib.ticker as mticker
+            from matplotlib.cm import ScalarMappable
+            from matplotlib.colors import Normalize
+            sm = ScalarMappable(cmap='RdBu_r', norm=Normalize(-global_vmax, global_vmax))
+            sm.set_array([])
+            cbar = fig.colorbar(sm, ax=list(axes), shrink=0.5, pad=0.06,
+                                orientation='horizontal', aspect=40, extend='both')
+            if tick_div:
+                cbar.formatter = mticker.FuncFormatter(lambda x, _: f'{x/tick_div:g}')
+                cbar.update_ticks()
+            cbar.set_label(unit_label, fontsize=10, fontweight='bold')
+            cbar.ax.tick_params(labelsize=10)
+            secax = cbar.ax.secondary_xaxis(
+                'top', functions=(lambda x: x*sec_factor, lambda x: x/sec_factor))
+            secax.set_xlabel(sec_label, fontsize=10, fontweight='bold')
+            secax.tick_params(labelsize=10)
+
+            suffix = '' if unit_mode == 'depth' else '_Volume'
+            fig.savefig(
+                os.path.join(huc12_diff_dir, f'Spatial_Diff_HUC12_Peff{suffix}.png'),
+                dpi=600, bbox_inches='tight',
+            )
+            plt.close(fig)
+        logger.info(f'  HUC12-level Peff diff maps saved to {huc12_diff_dir}')
+
     # ── Summary ──────────────────────────────────────────────────────────
     logger.info('\n' + '=' * 60)
     logger.info('Peff Intercomparison Summary')
@@ -2730,8 +3651,11 @@ def _compute_cap_srp_metrics(
         denom = (np.mean(ml_vals) + np.mean(obs_vals)) / 2.0
         pct_diff = float(mad_af / denom * 100) if denom > 0 else np.nan
 
-        # R² (equivalent to NSE when computed as sklearn's r2_score
-        # with observed as y_true and predicted as y_pred)
+        # Temporal R² / NSE (sklearn r2_score with observed as y_true and
+        # predicted as y_pred, computed per basin across years). This is
+        # distinct from the spatial R² shown on the scatter plot, which
+        # computes r2_score across basins for a single mean value per
+        # basin.
         if len(ml_vals) > 1 and np.std(obs_vals) > 0:
             from sklearn.metrics import r2_score as _r2
             r2 = float(_r2(obs_vals, ml_vals))
@@ -2757,7 +3681,7 @@ def _compute_cap_srp_metrics(
             'Basin': basin,
             'N_Years': len(common_years),
             'Year_Range': f'{common_years[0]}-{common_years[-1]}',
-            'R2': round(r2, 4),
+            'Temporal_R2_NSE': round(r2, 4),
             'RMSE_AF': round(rmsd_af, 2),
             'RMSE_m3': round(float(np.sqrt(np.mean(diff_m3 ** 2))), 2),
             'MAE_AF': round(mad_af, 2),
@@ -2955,6 +3879,8 @@ def run_cap_srp_validation(
         title='ML Total SW vs CAP + SRP — Per Basin',
         filename='Scatter_ML_vs_CAP_SRP.png',
         is_validation=True,
+        af_divisor=1000.0,
+        af_unit_label='1000 AF',
     )
 
     # ── Summary ──────────────────────────────────────────────────────────
@@ -2975,9 +3901,10 @@ def _load_ps_huc12_annual(
     csv_path: str,
     huc12_geojson: str,
     year_range: tuple[int, int],
+    basin_gdf: gpd.GeoDataFrame | None = None,
 ) -> pd.DataFrame:
-    """Load a USGS PS HUC12 CSV, filter to AZ HUC12s, aggregate monthly
-    to annual totals.
+    """Load a USGS PS HUC12 CSV, filter to AZ-interior HUC12s, aggregate
+    monthly to annual totals.
 
     The raw data is in million gallons per day (Mgal/d).  For each
     HUC12 × year we compute the annual total volume in acre-feet:
@@ -2992,12 +3919,14 @@ def _load_ps_huc12_annual(
     df = pd.read_csv(csv_path)
     df.columns = df.columns.astype(str)
 
-    # Identify AZ HUC12 columns
+    # Identify AZ-interior HUC12 columns (drop cross-border HUC12s)
     huc_gdf = gpd.read_file(huc12_geojson)
+    if basin_gdf is not None:
+        huc_gdf = _filter_huc12_within_az(huc_gdf, basin_gdf)
     az_huc12_set = set(huc_gdf['huc12'].astype(str).values)
     all_huc_cols = [c for c in df.columns if c not in ('Year', 'Month')]
     az_cols = [c for c in all_huc_cols if c in az_huc12_set]
-    logger.info(f'  {len(az_cols)}/{len(all_huc_cols)} HUC12s in AZ')
+    logger.info(f'  {len(az_cols)}/{len(all_huc_cols)} AZ-interior HUC12s in PS')
 
     if not az_cols:
         logger.warning('  No AZ HUC12 matches in PS CSV')
@@ -3053,6 +3982,7 @@ def _ps_annual_to_basin_volumes(
         }
 
     huc_gdf = gpd.read_file(huc12_geojson)
+    huc_gdf = _filter_huc12_within_az(huc_gdf, basin_gdf)
     huc_gdf['huc12'] = huc_gdf['huc12'].astype(str)
     huc_reproj = huc_gdf.to_crs(ref_crs)
     huc_reproj['area_m2'] = huc_reproj.geometry.area
@@ -3234,7 +4164,9 @@ def run_ps_intercomparison(
                 'yearly': {},
             }
             continue
-        annual_df = _load_ps_huc12_annual(csv_path, huc12_geojson, year_range)
+        annual_df = _load_ps_huc12_annual(
+            csv_path, huc12_geojson, year_range, basin_gdf=basin_gdf,
+        )
         ps_vols[cat_label] = _ps_annual_to_basin_volumes(
             annual_df, huc12_geojson, basin_gdf, basin_col, ref_crs,
         )
