@@ -39,7 +39,7 @@ The 2019 ADWR statewide GW share comparison is the loosest of the agency cross-c
 
 ![Graphical Abstract](docs/images/Graphical_Abstract_Fig1.png)
 
-**(a)** Mean annual predicted withdrawal depth (mm) across Arizona (1896-2099) with groundwater basin boundaries and AMA/INA labels. **(b)** Statewide annual withdrawal time series with 95% confidence intervals across three eras: Hindcast (1896-1983), Historical (1984-2025), and Projection (2026-2099). **(c)** Era-average withdrawal volumes with 95% CI error bars, showing the progression from 1,353k acre-ft (Hindcast) through 4,370k (Historical) to 5,491k (Projection).
+**(a)** Mean annual predicted withdrawal depth (mm) across Arizona (1896-2099) with groundwater basin boundaries and AMA/INA labels. **(b)** Statewide annual withdrawal time series with 95% confidence intervals across three eras: Hindcast (1896-1983), Historical (1984-2025), and Projection (2026-2099). **(c)** Era-average withdrawal volumes with 95% CI error bars. **(d)** Key contributions.
 
 ## Abstract
 

@@ -2871,7 +2871,7 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
     #   (6) Ternary σ_CU attribution.
     #   (7) Per-basin per-year stacked-area timeseries for eight
     #       headline basins × two pools.
-    #   (8) Projection-era (σ_clim, σ_mgmt) log-log bubble scatter.
+    #   (8) Projection-era stacked-bar variance decomposition.
     try:
         attr_dir = os.path.join(maps_dir, 'Sigma_Attribution')
         os.makedirs(attr_dir, exist_ok=True)
@@ -2937,7 +2937,7 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
             pools=('Total_GW', 'Total_SW'),
         )
 
-        # (8) Bubble-chart scatter, Projection era only
+        # (8) Stacked-bar variance decomposition, Projection era only
         vizops.create_sigma_attribution_bubble(
             unc_dir=unc_dir, output_dir=attr_dir,
             pools=('Total_GW', 'Total_SW'),

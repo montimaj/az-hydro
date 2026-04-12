@@ -3270,6 +3270,47 @@ should be read as physics-constrained reconstructions and projections
 rather than as validated point estimates.
 
 
+## Key Outputs
+
+### Withdrawal Predictions (Era Mean Volume)
+
+| Total Predicted Withdrawal | Total GW Withdrawal | Total SW Withdrawal |
+|:---:|:---:|:---:|
+| ![Total Predicted](../docs/images/Era_Maps_Total_Predicted_Annual_Withdrawal_Volume.png) | ![Total GW](../docs/images/Era_Maps_Total_GW_Volume.png) | ![Total SW](../docs/images/Era_Maps_Total_SW_Volume.png) |
+
+### Consumptive Use and Actual vs Predicted
+
+| Irrigation CU Volume | Actual vs Predicted (Depth) | Actual vs Predicted (Volume) |
+|:---:|:---:|:---:|
+| ![Irrigation CU](../docs/images/Era_Maps_Irrigation_CU_Volume.png) | ![AvP Depth](../docs/images/Actual_vs_Predicted.png) | ![AvP Volume](../docs/images/Actual_vs_Predicted_Volume.png) |
+
+### Uncertainty and Model Diagnostics
+
+| Prediction CV | Prediction SNR | OOD Probability |
+|:---:|:---:|:---:|
+| ![CV](../docs/images/Era_Maps_Prediction_CV.png) | ![SNR](../docs/images/Era_Maps_Prediction_SNR.png) | ![OOD](../docs/images/Era_Maps_Out-of-Distribution_Probability.png) |
+
+### SW Capture Index
+
+| Total SW Capture (Volume) | Total SW Capture Fraction (λ=10m) |
+|:---:|:---:|
+| ![SW Capture Volume](../docs/images/Era_Maps_Total_SW_Capture_Volume.png) | ![SW Capture Fraction](../docs/images/Era_Maps_Total_SW_Capture_Fraction_(λ=10m).png) |
+
+### σ Attribution Diagnostic Suite (Projection Era)
+
+| Binary Attribution (Climate ↔ Management) | Ternary Attribution (RGB: Mgmt/Model/Clim) |
+|:---:|:---:|
+| ![Binary](../docs/images/Era_Maps_Sigma_Attribution_Projection.png) | ![Ternary](../docs/images/Era_Maps_Sigma_Attribution_Ternary_Projection.png) |
+
+| Variance Decomposition — Total GW | Variance Decomposition — Total SW |
+|:---:|:---:|
+| ![Stacked GW](../docs/images/Sigma_Attribution_Stacked_Bar_Total_GW_Projection.png) | ![Stacked SW](../docs/images/Sigma_Attribution_Stacked_Bar_Total_SW_Projection.png) |
+
+| Attribution Timeseries — Total GW | Attribution Timeseries — Total SW |
+|:---:|:---:|
+| ![TS GW](../docs/images/Sigma_Attribution_Timeseries_Total_GW.png) | ![TS SW](../docs/images/Sigma_Attribution_Timeseries_Total_SW.png) |
+
+
 ## References
 
 Abatzoglou, J. T. (2013). Development of gridded surface meteorological data for ecological applications and modeling. _International Journal of Climatology_, _33_(1), 121–131. https://doi.org/10.1002/joc.3413.

@@ -2980,6 +2980,7 @@ def create_graphical_abstract(
         yearly_predictions: dict | None = None,
         basin_yearly: dict | None = None,
         sigma_yearly: dict | None = None,
+        **_kwargs,
 ) -> None:
     """Create a publication-quality Figure 1 / graphical abstract.
 
@@ -3073,11 +3074,6 @@ def create_graphical_abstract(
 
     if has_ts:
         from matplotlib.gridspec import GridSpec
-        # 3-row layout: top two rows hold the map (left, spanning) and
-        # the time series + bar chart (right, stacked).  The bottom row
-        # spans the full width and holds a single-column "Key
-        # contributions" text panel summarising the headline claims for
-        # a poster/abstract reader.
         fig = plt.figure(figsize=(18, 10.5))
         gs = GridSpec(
             3, 2, figure=fig,
@@ -3085,17 +3081,15 @@ def create_graphical_abstract(
             height_ratios=[1.2, 1, 0.45],
             hspace=0.35, wspace=0.3,
         )
-        ax_map = fig.add_subplot(gs[:2, 0])   # map spans top two rows of left column
-        ax_ts = fig.add_subplot(gs[0, 1])     # time series top-right
-        ax_bar = fig.add_subplot(gs[1, 1])    # bar chart middle-right
-        ax_contrib = fig.add_subplot(gs[2, :])  # contributions span both columns of bottom row
+        ax_map = fig.add_subplot(gs[:2, 0])
+        ax_ts = fig.add_subplot(gs[0, 1])
+        ax_bar = fig.add_subplot(gs[1, 1])
+        ax_contrib = fig.add_subplot(gs[2, :])
     else:
         fig, ax_map = plt.subplots(1, 1, figsize=(9, 9))
         ax_contrib = None
 
     # ---- Panel A: Spatial map ----
-
-    # 2%-98% percentile colorbar range
     valid_vals = mean_depth_masked.compressed()
     if len(valid_vals) > 0:
         vmin = np.percentile(valid_vals, 2)
@@ -3118,13 +3112,8 @@ def create_graphical_abstract(
     cbar_fontsize = 10
     cbar.set_label('Depth (mm)', fontweight='bold', fontsize=cbar_fontsize)
     cbar.ax.tick_params(labelsize=cbar_fontsize)
-    # Place the primary metric unit (mm) on the LEFT side of the
-    # colorbar so it sits between the colorbar and the map, matching
-    # the convention used in create_actual_vs_predicted_maps and
-    # _add_af_twinx elsewhere in this file.
     cbar.ax.yaxis.set_label_position('left')
     cbar.ax.yaxis.tick_left()
-    # Secondary unit (ft) on the RIGHT side of the colorbar
     cb_ax2 = cbar.ax.twinx()
     cb_lo, cb_hi = cbar.ax.get_ylim()
     cb_ax2.set_ylim(cb_lo * _MM_TO_FT, cb_hi * _MM_TO_FT)
@@ -3137,12 +3126,12 @@ def create_graphical_abstract(
         f'(a) Mean Annual Predicted Withdrawal ({start_year}\u2013{end_year})',
         fontweight='bold', fontsize=13,
     )
+
     # ---- Panel B: Time series (top-right) ----
     if has_ts:
         years = sorted(yearly_predictions.keys())
         vol_af = np.array([yearly_predictions[y]['Volume_AF'] for y in years])
 
-        # Compute ±1σ band: prefer UQ-derived σ, fall back to inter-basin std
         vol_std = np.zeros(len(years))
         std_label = None
         if sigma_yearly:
@@ -3150,7 +3139,7 @@ def create_graphical_abstract(
                 if y in sigma_yearly:
                     val = sigma_yearly[y].get('Volume_AF', 0)
                     vol_std[i] = val if np.isfinite(val) else 0
-            std_label = '±1σ (UQ)'
+            std_label = '\u00b11\u03c3 (UQ)'
         elif basin_yearly:
             for i, y in enumerate(years):
                 if y in basin_yearly:
@@ -3158,12 +3147,11 @@ def create_graphical_abstract(
                                   if np.isfinite(v.get('Volume_AF', np.nan))]
                     if len(basin_vols) > 1:
                         vol_std[i] = np.std(basin_vols)
-            std_label = '±1σ (inter-basin)'
+            std_label = '\u00b11\u03c3 (inter-basin)'
 
         for era, (s, e) in ERA_PERIODS.items():
             ax_ts.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
 
-        # ±1σ band — lower edge clipped at 0 (volumes are non-negative)
         if vol_std.any():
             ax_ts.fill_between(
                 years,
@@ -3183,7 +3171,7 @@ def create_graphical_abstract(
 
         handles = [
             mpatches.Patch(color=ERA_COLORS[e], alpha=0.4,
-                           label=f'{e} ({ERA_PERIODS[e][0]}–{ERA_PERIODS[e][1]})')
+                           label=f'{e} ({ERA_PERIODS[e][0]}\u2013{ERA_PERIODS[e][1]})')
             for e in ERA_PERIODS
         ]
         ax_ts.legend(handles=handles, loc='upper left', fontsize=9, framealpha=0.7)
@@ -3227,7 +3215,6 @@ def create_graphical_abstract(
         ax_contrib.set_ylim(0, 1)
         ax_contrib.axis('off')
 
-        # Light background panel matching the era-shading aesthetic
         bg = mpatches.FancyBboxPatch(
             (0.005, 0.05), 0.99, 0.90,
             boxstyle='round,pad=0.01,rounding_size=0.015',
@@ -3243,43 +3230,29 @@ def create_graphical_abstract(
             fontsize=12, fontweight='bold', va='top',
         )
 
-        # Single-column, single-line bullets.  Each bullet stays under
-        # ~150 characters so it fits on one line at the panel width
-        # without wrapping.  Lead phrase is set off from the body by
-        # an em-dash separator instead of bold formatting, which
-        # avoids matplotlib's fragile mathtext escaping for the unicode
-        # characters (×, σ, –) used in the lead phrases.
         bullets = [
-            '2 km × 204-yr coverage — first statewide annual withdrawals, '
-            'irrigation CU, and SW capture index, 1896–2099, in one '
+            '2 km \u00d7 204-yr coverage \u2014 first statewide annual withdrawals, '
+            'irrigation CU, and SW capture index, 1896\u20132099, in one '
             'self-consistent framework.',
 
             'First Arizona-wide irrigation CU dataset at 2 km annual '
-            'resolution — no public alternative exists at this combination '
+            'resolution \u2014 no public alternative exists at this combination '
             'of resolution and time horizon.',
 
-            'Out-of-distribution validation — trained only in the 10 '
+            'Out-of-distribution validation \u2014 trained only in the 10 '
             'metered ADWR AMA/INAs, predicts statewide; matches ADWR and '
             'USGS within ~1 pp / 0.1 MAF with no calibration to either '
             'agency.',
 
-            'Novel SW capture index — apportions GW pumping into '
+            'Novel SW capture index \u2014 apportions GW pumping into '
             'stream-depletion vs. storage-mining shares at 2 km annual, '
-            'work that normally requires a per-basin MODFLOW–SFR model.',
+            'work that normally requires a per-basin MODFLOW\u2013SFR model.',
 
-            'Hybrid 5-component σ_total UQ with physics-based CU error '
-            'propagation, producing 6-band augmented rasters (pred, σ, CV, '
+            'Hybrid 5-component \u03c3_total UQ with physics-based CU error '
+            'propagation, producing 6-band augmented rasters (pred, \u03c3, CV, '
             'SNR, lower/upper CI) for every product.',
         ]
 
-        # Render bullets evenly spaced down the panel.  The panel is
-        # ~2.0 inches tall (0.45 height ratio out of 2.65 total × 10.5
-        # inches).  The header sits at y = 0.92; the first bullet
-        # starts at y = 0.74 (previously 0.78) to open a visible
-        # breathing gap between the "Key Contributions" header and
-        # the first bullet.  Bullets fill y in [0.05, 0.74], which
-        # still gives each of the five bullets ~0.14 panel-height
-        # units of vertical space.
         bullet_top = 0.74
         bullet_bot = 0.05
         line_h = (bullet_top - bullet_bot) / max(len(bullets), 1)
@@ -3927,10 +3900,7 @@ _SIGMA_ATTR_SHARE_LABELS = (
 )
 
 # Headline basins for the per-year attribution timeseries grid
-_SIGMA_ATTR_HEADLINE_BASINS = (
-    'PHOENIX AMA', 'TUCSON AMA', 'YUMA', 'PARKER',
-    'LOWER GILA', 'SAFFORD', 'WILLCOX AMA', 'BUTLER VALLEY',
-)
+_SIGMA_ATTR_HEADLINE_BASINS: tuple[str, ...] = ()  # populated at first use
 
 # Withdrawal → CU pool mapping for σ_CU propagation
 _SIGMA_CU_POOL_MAP = {
@@ -4230,10 +4200,16 @@ def _draw_sigma_attribution_legend(
                        linewidth=0.6, label=_SIGMA_ATTR_SHARE_LABELS[i])
         for i in range(5)
     ]
+    na_patch = mpatches.Patch(
+        facecolor='#E8E8E8', edgecolor='#999999',
+        linewidth=0.6, hatch='///', label='N/A',
+    )
+    na_patch.set_edgecolor('#AAAAAA')
+    handles.append(na_patch)
     leg = fig.legend(
         handles=handles,
         loc='lower center',
-        ncol=5,
+        ncol=6,
         bbox_to_anchor=(0.5, 0.01),
         frameon=False,
         fontsize=9,
@@ -4281,7 +4257,7 @@ def _draw_sigma_attribution_disclosure_box(
         f'({n_model_dom / n_total * 100:.0f}%); median Model share '
         f'{median_model:.0f}%.\n'
         f'Color axis classifies Management vs Climate within the '
-        f'remaining variance; basins with a bold black edge are '
+        f'remaining variance; basins with a red edge are '
         f'Model-dominated overall.'
     )
     # Make room for the two-line disclosure between the map panels and
@@ -4315,9 +4291,23 @@ def _draw_sigma_attribution_disclosure_box(
 
 
 def _draw_sigma_attribution_ternary_legend(fig) -> None:
-    """Render the small RGB-mixed ternary triangle inset at bottom-left."""
+    """Render the small RGB-mixed ternary triangle inset at bottom-left.
+
+    The inset is placed in the whitespace below the map panels, using
+    the figure's ``subplotpars.bottom`` to avoid overlapping the
+    bottom-left panel (c) on 2×2 detailed layouts.
+    """
     from matplotlib.patches import Polygon
-    ax_inset = fig.add_axes([0.04, 0.04, 0.14, 0.19])
+    # Place the inset inside the bottom margin that _setup_attr_figure
+    # reserved. On a 1×2 headline figure the bottom margin is ~0.14
+    # (1 inch / 7 inches); on a 2×2 detailed figure it is ~0.083
+    # (1 inch / 12 inches). A small inset (~0.12 wide × 0.08 tall in
+    # figure fraction) that sits at y = 0.005 stays fully below the
+    # bottom row of panels in both layouts.
+    bottom = fig.subplotpars.bottom
+    inset_height = min(0.16, bottom * 0.85)
+    inset_width = inset_height * (fig.get_figheight() / fig.get_figwidth())
+    ax_inset = fig.add_axes([0.02, 0.005, inset_width, inset_height])
     ax_inset.set_aspect('equal')
     ax_inset.axis('off')
     # Paint the triangle interior by tiling a grid of small polygons
@@ -4392,8 +4382,22 @@ def _draw_sigma_attribution_ternary_legend(fig) -> None:
         1.05, -0.02, 'Model',
         ha='left', va='top', fontsize=7, fontweight='bold', color='#1a4a22',
     )
+    # N/A swatch below the triangle — hatched to match the map polygons
+    na_rect = mpatches.FancyBboxPatch(
+        (0.25, -0.28), 0.5, 0.12,
+        boxstyle='round,pad=0.02',
+        facecolor='#E8E8E8', edgecolor='#999999',
+        linewidth=0.6, hatch='///',
+    )
+    na_rect.set_edgecolor('#AAAAAA')
+    ax_inset.add_patch(na_rect)
+    ax_inset.text(
+        0.5, -0.22, 'N/A',
+        ha='center', va='center', fontsize=6, fontweight='bold',
+        color='#555555',
+    )
     ax_inset.set_xlim(-0.35, 1.35)
-    ax_inset.set_ylim(-0.15, np.sqrt(3) / 2 + 0.22)
+    ax_inset.set_ylim(-0.35, np.sqrt(3) / 2 + 0.22)
 
 
 def _ternary_mix(mgmt: float, model: float, clim: float) -> tuple[float, float, float]:
@@ -4583,9 +4587,17 @@ def _draw_attribution_basin_panel(
     ax.set_facecolor('#EEEEEE')
     merged = _merge_attr_df_to_gdf(basins_gdf, attr_df, basin_col=basin_col)
     palette = _palette_for_era(era)
-    # Default edge styling (thin gray)
+    # Default edge styling (thin gray solid)
     edge_colors = np.full(len(merged), '#666666', dtype=object)
     linewidths = np.full(len(merged), 0.5, dtype=float)
+
+    # Identify N/A basins (NaN shares → no attribution data).
+    na_mask = ~(
+        np.isfinite(merged['Mgmt_Share'].to_numpy(dtype=float))
+        & np.isfinite(merged['Clim_Share'].to_numpy(dtype=float))
+        & np.isfinite(merged['Model_Share'].to_numpy(dtype=float))
+    )
+    nodata_rgb = (0xD5 / 255.0, 0xD5 / 255.0, 0xD5 / 255.0)
 
     face_colors: list
     if ternary:
@@ -4593,27 +4605,26 @@ def _draw_attribution_basin_panel(
     else:
         share = _compute_binary_share(merged, era)
         bins = _classify_share_bins(share)
+        # Use hex string (not RGB tuple) so geopandas gets a
+        # homogeneous list of strings — mixing tuples with strings
+        # causes numpy to choke on inhomogeneous shapes.
         face_colors = [
             palette[b] if b >= 0 else '#D5D5D5' for b in bins
         ]
         if era == 'Projection':
-            # Bold black edge for basins where σ_Model dominates.
             model_share = merged['Model_Share'].to_numpy(dtype=float)
             mgmt_share = merged['Mgmt_Share'].to_numpy(dtype=float)
             clim_share = merged['Clim_Share'].to_numpy(dtype=float)
-            finite = (
-                np.isfinite(model_share)
-                & np.isfinite(mgmt_share)
-                & np.isfinite(clim_share)
-            )
+            finite = ~na_mask
             dominant = np.zeros(len(merged), dtype=bool)
             dominant[finite] = (
                 (model_share[finite] > mgmt_share[finite])
                 & (model_share[finite] > clim_share[finite])
             )
-            edge_colors[dominant] = 'black'
-            linewidths[dominant] = 1.5
+            edge_colors[dominant] = '#d62728'
+            linewidths[dominant] = 1.8
 
+    # Plot all basins with solid edges
     merged.plot(
         ax=ax,
         color=face_colors,
@@ -4621,10 +4632,29 @@ def _draw_attribution_basin_panel(
         linewidth=list(linewidths),
     )
 
-    # Label every basin — AMA/INAs with a bold emphasis, all other
-    # basins in italic at a smaller font. Stewardship users want to be
-    # able to identify *any* basin whose attribution is anomalous, not
-    # only the 10 AMA/INA regulatory boundaries.
+    # Overlay N/A basins with a diagonal-hatch pattern on a light
+    # gray fill, matching the NV reference figure. The hatch is
+    # rendered by plotting the N/A subset a second time with
+    # ``hatch='///'`` — this draws diagonal lines across the polygon
+    # interior that survive any subsequent boundary overlay from
+    # ``_overlay_boundaries``. The earlier solid fill from the main
+    # ``.plot()`` call is covered by this opaque gray + hatch layer.
+    na_gdf = merged[na_mask]
+    if not na_gdf.empty:
+        na_gdf.plot(
+            ax=ax,
+            color='#E8E8E8',
+            edgecolor='#999999',
+            linewidth=0.6,
+            hatch='///',
+        )
+        # Set the hatch color to a medium gray (matplotlib uses
+        # rcParams for hatch color, but we can override per-patch).
+        for patch in ax.patches:
+            if hasattr(patch, 'get_hatch') and patch.get_hatch():
+                patch.set_edgecolor('#AAAAAA')
+
+    # Label every basin
     ama_ina = get_ama_ina_basin_names()
     _overlay_boundaries(
         ax, basins_gdf, ama_ina, basin_col,
@@ -4954,17 +4984,21 @@ def create_sigma_attribution_timeseries(
     unc_dir: str,
     output_dir: str,
     *,
-    basins: tuple[str, ...] = _SIGMA_ATTR_HEADLINE_BASINS,
+    basins: tuple[str, ...] | None = None,
     pools: tuple[str, ...] = ('Total_GW', 'Total_SW'),
     era_years: tuple[int, int] = (1896, 2099),
 ) -> None:
     """Per-year stacked-area plot of the three-way variance decomposition
-    for a short-list of headline basins × pools.
+    for the AMA/INA basins × pools.
 
-    Renders a 4×len(pools) grid (default 4×2 = 8 basins × 2 pools) where
-    each panel stacks Management (red), Model (teal), and Climate (blue)
-    share in [0, 1] across all years in ``era_years``. Era shading
-    reproduces the Hindcast/Historical/Projection boundaries.
+    Renders an N×len(pools) grid (default 10×2 = 10 AMA/INA basins × 2
+    pools) where each panel stacks Management (red), Model (teal), and
+    Climate (blue) share in [0, 1] across all years in ``era_years``.
+    Era shading reproduces the Hindcast/Historical/Projection boundaries.
+
+    Args:
+        basins: Basins to include. Defaults to the 10 AMA/INA basins
+            from ``get_ama_ina_basin_names()``.
 
     Also writes a long-format companion CSV
     ``Sigma_Attribution_Timeseries.csv`` with one row per basin × pool ×
@@ -4972,105 +5006,124 @@ def create_sigma_attribution_timeseries(
     """
     apply_journal_style()
     makedirs(output_dir)
+    if basins is None:
+        basins = tuple(get_ama_ina_basin_names())
 
-    n_basins = len(basins)
-    n_pools = len(pools)
-    fig, axes = plt.subplots(
-        n_basins, n_pools,
-        figsize=(5.5 * n_pools, 2.1 * n_basins),
-        sharex=True,
-        constrained_layout=True,
-    )
-    if n_basins == 1 and n_pools == 1:
-        axes = np.array([[axes]])
-    elif n_basins == 1:
-        axes = axes.reshape(1, -1)
-    elif n_pools == 1:
-        axes = axes.reshape(-1, 1)
-
-    fig.suptitle(
-        'σ Attribution — Annual Variance Shares per Basin',
-        fontsize=14, fontweight='bold',
-    )
-
-    csv_rows = []
+    csv_rows: list[dict] = []
     band_colors = {
         'Management': '#d04e1f',
         'Model': '#2a9d8f',
         'Climate': '#1f4fa5',
     }
 
-    for ib, basin in enumerate(basins):
-        for ip, pool in enumerate(pools):
-            ax = axes[ib, ip]
+    for pool in pools:
+        # Pre-load data for every basin so we can drop basins with no
+        # data (important for SW pools where many AMA/INAs have zero
+        # surface-water withdrawal and therefore no attribution).
+        basin_data: list[tuple[str, pd.DataFrame]] = []
+        for basin in basins:
+            df = _load_year_resolved_attribution(unc_dir, pool, basin)
+            if df is not None and not df.empty:
+                basin_data.append((basin, df))
+        if not basin_data:
+            logger.warning(
+                '  [timeseries] pool=%s has no basin data — skipping', pool,
+            )
+            continue
+        n_active = len(basin_data)
+
+        # 2-column layout: rows = ceil(n_active / 2)
+        n_cols = 2
+        n_rows = int(np.ceil(n_active / n_cols))
+        fig, axes = plt.subplots(
+            n_rows, n_cols,
+            figsize=(6.5 * n_cols, 2.3 * n_rows),
+            sharex=True,
+            constrained_layout=True,
+        )
+        axes_flat = list(np.asarray(axes).ravel())
+        # Hide trailing axes if n_active is odd
+        for k in range(n_active, len(axes_flat)):
+            axes_flat[k].axis('off')
+
+        pretty_pool = pool.replace('_', ' ')
+        fig.suptitle(
+            f'σ Attribution — {pretty_pool}',
+            fontsize=14, fontweight='bold',
+        )
+
+        for ib, (basin, df) in enumerate(basin_data):
+            ax = axes_flat[ib]
             ax.set_xlim(era_years[0], era_years[1])
             ax.set_ylim(0.0, 1.0)
-            df = _load_year_resolved_attribution(unc_dir, pool, basin)
-            if df is None or df.empty:
-                ax.set_facecolor('#F5F5F5')
-                ax.text(
-                    0.5, 0.5, f'{basin}\n(no data)',
-                    transform=ax.transAxes, ha='center', va='center',
-                    fontsize=8, color='#888888',
-                )
-            else:
-                years = df.index.to_numpy()
-                mgmt = df['Mgmt_Share'].to_numpy()
-                model = df['Model_Share'].to_numpy()
-                clim = df['Clim_Share'].to_numpy()
-                ax.stackplot(
-                    years, mgmt, model, clim,
-                    colors=(
-                        band_colors['Management'],
-                        band_colors['Model'],
-                        band_colors['Climate'],
-                    ),
-                    edgecolor='none',
-                )
-                for _, row in df.reset_index().iterrows():
-                    csv_rows.append({
-                        'Basin': basin,
-                        'Pool': pool,
-                        'Year': int(row['Year']),
-                        'Mgmt_Share': row['Mgmt_Share'],
-                        'Clim_Share': row['Clim_Share'],
-                        'Model_Share': row['Model_Share'],
-                    })
+            years = df.index.to_numpy()
+            mgmt = df['Mgmt_Share'].to_numpy()
+            model = df['Model_Share'].to_numpy()
+            clim = df['Clim_Share'].to_numpy()
+            ax.stackplot(
+                years, mgmt, model, clim,
+                colors=(
+                    band_colors['Management'],
+                    band_colors['Model'],
+                    band_colors['Climate'],
+                ),
+                edgecolor='none',
+            )
+            for _, row in df.reset_index().iterrows():
+                csv_rows.append({
+                    'Basin': basin,
+                    'Pool': pool,
+                    'Year': int(row['Year']),
+                    'Mgmt_Share': row['Mgmt_Share'],
+                    'Clim_Share': row['Clim_Share'],
+                    'Model_Share': row['Model_Share'],
+                })
             for era, (s, e) in ERA_PERIODS.items():
                 ax.axvspan(s, e, color=ERA_COLORS[era], alpha=0.05, zorder=0)
             ax.set_title(
-                f'{basin.title()} — {pool.replace("_", " ")}',
+                _format_basin_label(basin),
                 fontsize=9, fontweight='bold',
             )
-            if ip == 0:
+            if ib % n_cols == 0:
                 ax.set_ylabel('Variance share', fontsize=9)
-            if ib == n_basins - 1:
+            if ib >= n_active - n_cols:
                 ax.set_xlabel('Year', fontsize=9)
             ax.tick_params(labelsize=8)
             ax.grid(alpha=0.2, linestyle='--')
 
-    handles = [
-        mpatches.Patch(color=band_colors['Management'], label='Management'),
-        mpatches.Patch(color=band_colors['Model'], label='Model'),
-        mpatches.Patch(color=band_colors['Climate'], label='Climate'),
-    ]
-    fig.legend(
-        handles=handles,
-        loc='lower center', ncol=3,
-        bbox_to_anchor=(0.5, -0.015),
-        frameon=False, fontsize=10,
-    )
+        handles = [
+            mpatches.Patch(color=band_colors['Management'], label='Management'),
+            mpatches.Patch(color=band_colors['Model'], label='Model'),
+            mpatches.Patch(color=band_colors['Climate'], label='Climate'),
+        ]
+        fig.legend(
+            handles=handles,
+            loc='lower center', ncol=3,
+            bbox_to_anchor=(0.5, -0.015),
+            frameon=False, fontsize=10,
+        )
 
-    out_path = os.path.join(output_dir, 'Sigma_Attribution_Timeseries.png')
-    fig.savefig(out_path, dpi=600, bbox_inches='tight')
-    plt.close(fig)
-    logger.info('  σ attribution timeseries saved to %s', out_path)
+        pool_slug = pool.replace(' ', '_')
+        out_path = os.path.join(
+            output_dir, f'Sigma_Attribution_Timeseries_{pool_slug}.png',
+        )
+        fig.savefig(out_path, dpi=600, bbox_inches='tight')
+        plt.close(fig)
+        logger.info('  σ attribution timeseries saved to %s', out_path)
 
     if csv_rows:
         pd.DataFrame(csv_rows).to_csv(
             os.path.join(output_dir, 'Sigma_Attribution_Timeseries.csv'),
             index=False,
         )
+
+
+def _format_basin_label(name: str) -> str:
+    """Title-case a basin name while preserving AMA/INA as uppercase."""
+    parts = name.title().split()
+    return ' '.join(
+        p.upper() if p.upper() in ('AMA', 'INA') else p for p in parts
+    )
 
 
 def create_sigma_attribution_bubble(
@@ -5080,154 +5133,155 @@ def create_sigma_attribution_bubble(
     pools: tuple[str, ...] = ('Total_GW', 'Total_SW'),
     era: str = 'Projection',
 ) -> None:
-    """Projection-era log-log bubble scatter of (σ_clim, σ_mgmt).
+    """Horizontal stacked-bar chart of the three-way variance
+    decomposition per basin — one separate figure per pool.
 
-    One figure with 1×len(pools) panels. Each bubble is a basin;
-    bubble size is proportional to ``√(σ_mgmt² + σ_clim²)`` and bubble
-    color encodes the same 5-bin discrete classification as the binary
-    attribution map. A ``y = x`` diagonal marks the 50/50 boundary.
+    Each basin gets one horizontal bar whose total length is
+    proportional to ``σ_total_quadrature`` (×10⁶ m³) and whose three
+    stacked segments are colored by the Management / Model / Climate
+    variance shares. Basins are sorted top-to-bottom by descending
+    σ_total so the largest-uncertainty basins appear at the top.
 
-    Basins whose σ_Model is the single largest contributor are flagged
-    with a bold black bubble edge (mirroring the map-level flag). Only
-    the top 20% of basins by total σ are labeled to avoid clutter.
-
-    Hindcast/Historical eras are explicitly excluded because σ_clim is
-    structurally zero in those eras, which would place every bubble on
-    the y-axis (a degenerate visualization).
+    Basins whose σ_Model is the single largest variance contributor
+    are marked with a red bar-edge rectangle (mirroring the red
+    polygon edge on the binary attribution maps).
     """
-    if era != 'Projection':
-        logger.info(
-            '  σ attribution bubble chart is Projection-only; skipping era=%s',
-            era,
-        )
-        return
     apply_journal_style()
     makedirs(output_dir)
 
-    n_panels = len(pools)
-    fig, axes = plt.subplots(
-        1, n_panels, figsize=(6 * n_panels, 6), constrained_layout=True,
-    )
-    if n_panels == 1:
-        axes = [axes]
-    else:
-        axes = list(axes)
-    fig.suptitle(
-        f'σ Attribution — (σ_Clim, σ_Mgmt) per Basin, {era}',
-        fontsize=14, fontweight='bold',
-    )
+    band_colors = {
+        'Management': '#d04e1f',
+        'Model': '#2a9d8f',
+        'Climate': '#1f4fa5',
+    }
 
-    palette = _palette_for_era(era)
-    for idx, pool in enumerate(pools):
-        ax = axes[idx]
+    for pool in pools:
         df = _load_sigma_attribution_data(unc_dir, pool, era)
         if df is None or df.empty:
-            ax.set_facecolor('#F5F5F5')
-            ax.text(
-                0.5, 0.5, f'{pool}\n(no data)',
-                transform=ax.transAxes, ha='center', va='center', fontsize=11,
+            logger.warning(
+                '  [stacked bar] no data for pool=%s era=%s — skipping',
+                pool, era,
             )
-            ax.axis('off')
             continue
-        sigma_mgmt = df['Sigma_Mgmt_m3'].to_numpy() / 1e6
-        sigma_clim = df['Sigma_Clim_m3'].to_numpy() / 1e6
-        sigma_total = np.sqrt(sigma_mgmt ** 2 + sigma_clim ** 2)
-        share = _compute_binary_share(df, era)
-        bins = _classify_share_bins(share)
-        colors = [palette[b] if b >= 0 else '#D5D5D5' for b in bins]
-        # Bubble size: scale total σ into a visually reasonable marker range
-        finite_tot = sigma_total[np.isfinite(sigma_total) & (sigma_total > 0)]
-        max_tot = finite_tot.max() if finite_tot.size else 1.0
-        with np.errstate(invalid='ignore'):
-            sizes = 40.0 + 500.0 * (sigma_total / max_tot)
-        sizes = np.where(np.isfinite(sizes), sizes, 40.0)
 
-        # Model-dominant edge flag
-        model_share = df['Model_Share'].to_numpy(dtype=float)
-        mgmt_share = df['Mgmt_Share'].to_numpy(dtype=float)
-        clim_share = df['Clim_Share'].to_numpy(dtype=float)
+        valid = df.dropna(subset=['Mgmt_Share', 'Clim_Share', 'Model_Share'])
+        if valid.empty:
+            continue
+        valid = valid.sort_values('Sigma_TotalQ_m3', ascending=True)
+
+        n_basins = len(valid)
+        basin_labels = [_format_basin_label(r) for r in valid['Region']]
+        sigma_total_m6 = valid['Sigma_TotalQ_m3'].to_numpy() / 1e6
+        mgmt_share = valid['Mgmt_Share'].to_numpy()
+        model_share = valid['Model_Share'].to_numpy()
+        clim_share = valid['Clim_Share'].to_numpy()
         model_dom = (
-            np.isfinite(model_share)
-            & (model_share > mgmt_share)
-            & (model_share > clim_share)
+            (model_share > mgmt_share) & (model_share > clim_share)
         )
-        edge_colors = np.where(model_dom, 'black', '#333333')
-        linewidths = np.where(model_dom, 1.5, 0.5)
 
-        # Plot with log-log axes; clip any zero/NaN values above the
-        # minimum plottable value on each axis.
-        x_safe = np.where(
-            np.isfinite(sigma_clim) & (sigma_clim > 0), sigma_clim, np.nan,
-        )
-        y_safe = np.where(
-            np.isfinite(sigma_mgmt) & (sigma_mgmt > 0), sigma_mgmt, np.nan,
-        )
-        ax.scatter(
-            x_safe, y_safe, s=sizes, c=colors,
-            edgecolors=list(edge_colors), linewidths=list(linewidths),
-            alpha=0.85,
-        )
-        ax.set_xscale('log')
-        ax.set_yscale('log')
+        pretty_pool = pool.replace('_', ' ')
+        ama_ina_set = set(get_ama_ina_basin_names())
+        handles = [
+            mpatches.Patch(
+                color=band_colors['Management'], label='Management',
+            ),
+            mpatches.Patch(
+                color=band_colors['Model'], label='Model',
+            ),
+            mpatches.Patch(
+                color=band_colors['Climate'], label='Climate',
+            ),
+            mpatches.Patch(
+                fill=False, edgecolor='#d62728', linewidth=1.5,
+                label='Model-dominated',
+            ),
+        ]
 
-        # 1:1 diagonal
-        fx = x_safe[np.isfinite(x_safe)]
-        fy = y_safe[np.isfinite(y_safe)]
-        if fx.size and fy.size:
-            lo = min(fx.min(), fy.min()) * 0.8
-            hi = max(fx.max(), fy.max()) * 1.25
-            ax.plot(
-                [lo, hi], [lo, hi],
-                color='#555555', linestyle='--', linewidth=0.9,
-                label='σ_Mgmt = σ_Clim',
+        # Split into two side-by-side panels when there are many
+        # basins (> 30) so each panel is tall enough to read without
+        # being absurdly long as a single column. The first panel
+        # takes the top half (higher σ_total), the second panel takes
+        # the bottom half. For ≤ 30 basins a single panel is fine.
+        split_threshold = 30
+        if n_basins > split_threshold:
+            mid = n_basins // 2
+            chunks = [
+                (basin_labels[mid:], sigma_total_m6[mid:],
+                 mgmt_share[mid:], model_share[mid:], clim_share[mid:],
+                 model_dom[mid:]),
+                (basin_labels[:mid], sigma_total_m6[:mid],
+                 mgmt_share[:mid], model_share[:mid], clim_share[:mid],
+                 model_dom[:mid]),
+            ]
+            n_cols = 2
+        else:
+            chunks = [
+                (basin_labels, sigma_total_m6, mgmt_share,
+                 model_share, clim_share, model_dom),
+            ]
+            n_cols = 1
+
+        n_per_panel = max(len(c[0]) for c in chunks)
+        fig_height = max(6, 0.35 * n_per_panel)
+        fig, axes = plt.subplots(
+            1, n_cols, figsize=(7 * n_cols, fig_height),
+            constrained_layout=True,
+        )
+        if n_cols == 1:
+            axes = [axes]
+        else:
+            axes = list(axes)
+        fig.suptitle(
+            f'σ Attribution — {pretty_pool}, {era}',
+            fontsize=14, fontweight='bold',
+        )
+
+        x_max = float(sigma_total_m6.max()) * 1.05
+
+        for col_idx, (lbl, stm6, ms, mds, cs, mdom) in enumerate(chunks):
+            ax = axes[col_idx]
+            n_chunk = len(lbl)
+            y_pos = np.arange(n_chunk)
+            bar_height = 0.7
+            mw = stm6 * ms
+            mdw = stm6 * mds
+            cw = stm6 * cs
+
+            ax.barh(y_pos, mw, height=bar_height,
+                    color=band_colors['Management'])
+            ax.barh(y_pos, mdw, height=bar_height, left=mw,
+                    color=band_colors['Model'])
+            ax.barh(y_pos, cw, height=bar_height, left=mw + mdw,
+                    color=band_colors['Climate'])
+            for i in range(n_chunk):
+                if mdom[i]:
+                    ax.barh(y_pos[i], stm6[i], height=bar_height,
+                            fill=False, edgecolor='#d62728', linewidth=1.5)
+
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(list(lbl), fontsize=7)
+            ax.set_xlabel(
+                r'σ$_{\mathrm{total}}$ ($\times10^{6}$ m$^3$)',
+                fontsize=10, fontweight='bold',
             )
-            ax.set_xlim(lo, hi)
-            ax.set_ylim(lo, hi)
+            ax.set_xlim(0, x_max)
+            ax.grid(axis='x', alpha=0.25, linestyle='--')
+            for tick_label in ax.get_yticklabels():
+                if tick_label.get_text().upper() in ama_ina_set:
+                    tick_label.set_fontweight('bold')
+            if col_idx == n_cols - 1:
+                ax.legend(
+                    handles=handles,
+                    loc='lower right', fontsize=8, framealpha=0.9,
+                )
 
-        # Top-20% label annotation
-        if sigma_total.size:
-            threshold = np.nanpercentile(sigma_total, 80)
-            for i, region in enumerate(df['Region'].to_numpy()):
-                if (
-                    np.isfinite(sigma_total[i])
-                    and sigma_total[i] >= threshold
-                    and np.isfinite(x_safe[i])
-                    and np.isfinite(y_safe[i])
-                ):
-                    ax.annotate(
-                        str(region).title(),
-                        (x_safe[i], y_safe[i]),
-                        textcoords='offset points',
-                        xytext=(4, 4),
-                        fontsize=6.5,
-                        color='#222222',
-                    )
-
-        ax.set_xlabel(r'σ$_{\mathrm{Clim}}$ ($\times10^{6}$ m$^3$)', fontsize=10)
-        if idx == 0:
-            ax.set_ylabel(
-                r'σ$_{\mathrm{Mgmt}}$ ($\times10^{6}$ m$^3$)', fontsize=10,
-            )
-        ax.set_title(pool.replace('_', ' '), fontsize=11, fontweight='bold')
-        ax.grid(alpha=0.25, which='both', linestyle='--')
-        ax.legend(loc='upper left', fontsize=8, frameon=False)
-
-    fig.text(
-        0.5, -0.02,
-        r'Bubble size $\propto$ $\sqrt{\sigma_{\mathrm{Mgmt}}^{2} + '
-        r'\sigma_{\mathrm{Clim}}^{2}}$. '
-        'Basins with a bold black edge are Model-dominated overall '
-        r'($\sigma_{\mathrm{Model}}$ > both $\sigma_{\mathrm{Mgmt}}$ '
-        r'and $\sigma_{\mathrm{Clim}}$).',
-        ha='center', fontsize=8, color='#555555',
-    )
-
-    out_path = os.path.join(
-        output_dir, f'Sigma_Attribution_Bubble_{era}.png',
-    )
-    fig.savefig(out_path, dpi=600, bbox_inches='tight')
-    plt.close(fig)
-    logger.info('  σ attribution bubble saved to %s', out_path)
+        pool_slug = pool.replace(' ', '_')
+        out_path = os.path.join(
+            output_dir, f'Sigma_Attribution_Stacked_Bar_{pool_slug}_{era}.png',
+        )
+        fig.savefig(out_path, dpi=600, bbox_inches='tight')
+        plt.close(fig)
+        logger.info('  σ attribution stacked bar saved to %s', out_path)
 
 
 def create_actual_vs_predicted_maps(
@@ -5400,28 +5454,50 @@ def create_actual_vs_predicted_maps(
     az_gray_actual = np.where(az_mask_actual, 0.5, np.nan)
     az_gray_pred = np.where(az_mask_pred, 0.5, np.nan)
 
-    # ---- Helper: create one 1×3 figure ----
+    # ---- Helper: create one 1×3 figure with two shared colorbars ----
+    # Layout via GridSpec:
+    #   Row 0: [Actual]  [Predicted]  [Difference]   (map panels)
+    #   Row 1: [──── shared cbar ────] [diff cbar ]   (colorbars)
+    # The shared colorbar spans columns 0–1, the diff colorbar
+    # sits under column 2. Both are horizontal and carry dual
+    # units (primary label below, secondary label above via
+    # secondary_xaxis).
     def _make_figure(data_sets, suptitle, primary_label, secondary_label,
                      secondary_factor, out_file, v_lo, v_hi, d_lo, d_hi):
         import matplotlib.patches as mpatches
-        fig, axes = plt.subplots(
-            1, 3, figsize=(24, 7.5), constrained_layout=True,
+        from matplotlib.gridspec import GridSpec
+
+        fig = plt.figure(figsize=(22, 9))
+        gs = GridSpec(
+            2, 3, figure=fig,
+            height_ratios=[1, 0.04],
+            hspace=0.18, wspace=0.12,
         )
-        # Increase horizontal space between subplots so each panel's
-        # twin-axis colorbar does not crowd the next map.
-        try:
-            fig.get_layout_engine().set(w_pad=0.18, wspace=0.22)
-        except AttributeError:
-            pass
-        fig.suptitle(suptitle, fontsize=15, fontweight='bold')
+        fig.suptitle(suptitle, fontsize=15, fontweight='bold', y=0.98)
 
         unmetered_handle = mpatches.Patch(
             facecolor='#D1D1D1', edgecolor='#555555', linewidth=0.4,
             label='Unmetered',
         )
+        avp_fontsize = 10
 
-        for ax, (panel_title, data, ext, cm, lo, hi, az_gray) in zip(
-                axes, data_sets):
+        # Detect volume labels so tick values can be scaled by ×10⁶,
+        # matching the convention in create_era_raster_maps.
+        is_volume = 'm$^3$' in primary_label or 'm3' in primary_label.lower()
+        if is_volume:
+            import matplotlib.ticker as mticker
+            vol_formatter = mticker.FuncFormatter(
+                lambda x, _: f'{x / 1e6:g}',
+            )
+            vol_label = r'Volume ($\times$10$^{6}$ m$^3$)'
+            dvol_label = r'$\Delta$ Volume ($\times$10$^{6}$ m$^3$)'
+
+        # ---- Row 0: three map panels ----
+        im_shared = None   # will hold the ScalarMappable for panels a/b
+        im_diff = None     # will hold the ScalarMappable for panel c
+        for idx, (panel_title, data, ext, cm, lo, hi, az_gray) in enumerate(
+                data_sets):
+            ax = fig.add_subplot(gs[0, idx])
             ax.set_facecolor('white')
             ax.imshow(
                 az_gray, extent=ext, origin='upper',
@@ -5439,42 +5515,78 @@ def create_actual_vs_predicted_maps(
 
             is_diff = 'Difference' in panel_title
             is_actual = 'Actual' in panel_title
-            p_label = f'\u0394 {primary_label}' if is_diff else primary_label
-            avp_fontsize = 10
-            # Larger pad pushes the colorbar away from the next map.
-            cb = fig.colorbar(im, ax=ax, shrink=0.6, pad=0.12,
-                              extend='both')
-            cb.set_label(p_label, fontsize=avp_fontsize, fontweight='bold')
-            cb.ax.tick_params(labelsize=avp_fontsize)
-            # Place the primary metric unit (mm for depth, m³ for volume)
-            # on the LEFT side of the colorbar so it sits between the
-            # colorbar and the map.  This matches the m³-on-left /
-            # AF-on-right convention used by _add_af_twinx elsewhere in
-            # the codebase.
-            cb.ax.yaxis.set_label_position('left')
-            cb.ax.yaxis.tick_left()
-            # Add secondary unit ticks on the RIGHT side of the colorbar
-            s_label = (f'\u0394 {secondary_label}' if is_diff
-                       else secondary_label)
-            cb_ax2 = cb.ax.twinx()
-            cb_lo, cb_hi = cb.ax.get_ylim()
-            cb_ax2.set_ylim(cb_lo * secondary_factor,
-                            cb_hi * secondary_factor)
-            cb_ax2.set_ylabel(s_label, fontsize=avp_fontsize,
-                              fontweight='bold')
-            cb_ax2.tick_params(labelsize=avp_fontsize)
-            cb_ax2.yaxis.set_label_position('right')
-            cb_ax2.yaxis.tick_right()
+            if is_diff:
+                im_diff = im
+            else:
+                im_shared = im
 
-            # Show 'Unmetered' legend only on panels that contain
-            # unmetered (gray) pixels — Actual and Difference.  Predicted
-            # covers all of AZ so it has none.
             if is_actual or is_diff:
                 ax.legend(
                     handles=[unmetered_handle],
                     loc='lower left', framealpha=0.9,
                     fontsize=avp_fontsize, frameon=True,
                 )
+
+        # ---- Row 1: two horizontal colorbars ----
+        # Shared colorbar spanning columns 0–1 (Actual + Predicted)
+        cbar_shared_ax = fig.add_subplot(gs[1, 0:2])
+        cb_shared = fig.colorbar(
+            im_shared, cax=cbar_shared_ax,
+            orientation='horizontal', extend='both',
+        )
+        if is_volume:
+            cb_shared.set_label(
+                vol_label, fontsize=avp_fontsize, fontweight='bold',
+            )
+            cb_shared.formatter = vol_formatter
+            cb_shared.update_ticks()
+        else:
+            cb_shared.set_label(
+                primary_label, fontsize=avp_fontsize, fontweight='bold',
+            )
+        cb_shared.ax.tick_params(labelsize=avp_fontsize)
+        secax_shared = cb_shared.ax.secondary_xaxis(
+            'top',
+            functions=(
+                lambda x: x * secondary_factor,
+                lambda x: x / secondary_factor,
+            ),
+        )
+        secax_shared.set_xlabel(
+            secondary_label, fontsize=avp_fontsize, fontweight='bold',
+        )
+        secax_shared.tick_params(labelsize=avp_fontsize)
+
+        # Difference colorbar under column 2
+        cbar_diff_ax = fig.add_subplot(gs[1, 2])
+        cb_diff = fig.colorbar(
+            im_diff, cax=cbar_diff_ax,
+            orientation='horizontal', extend='both',
+        )
+        if is_volume:
+            cb_diff.set_label(
+                dvol_label, fontsize=avp_fontsize, fontweight='bold',
+            )
+            cb_diff.formatter = vol_formatter
+            cb_diff.update_ticks()
+        else:
+            cb_diff.set_label(
+                f'\u0394 {primary_label}',
+                fontsize=avp_fontsize, fontweight='bold',
+            )
+        cb_diff.ax.tick_params(labelsize=avp_fontsize)
+        secax_diff = cb_diff.ax.secondary_xaxis(
+            'top',
+            functions=(
+                lambda x: x * secondary_factor,
+                lambda x: x / secondary_factor,
+            ),
+        )
+        secax_diff.set_xlabel(
+            f'\u0394 {secondary_label}',
+            fontsize=avp_fontsize, fontweight='bold',
+        )
+        secax_diff.tick_params(labelsize=avp_fontsize)
 
         out_path = os.path.join(output_dir, out_file)
         fig.savefig(out_path, dpi=600, bbox_inches='tight')
