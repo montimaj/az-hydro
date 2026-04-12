@@ -3587,7 +3587,7 @@ def _replot_with_uncertainty(
         return result
 
     def _read_basin_yearly(csv_path, col):
-        """Read Basin/Subbasin_Annual_GW.csv → (yearly, actual_yearly)."""
+        """Read Basin/Subbasin_Annual.csv → (yearly, actual_yearly)."""
         if not os.path.exists(csv_path):
             return None, None
         df = pd.read_csv(csv_path)
@@ -3711,7 +3711,7 @@ def _replot_with_uncertainty(
         os.path.join(unc_dir, 'Sigma_Total', 'Basin_Sigma_Total.csv'))
     if basin_sigma:
         basin_yearly, actual_basin = _read_basin_yearly(
-            os.path.join(prediction_dir, 'Basin_Time_Series', 'Basin_Annual_GW.csv'),
+            os.path.join(prediction_dir, 'Basin_Time_Series', 'Basin_Annual.csv'),
             'Basin')
         if basin_yearly:
             vizops.create_basin_time_series(
@@ -3726,7 +3726,7 @@ def _replot_with_uncertainty(
         os.path.join(unc_dir, 'Sigma_Total', 'Subbasin_Sigma_Total.csv'))
     if subbasin_sigma and subbasin_shp and os.path.exists(subbasin_shp):
         subbasin_yearly, actual_subbasin = _read_basin_yearly(
-            os.path.join(prediction_dir, 'Subbasin_Time_Series', 'Subbasin_Annual_GW.csv'),
+            os.path.join(prediction_dir, 'Subbasin_Time_Series', 'Subbasin_Annual.csv'),
             'Subbasin')
         if subbasin_yearly:
             vizops.create_subbasin_time_series(
@@ -3963,9 +3963,9 @@ def _replot_from_augmented_rasters(
         actual = _read_actual_from_csv(
             os.path.join(out_dir, 'Full_Period_Time_Series.csv'))
         actual_basin = _read_actual_region(
-            os.path.join(out_dir, 'Basin_Time_Series', 'Basin_Annual_GW.csv'), 'Basin')
+            os.path.join(out_dir, 'Basin_Time_Series', 'Basin_Annual.csv'), 'Basin')
         actual_subbasin = _read_actual_region(
-            os.path.join(out_dir, 'Subbasin_Time_Series', 'Subbasin_Annual_GW.csv'),
+            os.path.join(out_dir, 'Subbasin_Time_Series', 'Subbasin_Annual.csv'),
             'Subbasin')
 
         vizops.create_full_period_time_series(

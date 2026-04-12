@@ -2587,14 +2587,25 @@ def create_basin_time_series(
         actual_basin_yearly: dict[int, dict[str, dict]] | None = None,
         sigma_basin_yearly: dict[int, dict[str, dict]] | None = None,
 ) -> None:
-    """Per-basin annual GW withdrawal time series with era shading + uncertainty.
+    """Per-basin annual time series (any pool) with era shading + uncertainty.
+
+    Despite the historical ``_GW``-suffixed docstring, this function is
+    reused for **every** withdrawal, surface-water, and consumptive-use
+    pool (Total_GW, Total_SW, Irrigation, Non_Irrigation, Irrigation_GW,
+    Irrigation_SW, Non_Irrigation_GW, Non_Irrigation_SW, Irrigation_CU,
+    Irrigation_GW_CU, Irrigation_SW_CU) by :func:`_process_group` in
+    ``uncertaintyops._replot_from_augmented_rasters``. The pool identity
+    is implied by the enclosing ``{pool}/Basin_Time_Series/`` output
+    directory, so the on-disk CSVs are named ``Basin_Annual.csv`` and
+    ``{basin}_Annual.csv`` without a pool-specific suffix.
 
     Args:
         basin_yearly (dict[int, dict[str, dict]]): {year: {basin: metrics}}.
         output_dir (str): Output directory for plots.
         start_year (int): First year on the x-axis.
         end_year (int): Last year on the x-axis.
-        title_prefix (str): Prefix for figure titles.
+        title_prefix (str): Prefix for figure titles (typically the
+            pretty pool name, e.g. ``'Total SW '``).
         actual_basin_yearly (dict or None): Observed meter data in same format.
         sigma_basin_yearly (dict or None): Per-basin uncertainty in same format.
 
@@ -2620,9 +2631,9 @@ def create_basin_time_series(
             actual_df[['Year', 'Basin', 'Actual_Depth_mm', 'Actual_Volume_AF']],
             on=['Year', 'Basin'], how='left',
         )
-        merged.to_csv(os.path.join(ts_dir, 'Basin_Annual_GW.csv'), index=False)
+        merged.to_csv(os.path.join(ts_dir, 'Basin_Annual.csv'), index=False)
     else:
-        df.to_csv(os.path.join(ts_dir, 'Basin_Annual_GW.csv'), index=False)
+        df.to_csv(os.path.join(ts_dir, 'Basin_Annual.csv'), index=False)
 
     basins = sorted(df.Basin.unique())
     n_basins = len(basins)
@@ -2743,7 +2754,7 @@ def create_basin_time_series(
         fig.savefig(os.path.join(ts_dir, f'{safe}_Time_Series.png'), dpi=600, bbox_inches='tight')
         plt.close()
 
-        bdf.to_csv(os.path.join(ts_dir, f'{safe}_Annual_GW.csv'), index=False)
+        bdf.to_csv(os.path.join(ts_dir, f'{safe}_Annual.csv'), index=False)
 
     logger.info(f'Basin time series saved to {ts_dir}')
 
@@ -2759,7 +2770,13 @@ def create_subbasin_time_series(
         actual_subbasin_yearly: dict[int, dict[str, dict]] | None = None,
         sigma_subbasin_yearly: dict[int, dict[str, dict]] | None = None,
 ) -> None:
-    """Per-sub-basin annual GW withdrawal time series with era shading + uncertainty.
+    """Per-sub-basin annual time series (any pool) with era shading + uncertainty.
+
+    Same sub-basin-level counterpart to :func:`create_basin_time_series`
+    — used for every pool via ``_process_group``. The on-disk CSVs are
+    named ``Subbasin_Annual.csv`` and ``{subbasin}_Annual.csv`` without
+    a pool-specific suffix; the pool identity is implied by the
+    enclosing ``{pool}/Subbasin_Time_Series/`` directory.
 
     Args:
         subbasin_yearly (dict[int, dict[str, dict]]): {year: {subbasin: metrics}}.
@@ -2768,7 +2785,8 @@ def create_subbasin_time_series(
         ama_code_map (dict[str, str]): Mapping of AMA/INA codes to names.
         start_year (int): First year on the x-axis.
         end_year (int): Last year on the x-axis.
-        title_prefix (str): Prefix for figure titles.
+        title_prefix (str): Prefix for figure titles (typically the
+            pretty pool name, e.g. ``'Total SW '``).
         actual_subbasin_yearly (dict or None): Observed meter data in same format.
         sigma_subbasin_yearly (dict or None): Per-sub-basin uncertainty in same format.
 
@@ -2794,9 +2812,9 @@ def create_subbasin_time_series(
             actual_df[['Year', 'Subbasin', 'Actual_Depth_mm', 'Actual_Volume_AF']],
             on=['Year', 'Subbasin'], how='left',
         )
-        merged.to_csv(os.path.join(ts_dir, 'Subbasin_Annual_GW.csv'), index=False)
+        merged.to_csv(os.path.join(ts_dir, 'Subbasin_Annual.csv'), index=False)
     else:
-        df.to_csv(os.path.join(ts_dir, 'Subbasin_Annual_GW.csv'), index=False)
+        df.to_csv(os.path.join(ts_dir, 'Subbasin_Annual.csv'), index=False)
 
     # Map sub-basins → parent AMA/INA for grouped plots
     sub_gdf = gpd.read_file(subbasin_shp)
@@ -2942,7 +2960,7 @@ def create_subbasin_time_series(
         fig.savefig(os.path.join(ts_dir, f'{safe}_Time_Series.png'), dpi=600, bbox_inches='tight')
         plt.close()
 
-        sdf.to_csv(os.path.join(ts_dir, f'{safe}_Annual_GW.csv'), index=False)
+        sdf.to_csv(os.path.join(ts_dir, f'{safe}_Annual.csv'), index=False)
 
     logger.info(f'Sub-basin time series saved to {ts_dir}')
 
@@ -3607,21 +3625,43 @@ def create_era_raster_maps(
         )
     cbar.ax.tick_params(labelsize=era_cbar_fontsize)
 
-    # Add secondary unit axis on top of the colorbar
+    # Add a secondary unit axis on top of the colorbar.
+    #
+    # We use ``cbar.ax.secondary_xaxis`` rather than ``cbar.ax.twiny()``
+    # because ``twiny`` creates a second Axes that copies only the
+    # *data* xlim from the colorbar and draws its own rectangular
+    # spines on top of the colorbar axes bbox. When the colorbar has
+    # ``extend='max'`` or ``extend='both'``, the arrowhead triangle
+    # lives *outside* that data xlim, so the rectangular twin axis
+    # ends up occluding the triangle and the colorbar renders with a
+    # flat end. ``secondary_xaxis`` is explicitly designed to cooperate
+    # with colorbar extensions: it shares the parent axis transform,
+    # preserves the arrowhead region, and applies the unit conversion
+    # through a paired (forward, inverse) function tuple.
     if 'mm' in unit_label.lower():
-        cb_ax2 = cbar.ax.twiny()
-        cb_lo, cb_hi = cbar.ax.get_xlim()
-        cb_ax2.set_xlim(cb_lo * _MM_TO_FT, cb_hi * _MM_TO_FT)
-        cb_ax2.set_xlabel('Depth (ft)', fontsize=era_cbar_fontsize,
-                          fontweight='bold')
-        cb_ax2.tick_params(labelsize=era_cbar_fontsize)
+        secax = cbar.ax.secondary_xaxis(
+            'top',
+            functions=(
+                lambda mm: mm * _MM_TO_FT,
+                lambda ft: ft / _MM_TO_FT,
+            ),
+        )
+        secax.set_xlabel(
+            'Depth (ft)', fontsize=era_cbar_fontsize, fontweight='bold',
+        )
+        secax.tick_params(labelsize=era_cbar_fontsize)
     elif is_volume_m3:
-        cb_ax2 = cbar.ax.twiny()
-        cb_lo, cb_hi = cbar.ax.get_xlim()
-        cb_ax2.set_xlim(cb_lo / _AF_TO_M3, cb_hi / _AF_TO_M3)
-        cb_ax2.set_xlabel('Volume (AF)', fontsize=era_cbar_fontsize,
-                          fontweight='bold')
-        cb_ax2.tick_params(labelsize=era_cbar_fontsize)
+        secax = cbar.ax.secondary_xaxis(
+            'top',
+            functions=(
+                lambda m3: m3 / _AF_TO_M3,
+                lambda af: af * _AF_TO_M3,
+            ),
+        )
+        secax.set_xlabel(
+            'Volume (AF)', fontsize=era_cbar_fontsize, fontweight='bold',
+        )
+        secax.tick_params(labelsize=era_cbar_fontsize)
 
     if out_filename is None:
         slug = title.replace(' ', '_').replace('/', '_')
@@ -3638,7 +3678,7 @@ def create_ood_era_raster_maps(
     output_dir: str,
     *,
     title: str = 'Out-of-Distribution Probability',
-    cmap: str = 'RdYlGn_r',
+    cmap: str | None = None,
     fully_ood_threshold: float = 0.999,
     fully_ood_color: str = '#888888',
     out_filename: str | None = None,
@@ -3683,10 +3723,29 @@ def create_ood_era_raster_maps(
         None. Writes the PNG to ``output_dir``.
     """
     import rasterio as rio
-    from matplotlib.colors import ListedColormap
+    from matplotlib.colors import ListedColormap, LinearSegmentedColormap
 
     apply_journal_style()
     makedirs(output_dir)
+
+    # Tone-down the default palette: the saturated ``RdYlGn_r`` ends
+    # (pure green at 0, pure red near 1) make the map feel loud next
+    # to the muted basin shapefile and labels. Build a muted five-stop
+    # diverging ramp — dark-green → sage → sand → terracotta →
+    # brick — that matches the matte tone of the σ attribution maps
+    # and the σ volume maps. Callers can override via ``cmap=...`` to
+    # pass any matplotlib colormap by name or instance.
+    if cmap is None:
+        cmap = LinearSegmentedColormap.from_list(
+            'muted_ood_ramp',
+            [
+                '#2e6b3c',  # dark green     (low OOD probability)
+                '#7ba86a',  # sage
+                '#d8c98a',  # sand
+                '#d38a5a',  # terracotta
+                '#a63a2a',  # brick          (high OOD probability)
+            ],
+        )
 
     tif_files = sorted(f for f in os.listdir(raster_dir) if f.endswith('.tif'))
     if not tif_files:
@@ -3769,9 +3828,15 @@ def create_ood_era_raster_maps(
 
     era_cbar_fontsize = 10
     if last_partial_im is not None:
+        # extend='both' gives the horizontal colorbar triangular
+        # arrowheads on both ends, matching the shape of the σ volume
+        # era-map colorbars. The left arrowhead is ornamental for the
+        # OOD probability (the partial-OOD range starts at 0, so
+        # nothing is actually clipped below vmin); the right arrowhead
+        # points toward the separately-rendered fully-OOD class.
         cbar = fig.colorbar(
             last_partial_im, ax=axes_flat, shrink=0.5, pad=0.06,
-            orientation='horizontal', aspect=40, extend='neither',
+            orientation='horizontal', aspect=40, extend='both',
         )
         cbar.set_label(
             'Mean OOD Probability (partial)',
@@ -4220,12 +4285,25 @@ def _draw_sigma_attribution_disclosure_box(
         f'Model-dominated overall.'
     )
     # Make room for the two-line disclosure between the map panels and
-    # the bottom legend. The legend is anchored at y=0.01 in the shared
-    # setup; placing the text at y ≈ 0.12 leaves a comfortable gap above
-    # the legend title and below the panel axes after we bump `bottom`.
-    fig.subplots_adjust(bottom=0.20)
+    # the bottom legend. The legend-only bottom margin is computed in
+    # absolute inches by ``_setup_attr_figure`` so that 1-row and 2-row
+    # layouts get the same visual whitespace below the maps; we grow
+    # that margin by the same fixed amount (0.4 inches) regardless of
+    # figure height so the disclosure box always has the same vertical
+    # budget between the panels and the legend. Falls back to the old
+    # 0.20 fraction if the figure was not set up via _setup_attr_figure.
+    fig_height = getattr(fig, '_attr_fig_height', None)
+    bottom_inches = getattr(fig, '_attr_bottom_inches', None)
+    if fig_height and bottom_inches:
+        new_bottom_inches = bottom_inches + 0.4
+        new_bottom = new_bottom_inches / fig_height
+        text_y = (new_bottom_inches * 0.62) / fig_height
+    else:
+        new_bottom = 0.20
+        text_y = 0.13
+    fig.subplots_adjust(bottom=new_bottom)
     fig.text(
-        0.5, 0.13, txt,
+        0.5, text_y, txt,
         ha='center', va='bottom',
         fontsize=8,
         bbox=dict(
@@ -4250,7 +4328,6 @@ def _draw_sigma_attribution_ternary_legend(fig) -> None:
         [1.0, 0.0],              # Bottom-right — Model (green)
     ])
     n_sub = 20
-    base_intensity = 0.9
     for i in range(n_sub):
         for j in range(n_sub - i):
             # Barycentric tri-sub-cell at (i, j, k) with k = n_sub-i-j
@@ -4272,15 +4349,14 @@ def _draw_sigma_attribution_ternary_legend(fig) -> None:
             p0 = bary_to_xy(a0, b0)
             p1 = bary_to_xy(a1, b0)
             p2 = bary_to_xy(a0, b1)
-            # The color is given by the centroid's barycentric coords
+            # The color is given by the centroid's barycentric coords,
+            # fed through the same muted mix as the basin choropleth
+            # via _ternary_mix so the inset and the map colors are a
+            # single source of truth.
             a_c = a0 + 1 / (3 * n_sub)
             b_c = b0 + 1 / (3 * n_sub)
             c_c = 1 - a_c - b_c
-            color = (
-                a_c * base_intensity,   # R = Management
-                c_c * base_intensity,   # G = Model
-                b_c * base_intensity,   # B = Climate
-            )
+            color = _ternary_mix(a_c, c_c, b_c)
             poly = Polygon(
                 np.stack([p0, p1, p2]), facecolor=color, edgecolor='none',
             )
@@ -4290,16 +4366,15 @@ def _draw_sigma_attribution_ternary_legend(fig) -> None:
                 a_c2 = a0 + 2 / (3 * n_sub)
                 b_c2 = b0 + 2 / (3 * n_sub)
                 c_c2 = 1 - a_c2 - b_c2
-                color2 = (
-                    a_c2 * base_intensity,
-                    c_c2 * base_intensity,
-                    b_c2 * base_intensity,
-                )
+                color2 = _ternary_mix(a_c2, c_c2, b_c2)
                 poly2 = Polygon(
                     np.stack([p1, p3, p2]), facecolor=color2, edgecolor='none',
                 )
                 ax_inset.add_patch(poly2)
-    # Triangle outline + labels
+    # Triangle outline + labels. Corner label hex colors are chosen to
+    # match the muted corner of the new ternary mix — slightly darker
+    # than the rendered corner tile so the label reads clearly against
+    # the tile fill.
     outline = Polygon(
         tri_vertices, closed=True, fill=False,
         edgecolor='black', linewidth=0.8,
@@ -4307,26 +4382,62 @@ def _draw_sigma_attribution_ternary_legend(fig) -> None:
     ax_inset.add_patch(outline)
     ax_inset.text(
         0.5, np.sqrt(3) / 2 + 0.05, 'Management',
-        ha='center', va='bottom', fontsize=7, fontweight='bold', color='#8b1a0a',
+        ha='center', va='bottom', fontsize=7, fontweight='bold', color='#6a2214',
     )
     ax_inset.text(
         -0.05, -0.02, 'Climate',
-        ha='right', va='top', fontsize=7, fontweight='bold', color='#0a2c8b',
+        ha='right', va='top', fontsize=7, fontweight='bold', color='#142a6a',
     )
     ax_inset.text(
         1.05, -0.02, 'Model',
-        ha='left', va='top', fontsize=7, fontweight='bold', color='#0a5a1f',
+        ha='left', va='top', fontsize=7, fontweight='bold', color='#1a4a22',
     )
     ax_inset.set_xlim(-0.35, 1.35)
     ax_inset.set_ylim(-0.15, np.sqrt(3) / 2 + 0.22)
 
 
-def _ternary_rgb_colors(df: pd.DataFrame) -> list[tuple[float, float, float]]:
-    """Convert per-basin Mgmt/Clim/Model shares to RGB colors.
+def _ternary_mix(mgmt: float, model: float, clim: float) -> tuple[float, float, float]:
+    """Map a single (Mgmt, Model, Clim) triple to a muted RGB tuple.
 
-    R = Mgmt × 0.9   (deep red for pure Management)
-    G = Model × 0.9  (deep green for pure Model)
-    B = Clim × 0.9   (deep blue for pure Climate)
+    The old formula used ``R = Mgmt × 0.9`` (etc.), which pushed pure
+    corners of the simplex to saturated primaries — fully-management
+    basins rendered as eye-piercing pure red, etc. That made the
+    ternary maps uncomfortably bright next to the muted basin
+    shapefile and basin labels.
+
+    The replacement uses a bias-and-slope form that keeps the colors
+    in a matte, journal-quality range:
+
+        R = bias + Mgmt  × slope
+        G = bias + Model × slope
+        B = bias + Clim  × slope
+
+    with ``bias = 0.22`` and ``slope = 0.50`` so that a pure-Mgmt
+    corner renders as ``(0.72, 0.22, 0.22)`` (a muted dusty red rather
+    than the saturated ``(0.9, 0, 0)`` of the old formula), a
+    balanced 1/3-1/3-1/3 basin renders as ``(0.39, 0.39, 0.39)`` (a
+    comfortable mid-gray rather than the old near-black
+    ``(0.3, 0.3, 0.3)``), and every basin stays in the
+    ``[bias, bias + slope] = [0.22, 0.72]`` brightness range.
+
+    The shares are assumed to be finite; caller is responsible for
+    substituting a no-data color when they are not.
+    """
+    bias = 0.22
+    slope = 0.50
+    return (
+        bias + float(mgmt) * slope,
+        bias + float(model) * slope,
+        bias + float(clim) * slope,
+    )
+
+
+def _ternary_rgb_colors(df: pd.DataFrame) -> list[tuple[float, float, float]]:
+    """Convert per-basin Mgmt/Clim/Model shares to muted RGB colors.
+
+    Each row's three shares are fed through :func:`_ternary_mix` so
+    that the inset-triangle painter and the basin choropleth share one
+    source of truth for the color formula.
 
     Basins with NaN shares return a no-data gray RGB tuple (the literal
     ``#D5D5D5`` hex converted to ``(0.8353, 0.8353, 0.8353)``). Returning
@@ -4335,7 +4446,6 @@ def _ternary_rgb_colors(df: pd.DataFrame) -> list[tuple[float, float, float]]:
     from the list; otherwise geopandas crashes with
     ``setting an array element with a sequence``.
     """
-    base_intensity = 0.9
     nodata_rgb = (0xD5 / 255.0, 0xD5 / 255.0, 0xD5 / 255.0)
     colors: list[tuple[float, float, float]] = []
     for _, row in df.iterrows():
@@ -4345,11 +4455,7 @@ def _ternary_rgb_colors(df: pd.DataFrame) -> list[tuple[float, float, float]]:
         if not (np.isfinite(mgmt) and np.isfinite(clim) and np.isfinite(model)):
             colors.append(nodata_rgb)
             continue
-        colors.append((
-            float(mgmt) * base_intensity,
-            float(model) * base_intensity,
-            float(clim) * base_intensity,
-        ))
+        colors.append(_ternary_mix(mgmt, model, clim))
     return colors
 
 
@@ -4403,6 +4509,19 @@ def _setup_attr_figure(
       * n_panels == 4  → 2×2 (detailed Irrigation/Non-Irrigation × GW/SW)
       * n_panels >= 5  → 2×ceil(n/2) fallback
 
+    The ``bottom`` subplots-adjust margin is computed as an absolute
+    inch value rather than a figure fraction so the bottom whitespace
+    below the map grid is visually constant regardless of whether the
+    figure is 7 inches tall (1-row) or 12 inches tall (2-row). Without
+    this, the 2×2 detailed layout inherits the same 14% fraction as the
+    1×2 headline and ends up with nearly twice as much dead space
+    between the bottom row of maps and the shared legend.
+
+    The figure records ``_attr_fig_height`` and ``_attr_bottom_inches``
+    attributes so :func:`_draw_sigma_attribution_disclosure_box` can
+    grow the bottom margin by the same absolute amount when the
+    disclosure text has to fit between the maps and the legend.
+
     Axes are always returned as a flat list so callers can index by
     pool-order regardless of the underlying grid shape.
     """
@@ -4432,10 +4551,20 @@ def _setup_attr_figure(
     for idx in range(n_panels, len(axes_flat)):
         axes_flat[idx].axis('off')
     fig.suptitle(title, fontsize=16, fontweight='bold', y=0.98)
+
+    # Target ~1.0 inch for the legend-only bottom margin. At the 1-row
+    # fig_height=7 that yields bottom=0.143 (matches the old 0.14
+    # hard-code); at fig_height=12 it yields bottom=0.083, which
+    # eliminates the extra 0.7-inch dead strip that was showing up on
+    # the 2×2 detailed maps.
+    bottom_inches = 1.0
+    bottom_frac = bottom_inches / fig_height
     plt.subplots_adjust(
-        left=0.04, right=0.98, top=0.90, bottom=0.14,
-        wspace=0.06, hspace=0.12,
+        left=0.04, right=0.98, top=0.90, bottom=bottom_frac,
+        wspace=0.06, hspace=0.08,
     )
+    fig._attr_fig_height = fig_height       # type: ignore[attr-defined]
+    fig._attr_bottom_inches = bottom_inches  # type: ignore[attr-defined]
     return fig, axes_flat
 
 
@@ -4492,11 +4621,14 @@ def _draw_attribution_basin_panel(
         linewidth=list(linewidths),
     )
 
-    # AMA/INA labels as minor visual guide
+    # Label every basin — AMA/INAs with a bold emphasis, all other
+    # basins in italic at a smaller font. Stewardship users want to be
+    # able to identify *any* basin whose attribution is anomalous, not
+    # only the 10 AMA/INA regulatory boundaries.
     ama_ina = get_ama_ina_basin_names()
     _overlay_boundaries(
         ax, basins_gdf, ama_ina, basin_col,
-        label_fontsize=5.5, label_all=False,
+        label_fontsize=5.5, label_all=True,
     )
     ax.set_title(
         f'{panel_label} {panel_title}',
@@ -5114,7 +5246,11 @@ def create_actual_vs_predicted_maps(
 ) -> None:
     """Create a 3-panel figure comparing actual and predicted raster means.
 
-    Layout: Actual (mean) | Predicted (mean) | Difference (Predicted − Actual).
+    Layout: Actual (mean) | Predicted (mean) | Difference (Actual − Predicted).
+    The difference panel follows the same sign convention as ``normalized_mbe``
+    in ``mlops.py`` (``np.mean(y - y_pred)``), so positive values indicate
+    regions where the model under-predicts the metered record (actual > pred)
+    and negative values indicate over-prediction.
     Actual no-data regions (unmetered areas outside AMA/INA) are shown in gray.
     Groundwater basin boundaries and AMA/INA labels are overlaid on all panels.
 
@@ -5222,7 +5358,10 @@ def create_actual_vs_predicted_maps(
     else:
         pred_for_diff = pred_mean
 
-    diff = pred_for_diff - actual_mean
+    # Sign convention matches normalized_mbe in mlops.py:
+    # positive diff = actual > predicted (model under-predicts),
+    # negative diff = actual < predicted (model over-predicts).
+    diff = actual_mean - pred_for_diff
     diff_display = diff.copy()
     diff_display[~az_mask_actual] = np.nan
     diff_masked = np.ma.masked_where(
@@ -5348,7 +5487,7 @@ def create_actual_vs_predicted_maps(
          cmap, v_min, v_max, az_gray_actual),
         ('(b) Predicted (ML)', pred_masked, extent_pred,
          cmap, v_min, v_max, az_gray_pred),
-        ('(c) Difference (Predicted \u2212 Actual)', diff_masked, extent_actual,
+        ('(c) Difference (Actual \u2212 Predicted)', diff_masked, extent_actual,
          diff_cmap, -d_abs, d_abs, az_gray_actual),
     ]
     _make_figure(
@@ -5389,7 +5528,7 @@ def create_actual_vs_predicted_maps(
          cmap, vol_min, vol_max, az_gray_actual),
         ('(b) Predicted (ML)', pred_vol, extent_pred,
          cmap, vol_min, vol_max, az_gray_pred),
-        ('(c) Difference (Predicted \u2212 Actual)', diff_vol, extent_actual,
+        ('(c) Difference (Actual \u2212 Predicted)', diff_vol, extent_actual,
          diff_cmap, -dvol_abs, dvol_abs, az_gray_actual),
     ]
     vol_filename = out_filename.replace('.png', '_Volume.png')

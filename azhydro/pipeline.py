@@ -406,7 +406,7 @@ def prepare_data(
 def create_az_data(
         data_band_names: list[str],
         load_files: bool = True,
-        skip_eda: bool = False,
+        run_eda: bool = False,
 ) -> pd.DataFrame:
     """
     Build the AZ predictor dataframe for years START_YEAR to END_YEAR.
@@ -414,12 +414,17 @@ def create_az_data(
     Calls ``dataops.create_az_data_parquet`` which reads each year's
     Predictor, GW_Basin, GW_Subbasin, Streamflow,
     Canal_Weighted_Streamflow, Canal_Density, and Well_Density rasters,
-    then maps ADWR sub-basin OBJECTIDs to names and runs EDA.
+    then maps ADWR sub-basin OBJECTIDs to names and optionally runs EDA.
 
     Args:
         data_band_names (list[str]): Band/layer names for predictor rasters.
         load_files (bool): If True, load from cached parquet files.
-        skip_eda (bool): If True, skip EDA plot generation.
+        run_eda (bool): If True, regenerate the EDA figures (histograms,
+            ET-vs-ETo analysis, pumping-distribution analysis, per-basin
+            data-availability summary). Defaults to False so downstream
+            steps that reuse the predictor DataFrame (Step 2, Step 3,
+            Step 3b) never repeat the ~minute-long EDA render unless
+            explicitly asked via ``--run-eda``.
 
     Returns:
         pd.DataFrame: Combined predictor dataframe for the full study period.
@@ -443,10 +448,10 @@ def create_az_data(
     logger.debug(f'Year range: {az_df.Year.min()} – {az_df.Year.max()}')
     logger.debug(f'Columns: {list(az_df.columns)}')
 
-    # EDA
-    if not skip_eda:
+    # EDA (opt-in)
+    if run_eda:
         vizops.explore_az_data(az_df, os.path.join(MODEL_DIR, 'EDA'))
-        
+
         # ET vs ETo analysis by land use
         vizops.analyze_et_by_land_use(az_df, os.path.join(MODEL_DIR, 'EDA'))
 
@@ -460,7 +465,7 @@ def create_az_data(
             az_df, os.path.join(MODEL_DIR, 'EDA'), YEAR_LIST,
         )
     else:
-        logger.info('Skipping EDA plots (--skip-eda)')
+        logger.info('EDA plots not generated (pass --run-eda to regenerate).')
 
     return az_df
 
@@ -2544,92 +2549,6 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
             band=1,
         )
 
-    # ── σ attribution diagnostic suite ──────────────────────────────
-    # All eight figure families write to Raster_Maps/Sigma_Attribution/
-    # so they stay isolated from the main era-mean, trend-analysis, and
-    # SW-capture outputs. Basin-level only — sub-basin attribution is
-    # deferred because ADWR stewardship decisions are basin-scale.
-    #
-    # Eight figure families sharing the same data pipeline:
-    #   (1) Binary headline withdrawal (Total_GW + Total_SW).
-    #   (2) Binary detailed withdrawal (Irrigation_GW/SW,
-    #       Non_Irrigation_GW/SW), 4-panel per era.
-    #   (3) Binary σ_CU attribution via the IE × Withdrawal
-    #       error-propagation decomposition.
-    #   (4) Ternary headline withdrawal (continuous RGB mix of
-    #       Mgmt/Clim/Model shares).
-    #   (5) Ternary detailed withdrawal.
-    #   (6) Ternary σ_CU attribution.
-    #   (7) Per-basin per-year stacked-area timeseries for eight
-    #       headline basins × two pools.
-    #   (8) Projection-era (σ_clim, σ_mgmt) log-log bubble scatter.
-    attr_dir = os.path.join(maps_dir, 'Sigma_Attribution')
-    os.makedirs(attr_dir, exist_ok=True)
-
-    # (1) Binary headline — Total_GW + Total_SW
-    vizops.create_sigma_attribution_map(
-        unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
-        pools=('Total_GW', 'Total_SW'),
-        eras=('Hindcast', 'Historical', 'Projection'),
-    )
-
-    # (2) Binary detailed — per-use-type breakdown
-    vizops.create_sigma_attribution_map(
-        unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
-        pools=(
-            'Irrigation_GW', 'Irrigation_SW',
-            'Non_Irrigation_GW', 'Non_Irrigation_SW',
-        ),
-        eras=('Hindcast', 'Historical', 'Projection'),
-        filename_tag='Detailed',
-    )
-
-    # (3) Binary σ_CU — IE × Withdrawal error-propagation decomposition
-    vizops.create_sigma_cu_attribution_map(
-        unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
-        pools=('Irrigation_CU', 'Irrigation_GW_CU', 'Irrigation_SW_CU'),
-        eras=('Hindcast', 'Historical', 'Projection'),
-    )
-
-    # (4) Ternary headline — continuous RGB three-way disclosure
-    vizops.create_sigma_attribution_ternary_map(
-        unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
-        pools=('Total_GW', 'Total_SW'),
-        eras=('Hindcast', 'Historical', 'Projection'),
-    )
-
-    # (5) Ternary detailed
-    vizops.create_sigma_attribution_ternary_map(
-        unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
-        pools=(
-            'Irrigation_GW', 'Irrigation_SW',
-            'Non_Irrigation_GW', 'Non_Irrigation_SW',
-        ),
-        eras=('Hindcast', 'Historical', 'Projection'),
-        filename_tag='Detailed',
-    )
-
-    # (6) Ternary σ_CU — reuses the same IE propagation as (3)
-    vizops.create_sigma_attribution_ternary_map(
-        unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
-        pools=('Irrigation_CU', 'Irrigation_GW_CU', 'Irrigation_SW_CU'),
-        eras=('Hindcast', 'Historical', 'Projection'),
-        for_cu=True,
-    )
-
-    # (7) Per-year stacked-area timeseries for headline basins
-    vizops.create_sigma_attribution_timeseries(
-        unc_dir=unc_dir, output_dir=attr_dir,
-        pools=('Total_GW', 'Total_SW'),
-    )
-
-    # (8) Bubble-chart scatter, Projection era only
-    vizops.create_sigma_attribution_bubble(
-        unc_dir=unc_dir, output_dir=attr_dir,
-        pools=('Total_GW', 'Total_SW'),
-        era='Projection',
-    )
-
     # ── Augmented prediction rasters (band 3 = CV, band 4 = SNR) ────
     pred_mm_dir = os.path.join(prediction_dir, 'Predicted_Rasters', 'Depth_mm')
     if os.path.isdir(pred_mm_dir):
@@ -2637,6 +2556,19 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
         # component CV maps.  The actual CV distribution for
         # Total_Predicted is in [0, ~0.3] so the colorbar settles
         # naturally to that range.
+        # Hard [0, 1] colorbar range for Prediction CV — the measured
+        # CV distribution for Total_Predicted is heavy-tailed (P50 ≈
+        # 0.42, P95 ≈ 7, max > 6000 at near-zero-prediction pixels), and
+        # the P2–P95 auto-range was squeezing the informative 0–1
+        # region into the bottom of the colorbar. A hard vmax=1 maps
+        # the entire "uncertainty is comparable to the prediction" band
+        # (σ ≈ |pred|) to the top color, and pixels above that saturate
+        # at the top via the extend='max' arrowhead.  Using
+        # extend='both' gives both ends of the colorbar a triangular
+        # tip matching the σ volume / SW capture maps — the lower
+        # triangle is cosmetic (CV ≥ 0 by construction), but drawing
+        # it keeps the colorbar shape visually consistent across the
+        # entire era-map suite.
         vizops.create_era_raster_maps(
             raster_dir=pred_mm_dir,
             basin_shp=AZ_GW_BASIN,
@@ -2646,14 +2578,18 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
             cmap='inferno',
             band=3,
             mask_nan_only=True,
-            percentile_clip=(2.0, 95.0),
-            cbar_extend='max',
+            vmin=0.0,
+            vmax=1.0,
+            cbar_extend='both',
         )
-        # Prediction SNR: P5–P95 auto-range.  Drop P5 (not P2)
-        # because the lower tail of SNR is where the framework is
-        # under-constrained; P95 caps the upper tail where σ → 0
-        # pushes SNR → ∞.  extend='max' is correct because SNR is
-        # non-negative.
+        # Prediction SNR: P5–P95 auto-range + extend='both' so both
+        # the low-SNR tail (where the framework is under-constrained
+        # and σ ≈ |pred|) and the high-SNR tail (where σ → 0 pushes
+        # SNR toward the 20+ range observed in metered corridors) are
+        # honestly flagged with triangular arrowheads on both ends.
+        # Dropping P5 rather than P2 on the low side keeps the bulk of
+        # the distribution (P25≈1.1, P50≈2.4, P75≈4.3) well-centered
+        # on the viridis ramp.
         vizops.create_era_raster_maps(
             raster_dir=pred_mm_dir,
             basin_shp=AZ_GW_BASIN,
@@ -2664,7 +2600,7 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
             band=4,
             mask_nan_only=True,
             percentile_clip=(5.0, 95.0),
-            cbar_extend='max',
+            cbar_extend='both',
         )
 
     # ── Actual vs Predicted comparison (metered GW, 1984-2024) ──────
@@ -2707,6 +2643,13 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
         # below (same cmap, same default percentile_clip, same
         # cbar_extend) per the user's guidance: "make the color
         # ramp for the fractions similar to the SW capture volume".
+        # All SW Capture era maps use cbar_extend='both' for visual
+        # consistency with the withdrawal-volume, CV, SNR, and σ
+        # component era maps.  The lower triangle is cosmetic on
+        # non-negative quantities (capture fraction, depth, volume,
+        # and σ are ≥ 0 by construction) but keeping it present
+        # across every family gives the era-map suite a uniform
+        # colorbar shape.
         frac_dir = os.path.join(sw_cap_base, f'{cap_cat}_Fraction')
         if os.path.isdir(frac_dir):
             vizops.create_era_raster_maps(
@@ -2717,7 +2660,6 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
                 unit_label='Capture Fraction',
                 cmap='YlOrRd',
                 band=2,
-                cbar_extend='max',
             )
         # 6-band augmented capture depth rasters: band 1 = central,
         # band 2 = σ, band 3 = CV, bands 5/6 = lower/upper 95 % CI.
@@ -2733,7 +2675,6 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
                 unit_label='Capture (mm)',
                 cmap='YlOrRd',
                 band=1,
-                cbar_extend='max',
             )
             # Band 2: σ_cap — uses σ-friendly Purples colormap to
             # match the other σ era maps.
@@ -2745,15 +2686,14 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
                 unit_label='σ (mm)',
                 cmap='Purples',
                 band=2,
-                cbar_extend='max',
             )
-            # Band 3: CV — same tight P2–P95 auto-range strategy as
-            # the withdrawal and σ-component CV maps.  No hard
-            # vmax because SW capture CV has very different
-            # magnitudes in different basins (near-zero in upland
-            # basins, up to ~0.5 in mid-range river-corridor
-            # basins).  Auto-ranging gives each map its own
-            # natural colorbar.
+            # Band 3: CV — same hard [0, 1] clamp as the
+            # Prediction CV map, so the informative portion of the
+            # SW capture CV distribution is legible and anything
+            # above 1.0 is honestly flagged by the right-side
+            # arrowhead.  The lower arrowhead is cosmetic (CV ≥ 0)
+            # but keeps the colorbar shape uniform across the
+            # era-map suite.
             vizops.create_era_raster_maps(
                 raster_dir=depth_dir,
                 basin_shp=AZ_GW_BASIN,
@@ -2763,8 +2703,8 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
                 cmap='inferno',
                 band=3,
                 mask_nan_only=True,
-                percentile_clip=(2.0, 95.0),
-                cbar_extend='max',
+                vmin=0.0,
+                vmax=1.0,
             )
 
         # 6-band augmented capture volume rasters (m³): band 1 =
@@ -2783,7 +2723,6 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
                 unit_label=r'Volume (m$^3$)',
                 cmap='YlOrRd',
                 band=1,
-                cbar_extend='max',
             )
             # Band 2: σ capture volume (Purples, matches other
             # σ volume era maps)
@@ -2795,7 +2734,6 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
                 unit_label=r'Volume (m$^3$)',
                 cmap='Purples',
                 band=2,
-                cbar_extend='max',
             )
 
     # ── Trend analysis (Mann-Kendall + Sen's slope) ────────────────
@@ -2907,6 +2845,111 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
                 )
     else:
         logger.info('  Trend-map suite skipped per --skip-maps trends.')
+
+    # ── σ attribution diagnostic suite ──────────────────────────────
+    # Runs LAST in create_all_raster_maps so a failure here cannot
+    # cascade into the core era-mean, CV/SNR, actual-vs-predicted,
+    # SW-capture, or trend outputs above. Wrapped in try/except so a
+    # crash in any one figure family is logged and swallowed — the
+    # rest of the step has already completed, and the graphical
+    # abstract below still runs.
+    #
+    # All eight figure families write to Raster_Maps/Sigma_Attribution/
+    # so they stay isolated from the main era-mean, trend-analysis, and
+    # SW-capture outputs. Basin-level only — sub-basin attribution is
+    # deferred because ADWR stewardship decisions are basin-scale.
+    #
+    # Eight figure families sharing the same data pipeline:
+    #   (1) Binary headline withdrawal (Total_GW + Total_SW).
+    #   (2) Binary detailed withdrawal (Irrigation_GW/SW,
+    #       Non_Irrigation_GW/SW), 4-panel per era.
+    #   (3) Binary σ_CU attribution via the IE × Withdrawal
+    #       error-propagation decomposition.
+    #   (4) Ternary headline withdrawal (continuous RGB mix of
+    #       Mgmt/Clim/Model shares).
+    #   (5) Ternary detailed withdrawal.
+    #   (6) Ternary σ_CU attribution.
+    #   (7) Per-basin per-year stacked-area timeseries for eight
+    #       headline basins × two pools.
+    #   (8) Projection-era (σ_clim, σ_mgmt) log-log bubble scatter.
+    try:
+        attr_dir = os.path.join(maps_dir, 'Sigma_Attribution')
+        os.makedirs(attr_dir, exist_ok=True)
+
+        # (1) Binary headline — Total_GW + Total_SW
+        vizops.create_sigma_attribution_map(
+            unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
+            pools=('Total_GW', 'Total_SW'),
+            eras=('Hindcast', 'Historical', 'Projection'),
+        )
+
+        # (2) Binary detailed — per-use-type breakdown
+        vizops.create_sigma_attribution_map(
+            unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
+            pools=(
+                'Irrigation_GW', 'Irrigation_SW',
+                'Non_Irrigation_GW', 'Non_Irrigation_SW',
+            ),
+            eras=('Hindcast', 'Historical', 'Projection'),
+            filename_tag='Detailed',
+        )
+
+        # (3) Binary σ_CU — IE × Withdrawal error-propagation
+        vizops.create_sigma_cu_attribution_map(
+            unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
+            pools=(
+                'Irrigation_CU', 'Irrigation_GW_CU', 'Irrigation_SW_CU',
+            ),
+            eras=('Hindcast', 'Historical', 'Projection'),
+        )
+
+        # (4) Ternary headline — continuous RGB three-way disclosure
+        vizops.create_sigma_attribution_ternary_map(
+            unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
+            pools=('Total_GW', 'Total_SW'),
+            eras=('Hindcast', 'Historical', 'Projection'),
+        )
+
+        # (5) Ternary detailed
+        vizops.create_sigma_attribution_ternary_map(
+            unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
+            pools=(
+                'Irrigation_GW', 'Irrigation_SW',
+                'Non_Irrigation_GW', 'Non_Irrigation_SW',
+            ),
+            eras=('Hindcast', 'Historical', 'Projection'),
+            filename_tag='Detailed',
+        )
+
+        # (6) Ternary σ_CU — reuses the same IE propagation as (3)
+        vizops.create_sigma_attribution_ternary_map(
+            unc_dir=unc_dir, basin_shp=AZ_GW_BASIN, output_dir=attr_dir,
+            pools=(
+                'Irrigation_CU', 'Irrigation_GW_CU', 'Irrigation_SW_CU',
+            ),
+            eras=('Hindcast', 'Historical', 'Projection'),
+            for_cu=True,
+        )
+
+        # (7) Per-year stacked-area timeseries for headline basins
+        vizops.create_sigma_attribution_timeseries(
+            unc_dir=unc_dir, output_dir=attr_dir,
+            pools=('Total_GW', 'Total_SW'),
+        )
+
+        # (8) Bubble-chart scatter, Projection era only
+        vizops.create_sigma_attribution_bubble(
+            unc_dir=unc_dir, output_dir=attr_dir,
+            pools=('Total_GW', 'Total_SW'),
+            era='Projection',
+        )
+    except Exception:
+        logger.exception(
+            '  σ attribution diagnostic suite failed — skipping the '
+            'remainder of the attribution figures. Core era maps, '
+            'CV/SNR, actual-vs-predicted, SW capture, and trend '
+            'analysis are unaffected.',
+        )
 
     # ── Graphical abstract / Figure 1 (after UQ for augmented rasters) ──
     summary_dir = os.path.join(prediction_dir, 'Annual_Summaries')
@@ -3399,8 +3442,16 @@ def main() -> None:
         help='Enable verbose (DEBUG-level) logging.',
     )
     parser.add_argument(
-        '--skip-eda', action='store_true', default=False,
-        help='Skip EDA plot generation in Step 1.',
+        '--run-eda', action='store_true', default=False,
+        help=(
+            'Opt in to the Step 1 EDA plot generation (histograms, '
+            'ET-vs-ETo analysis, pumping-distribution analysis, '
+            'per-basin data-availability summary). EDA is skipped by '
+            'default regardless of which steps are selected, because '
+            'downstream steps (Step 2, Step 3, Step 3b) reuse the '
+            'predictor DataFrame without needing the plots. Pass this '
+            'flag when you actually want the EDA figures regenerated.'
+        ),
     )
     parser.add_argument(
         '--skip-prep', type=str, default='',
@@ -3479,8 +3530,14 @@ def main() -> None:
     def get_az_df():
         nonlocal az_df
         if az_df is None:
-            skip_eda = args.skip_eda or not should_run('1')
-            az_df = create_az_data(data_band_names, load_files=load_files, skip_eda=skip_eda)
+            # Only regenerate EDA when the user explicitly opts in AND
+            # Step 1 is actually in the requested step list. Running
+            # `--steps 3b --run-eda` is not meaningful (Step 3b doesn't
+            # touch the predictor build) — the flag is a Step 1 opt-in.
+            run_eda = args.run_eda and should_run('1')
+            az_df = create_az_data(
+                data_band_names, load_files=load_files, run_eda=run_eda,
+            )
         return az_df
 
     # Step 1

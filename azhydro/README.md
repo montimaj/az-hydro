@@ -84,7 +84,7 @@ python pipeline.py --steps 0,1,2a         # run only steps 0, 1, and 2a
 python pipeline.py --steps 3              # prediction only
 python pipeline.py --steps 3,3b           # prediction + uncertainty quantification
 python pipeline.py --download --recreate  # force fresh GEE download and file recreation
-python pipeline.py --skip-eda            # skip EDA plot generation (auto-skipped when Step 1 not selected)
+python pipeline.py --steps 1 --run-eda   # regenerate Step 1 EDA figures (opt-in; off by default)
 python pipeline.py --steps 2s            # regenerate cross-strategy summary from saved results
 ```
 
@@ -208,7 +208,7 @@ Step 3h is excluded from `--steps all` because Step 3g already produces the grap
 | `--download` | — | Force GEE tile download. |
 | `--load-files` | `True` | Skip recreating intermediate files that already exist. |
 | `--recreate` | — | Force recreation of intermediate files. |
-| `--skip-eda` | `False` | Skip EDA plot generation in Step 1. EDA is auto-skipped when Step 1 is not explicitly selected. |
+| `--run-eda` | `False` | Opt in to the Step 1 EDA plot suite (histograms, ET-vs-ETo analysis, pumping-distribution analysis, per-basin data-availability summary). EDA is off by default; downstream steps (Step 2, Step 3, Step 3b) reuse the predictor DataFrame without needing the plots, so we don't pay the ~minute-long render cost on every run. Pass this flag together with `--steps 1` (or any step list that includes `1`) to regenerate the figures; passing it with a step list that does not include Step 1 has no effect. |
 | `--skip-prep` | — | Comma-separated Step 0 sub-steps to skip. |
 | `--skip-eval` | — | Comma-separated evaluation strategies to skip. |
 | `--skip-uq` | — | Comma-separated UQ sub-steps to skip (including `sw-capture-sigma`). |
