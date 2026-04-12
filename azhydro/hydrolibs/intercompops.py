@@ -71,6 +71,51 @@ MM_TO_FT = 1.0 / 304.8                 # millimeters → feet
 NHM_SENTINEL = {999, 888}
 
 
+def _get_huc_basin_overlay(
+    huc_reproj: gpd.GeoDataFrame,
+    basin_reproj: gpd.GeoDataFrame,
+    basin_col: str,
+    cache_dir: str | None = None,
+) -> gpd.GeoDataFrame:
+    """Compute (or load cached) HUC12 → basin spatial overlay.
+
+    The overlay is the geometric intersection of every HUC12 polygon
+    with every basin polygon, with ``overlap_area`` and ``area_frac``
+    columns pre-computed. It is the most expensive operation in the
+    NHM aggregation pipeline (~2 min for 3,645 HUC12s × 52 basins),
+    and the result is deterministic for a given HUC12 + basin pair, so
+    caching it to a GeoParquet file avoids recomputing on every Step 4
+    rerun.
+
+    The cache is keyed by ``{cache_dir}/huc_basin_overlay.parquet``.
+    If the file exists it is loaded; otherwise the overlay is computed
+    and saved.
+    """
+    cache_path = None
+    if cache_dir:
+        cache_path = os.path.join(cache_dir, 'huc_basin_overlay.parquet')
+        if os.path.isfile(cache_path):
+            logger.info(f'  Loading cached HUC12→basin overlay from {cache_path}')
+            return gpd.read_parquet(cache_path)
+
+    logger.info('  Computing HUC12→basin spatial overlay (this is slow; '
+                'result will be cached for future runs)...')
+    overlay = gpd.overlay(
+        huc_reproj[['huc12', 'area_m2', 'geometry']],
+        basin_reproj[[basin_col, 'geometry']],
+        how='intersection',
+    )
+    overlay['overlap_area'] = overlay.geometry.area
+    overlay['area_frac'] = overlay['overlap_area'] / overlay['area_m2']
+
+    if cache_path:
+        makedirs(os.path.dirname(cache_path))
+        overlay.to_parquet(cache_path)
+        logger.info(f'  Cached HUC12→basin overlay to {cache_path}')
+
+    return overlay
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Helper: aggregate a raster to basin volumes (AF)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -375,13 +420,10 @@ def load_nhm_basin_volumes(
 
         # Per-year basin volumes via spatial overlay of HUC12 → basins
         yearly_vols = {}
-        overlay = gpd.overlay(
-            huc_reproj[['huc12', 'area_m2', 'geometry']],
-            basin_reproj[[basin_col, 'geometry']],
-            how='intersection',
+        overlay = _get_huc_basin_overlay(
+            huc_reproj, basin_reproj, basin_col,
+            cache_dir=output_dir,
         )
-        overlay['overlap_area'] = overlay.geometry.area
-        overlay['area_frac'] = overlay['overlap_area'] / overlay['area_m2']
         for year in range(start_yr, end_yr + 1):
             yr_vols = ann_df[ann_df.year == year].set_index('huc12')['volume_m3']
             merged = overlay.merge(
@@ -852,22 +894,34 @@ def _plot_spatial_diff_maps(
     mean_raster_paths: dict[str, dict[str, str]],
     ref_raster: str,
     output_dir: str,
+    basin_shp: str | None = None,
+    basin_col: str = 'BASIN_NAME',
 ) -> None:
     """Create spatial maps of pairwise mean-annual depth differences.
 
     For each GW/SW category, produces three difference maps:
         ML − NHM, ML − Reitz, NHM − Reitz
-    using a diverging color map centered on zero.
+    using a diverging color map centered on zero, with groundwater
+    basin boundaries and AMA/INA labels overlaid.
 
     Args:
         mean_raster_paths (dict): ``{source: {cat: path}}`` where source ∈ {ML, NHM, Reitz} and
             cat ∈ {GW, SW}.  Paths to mean-annual depth rasters (mm).
         ref_raster (str): Reference raster for extent / CRS.
         output_dir (str): Directory for saved plots.
+        basin_shp (str or None): Path to GW basin boundary shapefile.
+            When provided, basin boundaries and AMA/INA labels are
+            overlaid on every panel.
+        basin_col (str): Column in *basin_shp* naming each basin.
 
     Returns:
         None
     """
+    from hydrolibs.visualops import (
+        _overlay_boundaries, get_ama_ina_basin_names, apply_journal_style,
+    )
+
+    apply_journal_style()
     makedirs(output_dir)
 
     with rio.open(ref_raster) as src:
@@ -875,22 +929,60 @@ def _plot_spatial_diff_maps(
             src.bounds.left, src.bounds.right,
             src.bounds.bottom, src.bounds.top,
         ]
+        raster_crs = src.crs
+
+    # Load basin boundaries if provided
+    basins_gdf = None
+    ama_ina = None
+    name_col = basin_col
+    if basin_shp and os.path.isfile(basin_shp):
+        basins_gdf = gpd.read_file(basin_shp)
+        if basins_gdf.crs != raster_crs:
+            basins_gdf = basins_gdf.to_crs(raster_crs)
+        name_col = (
+            basin_col if basin_col in basins_gdf.columns
+            else basins_gdf.columns[0]
+        )
+        ama_ina = get_ama_ina_basin_names()
 
     pairs = [('ML', 'NHM'), ('ML', 'Reitz'), ('NHM', 'Reitz')]
 
     for cat in ('GW', 'SW'):
-        fig, axes = plt.subplots(1, 3, figsize=(20, 6), constrained_layout=True)
-        fig.suptitle(f'Irrigation {cat} — Mean-Annual Depth Difference (mm)',
+        fig, axes = plt.subplots(1, 3, figsize=(20, 7), constrained_layout=True)
+        fig.suptitle(f'Irrigation {cat} \u2014 Mean-Annual Depth Difference (mm)',
                      fontsize=14, fontweight='bold')
 
+        # First pass: compute shared vmax across all three pairs
+        global_vmax = 1e-6
+        for src_a, src_b in pairs:
+            path_a = mean_raster_paths.get(src_a, {}).get(cat)
+            path_b = mean_raster_paths.get(src_b, {}).get(cat)
+            if path_a and path_b and os.path.isfile(path_a) and os.path.isfile(path_b):
+                a = read_raster_as_arr(path_a, get_file=False).astype(np.float64)
+                b = read_raster_as_arr(path_b, get_file=False).astype(np.float64)
+                a[np.isnan(a)] = 0.0
+                b[np.isnan(b)] = 0.0
+                d = a - b
+                m = (a == 0) & (b == 0)
+                d_valid = d[~m]
+                if d_valid.size > 0:
+                    global_vmax = max(
+                        global_vmax,
+                        abs(np.nanpercentile(d_valid, 2)),
+                        abs(np.nanpercentile(d_valid, 98)),
+                    )
+
+        # Second pass: render panels with shared color scale
+        last_im = None
         for col_i, (src_a, src_b) in enumerate(pairs):
             ax = axes[col_i]
+            ax.set_facecolor('#D5D5D5')
             path_a = mean_raster_paths.get(src_a, {}).get(cat)
             path_b = mean_raster_paths.get(src_b, {}).get(cat)
 
             if path_a is None or path_b is None or \
                not os.path.isfile(path_a) or not os.path.isfile(path_b):
-                ax.set_title(f'{src_a} − {src_b}  (data unavailable)')
+                ax.set_title(f'{src_a} \u2212 {src_b}  (data unavailable)')
                 ax.axis('off')
                 continue
 
@@ -900,24 +992,34 @@ def _plot_spatial_diff_maps(
             arr_b[np.isnan(arr_b)] = 0.0
 
             diff = arr_a - arr_b
-            # Mask where both are zero (outside domain)
             mask = (arr_a == 0) & (arr_b == 0)
             diff_masked = np.ma.masked_where(mask, diff)
 
-            vmax = max(abs(np.nanmin(diff_masked)), abs(np.nanmax(diff_masked)), 1e-6)
-            im = ax.imshow(
+            last_im = ax.imshow(
                 diff_masked, extent=extent, origin='upper',
-                cmap='RdBu_r', vmin=-vmax, vmax=vmax,
+                cmap='RdBu_r', vmin=-global_vmax, vmax=global_vmax,
                 interpolation='nearest',
             )
-            ax.set_title(f'{src_a} − {src_b}', fontweight='bold')
-            ax.set_xlabel('Easting (m)')
-            if col_i == 0:
-                ax.set_ylabel('Northing (m)')
-            fig.colorbar(im, ax=ax, shrink=0.8, label='Δ Depth (mm)')
+            if basins_gdf is not None:
+                _overlay_boundaries(
+                    ax, basins_gdf, ama_ina, name_col,
+                    label_fontsize=5.0, label_all=True,
+                )
+            ax.set_title(f'{src_a} \u2212 {src_b}', fontweight='bold')
+
+        # Single shared horizontal colorbar below all three panels
+        if last_im is not None:
+            cbar = fig.colorbar(
+                last_im, ax=list(axes), shrink=0.5, pad=0.06,
+                orientation='horizontal', aspect=40, extend='both',
+            )
+            cbar.set_label(
+                '\u0394 Depth (mm)', fontsize=10, fontweight='bold',
+            )
+            cbar.ax.tick_params(labelsize=10)
 
         out_path = os.path.join(output_dir, f'Spatial_Diff_{cat}.png')
-        fig.savefig(out_path, dpi=300, bbox_inches='tight')
+        fig.savefig(out_path, dpi=600, bbox_inches='tight')
         plt.close(fig)
 
     logger.info(f'Spatial difference maps saved to {output_dir}')
@@ -1128,13 +1230,10 @@ def _nhm_cu_volume_path(
     # via _raster_basin_volumes over-counts for HUC12-level polygon
     # rasters, so we derive 'mean' from yearly_vols instead.
     yearly_vols = {}
-    overlay = gpd.overlay(
-        huc_reproj[['huc12', 'area_m2', 'geometry']],
-        basin_reproj[[basin_col, 'geometry']],
-        how='intersection',
+    overlay = _get_huc_basin_overlay(
+        huc_reproj, basin_reproj, basin_col,
+        cache_dir=output_dir,
     )
-    overlay['overlap_area'] = overlay.geometry.area
-    overlay['area_frac'] = overlay['overlap_area'] / overlay['area_m2']
     for year in range(start_yr, end_yr + 1):
         yr_vols = ann_df[ann_df.year == year].set_index('huc12')['volume_m3']
         merged = overlay.merge(
@@ -1202,12 +1301,10 @@ def _nhm_ie_ratio_path(
 
     # Per-year basin means via spatial overlay
     yearly_means = {}
-    overlay = gpd.overlay(
-        huc_reproj[['huc12', 'area_m2', 'geometry']],
-        basin_reproj[[basin_col, 'geometry']],
-        how='intersection',
+    overlay = _get_huc_basin_overlay(
+        huc_reproj, basin_reproj, basin_col,
+        cache_dir=output_dir,
     )
-    overlay['overlap_area'] = overlay.geometry.area
     for year in range(start_yr, end_yr + 1):
         yr_row = df_az[df_az.Year == year]
         if yr_row.empty:
@@ -1871,7 +1968,10 @@ def run_intercomparison(
                   for cat in ('GW', 'SW')},
     }
     diff_dir = os.path.join(output_dir, 'Spatial_Diff/')
-    _plot_spatial_diff_maps(mean_raster_paths, ref_raster, diff_dir)
+    _plot_spatial_diff_maps(
+        mean_raster_paths, ref_raster, diff_dir,
+        basin_shp=basin_shp, basin_col=basin_col,
+    )
 
     # ── 10. Summary print ────────────────────────────────────────────────
     logger.info('\n' + '='*60)
@@ -2854,6 +2954,7 @@ def run_cap_srp_validation(
         list(ml_mean_vals.keys()), basin_areas_m2, scatter_dir,
         title='ML Total SW vs CAP + SRP — Per Basin',
         filename='Scatter_ML_vs_CAP_SRP.png',
+        is_validation=True,
     )
 
     # ── Summary ──────────────────────────────────────────────────────────
@@ -2961,13 +3062,9 @@ def _ps_annual_to_basin_volumes(
     )
 
     # Spatial overlay: HUC12 → basin fractional membership
-    overlay = gpd.overlay(
-        huc_reproj[['huc12', 'area_m2', 'geometry']],
-        basin_reproj[[basin_col, 'geometry']],
-        how='intersection',
+    overlay = _get_huc_basin_overlay(
+        huc_reproj, basin_reproj, basin_col,
     )
-    overlay['overlap_area'] = overlay.geometry.area
-    overlay['area_frac'] = overlay['overlap_area'] / overlay['area_m2']
 
     years = sorted(annual_df['year'].unique())
     yearly_vols = {}

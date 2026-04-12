@@ -6421,7 +6421,16 @@ def plot_intercomp_time_series(
             has_any_data = False
             for source, src_data in all_sources.items():
                 yearly = src_data.get(cat, {}).get('yearly', {})
-                years = sorted(int(y) for y in yearly.keys())
+                # Filter to numeric year keys only — some data structures
+                # (e.g. CAP/SRP) use {basin: {year: val}} and pass basin
+                # names as the yearly dict keys at the wrong nesting level.
+                numeric_keys = []
+                for k in yearly.keys():
+                    try:
+                        numeric_keys.append(int(k))
+                    except (ValueError, TypeError):
+                        continue
+                years = sorted(numeric_keys)
                 if not years:
                     continue
 
@@ -6429,16 +6438,24 @@ def plot_intercomp_time_series(
                 marker = markers.get(source, 'o')
                 label = labels.get(source, source)
 
-                # Build a lookup that handles both int and float year keys
-                yearly_int = {int(k): v for k, v in yearly.items()}
+                # Build a lookup that handles both int and float year keys,
+                # filtering to numeric keys only.
+                yearly_int = {}
+                for k, v in yearly.items():
+                    try:
+                        yearly_int[int(k)] = v
+                    except (ValueError, TypeError):
+                        continue
                 if mode == 'volume':
                     if basin == 'AZ_Total':
                         af_vals = np.array([
                             sum(yearly_int[yr].values()) for yr in years
                         ])
                     else:
+                        # Use NaN for missing basins so gaps appear
+                        # instead of false zeros (e.g. NHM before 2000)
                         af_vals = np.array([
-                            yearly_int[yr].get(basin, 0.0) for yr in years
+                            yearly_int[yr].get(basin, np.nan) for yr in years
                         ])
 
                     m3_vals = af_vals * af_to_m3
@@ -6533,6 +6550,7 @@ def plot_intercomp_scatter(
     mode: str = 'volume',
     af_to_m3: float = 1233.48184,
     m_to_mm: float = 1000.0,
+    is_validation: bool = False,
 ) -> None:
     """Generic intercomparison scatter plots with 1:1 line and linear fit.
 
@@ -6623,10 +6641,16 @@ def plot_intercomp_scatter(
                 mae_pct = normalized_mae(vy, vx)
                 mbe_pct = normalized_mbe(vy, vx)
                 mbe_sign = '\u2212' if mbe_pct < 0 else ''
+                # Validation (vs observed data): RMSE/MAE/MBE
+                # Intercomparison (model vs model): RMSD/MAD/MBD
+                if is_validation:
+                    e_labels = ('RMSE', 'MAE', 'MBE')
+                else:
+                    e_labels = ('RMSD', 'MAD', 'MBD')
                 metrics_text = (f'R²={r2:.3f}\n'
-                                f'RMSE={rmse_pct:.1f}%\n'
-                                f'MAE={mae_pct:.1f}%\n'
-                                f'MBE={mbe_sign}{abs(mbe_pct):.1f}%')
+                                f'{e_labels[0]}={rmse_pct:.1f}%\n'
+                                f'{e_labels[1]}={mae_pct:.1f}%\n'
+                                f'{e_labels[2]}={mbe_sign}{abs(mbe_pct):.1f}%')
                 ax.text(0.97, 0.03, metrics_text, transform=ax.transAxes,
                         fontsize=8, verticalalignment='bottom',
                         horizontalalignment='right',

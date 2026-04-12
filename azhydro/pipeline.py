@@ -3184,7 +3184,7 @@ def run_usgs_intercomparison() -> pd.DataFrame:
     reitz_base_dir = os.path.join(INPUT_DIR, 'USGS WU/USGS_Reitz_Irrigation')
     huc12_geojson = os.path.join(INPUT_DIR, 'GEE_Data', 'AZ_HUC12.geojson')
 
-    output_dir = os.path.join(prediction_dir, 'Intercomparison')
+    output_dir = os.path.join(prediction_dir, 'Withdrawal_Intercomparison')
 
     return intercompops.run_intercomparison(
         ml_pred_dir=ml_pred_dir,
