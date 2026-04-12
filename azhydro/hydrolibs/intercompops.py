@@ -84,18 +84,34 @@ def _filter_huc12_within_az(
     partially outside Arizona, which would otherwise create spurious
     differences in the spatial-diff maps and inflate the basin-level
     volume aggregation for border basins.
+
+    Both GeoDataFrames are reprojected to a common projected CRS
+    before computing the geometric intersection so that area
+    calculations are in meters, not degrees.
     """
-    az_union = basin_gdf.geometry.union_all()
-    frac = huc_gdf.geometry.intersection(az_union).area / huc_gdf.geometry.area
+    # Ensure both are in the same projected CRS for area computation.
+    # Use basin_gdf's CRS as the target (it's typically already projected).
+    target_crs = basin_gdf.crs
+    huc_proj = (
+        huc_gdf.to_crs(target_crs) if huc_gdf.crs != target_crs
+        else huc_gdf
+    )
+    basin_proj = basin_gdf
+    az_union = basin_proj.geometry.union_all()
+    frac = huc_proj.geometry.intersection(az_union).area / huc_proj.geometry.area
     keep = frac >= threshold
     n_dropped = int((~keep).sum())
+    n_kept = int(keep.sum())
     if n_dropped > 0:
         logger.info(
             f'  Dropped {n_dropped} cross-border HUC12s '
             f'(< {threshold * 100:.0f}% within AZ basins); '
-            f'{int(keep.sum())} HUC12s retained'
+            f'{n_kept} HUC12s retained'
         )
-    return huc_gdf[keep].copy()
+    else:
+        logger.info(f'  All {n_kept} HUC12s within AZ basins (no cross-border drops)')
+    # Return in the ORIGINAL CRS so downstream code can reproject as needed.
+    return huc_gdf[keep.values].copy()
 
 
 def _get_huc_basin_overlay(
