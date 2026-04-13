@@ -806,10 +806,9 @@ def create_streamflow_rasters(
                     flow_mm = ws_annual[oid].mean()
                 mask = ws_arr == oid
                 total_canal = yr_ws_canal_sum.get(oid, 0.0)
+                n_pixels = ws_pixel_count.get(oid, 1)
                 if total_canal > 0:
-                    max_canal = yr_canal_arr[mask].max()
-                    if max_canal > 0:
-                        cw_arr[mask] = flow_mm * (yr_canal_arr[mask] / max_canal)
+                    cw_arr[mask] = flow_mm * n_pixels * (yr_canal_arr[mask] / total_canal)
                 # No active canals in watershed → zero canal-weighted streamflow
 
             # CAP overlay weighted by canal density
@@ -819,9 +818,8 @@ def create_streamflow_rasters(
             else:
                 co_flow = co_annual.mean() if not co_annual.empty else 0.0
             if yr_cap_canal_sum > 0:
-                cap_canal_max = yr_canal_arr[cap_mask].max()
-                if cap_canal_max > 0:
-                    cw_arr[cap_mask] += co_flow * (yr_canal_arr[cap_mask] / cap_canal_max)
+                n_cap = int(cap_mask.sum())
+                cw_arr[cap_mask] += co_flow * n_cap * (yr_canal_arr[cap_mask] / yr_cap_canal_sum)
             # No active CAP canals → no CAP canal-weighted streamflow
 
             cw_arr[np.isnan(cw_arr)] = 0.0
