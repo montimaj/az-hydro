@@ -58,13 +58,6 @@ import rasterio as rio
 
 logger = logging.getLogger(__name__)
 
-# ── Module-level delivery-ratio state ────────────────────────────────────────
-# Set by ``run_uncertainty_quantification`` before the compute_sigma_*
-# calls so that ``_predict_total`` can apply the same delivery-calibrated
-# GW/SW scaling to every UQ ensemble member without threading the dict
-# through five function signatures.
-_module_basin_ratios: dict[str, float] | None = None
-
 # ── Constants ────────────────────────────────────────────────────────────────
 
 # 5 representative GCMs spanning the Southwest US climate space
@@ -204,7 +197,7 @@ def _safe_nanstd(stack, axis=0, ddof=1):
 
 def _predict_total(model, pred_features, year_df, partops,
                    raster_shape, valid_mask,
-                   basin_ratios=None):
+):
     """Predict and partition, returning total pumping and category dict.
 
     Args:
@@ -214,13 +207,6 @@ def _predict_total(model, pred_features, year_df, partops,
         partops: Module providing ``partition_predictions``.
         raster_shape (tuple): (rows, cols) of the full raster grid.
         valid_mask (np.ndarray): Boolean mask of valid pixels (ravelled).
-        basin_ratios (dict or None): ``{basin: ratio}`` from
-            ``partops.compute_basin_delivery_ratios()``. When provided,
-            ``partops.apply_basin_sw_scaling()`` is called after
-            partitioning to scale per-basin Total_SW by the observed
-            delivery ratio. This ensures UQ ensemble members receive
-            the same delivery-calibrated partitioning as the central
-            prediction in Step 3.
 
     Returns:
         tuple[np.ndarray, dict[str, np.ndarray]]: (total_1d, categories) where
@@ -229,15 +215,6 @@ def _predict_total(model, pred_features, year_df, partops,
     """
     raw = np.abs(model.predict(pred_features))
     cat = partops.partition_predictions(raw, year_df, raster_shape, valid_mask)
-    # Apply delivery-ratio scaling: prefer the explicit kwarg, fall
-    # back to the module-level variable set by run_uncertainty_quantification.
-    ratios = basin_ratios if basin_ratios is not None else _module_basin_ratios
-    if ratios:
-        partops.apply_basin_sw_scaling(
-            cat,
-            pixel_basins=year_df['GW_Basin'].values,
-            basin_ratios=ratios,
-        )
     return cat['Irrigation'] + cat['Non_Irrigation'], cat
 
 
@@ -1876,6 +1853,441 @@ def run_density_ratio_sensitivity(
     logger.info('  Partition sensitivity plots saved to %s', sens_dir)
 
 
+# ── CAP delivery reduction scenarios ──────────────────────────────────────
+
+CAP_SCENARIOS: dict[str, float] = {
+    'Baseline_900kAF': 1.0,
+    'Basic_Coordination_237kAF': 0.263,
+    'Extreme_Shortage_0kAF': 0.0,
+    'DCP_Tier0_192kAF_cut': 0.787,
+    'DCP_Tier1_512kAF_cut': 0.431,
+    'DCP_Tier2a_592kAF_cut': 0.342,
+    'DCP_Tier2b_640kAF_cut': 0.289,
+    'DCP_Tier3_720kAF_cut': 0.200,
+}
+
+NON_WELL_OFFSET_FIXED_AF = 790_000 + 350_000  # Yuma + reclaimed
+NON_WELL_OFFSET_CAP_AF = 950_000              # CAP-dependent other
+
+
+def run_cap_scenario_analysis(
+        model,
+        feature_cols: list[str],
+        az_df: pd.DataFrame,
+        drop_attrs: tuple[str, ...],
+        pred_data_dir: str,
+        output_dir: str,
+        start_year: int,
+        end_year: int,
+        year_list: list[int],
+        mosaic_res: int,
+        cap_service_area_geojson: str,
+        scenarios: dict[str, float] | None = None,
+) -> None:
+    """Simulate CAP delivery reduction scenarios via partition perturbation.
+
+    For each scenario, scales ``canal_weighted_streamflow_mm`` at CAP
+    service-area pixels by the scenario factor and re-runs
+    ``partition_predictions()`` with the same ML predictions. Total
+    withdrawals per pixel stay fixed; only the GW/SW split changes.
+
+    Scenarios follow WestWater Research (2026) and USBR DEIS DCP tiers.
+
+    Outputs:
+        - ``CAP_Scenario_Basin.csv``   — per-basin per-category volumes
+        - ``CAP_Scenario_Statewide.csv`` — statewide totals + reconciled WU
+        - ``CAP_Scenario_Delta.csv``   — change vs Baseline
+        - ``CAP_Scenario_Cumulative.csv`` — cumulative additional GW
+        - Time-series plots (WestWater, DCP tiers, per-basin, cumulative)
+    """
+    import hydrolibs.partitionops as partops
+    from hydrolibs.rasterops import read_raster_as_arr
+    from hydrolibs.sysops import makedirs
+
+    if scenarios is None:
+        scenarios = CAP_SCENARIOS
+
+    logger.info('Running CAP delivery reduction scenario analysis...')
+    logger.info('  Scenarios: %s', list(scenarios.keys()))
+    cap_dir = os.path.join(output_dir, 'CAP_Scenario')
+    makedirs(cap_dir)
+
+    pixel_area_m2 = mosaic_res ** 2
+    mm_to_m3 = pixel_area_m2 / 1000
+
+    # Build valid_mask and raster_shape from reference basin raster
+    ref_basin_file = os.path.join(
+        pred_data_dir, f'GW_Basin_{year_list[0]}.tif',
+    )
+    basin_arr, bfile = read_raster_as_arr(ref_basin_file, get_file=True)
+    basin_flat = basin_arr.ravel()
+    valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
+    raster_shape = basin_arr.shape
+    bfile.close()
+
+    # Build CAP pixel mask by rasterizing the CAP service area
+    import geopandas as gpd
+    from hydrolibs.vectorops import shp2raster
+    import tempfile
+
+    cap_gdf = gpd.read_file(cap_service_area_geojson)
+    ref_raster_file = os.path.join(
+        pred_data_dir, f'Predictor_{year_list[0]}.tif',
+    )
+    with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
+        cap_raster_path = tmp.name
+    shp2raster(
+        cap_service_area_geojson, cap_raster_path,
+        xres=mosaic_res, yres=mosaic_res, burn_value=1.0,
+    )
+    cap_arr = read_raster_as_arr(cap_raster_path, get_file=False)
+    os.unlink(cap_raster_path)
+    cap_flat = cap_arr.ravel()
+    # CAP mask aligned to valid pixels (same ordering as year_df rows)
+    cap_pixel_mask = cap_flat[valid_mask] > 0
+    n_cap_pixels = int(cap_pixel_mask.sum())
+    logger.info(
+        '  CAP service area: %d pixels (of %d valid)',
+        n_cap_pixels, int(valid_mask.sum()),
+    )
+
+    # Collect results
+    basin_rows = []
+    statewide_rows = []
+    delta_rows = []
+
+    projection_start = max(start_year, 2026)
+
+    for year in range(projection_start, end_year + 1):
+        year_df = az_df[az_df.Year == year].copy()
+        if year_df.empty:
+            continue
+
+        # Predict once — canal_weighted_streamflow_mm is in DROP_ATTRS
+        pf = _build_pred_features(year_df, feature_cols, drop_attrs)
+        raw = np.abs(model.predict(pf))
+
+        pixel_basins = year_df['GW_Basin'].values
+        all_basins = sorted(set(pixel_basins))
+
+        scenario_cats: dict[str, dict[str, np.ndarray]] = {}
+
+        for sc_name, factor in scenarios.items():
+            if factor == 1.0:
+                cats = partops.partition_predictions(
+                    raw, year_df, raster_shape, valid_mask,
+                )
+            else:
+                sc_df = year_df.copy()
+                sc_df.loc[
+                    sc_df.index[cap_pixel_mask],
+                    'canal_weighted_streamflow_mm',
+                ] *= factor
+                cats = partops.partition_predictions(
+                    raw, sc_df, raster_shape, valid_mask,
+                )
+            scenario_cats[sc_name] = cats
+
+            # Statewide totals
+            sw_row = {'Year': year, 'Scenario': sc_name}
+            for cat in partops.CATEGORIES:
+                vol_af = float(np.nansum(cats[cat])) * mm_to_m3 * M3_TO_AF
+                sw_row[f'{cat}_AF'] = round(vol_af, 2)
+            well_total = sw_row['Irrigation_AF'] + sw_row['Non_Irrigation_AF']
+            offset = NON_WELL_OFFSET_FIXED_AF + NON_WELL_OFFSET_CAP_AF * factor
+            sw_row['Well_Mediated_Total_AF'] = round(well_total, 2)
+            sw_row['Non_Well_Offset_AF'] = round(offset, 2)
+            sw_row['Estimated_Statewide_Total_AF'] = round(
+                well_total + offset, 2,
+            )
+            statewide_rows.append(sw_row)
+
+            # Per-basin
+            for basin in all_basins:
+                bmask = pixel_basins == basin
+                b_row = {
+                    'Year': year, 'Scenario': sc_name, 'Basin': basin,
+                }
+                for cat in partops.CATEGORIES:
+                    vol_af = (
+                        float(np.nansum(cats[cat][bmask]))
+                        * mm_to_m3 * M3_TO_AF
+                    )
+                    b_row[f'{cat}_AF'] = round(vol_af, 2)
+                basin_rows.append(b_row)
+
+        # Delta vs Baseline
+        baseline_cats = scenario_cats.get('Baseline_900kAF')
+        if baseline_cats is not None:
+            for sc_name, cats in scenario_cats.items():
+                if sc_name == 'Baseline_900kAF':
+                    continue
+                for basin in all_basins:
+                    bmask = pixel_basins == basin
+                    base_gw = (
+                        float(np.nansum(baseline_cats['Total_GW'][bmask]))
+                        * mm_to_m3 * M3_TO_AF
+                    )
+                    base_sw = (
+                        float(np.nansum(baseline_cats['Total_SW'][bmask]))
+                        * mm_to_m3 * M3_TO_AF
+                    )
+                    sc_gw = (
+                        float(np.nansum(cats['Total_GW'][bmask]))
+                        * mm_to_m3 * M3_TO_AF
+                    )
+                    sc_sw = (
+                        float(np.nansum(cats['Total_SW'][bmask]))
+                        * mm_to_m3 * M3_TO_AF
+                    )
+                    delta_rows.append({
+                        'Year': year,
+                        'Scenario': sc_name,
+                        'Basin': basin,
+                        'Baseline_GW_AF': round(base_gw, 2),
+                        'Baseline_SW_AF': round(base_sw, 2),
+                        'Scenario_GW_AF': round(sc_gw, 2),
+                        'Scenario_SW_AF': round(sc_sw, 2),
+                        'Delta_GW_AF': round(sc_gw - base_gw, 2),
+                        'Delta_SW_AF': round(sc_sw - base_sw, 2),
+                    })
+
+        if year % 10 == 0 or year == end_year:
+            logger.info('    CAP scenario year %d done', year)
+
+    # Write CSVs
+    basin_df = pd.DataFrame(basin_rows)
+    basin_df.to_csv(
+        os.path.join(cap_dir, 'CAP_Scenario_Basin.csv'), index=False,
+    )
+
+    statewide_df = pd.DataFrame(statewide_rows)
+    statewide_df.to_csv(
+        os.path.join(cap_dir, 'CAP_Scenario_Statewide.csv'), index=False,
+    )
+
+    delta_df = pd.DataFrame(delta_rows)
+    delta_df.to_csv(
+        os.path.join(cap_dir, 'CAP_Scenario_Delta.csv'), index=False,
+    )
+
+    # Cumulative additional GW drawdown
+    if not delta_df.empty:
+        cumul_rows = []
+        for sc_name in delta_df['Scenario'].unique():
+            for basin in delta_df['Basin'].unique():
+                sub = delta_df[
+                    (delta_df.Scenario == sc_name)
+                    & (delta_df.Basin == basin)
+                ].sort_values('Year')
+                cumsum = sub['Delta_GW_AF'].cumsum()
+                for yr, cv in zip(sub['Year'], cumsum):
+                    cumul_rows.append({
+                        'Year': yr,
+                        'Scenario': sc_name,
+                        'Basin': basin,
+                        'Cumulative_Delta_GW_AF': round(cv, 2),
+                    })
+        cumul_df = pd.DataFrame(cumul_rows)
+        cumul_df.to_csv(
+            os.path.join(cap_dir, 'CAP_Scenario_Cumulative.csv'),
+            index=False,
+        )
+
+    logger.info('  CAP scenario CSVs saved to %s', cap_dir)
+
+    # --- Plots ---
+    _plot_cap_scenarios(
+        statewide_df, delta_df,
+        scenarios, cap_dir,
+        projection_start, end_year,
+    )
+    logger.info('  CAP scenario plots saved to %s', cap_dir)
+
+
+def _plot_cap_scenarios(
+        statewide_df: pd.DataFrame,
+        delta_df: pd.DataFrame,
+        scenarios: dict[str, float],
+        out_dir: str,
+        start_year: int,
+        end_year: int,
+) -> None:
+    """Render CAP scenario time-series plots."""
+    import matplotlib.pyplot as plt
+    from hydrolibs.visualops import apply_journal_style
+
+    apply_journal_style()
+
+    cat_pairs = [
+        ('Total_GW_AF', 'Total_SW_AF', 'Total'),
+        ('Irrigation_GW_AF', 'Irrigation_SW_AF', 'Irrigation'),
+        ('Non_Irrigation_GW_AF', 'Non_Irrigation_SW_AF', 'Non-Irrigation'),
+    ]
+
+    scenario_colors = {
+        'Baseline_900kAF': '#2C3E50',
+        'Basic_Coordination_237kAF': '#E67E22',
+        'Extreme_Shortage_0kAF': '#E74C3C',
+    }
+    dcp_colors = {
+        'DCP_Tier0_192kAF_cut': '#85C1E9',
+        'DCP_Tier1_512kAF_cut': '#5DADE2',
+        'DCP_Tier2a_592kAF_cut': '#2E86C1',
+        'DCP_Tier2b_640kAF_cut': '#1B4F72',
+        'DCP_Tier3_720kAF_cut': '#154360',
+    }
+
+    # --- WestWater scenarios (3 main) ---
+    westwater = ['Baseline_900kAF', 'Basic_Coordination_237kAF',
+                 'Extreme_Shortage_0kAF']
+    fig, axes = plt.subplots(3, 2, figsize=(18, 12), sharex=True)
+
+    for row, (gw_col, sw_col, label) in enumerate(cat_pairs):
+        for col, (vol_col, gs_label) in enumerate(
+            [(gw_col, 'GW'), (sw_col, 'SW')],
+        ):
+            ax = axes[row, col]
+            for sc in westwater:
+                sdf = statewide_df[statewide_df.Scenario == sc].sort_values('Year')
+                if sdf.empty:
+                    continue
+                color = scenario_colors.get(sc, '#333')
+                lbl = sc.replace('_', ' ').replace(' kAF', ' kAF')
+                ax.plot(
+                    sdf['Year'], sdf[vol_col] / 1e6,
+                    label=lbl, color=color, linewidth=1.5,
+                )
+            ax.set_ylabel('Volume (MAF)', fontweight='bold')
+            ax.set_title(f'{label} {gs_label}', fontweight='bold')
+            if row == 0 and col == 0:
+                ax.legend(fontsize=8, loc='upper left')
+    axes[-1, 0].set_xlabel('Year', fontweight='bold')
+    axes[-1, 1].set_xlabel('Year', fontweight='bold')
+    fig.suptitle(
+        'CAP Delivery Reduction Scenarios — GW/SW Partition Shift',
+        fontweight='bold', fontsize=14,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.savefig(
+        os.path.join(out_dir, 'CAP_Scenario_WestWater.png'), dpi=300,
+    )
+    plt.close(fig)
+
+    # --- DCP tier scenarios ---
+    dcp_names = [k for k in scenarios if k.startswith('DCP_')]
+    if dcp_names:
+        fig, axes = plt.subplots(3, 2, figsize=(18, 12), sharex=True)
+        all_dcp = ['Baseline_900kAF'] + dcp_names
+        all_dcp_colors = {**{'Baseline_900kAF': '#2C3E50'}, **dcp_colors}
+        for row, (gw_col, sw_col, label) in enumerate(cat_pairs):
+            for col, (vol_col, gs_label) in enumerate(
+                [(gw_col, 'GW'), (sw_col, 'SW')],
+            ):
+                ax = axes[row, col]
+                for sc in all_dcp:
+                    sdf = statewide_df[
+                        statewide_df.Scenario == sc
+                    ].sort_values('Year')
+                    if sdf.empty:
+                        continue
+                    color = all_dcp_colors.get(sc, '#333')
+                    lbl = sc.replace('_', ' ')
+                    ax.plot(
+                        sdf['Year'], sdf[vol_col] / 1e6,
+                        label=lbl, color=color, linewidth=1.2,
+                    )
+                ax.set_ylabel('Volume (MAF)', fontweight='bold')
+                ax.set_title(f'{label} {gs_label}', fontweight='bold')
+                if row == 0 and col == 0:
+                    ax.legend(fontsize=7, loc='upper left')
+        axes[-1, 0].set_xlabel('Year', fontweight='bold')
+        axes[-1, 1].set_xlabel('Year', fontweight='bold')
+        fig.suptitle(
+            'DCP Shortage Tier Scenarios — GW/SW Partition Shift',
+            fontweight='bold', fontsize=14,
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        fig.savefig(
+            os.path.join(out_dir, 'CAP_Scenario_DCP_Tiers.png'), dpi=300,
+        )
+        plt.close(fig)
+
+    # --- Per-basin plot (WestWater scenarios, CAP-served basins) ---
+    cap_basins = [
+        'PHOENIX AMA', 'TUCSON AMA', 'PINAL AMA',
+        'HARQUAHALA INA', 'RANEGRAS PLAIN',
+    ]
+    if not delta_df.empty:
+        avail = [b for b in cap_basins if b in delta_df['Basin'].unique()]
+        if avail:
+            n = len(avail)
+            fig, axes = plt.subplots(n, 1, figsize=(14, 4 * n), sharex=True)
+            if n == 1:
+                axes = [axes]
+            for ax, basin in zip(axes, avail):
+                for sc in westwater[1:]:
+                    bdf = delta_df[
+                        (delta_df.Scenario == sc) & (delta_df.Basin == basin)
+                    ].sort_values('Year')
+                    if bdf.empty:
+                        continue
+                    color = scenario_colors.get(sc, '#333')
+                    lbl = sc.replace('_', ' ')
+                    ax.plot(
+                        bdf['Year'], bdf['Delta_GW_AF'] / 1e3,
+                        label=lbl, color=color, linewidth=1.5,
+                    )
+                ax.axhline(0, color='gray', linewidth=0.5, linestyle='--')
+                ax.set_ylabel('ΔGW (kAF)', fontweight='bold')
+                ax.set_title(basin, fontweight='bold')
+                if ax is axes[0]:
+                    ax.legend(fontsize=8)
+            axes[-1].set_xlabel('Year', fontweight='bold')
+            fig.suptitle(
+                'Additional GW Pumping Under CAP Reduction (vs Baseline)',
+                fontweight='bold', fontsize=14,
+            )
+            fig.tight_layout(rect=[0, 0, 1, 0.96])
+            fig.savefig(
+                os.path.join(out_dir, 'CAP_Scenario_Basin.png'), dpi=300,
+            )
+            plt.close(fig)
+
+    # --- Cumulative drawdown plot ---
+    cumul_path = os.path.join(out_dir, 'CAP_Scenario_Cumulative.csv')
+    if os.path.isfile(cumul_path):
+        cumul_df = pd.read_csv(cumul_path)
+        # Statewide cumulative = sum across all basins
+        state_cumul = cumul_df.groupby(
+            ['Year', 'Scenario'], as_index=False,
+        )['Cumulative_Delta_GW_AF'].sum()
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        for sc in state_cumul['Scenario'].unique():
+            sdf = state_cumul[state_cumul.Scenario == sc].sort_values('Year')
+            color = {**scenario_colors, **dcp_colors}.get(sc, '#333')
+            lbl = sc.replace('_', ' ')
+            ax.plot(
+                sdf['Year'], sdf['Cumulative_Delta_GW_AF'] / 1e6,
+                label=lbl, color=color, linewidth=1.5,
+            )
+        ax.set_xlabel('Year', fontweight='bold')
+        ax.set_ylabel('Cumulative Additional GW (MAF)', fontweight='bold')
+        ax.set_title(
+            'Cumulative Additional Groundwater Drawdown Under CAP Reduction',
+            fontweight='bold',
+        )
+        ax.legend(fontsize=8)
+        ax.axhline(0, color='gray', linewidth=0.5, linestyle='--')
+        fig.tight_layout()
+        fig.savefig(
+            os.path.join(out_dir, 'CAP_Scenario_Cumulative_Drawdown.png'),
+            dpi=300,
+        )
+        plt.close(fig)
+
+
 def _plot_sens_section(
         df_section: pd.DataFrame,
         plot_cats: tuple,
@@ -2589,7 +3001,6 @@ def run_uncertainty_quantification(
         basin_shp: str = '',
         prediction_model: str = 'XGB',
         skip_uq_steps: set[str] | None = None,
-        basin_ratios: dict[str, float] | None = None,
 ) -> None:
     """
     Run the full hybrid uncertainty quantification pipeline.
@@ -2640,16 +3051,6 @@ def run_uncertainty_quantification(
     pred_base = f'Full_Prediction_{prediction_model}'
     unc_dir = os.path.join(model_dir, pred_base, 'Uncertainty')
     makedirs(unc_dir)
-
-    # Set module-level delivery ratios so _predict_total applies the
-    # same delivery-calibrated GW/SW scaling to every ensemble member.
-    global _module_basin_ratios
-    _module_basin_ratios = basin_ratios
-    if basin_ratios:
-        logger.info(
-            f'  Delivery-ratio scaling active for {len(basin_ratios)} basins '
-            f'in all compute_sigma_* ensemble members'
-        )
 
     skip = skip_uq_steps or set()
     if skip:
@@ -2728,6 +3129,30 @@ def run_uncertainty_quantification(
         )
     else:
         logger.info('  Density-ratio sensitivity skipped.')
+
+    # ── CAP delivery reduction scenario analysis ──
+    if 'cap-scenario' not in skip:
+        cap_geojson = os.path.join(
+            vector_dir, 'CAP', 'CAP_Service_Area.geojson',
+        )
+        if not os.path.isfile(cap_geojson):
+            cap_geojson = os.path.join(
+                os.path.dirname(basin_shp), 'CAP_Service_Area.geojson',
+            )
+        if os.path.isfile(cap_geojson):
+            run_cap_scenario_analysis(
+                model, feature_cols, az_df, drop_attrs,
+                pred_data_dir, unc_dir, start_year, end_year,
+                year_list, mosaic_res,
+                cap_service_area_geojson=cap_geojson,
+            )
+        else:
+            logger.warning(
+                '  CAP service area geojson not found; '
+                'skipping CAP scenario analysis'
+            )
+    else:
+        logger.info('  CAP scenario analysis skipped.')
 
     # ── σ_total + augmentation ──
     full_pred_dir = os.path.join(model_dir, pred_base)
