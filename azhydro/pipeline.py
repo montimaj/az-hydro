@@ -1941,7 +1941,6 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     # time-averaged delivery magnitude; pre-delivery years get SW
     # zeroed.  Basins without delivery data (Yuma, Lower Gila, etc.)
     # keep their unscaled density-ratio partitioning.
-    import hydrolibs.intercompops as intercompops
     cap_xlsx = os.path.join(VECTOR_DIR, 'CAP',
                             'CAP Delivery Data DRI Request.xlsx')
     srp_xlsx = os.path.join(VECTOR_DIR, 'SRP',
