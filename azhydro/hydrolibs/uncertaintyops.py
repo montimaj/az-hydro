@@ -1926,22 +1926,21 @@ def run_cap_scenario_analysis(
     bfile.close()
 
     # Build CAP pixel mask by rasterizing the CAP service area
+    # onto the same grid as the basin raster
     import geopandas as gpd
-    from hydrolibs.vectorops import shp2raster
-    import tempfile
+    import rasterio
+    from rasterio.features import rasterize as rio_rasterize
 
     cap_gdf = gpd.read_file(cap_service_area_geojson)
-    ref_raster_file = os.path.join(
-        pred_data_dir, f'Predictor_{year_list[0]}.tif',
-    )
-    with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
-        cap_raster_path = tmp.name
-    shp2raster(
-        cap_service_area_geojson, cap_raster_path,
-        xres=mosaic_res, yres=mosaic_res, burn_value=1.0,
-    )
-    cap_arr = read_raster_as_arr(cap_raster_path, get_file=False)
-    os.unlink(cap_raster_path)
+    with rasterio.open(ref_basin_file) as ref_src:
+        cap_gdf_proj = cap_gdf.to_crs(ref_src.crs)
+        cap_arr = rio_rasterize(
+            [(geom, 1) for geom in cap_gdf_proj.geometry],
+            out_shape=raster_shape,
+            transform=ref_src.transform,
+            fill=0,
+            dtype='uint8',
+        )
     cap_flat = cap_arr.ravel()
     # CAP mask aligned to valid pixels (same ordering as year_df rows)
     cap_pixel_mask = cap_flat[valid_mask] > 0
