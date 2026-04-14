@@ -148,6 +148,80 @@ COMPONENT_N = {
 CU_CATEGORIES = ('Irrigation_CU', 'Irrigation_GW_CU', 'Irrigation_SW_CU')
 
 
+# ── Pre-GMA partitioning context ─────────────────────────────────────────────
+# Mirrors the production pipeline's pre-GMA overrides so UQ ensemble
+# members use the same partitioning logic as the central prediction.
+# Set by run_uncertainty_quantification() at the start of the run.
+# Contains arrays from the 2024 parquet snapshot:
+#   wd_1981, irr_wd_1981, nonirr_wd_1981, irr_cap_1981
+# All arrays are aligned with the same valid-pixel order used in az_df.
+
+_PRE_GMA_CTX: dict[str, np.ndarray | None] = {
+    'wd_1981': None,
+    'irr_wd_1981': None,
+    'nonirr_wd_1981': None,
+    'irr_cap_1981': None,
+}
+
+
+def _set_pre_gma_context(az_df: pd.DataFrame, ref_year: int = 2024) -> None:
+    """Populate the module-level pre-GMA partitioning context from az_df.
+
+    Extracts well density and irrigation capacity arrays from the
+    *ref_year* snapshot (default 2024 — the most complete registry).
+    Mirrors the pipeline's pre-GMA override behaviour so UQ ensemble
+    members partition consistently with the central prediction.
+    """
+    sub = az_df[az_df.Year == ref_year]
+    if len(sub) == 0:
+        logger.warning(
+            'UQ pre-GMA context: no rows for year %d in az_df; '
+            'pre-1981 partitioning will use year-specific arrays only.',
+            ref_year,
+        )
+        return
+    _PRE_GMA_CTX['wd_1981'] = (
+        sub['well_density'].values
+        if 'well_density' in sub.columns else None
+    )
+    _PRE_GMA_CTX['irr_wd_1981'] = (
+        sub['irr_well_density'].values
+        if 'irr_well_density' in sub.columns else None
+    )
+    _PRE_GMA_CTX['nonirr_wd_1981'] = (
+        sub['nonirr_well_density'].values
+        if 'nonirr_well_density' in sub.columns else None
+    )
+    _PRE_GMA_CTX['irr_cap_1981'] = (
+        sub['irr_capacity_fraction'].values
+        if 'irr_capacity_fraction' in sub.columns else None
+    )
+    logger.info(
+        'UQ pre-GMA context loaded from year %d (well_density=%s, '
+        'irr_well_density=%s, nonirr_well_density=%s, irr_cap=%s)',
+        ref_year,
+        _PRE_GMA_CTX['wd_1981'] is not None,
+        _PRE_GMA_CTX['irr_wd_1981'] is not None,
+        _PRE_GMA_CTX['nonirr_wd_1981'] is not None,
+        _PRE_GMA_CTX['irr_cap_1981'] is not None,
+    )
+
+
+def _wd_feature_alpha(year: int) -> float:
+    """Return the well-density feature blend alpha for *year*.
+
+    Mirrors the pipeline.py blend (1945→1970 ramp 0→1, stays 1.0
+    forever).  Used in _build_pred_features to apply the same blend
+    to ML feature `well_density` as the production pipeline.
+    """
+    RAMP_S, RAMP_E = 1945, 1970
+    if year < RAMP_S:
+        return 0.0
+    if year < RAMP_E:
+        return (year - RAMP_S) / (RAMP_E - RAMP_S)
+    return 1.0
+
+
 # ── Helper ───────────────────────────────────────────────────────────────────
 
 def _build_pred_features(
@@ -169,6 +243,23 @@ def _build_pred_features(
         if c not in pred.columns:
             pred[c] = 0
     pred = pred[feature_cols]
+
+    # Pre-GMA well_density blend (mirrors pipeline.py logic).  Without
+    # this blend, UQ ML predictions pre-1981 use sparse year-specific
+    # well registries and under-predict relative to the central run.
+    yr = int(year_df['Year'].iloc[0]) if 'Year' in year_df.columns and len(year_df) else None
+    wd_1981 = _PRE_GMA_CTX.get('wd_1981')
+    if (yr is not None and yr < 1981 and wd_1981 is not None
+            and 'well_density' in pred.columns and len(pred) == len(wd_1981)):
+        alpha = _wd_feature_alpha(yr)
+        if alpha > 0:
+            year_wd = pred['well_density'].values
+            pred = pred.copy()
+            pred['well_density'] = (
+                year_wd * (1 - alpha)
+                + np.nan_to_num(wd_1981, nan=0.0) * alpha
+            )
+
     inf_mask = np.isinf(pred.values)
     nan_mask = pred.isna().values
     n_inf = int(inf_mask.sum())
@@ -215,8 +306,28 @@ def _predict_total(model, pred_features, year_df, partops,
     """
     raw = np.abs(model.predict(pred_features))
     yr = int(year_df['Year'].iloc[0]) if 'Year' in year_df.columns else 0
-    cat = partops.partition_predictions(raw, year_df, raster_shape, valid_mask, year=yr)
+    cat = _partition_with_ctx(
+        partops, raw, year_df, raster_shape, valid_mask, year=yr,
+    )
     return cat['Irrigation'] + cat['Non_Irrigation'], cat
+
+
+def _partition_with_ctx(partops, predictions, year_df, raster_shape,
+                         valid_mask, year, sw_smooth_sigma=4.0):
+    """Call partops.partition_predictions with the pre-GMA context kwargs.
+
+    Centralises the wd_1981/irr_wd_1981/nonirr_wd_1981/irr_cap_1981
+    plumbing so all UQ ensemble members partition identically to the
+    central pipeline run.
+    """
+    return partops.partition_predictions(
+        predictions, year_df, raster_shape, valid_mask,
+        sw_smooth_sigma=sw_smooth_sigma, year=year,
+        wd_1981=_PRE_GMA_CTX.get('wd_1981'),
+        irr_wd_1981=_PRE_GMA_CTX.get('irr_wd_1981'),
+        nonirr_wd_1981=_PRE_GMA_CTX.get('nonirr_wd_1981'),
+        irr_cap_1981=_PRE_GMA_CTX.get('irr_cap_1981'),
+    )
 
 
 def _compute_category_sigmas(
@@ -1766,9 +1877,9 @@ def run_density_ratio_sensitivity(
         raw = np.abs(model.predict(pf_base))
 
         # --- Baseline partition ---
-        cats_base = partops.partition_predictions(
-            raw, year_df, raster_shape, valid_mask, sw_smooth_sigma=4.0,
-            year=year,
+        cats_base = _partition_with_ctx(
+            partops, raw, year_df, raster_shape, valid_mask,
+            year=year, sw_smooth_sigma=4.0,
         )
 
         # --- Density section: both sides of ratio, opposite signs ---
@@ -1777,9 +1888,9 @@ def run_density_ratio_sensitivity(
         plus_df['nonirr_well_density'] = year_df['nonirr_well_density'].values * (1 + delta)
         plus_df['irr_sw_rights_density'] = year_df['irr_sw_rights_density'].values * max(1 - delta, 0)
         plus_df['nonirr_sw_rights_density'] = year_df['nonirr_sw_rights_density'].values * max(1 - delta, 0)
-        cats_density_plus = partops.partition_predictions(
-            raw, plus_df, raster_shape, valid_mask, sw_smooth_sigma=4.0,
-            year=year,
+        cats_density_plus = _partition_with_ctx(
+            partops, raw, plus_df, raster_shape, valid_mask,
+            year=year, sw_smooth_sigma=4.0,
         )
 
         minus_df = year_df.copy()
@@ -1787,19 +1898,19 @@ def run_density_ratio_sensitivity(
         minus_df['nonirr_well_density'] = year_df['nonirr_well_density'].values * max(1 - delta, 0)
         minus_df['irr_sw_rights_density'] = year_df['irr_sw_rights_density'].values * (1 + delta)
         minus_df['nonirr_sw_rights_density'] = year_df['nonirr_sw_rights_density'].values * (1 + delta)
-        cats_density_minus = partops.partition_predictions(
-            raw, minus_df, raster_shape, valid_mask, sw_smooth_sigma=4.0,
-            year=year,
+        cats_density_minus = _partition_with_ctx(
+            partops, raw, minus_df, raster_shape, valid_mask,
+            year=year, sw_smooth_sigma=4.0,
         )
 
         # --- Smoothing section: baseline densities, swept sigma ---
-        cats_smooth_high = partops.partition_predictions(
-            raw, year_df, raster_shape, valid_mask,
-            sw_smooth_sigma=smooth_sigmas[1], year=year,
+        cats_smooth_high = _partition_with_ctx(
+            partops, raw, year_df, raster_shape, valid_mask,
+            year=year, sw_smooth_sigma=smooth_sigmas[1],
         )
-        cats_smooth_low = partops.partition_predictions(
-            raw, year_df, raster_shape, valid_mask,
-            sw_smooth_sigma=smooth_sigmas[0], year=year,
+        cats_smooth_low = _partition_with_ctx(
+            partops, raw, year_df, raster_shape, valid_mask,
+            year=year, sw_smooth_sigma=smooth_sigmas[0],
         )
 
         for cat in partops.CATEGORIES:
@@ -1976,8 +2087,8 @@ def run_cap_scenario_analysis(
         basin_masks = {b: (pixel_basins == b) for b in all_basins}
 
         # Baseline partition (kept for delta computation)
-        cats_base = partops.partition_predictions(
-            raw, year_df, raster_shape, valid_mask, year=year,
+        cats_base = _partition_with_ctx(
+            partops, raw, year_df, raster_shape, valid_mask, year=year,
         )
         base_basin_gw: dict[str, float] = {}
         base_basin_sw: dict[str, float] = {}
@@ -2028,8 +2139,8 @@ def run_cap_scenario_analysis(
                 sc_df.index[cap_pixel_mask],
                 'canal_weighted_streamflow_mm',
             ] *= factor
-            cats = partops.partition_predictions(
-                raw, sc_df, raster_shape, valid_mask, year=year,
+            cats = _partition_with_ctx(
+                partops, raw, sc_df, raster_shape, valid_mask, year=year,
             )
 
             sw_row = {'Year': year, 'Scenario': sc_name}
@@ -3080,6 +3191,12 @@ def run_uncertainty_quantification(
     pred_base = f'Full_Prediction_{prediction_model}'
     unc_dir = os.path.join(model_dir, pred_base, 'Uncertainty')
     makedirs(unc_dir)
+
+    # Initialise pre-GMA partitioning context from the 2024 az_df snapshot
+    # so all UQ ensemble members partition with the same overrides as the
+    # central pipeline run (well-density blend in ML features +
+    # 2024 well/irr_capacity arrays in partition_predictions).
+    _set_pre_gma_context(az_df, ref_year=2024)
 
     skip = skip_uq_steps or set()
     if skip:

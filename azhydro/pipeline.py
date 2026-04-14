@@ -1990,21 +1990,19 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         pred_features = pred_features.replace([np.inf, -np.inf], np.nan).fillna(0)
 
         # Pre-GMA: override well_density with 2024 values in ML features.
-        # Blend year-specific and 2024 well density in ML features
-        # using the same ramp as the partition override (1938→1960 ramp
-        # up, 1981→1985 ramp down) to avoid discontinuities.
+        # Blend year-specific and 2024 well density in ML features.
+        # Ramp-up 1945→1970, stays at 1.0 forever (2024 registry has the
+        # most complete coverage and benefits post-CAP years too).
         _ramp_up_s, _ramp_up_e = 1945, 1970
-        _ramp_dn_s, _ramp_dn_e = partops.GMA_YEAR, 1985
         if year < _ramp_up_s:
             _feat_alpha = 0.0
         elif year < _ramp_up_e:
             _feat_alpha = (year - _ramp_up_s) / (_ramp_up_e - _ramp_up_s)
-        elif year <= 1980:
-            _feat_alpha = 1.0
-        elif year < _ramp_dn_e:
-            _feat_alpha = 1.0 - (year - _ramp_dn_s) / (_ramp_dn_e - _ramp_dn_s)
         else:
-            _feat_alpha = 0.0
+            _feat_alpha = 1.0
+        # Floor for 1925-1949 era (matches partitionops _wd_alpha)
+        # Note: pre-1938 LU-only pixel retention is enabled in
+        # partitionops to capture the unregistered well era.
         if _feat_alpha > 0 and 'well_density' in pred_features.columns and _wd_1981 is not None:
             pred_features = pred_features.copy()
             year_wd = pred_features['well_density'].values

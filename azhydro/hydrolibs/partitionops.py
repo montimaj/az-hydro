@@ -160,7 +160,8 @@ def compute_sw_fraction(
 
 RURAL_AMA_INA = frozenset({
     'WILLCOX AMA', 'HARQUAHALA INA', 'HUALAPAI VALLEY INA',
-    'JOSEPH CITY INA', 'DOUGLAS AMA',
+    'JOSEPH CITY INA', 'DOUGLAS AMA', 'PINAL AMA',
+    'PHOENIX AMA', 'TUCSON AMA', 'PRESCOTT AMA', 'SANTA CRUZ AMA',
 })
 
 
@@ -176,7 +177,7 @@ CANAL_PREDICTOR_START = 1938
 #   gw_frac = (gw_weight × wd) / (gw_weight × wd + swd_smooth)
 GMA_YEAR = 1981
 CAP_FULL_YEAR = 1993
-GW_WEIGHT_PRE_GMA = 2.0
+GW_WEIGHT_PRE_GMA = 1.0
 GW_WEIGHT_POST_CAP = 0.1
 
 
@@ -263,27 +264,44 @@ def partition_predictions(
     has_well = ~((well_dens == 0) | np.isnan(well_dens)) \
         if well_dens is not None else np.zeros(len(predictions), dtype=bool)
 
-    # ---- Hindcast override ramp ----
-    # Smooth ramp-up from 1938→1960 (alpha 0→1) and ramp-down from
-    # 1981→1985 (alpha 1→0).  Controls well density override, LU-only
-    # pixel retention, irr_cap override, and urban scaling exemption.
+    # ---- Hindcast override ramps ----
+    # _wd_alpha: well density override ramp (ramps up 1945→1970,
+    # stays 1.0 forever — 2024 registry applies from 1960 onward).
+    # _override_alpha: irr_cap + urban scaling exemption ramp (ramps
+    # up 1945→1970, stays 1.0 until 1980, ramps down 1981→1985).
     _RAMP_UP_START, _RAMP_UP_END = 1945, 1970
     _RAMP_DN_START, _RAMP_DN_END = GMA_YEAR, 1985
     if year < _RAMP_UP_START:
-        _hindcast_alpha = 0.0
+        _wd_alpha = 0.0
     elif year < _RAMP_UP_END:
-        _hindcast_alpha = (year - _RAMP_UP_START) / (_RAMP_UP_END - _RAMP_UP_START)
-    elif year <= 1980:
-        _hindcast_alpha = 1.0
-    elif year < _RAMP_DN_END:
-        _hindcast_alpha = 1.0 - (year - _RAMP_DN_START) / (_RAMP_DN_END - _RAMP_DN_START)
+        _wd_alpha = (year - _RAMP_UP_START) / (_RAMP_UP_END - _RAMP_UP_START)
     else:
-        _hindcast_alpha = 0.0
+        _wd_alpha = 1.0
+    # Note: no pre-1938 _wd_alpha floor — XGBoost treats any
+    # well_density > 0 as significant, so even tiny floors inflate
+    # predictions massively.  Pre-1938 stays well-only with the
+    # year-specific registry (acknowledged limitation).
 
-    # Pre-GMA: blend year-specific and 2024 well density using ramp.
+    if year < _RAMP_UP_START:
+        _override_alpha = 0.0
+    elif year < _RAMP_UP_END:
+        _override_alpha = (year - _RAMP_UP_START) / (_RAMP_UP_END - _RAMP_UP_START)
+    elif year <= 1980:
+        _override_alpha = 1.0
+    elif year < _RAMP_DN_END:
+        _override_alpha = 1.0 - (year - _RAMP_DN_START) / (_RAMP_DN_END - _RAMP_DN_START)
+    else:
+        _override_alpha = 0.0
+
+    # Backward-compat alias for existing code paths
+    _hindcast_alpha = _override_alpha
+
+    # Blend year-specific and 2024 well density using ramp.  Full 2024
+    # override from 1970 onward (no ramp down — post-CAP years benefit
+    # from the complete registry too).
     _gma_fill_mask = np.zeros(len(predictions), dtype=bool)
-    if _hindcast_alpha > 0 and wd_1981 is not None:
-        blended_wd = well_dens * (1 - _hindcast_alpha) + wd_1981 * _hindcast_alpha
+    if _wd_alpha > 0 and wd_1981 is not None:
+        blended_wd = well_dens * (1 - _wd_alpha) + wd_1981 * _wd_alpha
         well_dens = np.nan_to_num(blended_wd, nan=0.0)
         has_well = well_dens > 0
         _gma_fill_mask = has_well
@@ -299,15 +317,27 @@ def partition_predictions(
     if year < CANAL_PREDICTOR_START:
         has_well = has_well & (_has_crop_any | _has_urban_any)
 
-    # LU-only pixel retention scales with the ramp
-    has_crop = _has_crop_any & (_hindcast_alpha > 0 or year >= CANAL_PREDICTOR_START)
-    has_urban = _has_urban_any & (_hindcast_alpha > 0 or year >= CANAL_PREDICTOR_START)
+    # LU-only pixel retention from 1925+ (1938 LULC snapshot used as
+    # proxy for 1925-1937 to capture unregistered well era).
+    has_crop = _has_crop_any & (year >= 1925)
+    has_urban = _has_urban_any & (year >= 1925)
     keep = has_well | has_smooth_canal | has_crop | has_urban
     predictions = predictions.copy()
     predictions[~keep] = np.nan
 
     # Identify LU-only pixels (crop/urban but no wells, no canal service)
     lu_only = ~has_well & ~has_smooth_canal & (has_crop | has_urban)
+
+    # Scale LU-only pixel predictions:
+    # 1925-1937: small ramp 0.05→0.15 to capture early ag boom era
+    # 1938-1944: 0 (no override yet)
+    # 1945-1970: ramp 0→1 (matches _wd_alpha)
+    # 1970+: 1.0 (full)
+    if 1925 <= year < CANAL_PREDICTOR_START and lu_only.any():
+        early_alpha = 0.10 + (year - 1925) * (0.30 - 0.10) / (1937 - 1925)
+        predictions[lu_only] = predictions[lu_only] * early_alpha
+    elif _wd_alpha < 1.0 and lu_only.any():
+        predictions[lu_only] = predictions[lu_only] * _wd_alpha
 
     # ---- Irrigation / Non-irrigation split ----
     # Use pump-capacity-weighted irrigation fraction when available:
@@ -364,13 +394,24 @@ def partition_predictions(
             irr_cap_frac = np.clip(np.nan_to_num(irr_cap_frac, nan=0.0), 0, 1)
 
         # Hindcast irr_cap override using the ramp.
-        # 1970-1980: use 2024 irr_capacity_fraction, assign remaining
-        # fully to non-irrigation (no urban scaling).
-        # 1938-1969: blend year-specific toward 2024 using _hindcast_alpha.
-        # Pre-1938: well+crop override only.
-        if crop_frac is not None and _hindcast_alpha > 0 and irr_cap_1981 is not None:
-            irr_cap_2024 = np.clip(np.nan_to_num(irr_cap_1981, nan=0.0), 0, 1)
-            irr_cap_frac = irr_cap_frac * (1 - _hindcast_alpha) + irr_cap_2024 * _hindcast_alpha
+        # Ramp-up (1945-1969): boost only at crop pixels (partial alpha
+        # — applying to all pixels inflates totals by preventing
+        # nonirr from being urban-scaled away).
+        # Plateau + ramp-down (1970-1984): boost at ALL pixels (USBR
+        # reports ~91% ag).  The ramp-down alpha itself tapers the
+        # boost smoothly toward the modern parquet values.
+        if _override_alpha > 0 and urban_frac is not None:
+            uf_override = np.clip(np.nan_to_num(urban_frac, nan=0.0), 0, 1)
+            ag_era_cap = 1.0 - uf_override
+            blended = (
+                irr_cap_frac * (1 - _override_alpha)
+                + ag_era_cap * _override_alpha
+            )
+            if year >= 1970:
+                irr_cap_frac = blended
+            elif crop_frac is not None:
+                has_crop_px = np.nan_to_num(crop_frac, nan=0.0) > 0
+                irr_cap_frac = np.where(has_crop_px, blended, irr_cap_frac)
             irr_cap_frac = np.clip(irr_cap_frac, 0, 1)
         elif crop_frac is not None and year < CANAL_PREDICTOR_START:
             well_with_crop = has_well & (np.nan_to_num(crop_frac, nan=0.0) > 0)
@@ -379,6 +420,25 @@ def partition_predictions(
                 else np.zeros(well_with_crop.sum()), nan=0.0,
             ), 0, 1)
             irr_cap_frac[well_with_crop] = 1.0 - uf_pre
+
+        # Post-CAP: light ag boost at crop pixels (partial blend toward
+        # 1-urban_frac) to correct for 2024 registry undercounting
+        # irrigation at urban-encroached ag areas.  USGS/ADWR show ag
+        # remained ~72% of water use even in 2017.
+        if crop_frac is not None and year >= _RAMP_DN_END:
+            post_cap_blend = 0.6
+            has_crop_px_pc = np.nan_to_num(crop_frac, nan=0.0) > 0
+            uf_pc = np.clip(np.nan_to_num(
+                urban_frac if urban_frac is not None
+                else np.zeros(len(predictions)), nan=0.0,
+            ), 0, 1)
+            ag_cap_pc = 1.0 - uf_pc
+            irr_cap_frac = np.where(
+                has_crop_px_pc,
+                irr_cap_frac * (1 - post_cap_blend) + ag_cap_pc * post_cap_blend,
+                irr_cap_frac,
+            )
+            irr_cap_frac = np.clip(irr_cap_frac, 0, 1)
 
         irr = predictions * irr_cap_frac
         nonirr = predictions * (1 - irr_cap_frac)
@@ -445,14 +505,37 @@ def partition_predictions(
             if basin_names is not None else np.zeros(len(predictions), dtype=bool)
         apply_uf = (is_other | is_rural_ama) & ~lu_only
         uf = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
-        # Hindcast: ramp urban scaling exemption using _hindcast_alpha.
-        # alpha=1 (1960-1980): no urban scaling, nonirr keeps full volume.
-        # alpha=0 (pre-1938, post-1985): full urban scaling.
-        if _hindcast_alpha > 0:
-            scaled = nonirr[apply_uf] * uf[apply_uf]
-            nonirr[apply_uf] = scaled * (1 - _hindcast_alpha) + nonirr[apply_uf] * _hindcast_alpha
+        # Urban scaling exemption: ramp from 1960 (delayed start —
+        # urban development in AZ was minimal pre-1960 so the exemption
+        # is only needed for the peak ag era and beyond).
+        # Ramps up 1960→1970, stays 1.0 until 1980, ramps down 1981→1985.
+        if year < 1960:
+            _urb_alpha = 0.0
+        elif year < 1970:
+            _urb_alpha = (year - 1960) / (1970 - 1960)
+        elif year <= 1980:
+            _urb_alpha = 1.0
+        elif year < _RAMP_DN_END:
+            _urb_alpha = 1.0 - (year - _RAMP_DN_START) / (_RAMP_DN_END - _RAMP_DN_START)
         else:
+            _urb_alpha = 0.0
+
+        if _urb_alpha > 0:
+            scaled = nonirr[apply_uf] * uf[apply_uf]
+            nonirr[apply_uf] = scaled * (1 - _urb_alpha) + nonirr[apply_uf] * _urb_alpha
+        else:
+            nonirr_before = nonirr[apply_uf].copy()
             nonirr[apply_uf] = nonirr[apply_uf] * uf[apply_uf]
+            # Post-CAP: at rural pixels, recover the urban-scaled-away
+            # nonirr volume as irrigation, scaled by crop_frac.  Desert
+            # pixels (crop_frac=0) get nothing; partial-ag pixels get
+            # proportional recovery.
+            if year >= _RAMP_DN_END and crop_frac is not None:
+                cf_apply = np.clip(np.nan_to_num(
+                    crop_frac[apply_uf], nan=0.0,
+                ), 0, 1)
+                rural_residual = nonirr_before - nonirr[apply_uf]
+                irr[apply_uf] = irr[apply_uf] + rural_residual * cf_apply
 
     # ---- Zero-surface-water mask: per-pixel canal-weighted streamflow ----
     # Where canal-weighted streamflow is zero, there is no canal-delivered
@@ -484,6 +567,10 @@ def partition_predictions(
     # gets 1000× more influence than a POD at a dry wash.  This replaces
     # the separate cw_norm boost — canal delivery information is now
     # embedded in the smoothed SW density itself.
+    # Post-GMA (1981+): widen SW smoothing to 8 (2x) to spread
+    # canal-delivered SW influence over the larger service areas.
+    _sw_sigma = 8.0 if year >= GMA_YEAR else sw_smooth_sigma
+
     def _smooth_sw_density(sw_dens, cw_sf):
         """Weight SW POD density by cw_streamflow and Gaussian-smooth."""
         sw_grid = np.zeros(raster_shape, dtype=np.float64)
@@ -491,7 +578,7 @@ def partition_predictions(
         sw_grid.ravel()[valid_mask] = np.nan_to_num(sw_dens, nan=0.0)
         cw_grid.ravel()[valid_mask] = np.nan_to_num(cw_sf, nan=0.0)
         weighted = sw_grid * cw_grid
-        smoothed = _gaussian_filter(weighted, sigma=sw_smooth_sigma)
+        smoothed = _gaussian_filter(weighted, sigma=_sw_sigma)
         return smoothed.ravel()[valid_mask]
 
     cw_sf_vals = cw_streamflow if cw_streamflow is not None else np.zeros(len(predictions))

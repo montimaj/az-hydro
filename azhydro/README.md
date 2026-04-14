@@ -2297,40 +2297,208 @@ ancillary data already in the predictor stack:
 
 | Category | Derivation |
 |---|---|
-| **Irrigation** | `total × irr_fraction` (pump-capacity-weighted or area-based) |
-| **Non_Irrigation** | `(total − Irrigation) × URBAN` (Gaussian-smoothed urban density, 0–1) |
-| **Total** | `Irrigation + Non_Irrigation` (recomputed after urban weighting) |
-| **Irrigation_GW** | `Irrigation × irr_gw_frac` (density-ratio, see below) |
-| **Irrigation_SW** | `Irrigation − Irrigation_GW` |
-| **Non_Irrigation_GW** | `Non_Irrigation × nonirr_gw_frac` (density-ratio, see below) |
+| **Irrigation** | `total × irr_cap_frac` (pump-capacity-weighted, era-dependent override) |
+| **Non_Irrigation** | `total × (1 − irr_cap_frac)`, then urban-fraction-scaled in rural areas |
+| **Irrigation_GW** | `Irrigation × irr_gw_frac` (era-weighted density ratio) |
+| **Irrigation_SW** | `Irrigation − Irrigation_GW` (+ delivery residual) |
+| **Non_Irrigation_GW** | `Non_Irrigation × nonirr_gw_frac` (era-weighted density ratio) |
 | **Non_Irrigation_SW** | `Non_Irrigation − Non_Irrigation_GW` |
 | **Total_GW** | `Irrigation_GW + Non_Irrigation_GW` |
 | **Total_SW** | `Irrigation_SW + Non_Irrigation_SW` |
 
-**Density-ratio GW/SW split with CW-weighted smoothing:** The GW/SW
-split uses ADWR well density against HarDWR SW rights density weighted
-by canal-weighted streamflow and Gaussian-smoothed (σ=4, ~8 km radius)
-to spread each SW POD's influence over its canal service area:
+All partitions use subtraction from the parent total (e.g.,
+`nonirr_sw = nonirr − nonirr_gw`) to guarantee exact budget closure
+with no floating-point drift.
+
+#### Pixel retention (`keep` mask)
 
 ```
-sw_smoothed    = gaussian_filter(irr_sw_rights_density × canal_weighted_streamflow, σ=4)
-irr_gw_frac    = irr_well_density    / (irr_well_density    + sw_smoothed)
-nonirr_gw_frac = nonirr_well_density / (nonirr_well_density + nonirr_sw_smoothed)
+keep = has_well | has_smooth_canal | has_crop | has_urban
 ```
 
-A POD at a major canal headgate (high cw_streamflow) gets proportionally
-more influence than a POD at a dry wash — the product
-`POD_count × cw_streamflow` scales the SW rights by actual delivery
-capacity.  The Gaussian spread distributes that capacity-weighted
-influence across the canal service area, solving the spatial mismatch
-between point-source SW PODs and diffuse GW wells.  Both well and
-SW-rights densities are per-year rasters gated by installation/priority
-dates, so the GW/SW balance evolves as infrastructure builds out.
-Where the denominator is zero, `gw_frac` defaults to 1.0 (100 % GW).
+| Mask | Definition | Era gate |
+|---|---|---|
+| `has_well` | `well_density > 0` (with 1925–1937 LULC overlap filter) | All years |
+| `has_smooth_canal` | Gaussian-smoothed canal-weighted streamflow > 0 AND crop_frac > 0 | year ≥ 1938 (CANAL_PREDICTOR_START) |
+| `has_crop` | `annual_crop_fraction > 0` | year ≥ 1925 (uses 1938 LULC snapshot for 1925–1937) |
+| `has_urban` | `annual_urban_fraction ≥ 0.2` | year ≥ 1925 |
+
+Pixels failing all four masks have their predictions set to NaN.
+Pre-1925 is well-only with the additional constraint that the well
+must overlap a crop or urban pixel (1938 LULC snapshot used as proxy)
+to filter out abandoned/desert wells.
+
+#### Density-ratio GW/SW split with CW-weighted smoothing
+
+The GW/SW split uses ADWR well density against HarDWR SW rights density
+weighted by canal-weighted streamflow and Gaussian-smoothed to spread
+each SW POD's influence over its canal service area:
+
+```
+sw_smoothed     = gaussian_filter(irr_sw_rights_density × canal_weighted_streamflow, σ=_sw_sigma)
+irr_gw_frac     = (gw_weight × irr_well_density)    / (gw_weight × irr_well_density    + sw_smoothed)
+nonirr_gw_frac  = (gw_weight × nonirr_well_density) / (gw_weight × nonirr_well_density + nonirr_sw_smoothed)
+```
+
+A POD at a major canal headgate (high `cw_streamflow`) gets proportionally
+more influence than a POD at a dry wash. The Gaussian spread distributes
+that capacity-weighted influence across the canal service area, solving
+the spatial mismatch between point-source SW PODs and diffuse GW wells.
+
+**`gw_weight`** is era-dependent (see Calibration below):
+
+| Era | `gw_weight` | Rationale |
+|---|---|---|
+| Pre-1938 | 1.0 | Default neutral weight (well-only era) |
+| 1938–1980 | 1.0 (no boost) | USBR ~67 % GW achieved via well-density override |
+| 1981–1992 (transition) | linear ramp 1.0 → 0.1 | Post-GMA + CAP coming online |
+| 1993+ (post-CAP) | 0.1 | USGS/ADWR ~42 % GW as canal SW dominates |
+
+**`_sw_sigma`** (Gaussian smoothing kernel):
+
+| Era | σ | Service area radius |
+|---|---|---|
+| Pre-1981 | 4.0 | ~8 km |
+| 1981+ | 16.0 | ~32 km |
+
+Wider smoothing post-GMA reflects the broad CAP/SRP distribution
+networks that deliver to areas without direct canal infrastructure.
+
+Both well and SW-rights densities are per-year rasters gated by
+installation/priority dates, so the GW/SW balance evolves as
+infrastructure builds out. Where the denominator is zero, `gw_frac`
+defaults to 1.0 (100 % GW).
+
+#### Era-dependent overrides (smooth ramps)
+
+Two parallel alpha values control the partitioning era logic:
+
+```
+_wd_alpha (well density):   ramps 1945→1970 (0→1), stays 1.0 forever
+_override_alpha (irr/urban): ramps 1945→1970 (0→1), 1.0 until 1980, ramps 1981→1985 (1→0)
+```
+
+| Override | Controlled by | Effect |
+|---|---|---|
+| 2024 well density blend | `_wd_alpha` | Replaces year-specific well density (incomplete pre-GMA registry) with the 2024 snapshot, blended via alpha |
+| ML feature `well_density` | `_wd_alpha` (mirrored in pipeline) | ML predictions use the same blended well density at prediction time |
+| LU-only pixel scaling | `_wd_alpha` | LU-only crop/urban pixels contribute `prediction × _wd_alpha` (full at 1970+, ramps in earlier) |
+| `irr_cap_frac` ag-era boost | `_override_alpha` | Forces `irr_cap_frac = 1 − urban_frac` at all pixels during 1970–1980 (USBR ~91 % ag); blends at crop pixels during ramp years |
+| Urban-scaling exemption | `_urb_alpha` (1960–1985 ramp) | At rural pixels in `apply_uf` set, nonirr is normally `nonirr × urban_frac`; exempted (kept full) during 1970–1980 plateau |
+| Pre-1938 LU-only crop boost | early_alpha (0.10–0.30 ramp 1925–1937) | Captures unregistered well era; uses 1938 LULC snapshot as proxy |
+
+#### Era-specific overrides (categorical)
+
+- **Pre-1925**: well-only, year-specific registry, no LU-only contribution.
+- **1925–1937**: well pixels + LU-only pixels (1938 LULC snapshot) scaled
+  by `early_alpha = 0.10 + (year − 1925)/12 × 0.20`. Captures unregistered-
+  well era documented in USGS OFR 94-476 (Anderson & Duet 1994).
+- **1938**: GEE LULC starts → `has_smooth_canal`, `has_crop`, `has_urban`
+  all activate. Canal-only ag pixels (`canal_ag_no_wells`) get the full
+  ML prediction routed to `Irr_SW`.
+- **1945–1970**: `_wd_alpha` ramps from 0 to 1, gradually blending in the
+  2024 well density as both an ML feature and a partition mask.
+- **1970–1980**: full overrides on (`_wd_alpha = _override_alpha = _urb_alpha = 1`).
+  `irr_cap_frac = 1 − urban_frac` everywhere → ~91 % irrigation. Urban
+  scaling exempt → nonirr keeps full volume.
+- **1981–1985**: ramp-down of `_override_alpha` and `_urb_alpha` smoothly
+  reverts to year-specific irr_cap and full urban scaling. `_wd_alpha`
+  stays 1.0 (2024 well registry continues to apply).
+- **1986+**: `_override_alpha = 0` but `_wd_alpha = 1` (well density),
+  σ=16 (wide SW smoothing). Density-ratio GW/SW split with `gw_weight = 0.1`
+  produces ~42 % GW share matching USGS/ADWR.
+- **Post-CAP crop pixels**: 60 % blend toward `(1 − urban_frac)` at crop
+  pixels to correct for 2024 registry under-counting irrigation at
+  urban-encroached ag areas (USGS/ADWR show ag remained ~72 % even in 2017).
+- **Post-1985 rural recovery**: at rural ag pixels (`crop_frac × residual`),
+  the urban-scaled-away nonirr volume is recovered as irrigation in
+  proportion to crop fraction.
+
+#### Pre-1981 canal-ag-no-wells override
+
+At canal-served ag pixels without registered wells, the density ratio
+gives `irr_gw_frac = 0` → 100 % SW. But pre-GMA, these pixels had
+unregistered GW wells alongside canal SW deliveries (USBR statewide
+GW share was ~67 % in 1950–1970). Override forces a 67 %/33 % GW/SW
+split at these pixels for `year < GMA_YEAR`.
+
+#### Delivery-residual recovery
+
+After all the above splits, `irr + nonirr` may be less than the
+ML-predicted total because urban scaling, the LU-only override, etc.
+discard volume at certain pixels. From `year ≥ 1960`, the residual
+(`predictions − partitioned_total`) is recovered at agricultural canal
+pixels (`cw_smooth ≥ 1` and `crop_frac > 0`, OR well + canal + crop
+combinations) and routed to `Irrigation_SW`.
+
+#### Zero-surface-water constraint
+
+Where `canal_weighted_streamflow_mm` is zero at a pixel, there is no
+canal-delivered surface water, and `gw_frac` is forced to 1.0. This is
+a per-pixel check — no basin-median override is needed because canal-
+weighted streamflow is precisely located at canal infrastructure with
+no watershed bleed (unlike regular streamflow, which is uniform per-
+watershed and can assign Colorado River flow to desert basins like
+Butler Valley).
+
+Post-GMA exception: pixels within the smoothed canal reach AND with
+crops are exempted from the zero-SW mask, because CAP/SRP distribution
+networks deliver SW to pixels without direct `cw_streamflow` (e.g., the
+Phoenix-area canal grid serves many pixels with no direct canal
+intersection but ag fields receiving CAP water).
+
+#### Urban-fraction weighting for non-irrigation
+
+Outside urban AMAs (defined by `RURAL_AMA_INA` set, which now includes
+**all** AMA/INAs since each has substantial rural ag fringes), nonirr is
+scaled by per-pixel `URBAN` density:
+
+```
+apply_uf = (basin_type == 2 OR basin in RURAL_AMA_INA) AND ~lu_only
+nonirr[apply_uf] = nonirr[apply_uf] × URBAN[apply_uf]
+```
+
+This zeros out nonirr at desert/range pixels with no real M&I demand
+while preserving full nonirr at urban-dense pixels (e.g., Phoenix
+downtown with `URBAN ≈ 0.8` keeps 80 % of its nonirr volume).
+The `apply_uf` exemption ramps in 1960–1970, holds 1970–1980, ramps
+out 1981–1985 (`_urb_alpha`).
+
+#### Physics-constrained input data correction
+
+Published datasets are treated as informative priors, not ground truth.
+For example, the [Hung et al. (2025)](https://doi.org/10.1038/s41597-025-05920-x)
+GW-fraction snapshots report values as low as 0.7 in Willcox AMA,
+implying 30 % surface-water irrigation in a closed basin with no river
+or canal infrastructure. This is physically impossible — Willcox is an
+endorheic playa where the only "surface water" visible in LULC is mining
+tailings ponds (redistributed groundwater, confirmed as GW-sourced by
+HarDWR water rights records). The density-ratio approach inherently
+avoids this issue: Willcox has many GW wells but zero SW rights and
+zero canal-weighted streamflow, so `gw_frac` → 1.0 without requiring
+any override.
+
+#### Surface Water Capture Index
+
+After partitioning, the pipeline computes a per-pixel, per-year capture
+index quantifying how much GW pumping likely depletes surface water,
+using water table depth ([Ma et al., 2026](https://doi.org/10.1038/s43247-025-03094-3))
+and canal-weighted streamflow:
+
+```
+capture_fraction = exp(-wtd_m / λ) × cw_norm
+sw_capture_mm    = GW_withdrawal × capture_fraction
+```
+
+Three λ values (5, 10, 20 m) produce lower/central/upper bounds.
+Computed separately for Total_GW, Irrigation_GW, and
+Non_Irrigation_GW. Output in all 4 units (mm, ft, m³, AF).
+
+#### Sensitivity diagnostics
 
 The [Hung et al. (2025)](https://doi.org/10.1038/s41597-025-05920-x)
 `annual_gw_fraction` is retained as an ML feature but no longer used
-for partitioning.  A partition-level sensitivity diagnostic
+for partitioning. A partition-level sensitivity diagnostic
 (`run_density_ratio_sensitivity`) probes two orthogonal knobs and
 writes both as sections of one CSV with a `Perturbation_Type` column:
 
@@ -2347,65 +2515,179 @@ Both sections write to `Uncertainty/Sigma_GW/Density_Ratio_Sensitivity.csv`
 with time-series ribbon plots in `Density_Ratio_Sensitivity.png` and
 `Smoothing_Sigma_Sensitivity.png`.
 
-**Zero-surface-water constraint:** Where `canal_weighted_streamflow_mm`
-is zero at a pixel, there is no canal-delivered surface water, and
-`gw_frac` is forced to 1.0.  This is a simple per-pixel check — no
-basin-median override is needed because canal-weighted streamflow is
-precisely located at canal infrastructure with no watershed bleed
-(unlike regular streamflow, which is uniform per-watershed and can
-assign Colorado River flow to desert basins like Butler Valley).
-Affected pixels include all of Willcox AMA, Butler Valley, Parker,
-Ranegras Plain, and most of McMullen Valley.  Canal-served pixels
-in any basin retain their density-ratio + canal-boost split.
+#### Key helpers
 
-**Physics-constrained input data correction:** Published datasets are
-treated as informative priors, not ground truth.  For example, the
-[Hung et al. (2025)](https://doi.org/10.1038/s41597-025-05920-x)
-GW-fraction snapshots report values as low as 0.7 in Willcox AMA,
-implying 30 % surface-water irrigation in a closed basin with no river
-or canal infrastructure.  This is physically impossible — Willcox is an
-endorheic playa where the only "surface water" visible in LULC is mining
-tailings ponds (redistributed groundwater, confirmed as GW-sourced by
-HarDWR water rights records).  The density-ratio approach inherently
-avoids this issue: Willcox has many GW wells but zero SW rights and
-zero canal-weighted streamflow, so `gw_frac` → 1.0 without requiring
-any override.
-
-**Surface Water Capture Index:** After partitioning, the pipeline
-computes a per-pixel, per-year capture index quantifying how much GW
-pumping likely depletes surface water, using water table depth
-([Ma et al., 2026](https://doi.org/10.1038/s43247-025-03094-3)) and
-canal-weighted streamflow:
-
-```
-capture_fraction = exp(-wtd_m / λ) × cw_norm
-sw_capture_mm    = GW_withdrawal × capture_fraction
-```
-
-Three λ values (5, 10, 20 m) produce lower/central/upper bounds.
-Computed separately for Total_GW, Irrigation_GW, and
-Non_Irrigation_GW.  Output in all 4 units (mm, ft, m³, AF).
-
-Key helpers:
+- **`_era_gw_weight(year)`** — returns the era-dependent `gw_weight`
+  (1.0 pre-GMA, ramping to 0.1 post-CAP).
 - **`focal_fill_irr_fraction()`** — fills edge-pixel gaps (`irr_frac < 0.05`)
   with a focal mean of valid neighbors, avoiding NaN propagation along
   irrigated-area boundaries.
 - **`compute_sw_fraction()`** — normalizes a density array to [0, 1] using a
-  local-maximum filter (`maximum_filter(size=5)`).  Used for focal-max
+  local-maximum filter (`maximum_filter(size=5)`). Used for focal-max
   normalization of canal-weighted streamflow (`cw_norm`).
 - **`compute_sw_capture_index()`** — computes per-pixel SW capture fraction
   and volume at three λ values with uncertainty bounds.
-- **`partition_predictions()`** — orchestrates all splits (irr/nonirr,
-  GW/SW with density-ratio + canal boost, zero-SW constraint), applies
-  well-density masking, and returns a dict keyed by the eight category names.
-All partitions use subtraction from the parent total (e.g., `nonirr = total − irr`)
-to guarantee exact budget closure with no floating-point drift.
+- **`partition_predictions()`** — orchestrates all splits (era ramps,
+  density-ratio + canal boost, zero-SW constraint, residual recovery,
+  ag-era irr_cap override, urban scaling), applies well-density masking,
+  and returns a dict keyed by the eight category names.
+
+#### Calibration
+
+**Why partition-time calibration is necessary.** No per-pixel ground
+truth exists anywhere for the GW/SW × Irrigation/Non-Irrigation
+breakdown of water withdrawals — agencies (USGS, ADWR, USBR) only
+report aggregate statewide or basin-level totals by category. The
+ML model is trained only on metered total pumping (`gw_pumping_mm`)
+from ADWR records in the ten AMA/INA management areas, so it learns
+*total* withdrawal magnitudes but has no signal to apportion them
+into the eight reporting categories.  The partitioning logic
+therefore necessarily uses physically-motivated proxies (well
+density, SW rights density, canal-weighted streamflow, irrigation
+capacity fraction, urban/crop fractions), and its parameters can
+only be constrained against published statewide aggregates.
+
+The XGBoost predictions of total annual pumping themselves are not
+adjusted to any agency aggregate — only the post-hoc partitioning
+parameters (era ramps, GW weight, SW smoothing σ, irr_cap override
+blend factors, residual-recovery thresholds) are tuned to reproduce
+the documented historical GW/SW and Irrigation/Non-irrigation shares.
+
+**Delivery-residual routing as a calibration lever.** A subtle but
+important calibration choice is what to do with the volume gap
+between the ML-predicted total and the partitioned total
+(`predictions − (irr + nonirr)`).  This residual arises whenever
+the partitioning discards volume — most prominently from urban
+scaling at rural pixels (`nonirr ×= urban_frac`) — and would
+otherwise vanish from the budget.  The pipeline recovers this
+residual at canal-served agricultural pixels (where
+`cw_smooth ≥ 1` AND `crop_frac > 0`, OR pixels with both wells
+AND canal influence AND crops) and routes it to **`Irrigation_SW`**
+for `year ≥ 1960`.  This single design choice is what allows the
+post-CAP era to reach the USGS-reported Irr_SW magnitudes (~3 MAF)
+without inflating Irr_GW or NonIrr_SW.  Pre-CAP routing of the
+residual was also explored (to Irr_GW, representing unregistered
+well pumping); empirically, routing all residual to `Irr_SW`
+produces the best fit to USGS Circulars 1004/1081/1200 across
+1985–1995 while preserving the right Total_GW share.
+
+The partitioning logic above was iteratively calibrated against
+observed Arizona water-use anchor points spanning 1915–2017. Calibration
+data were compiled into `Data/Inputs/USGS WU/USGS_AZ_Water_Use_1950_1980.csv`
+from the following sources:
+
+| Source | Period | Provides |
+|---|---|---|
+| **USGS Open-File Report 94-476** (Anderson & Duet 1994) | 1915–1990 (annual GW from Figure 1) | Statewide groundwater withdrawals (kAF) |
+| **USGS Circulars 115, 398, 456, 556, 676, 765, 1001** | 1950, 1955, 1960, 1965, 1970, 1975, 1980 | Statewide totals + category breakdowns |
+| **USGS Circulars 1004, 1081, 1200** | 1985, 1990, 1995 | Per-state GW/SW × Irr/NonIrr |
+| **USGS Circulars 1268, 1344, 1405, 1441** | 2000, 2005, 2010, 2015 | Per-state GW/SW × all 8 categories |
+| **USBR (Mock 2007)** | 1950, 1970 narratives | Statewide totals + GW/SW share + Irr % |
+| **ADWR Annual Report 2016** | 1957, 1980, 1990, 2000, 2010, 2017 (Figure p.4) | Statewide totals (chart digitization) |
+
+##### Calibration targets vs final model outputs
+
+**Pre-1938 (USGS OFR 94-476 GW estimates, kAF):**
+
+| Year | Target GW | Model GW | Ratio |
+|---|---|---|---|
+| 1915 | 100 | 112 | 1.12 |
+| 1920 | 200 | 157 | 0.78 |
+| 1925 | 450 | 524 | 1.16 |
+| 1930 | 750 | 871 | 1.16 |
+| 1935 | 1,200 | 1,185 | 0.99 |
+
+**Statewide totals (MAF, all sources combined):**
+
+| Year | Target Total | Model Total | Target GW% | Model GW% | Source |
+|---|---|---|---|---|---|
+| 1950 | 5.40 | 5.40 | 67 % | 65 % | USBR/Circ 115 |
+| 1957 | 7.50 | 5.66 | — | 65 % | ADWR chart |
+| 1970 | 7.66 | 8.92 | 61 % | 69 % | Circ 676 |
+| 1980 | 8.97 | 8.88 | 52 % | 65 % | Circ 1001 |
+| 1985 | 7.20 | 6.38 | 48 % | 49 % | Circ 1004 |
+| 1990 | 7.36 | 6.41 | 42 % | 47 % | Circ 1081 |
+| 1995 | 7.65 | 6.29 | 42 % | 45 % | Circ 1200 |
+| 2000 | 7.53 | 6.36 | 51 % | 48 % | Circ 1268 |
+| 2005 | 7.00 | 6.23 | 49 % | 42 % | Circ 1344 |
+| 2010 | 6.83 | 6.12 | 42 % | 43 % | Circ 1405 |
+| 2015 | 6.70 | 6.69 | 46 % | 45 % | Circ 1441 |
+| 2017 | 7.00 | 6.76 | 41 % | 45 % | ADWR |
+
+##### Calibration design principles
+
+1. **Smooth temporal ramps** rather than hard era gates avoid artificial
+   discontinuities. The 1945–1970 ramp-up and 1981–1985 ramp-down for
+   the well density and irr_cap overrides produce a continuous trajectory.
+
+2. **Two parallel alphas** (`_wd_alpha` and `_override_alpha`) decouple
+   the well density override (which should persist post-CAP because the
+   2024 registry has the most complete coverage) from the ag-era
+   `irr_cap` and urban-scaling overrides (which should ramp down as the
+   modern era resumes typical irr/urban patterns).
+
+3. **Pre-1938 well-only era** uses the year-specific registry. The
+   1925–1937 floor lifts GW estimates toward USGS OFR 94-476 values via
+   LU-only pixel retention scaled by `early_alpha`, but does NOT boost
+   `well_density` features (XGBoost over-predicts at any nonzero value).
+
+4. **Era-dependent `gw_weight`** in the density ratio shifts the GW/SW
+   balance smoothly: 1.0 pre-GMA (USBR ~67 % GW), ramping to 0.1 post-
+   CAP (USGS/ADWR ~42 % GW). Only affects mixed well+canal pixels.
+
+5. **All AMAs/INAs treated as rural** for urban scaling (after empirical
+   verification that even Phoenix and Tucson have substantial rural ag
+   fringes; Pinal AMA is overwhelmingly agricultural with mean
+   `urban_frac ≈ 0.03`). Per-pixel `URBAN` density still preserves
+   nonirr at urban cores (e.g., Phoenix downtown with `URBAN ≈ 0.8`).
+
+6. **Ag-era `irr_cap` override** (`= 1 − urban_frac`) for 1970–1980
+   matches USBR's ~91 % ag share. Lighter post-CAP blend (0.6) at crop
+   pixels corrects for 2024 registry under-counting ag at urban-
+   encroached ag areas.
+
+7. **Post-1985 rural residual recovery** scales by `crop_frac` (linear,
+   no threshold) so genuine ag pixels recover urban-scaled-away nonirr
+   volume as irrigation; desert/range pixels recover proportionally less.
+
+##### Acknowledged limitations
+
+- **Pre-1938 GW** is well-only and can only approximate the unregistered
+  well era. The 1920 model (0.78× target) and 1925–1935 (1.0–1.2× target)
+  bracket the USGS OFR estimates within ±25 %.
+- **1957 target** (7.5 MAF from ADWR chart) is between USGS Circular
+  anchors (Circ 398 in 1955: 8.08 MAF; Circ 456 in 1960: 6.30 MAF). The
+  model interpolates smoothly through this region at 5.7–6.6 MAF.
+- **Modern Irr_GW** is slightly under-attributed (model 1.6–1.8 MAF vs
+  USGS 2.3–2.8 MAF in 1985–1995) because the model assigns some volume
+  to NonIrr at urban AMA crop pixels. NonIrr_GW is correspondingly
+  over-attributed by similar magnitude. Total GW is well-matched
+  (within 5 %).
+- **1970–1980 totals** slightly exceed USGS Circular components
+  (8.9 MAF model vs 7.7 MAF Circ 676 / 8.97 MAF Circ 1001) because the
+  ag-era `irr_cap = 1 − urban_frac` override aggressively routes volume
+  to irrigation at all retained pixels. The ADWR Annual Report 2016
+  chart shows ~9.5 MAF in 1980, between the two USGS circular figures
+  and matching the model better.
 
 ### `uncertaintyops.py` — Hybrid uncertainty quantification
 
 Computes pixel-level prediction uncertainty for all products (total
 annual withdrawals, withdrawal categories, consumptive use) and writes augmented
 6-band GeoTIFFs.
+
+**Pre-GMA partitioning consistency:** UQ ensemble members use the same
+era-dependent partitioning logic as the central pipeline (1925–1937
+LU-only scaling, 1945–1970 well-density blend ramp, 2024 well registry
+override pre-1981, ag-era `irr_cap = 1 − urban_frac` for 1970–1980,
+post-CAP density-ratio with `gw_weight = 0.1` and σ=16 SW smoothing).
+A module-level `_PRE_GMA_CTX` is initialised at the top of
+`run_uncertainty_quantification()` from the 2024 `az_df` snapshot and
+threaded through `_build_pred_features()` (well_density blend in ML
+features) and `_partition_with_ctx()` (1981 well/irr_cap arrays passed
+to `partition_predictions`).  This ensures UQ uncertainty bounds are
+computed around the calibrated central prediction, not around an
+under-calibrated baseline.
 
 Key functions:
 - **`run_uncertainty_quantification()`** — Master orchestrator.  Computes
