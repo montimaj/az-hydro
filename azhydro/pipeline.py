@@ -1779,6 +1779,18 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     m3_to_af = 1 / 1233.48                   # m³ → acre-ft
     mm_to_ft = 1 / 304.8                     # mm → ft
 
+    # Load 1981 well density for pre-GMA partitioning override.
+    # Pre-1981 well registries are incomplete; the 1981 snapshot (first
+    # year with full GMA coverage) provides reasonable well density for
+    # the pre-GMA era when many wells were unregistered.
+    _gma_ref_yr = 2024
+    _gma_df = az_df[az_df.Year == _gma_ref_yr]
+    _wd_1981 = _gma_df['well_density'].values if 'well_density' in _gma_df.columns else None
+    _irr_wd_1981 = _gma_df['irr_well_density'].values if 'irr_well_density' in _gma_df.columns else None
+    _nonirr_wd_1981 = _gma_df['nonirr_well_density'].values if 'nonirr_well_density' in _gma_df.columns else None
+    _irr_cap_1981 = _gma_df['irr_capacity_fraction'].values if 'irr_capacity_fraction' in _gma_df.columns else None
+    logger.info('Loaded %d well density + irr_capacity from parquet for pre-GMA partitioning override', _gma_ref_yr)
+
     def _pixel_stats(pred_vals):
         """Compute depth and volume stats in multiple units.
 
@@ -1977,6 +1989,29 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                     )
         pred_features = pred_features.replace([np.inf, -np.inf], np.nan).fillna(0)
 
+        # Pre-GMA: override well_density with 2024 values in ML features.
+        # Blend year-specific and 2024 well density in ML features
+        # using the same ramp as the partition override (1938→1960 ramp
+        # up, 1981→1985 ramp down) to avoid discontinuities.
+        _ramp_up_s, _ramp_up_e = 1945, 1970
+        _ramp_dn_s, _ramp_dn_e = partops.GMA_YEAR, 1985
+        if year < _ramp_up_s:
+            _feat_alpha = 0.0
+        elif year < _ramp_up_e:
+            _feat_alpha = (year - _ramp_up_s) / (_ramp_up_e - _ramp_up_s)
+        elif year <= 1980:
+            _feat_alpha = 1.0
+        elif year < _ramp_dn_e:
+            _feat_alpha = 1.0 - (year - _ramp_dn_s) / (_ramp_dn_e - _ramp_dn_s)
+        else:
+            _feat_alpha = 0.0
+        if _feat_alpha > 0 and 'well_density' in pred_features.columns and _wd_1981 is not None:
+            pred_features = pred_features.copy()
+            year_wd = pred_features['well_density'].values
+            pred_features['well_density'] = (
+                year_wd * (1 - _feat_alpha) + np.nan_to_num(_wd_1981, nan=0.0) * _feat_alpha
+            )
+
         # Collect subsampled features for era-specific interpretability
         for era_name, (y1, y2) in ERA_BOUNDS.items():
             if y1 <= year <= y2:
@@ -2034,7 +2069,10 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         # AGRI, annual_crop_fraction, annual_urban_fraction) from the
         # parquet; no partition-time smoothing needed.
         cat_predictions = partops.partition_predictions(
-            predictions, year_df, raster_shape, valid_mask,
+            predictions, year_df, raster_shape, valid_mask, year=year,
+            wd_1981=_wd_1981, irr_wd_1981=_irr_wd_1981,
+            nonirr_wd_1981=_nonirr_wd_1981,
+            irr_cap_1981=_irr_cap_1981,
         )
 
         predictions = cat_predictions['Irrigation'] + cat_predictions['Non_Irrigation']

@@ -214,7 +214,8 @@ def _predict_total(model, pred_features, year_df, partops,
             dict from ``partition_predictions``.
     """
     raw = np.abs(model.predict(pred_features))
-    cat = partops.partition_predictions(raw, year_df, raster_shape, valid_mask)
+    yr = int(year_df['Year'].iloc[0]) if 'Year' in year_df.columns else 0
+    cat = partops.partition_predictions(raw, year_df, raster_shape, valid_mask, year=yr)
     return cat['Irrigation'] + cat['Non_Irrigation'], cat
 
 
@@ -1767,6 +1768,7 @@ def run_density_ratio_sensitivity(
         # --- Baseline partition ---
         cats_base = partops.partition_predictions(
             raw, year_df, raster_shape, valid_mask, sw_smooth_sigma=4.0,
+            year=year,
         )
 
         # --- Density section: both sides of ratio, opposite signs ---
@@ -1777,6 +1779,7 @@ def run_density_ratio_sensitivity(
         plus_df['nonirr_sw_rights_density'] = year_df['nonirr_sw_rights_density'].values * max(1 - delta, 0)
         cats_density_plus = partops.partition_predictions(
             raw, plus_df, raster_shape, valid_mask, sw_smooth_sigma=4.0,
+            year=year,
         )
 
         minus_df = year_df.copy()
@@ -1786,16 +1789,17 @@ def run_density_ratio_sensitivity(
         minus_df['nonirr_sw_rights_density'] = year_df['nonirr_sw_rights_density'].values * (1 + delta)
         cats_density_minus = partops.partition_predictions(
             raw, minus_df, raster_shape, valid_mask, sw_smooth_sigma=4.0,
+            year=year,
         )
 
         # --- Smoothing section: baseline densities, swept sigma ---
         cats_smooth_high = partops.partition_predictions(
             raw, year_df, raster_shape, valid_mask,
-            sw_smooth_sigma=smooth_sigmas[1],  # wider canal reach
+            sw_smooth_sigma=smooth_sigmas[1], year=year,
         )
         cats_smooth_low = partops.partition_predictions(
             raw, year_df, raster_shape, valid_mask,
-            sw_smooth_sigma=smooth_sigmas[0],  # tighter canal reach
+            sw_smooth_sigma=smooth_sigmas[0], year=year,
         )
 
         for cat in partops.CATEGORIES:
@@ -1962,48 +1966,88 @@ def run_cap_scenario_analysis(
         if year_df.empty:
             continue
 
-        # Predict once — canal_weighted_streamflow_mm is in DROP_ATTRS
         pf = _build_pred_features(year_df, feature_cols, drop_attrs)
         raw = np.abs(model.predict(pf))
 
         pixel_basins = year_df['GW_Basin'].values
         all_basins = sorted(set(pixel_basins))
 
-        scenario_cats: dict[str, dict[str, np.ndarray]] = {}
+        # Pre-compute per-basin masks once per year
+        basin_masks = {b: (pixel_basins == b) for b in all_basins}
 
+        # Baseline partition (kept for delta computation)
+        cats_base = partops.partition_predictions(
+            raw, year_df, raster_shape, valid_mask, year=year,
+        )
+        base_basin_gw: dict[str, float] = {}
+        base_basin_sw: dict[str, float] = {}
+
+        # Record baseline statewide + basin stats
+        sw_row = {'Year': year, 'Scenario': 'Baseline_900kAF'}
+        for cat in partops.CATEGORIES:
+            vol_af = float(np.nansum(cats_base[cat])) * mm_to_m3 * M3_TO_AF
+            sw_row[f'{cat}_AF'] = round(vol_af, 2)
+        well_total = sw_row['Irrigation_AF'] + sw_row['Non_Irrigation_AF']
+        offset = NON_WELL_OFFSET_FIXED_AF + NON_WELL_OFFSET_CAP_AF
+        sw_row['Well_Mediated_Total_AF'] = round(well_total, 2)
+        sw_row['Non_Well_Offset_AF'] = round(offset, 2)
+        sw_row['Estimated_Statewide_Total_AF'] = round(
+            well_total + offset, 2,
+        )
+        statewide_rows.append(sw_row)
+
+        for basin, bmask in basin_masks.items():
+            b_row = {
+                'Year': year, 'Scenario': 'Baseline_900kAF',
+                'Basin': basin,
+            }
+            for cat in partops.CATEGORIES:
+                vol_af = (
+                    float(np.nansum(cats_base[cat][bmask]))
+                    * mm_to_m3 * M3_TO_AF
+                )
+                b_row[f'{cat}_AF'] = round(vol_af, 2)
+            basin_rows.append(b_row)
+            base_basin_gw[basin] = (
+                float(np.nansum(cats_base['Total_GW'][bmask]))
+                * mm_to_m3 * M3_TO_AF
+            )
+            base_basin_sw[basin] = (
+                float(np.nansum(cats_base['Total_SW'][bmask]))
+                * mm_to_m3 * M3_TO_AF
+            )
+
+        del cats_base
+
+        # Process each non-baseline scenario one at a time
         for sc_name, factor in scenarios.items():
             if factor == 1.0:
-                cats = partops.partition_predictions(
-                    raw, year_df, raster_shape, valid_mask,
-                )
-            else:
-                sc_df = year_df.copy()
-                sc_df.loc[
-                    sc_df.index[cap_pixel_mask],
-                    'canal_weighted_streamflow_mm',
-                ] *= factor
-                cats = partops.partition_predictions(
-                    raw, sc_df, raster_shape, valid_mask,
-                )
-            scenario_cats[sc_name] = cats
+                continue
+            sc_df = year_df.copy()
+            sc_df.loc[
+                sc_df.index[cap_pixel_mask],
+                'canal_weighted_streamflow_mm',
+            ] *= factor
+            cats = partops.partition_predictions(
+                raw, sc_df, raster_shape, valid_mask, year=year,
+            )
 
-            # Statewide totals
             sw_row = {'Year': year, 'Scenario': sc_name}
             for cat in partops.CATEGORIES:
                 vol_af = float(np.nansum(cats[cat])) * mm_to_m3 * M3_TO_AF
                 sw_row[f'{cat}_AF'] = round(vol_af, 2)
             well_total = sw_row['Irrigation_AF'] + sw_row['Non_Irrigation_AF']
-            offset = NON_WELL_OFFSET_FIXED_AF + NON_WELL_OFFSET_CAP_AF * factor
+            sc_offset = (
+                NON_WELL_OFFSET_FIXED_AF + NON_WELL_OFFSET_CAP_AF * factor
+            )
             sw_row['Well_Mediated_Total_AF'] = round(well_total, 2)
-            sw_row['Non_Well_Offset_AF'] = round(offset, 2)
+            sw_row['Non_Well_Offset_AF'] = round(sc_offset, 2)
             sw_row['Estimated_Statewide_Total_AF'] = round(
-                well_total + offset, 2,
+                well_total + sc_offset, 2,
             )
             statewide_rows.append(sw_row)
 
-            # Per-basin
-            for basin in all_basins:
-                bmask = pixel_basins == basin
+            for basin, bmask in basin_masks.items():
                 b_row = {
                     'Year': year, 'Scenario': sc_name, 'Basin': basin,
                 }
@@ -2015,41 +2059,27 @@ def run_cap_scenario_analysis(
                     b_row[f'{cat}_AF'] = round(vol_af, 2)
                 basin_rows.append(b_row)
 
-        # Delta vs Baseline
-        baseline_cats = scenario_cats.get('Baseline_900kAF')
-        if baseline_cats is not None:
-            for sc_name, cats in scenario_cats.items():
-                if sc_name == 'Baseline_900kAF':
-                    continue
-                for basin in all_basins:
-                    bmask = pixel_basins == basin
-                    base_gw = (
-                        float(np.nansum(baseline_cats['Total_GW'][bmask]))
-                        * mm_to_m3 * M3_TO_AF
-                    )
-                    base_sw = (
-                        float(np.nansum(baseline_cats['Total_SW'][bmask]))
-                        * mm_to_m3 * M3_TO_AF
-                    )
-                    sc_gw = (
-                        float(np.nansum(cats['Total_GW'][bmask]))
-                        * mm_to_m3 * M3_TO_AF
-                    )
-                    sc_sw = (
-                        float(np.nansum(cats['Total_SW'][bmask]))
-                        * mm_to_m3 * M3_TO_AF
-                    )
-                    delta_rows.append({
-                        'Year': year,
-                        'Scenario': sc_name,
-                        'Basin': basin,
-                        'Baseline_GW_AF': round(base_gw, 2),
-                        'Baseline_SW_AF': round(base_sw, 2),
-                        'Scenario_GW_AF': round(sc_gw, 2),
-                        'Scenario_SW_AF': round(sc_sw, 2),
-                        'Delta_GW_AF': round(sc_gw - base_gw, 2),
-                        'Delta_SW_AF': round(sc_sw - base_sw, 2),
-                    })
+                sc_gw = (
+                    float(np.nansum(cats['Total_GW'][bmask]))
+                    * mm_to_m3 * M3_TO_AF
+                )
+                sc_sw = (
+                    float(np.nansum(cats['Total_SW'][bmask]))
+                    * mm_to_m3 * M3_TO_AF
+                )
+                delta_rows.append({
+                    'Year': year,
+                    'Scenario': sc_name,
+                    'Basin': basin,
+                    'Baseline_GW_AF': round(base_basin_gw[basin], 2),
+                    'Baseline_SW_AF': round(base_basin_sw[basin], 2),
+                    'Scenario_GW_AF': round(sc_gw, 2),
+                    'Scenario_SW_AF': round(sc_sw, 2),
+                    'Delta_GW_AF': round(sc_gw - base_basin_gw[basin], 2),
+                    'Delta_SW_AF': round(sc_sw - base_basin_sw[basin], 2),
+                })
+
+            del cats, sc_df
 
         if year % 10 == 0 or year == end_year:
             logger.info('    CAP scenario year %d done', year)
