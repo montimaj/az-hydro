@@ -1989,26 +1989,41 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                     )
         pred_features = pred_features.replace([np.inf, -np.inf], np.nan).fillna(0)
 
-        # Pre-GMA: override well_density with 2024 values in ML features.
-        # Blend year-specific and 2024 well density in ML features.
-        # Ramp-up 1945→1970, stays at 1.0 forever (2024 registry has the
-        # most complete coverage and benefits post-CAP years too).
-        _ramp_up_s, _ramp_up_e = 1945, 1970
-        if year < _ramp_up_s:
-            _feat_alpha = 0.0
-        elif year < _ramp_up_e:
-            _feat_alpha = (year - _ramp_up_s) / (_ramp_up_e - _ramp_up_s)
-        else:
-            _feat_alpha = 1.0
-        # Floor for 1925-1949 era (matches partitionops _wd_alpha)
-        # Note: pre-1938 LU-only pixel retention is enabled in
-        # partitionops to capture the unregistered well era.
-        if _feat_alpha > 0 and 'well_density' in pred_features.columns and _wd_1981 is not None:
+        # Mirror partitionops well-density overrides in ML features:
+        #  (1) 2024 registry override: hard-active 1951–1983 as the
+        #      primary "where wells were likely drilled" spatial pattern.
+        #  (2) Phantom-well override: AGRI-gated fill for ag pixels the
+        #      2024 registry may miss (abandoned pre-GMA wells).
+        # Both combine via per-pixel max with year-specific well density.
+        _k_phantom = partops._phantom_k(year)
+        _wd2024_active = partops._wd_2024_active(year)
+        if (
+            (_k_phantom > 0 or _wd2024_active)
+            and year >= partops.CANAL_PREDICTOR_START
+            and 'well_density' in pred_features.columns
+        ):
             pred_features = pred_features.copy()
-            year_wd = pred_features['well_density'].values
-            pred_features['well_density'] = (
-                year_wd * (1 - _feat_alpha) + np.nan_to_num(_wd_1981, nan=0.0) * _feat_alpha
-            )
+            year_wd = np.nan_to_num(pred_features['well_density'].values, nan=0.0)
+            effective_wd = year_wd
+            if _wd2024_active and _wd_1981 is not None:
+                # wd_1981 magnitude scaled by phantom K (1951–1983) so
+                # the 1958–1960 drought-recovery dip affects registered
+                # wells too; 1984–2024: full strength.
+                wd24 = np.nan_to_num(_wd_1981, nan=0.0) * partops._wd_2024_scale(year)
+                effective_wd = np.maximum(effective_wd, wd24)
+            if _k_phantom > 0 and 'AGRI' in pred_features.columns:
+                agri = np.clip(np.nan_to_num(pred_features['AGRI'].values, nan=0.0), 0.0, 1.0)
+                _agri_thr = partops._phantom_agri_threshold(year)
+                ag_gate = (agri >= _agri_thr).astype(np.float64)
+                _canal_inc = partops._phantom_canal_include(year)
+                if 'canal_density' in pred_features.columns:
+                    canal_d = np.nan_to_num(pred_features['canal_density'].values, nan=0.0)
+                    canal_weight = np.where(canal_d > 0, _canal_inc, 1.0)
+                else:
+                    canal_weight = 1.0
+                phantom_wd = agri * partops.PHANTOM_M_TOTAL * _k_phantom * ag_gate * canal_weight
+                effective_wd = np.maximum(effective_wd, phantom_wd)
+            pred_features['well_density'] = effective_wd
 
         # Collect subsampled features for era-specific interpretability
         for era_name, (y1, y2) in ERA_BOUNDS.items():

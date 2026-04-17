@@ -167,6 +167,205 @@ RURAL_AMA_INA = frozenset({
 
 CANAL_PREDICTOR_START = 1938
 
+# 1960 drought-recovery dip: USGS Circ 456 records a ~2.5 MAF drop
+# from the 1955 peak (8.09) to 1960 (5.62). 1957-1959 were wet years
+# (precip 323-373 mm vs 311 LT mean), SW deliveries recovered, and
+# marginal ag pumping contracted. Phantom wells represent exactly this
+# marginal-ag pumping — drop phantom K to a low value at 1958-1960 to
+# capture the retreat, then restore by 1965. Year-specific wells and
+# wd_1981 remain at full strength (those registered wells kept pumping).
+PHANTOM_DROUGHT_DIP_START = 1957
+PHANTOM_DROUGHT_DIP_MIN_YEAR = 1960
+PHANTOM_DROUGHT_DIP_END = 1965
+PHANTOM_DROUGHT_DIP_MIN = 0.20   # phantom K drops to 20% of plateau
+
+# 2024-registry override active window: 1951–2020 with the 1958–1961
+# drought-recovery trough skipped.  Magnitude ramps 1.0 → 0.2 over
+# 1995–2005, holds at 0.2 through 2015 to preserve a residual registry
+# signal post-CAP (where year-specific registration is complete but the
+# 2024 snapshot still helps recover the 2000–2015 under-Irr bias), then
+# ramps 0.2 → 0 over 2015–2020.
+WD_2024_ACTIVE_START = 1951
+WD_2024_ACTIVE_END = 2020
+WD_2024_RAMP_DOWN_START = 1995
+WD_2024_RAMP_DOWN_END = 2005
+WD_2024_TAIL = 0.2
+WD_2024_TAIL_END_START = 2015
+WD_2024_TAIL_END_END = 2020
+WD_2024_DIP_SKIP_START = 1958
+WD_2024_DIP_SKIP_END = 1961
+
+
+def _wd_2024_active(year: int) -> bool:
+    """2024 registry override is active 1951–2020 but skipped during
+    the 1958–1961 drought-recovery trough."""
+    if not (WD_2024_ACTIVE_START <= year <= WD_2024_ACTIVE_END):
+        return False
+    if WD_2024_DIP_SKIP_START <= year <= WD_2024_DIP_SKIP_END:
+        return False
+    return True
+
+
+def _wd_2024_scale(year: int) -> float:
+    """Magnitude scale applied to the 2024 registry override.
+
+    1951–1983: scaled by _phantom_k so the 1958–1960 drought-recovery
+    trough reduces registered-well pumping too.  1984–1994: full
+    strength (1.0).  1995–2005: linear ramp 1.0 → WD_2024_TAIL (0.2).
+    2005–2015: flat tail at 0.2 (residual post-CAP registry signal).
+    2015–2020: linear ramp 0.2 → 0.0."""
+    if year <= 1983:
+        return _phantom_k(year)
+    if year <= WD_2024_RAMP_DOWN_START:
+        return 1.0
+    if year < WD_2024_RAMP_DOWN_END:
+        return 1.0 - (1.0 - WD_2024_TAIL) * (
+            (year - WD_2024_RAMP_DOWN_START)
+            / float(WD_2024_RAMP_DOWN_END - WD_2024_RAMP_DOWN_START)
+        )
+    if year <= WD_2024_TAIL_END_START:
+        return WD_2024_TAIL
+    if year < WD_2024_TAIL_END_END:
+        return WD_2024_TAIL * (
+            1.0 - (year - WD_2024_TAIL_END_START)
+            / float(WD_2024_TAIL_END_END - WD_2024_TAIL_END_START)
+        )
+    return 0.0
+
+# Phantom-well override (replaces prior Option B / wd_1981 blend).
+# Pre-GMA wells were registered only voluntarily; many ag wells abandoned
+# before 1980 have no record in the 2024 registry.  Phantom wells fill
+# ag-fringe pixels (gated by AGRI density) without importing modern
+# industrial wells (Palo Verde, Intel, urban public supply).
+PHANTOM_M_TOTAL = 12.0
+# AGRI threshold drops sharply during the 1951–1955 drilling boom.
+# Physically: ag-well drilling grew modestly 1938→1951 (threshold 0.60
+# → 0.40), then exploded during the 1951–1955 peak (threshold crashes
+# 0.40 → 0.15 as farmers drilled on any marginal ag land). Post-1955
+# the effective threshold recovers to a 0.30 plateau by 1960.
+PHANTOM_AGRI_THRESHOLD_EARLY = 0.60    # 1938
+PHANTOM_AGRI_THRESHOLD_MID = 0.40      # 1951 (pre-boom)
+PHANTOM_AGRI_THRESHOLD_PEAK = 0.08     # 1955 (drilling boom minimum — pushes activation wider)
+PHANTOM_AGRI_THRESHOLD_LATE = 0.30     # 1960+ (plateau)
+PHANTOM_AGRI_BOOM_START = 1951         # rapid drilling era begins
+
+# Canal-gate relaxation — monotone continuous ramp aligned with the
+# 2024-registry active window (1951–1983).
+# Phantom at canal pixels activates the ML model's ag-extraction
+# prediction at canal-served farms (Yuma, SRP, Pinal canal laterals);
+# the GW/SW partition splitting then routes the volume to SW (canal
+# deliveries) where SW-rights density dominates.
+#
+# 1951–1955: boom ramp 0 → PHANTOM_CANAL_BOOM_PEAK (0.30) — drought
+#   drilling boom brings canal-fed supplemental pumping online.
+# 1955–1975: gradual rise PHANTOM_CANAL_BOOM_PEAK → PHANTOM_CANAL_INCLUDE_MAX
+#   (0.30 → 0.60) as conjunctive use matures through the CAP-planning era.
+# 1975+: flat plateau at PHANTOM_CANAL_INCLUDE_MAX.
+PHANTOM_CANAL_BOOM_START = 1951
+PHANTOM_CANAL_BOOM_PEAK_YEAR = 1955
+PHANTOM_CANAL_BOOM_PEAK = 0.30
+PHANTOM_CANAL_RAMP_END = 1975
+PHANTOM_CANAL_INCLUDE_MAX = 0.60
+
+
+def _phantom_canal_include(year: int) -> float:
+    """Fraction of phantom strength applied at canal-served pixels."""
+    if year < PHANTOM_CANAL_BOOM_START:
+        return 0.0
+    if year < PHANTOM_CANAL_BOOM_PEAK_YEAR:
+        frac = (year - PHANTOM_CANAL_BOOM_START) / float(
+            PHANTOM_CANAL_BOOM_PEAK_YEAR - PHANTOM_CANAL_BOOM_START,
+        )
+        return PHANTOM_CANAL_BOOM_PEAK * frac
+    if year < PHANTOM_CANAL_RAMP_END:
+        frac = (year - PHANTOM_CANAL_BOOM_PEAK_YEAR) / float(
+            PHANTOM_CANAL_RAMP_END - PHANTOM_CANAL_BOOM_PEAK_YEAR,
+        )
+        return (
+            PHANTOM_CANAL_BOOM_PEAK
+            + frac * (PHANTOM_CANAL_INCLUDE_MAX - PHANTOM_CANAL_BOOM_PEAK)
+        )
+    return PHANTOM_CANAL_INCLUDE_MAX
+
+
+def _phantom_agri_threshold(year: int) -> float:
+    """Three-segment V: 0.60 (1938) → 0.40 (1951) → 0.15 (1955) → 0.30 (1960+)."""
+    if year < PHANTOM_K_RAMP_UP_START:
+        return PHANTOM_AGRI_THRESHOLD_EARLY
+    if year < PHANTOM_AGRI_BOOM_START:
+        # 1938→1951: slow decline 0.60 → 0.40
+        frac = (year - PHANTOM_K_RAMP_UP_START) / float(
+            PHANTOM_AGRI_BOOM_START - PHANTOM_K_RAMP_UP_START,
+        )
+        return (
+            PHANTOM_AGRI_THRESHOLD_EARLY
+            + frac * (PHANTOM_AGRI_THRESHOLD_MID - PHANTOM_AGRI_THRESHOLD_EARLY)
+        )
+    if year < PHANTOM_K_RAMP_UP_END:
+        # 1951→1955: sharp drop 0.40 → 0.15 (drilling boom)
+        frac = (year - PHANTOM_AGRI_BOOM_START) / float(
+            PHANTOM_K_RAMP_UP_END - PHANTOM_AGRI_BOOM_START,
+        )
+        return (
+            PHANTOM_AGRI_THRESHOLD_MID
+            + frac * (PHANTOM_AGRI_THRESHOLD_PEAK - PHANTOM_AGRI_THRESHOLD_MID)
+        )
+    post_peak_end = min(1960, PHANTOM_K_PLATEAU_END)
+    if year < post_peak_end:
+        # 1955→1960: recovery 0.15 → 0.30
+        frac = (year - PHANTOM_K_RAMP_UP_END) / float(
+            post_peak_end - PHANTOM_K_RAMP_UP_END,
+        )
+        return (
+            PHANTOM_AGRI_THRESHOLD_PEAK
+            + frac * (PHANTOM_AGRI_THRESHOLD_LATE - PHANTOM_AGRI_THRESHOLD_PEAK)
+        )
+    return PHANTOM_AGRI_THRESHOLD_LATE
+PHANTOM_K_RAMP_UP_START = 1938   # GEE-LULC start; earliest year with real AGRI
+PHANTOM_K_RAMP_UP_END = 1955     # ag-well drilling reaches maturity (USGS Circ 398 peak)
+PHANTOM_K_PLATEAU_END = 1980     # GMA enacted 1980; registration mandatory afterwards
+PHANTOM_K_RAMP_END = 1985        # enforcement maturity; unregistered stock absorbed
+
+
+def _phantom_k(year: int) -> float:
+    """Phantom-well temporal ramp with 1960 drought-recovery dip.
+
+    0 pre-1938 (AGRI is a fixed 1938 snapshot — not representative of
+    earlier eras). Linear up-ramp 1938→1955 mirrors the growth of ag
+    well drilling. Plateau 1955–1980 with a V-shape dip 1957→1960→1965
+    capturing the documented 1960 drought-recovery trough. Linear
+    down-ramp 1980→1985 as mandatory GMA registration absorbs the
+    unregistered-well stock.
+    """
+    if year < PHANTOM_K_RAMP_UP_START:
+        return 0.0
+    if year < PHANTOM_K_RAMP_UP_END:
+        return (year - PHANTOM_K_RAMP_UP_START) / float(
+            PHANTOM_K_RAMP_UP_END - PHANTOM_K_RAMP_UP_START,
+        )
+    # 1957→1960: ramp down 1.0 → PHANTOM_DROUGHT_DIP_MIN (drought-recovery retreat)
+    if PHANTOM_DROUGHT_DIP_START < year < PHANTOM_DROUGHT_DIP_MIN_YEAR:
+        frac = (year - PHANTOM_DROUGHT_DIP_START) / float(
+            PHANTOM_DROUGHT_DIP_MIN_YEAR - PHANTOM_DROUGHT_DIP_START,
+        )
+        return 1.0 + frac * (PHANTOM_DROUGHT_DIP_MIN - 1.0)
+    # 1960: full dip
+    if year == PHANTOM_DROUGHT_DIP_MIN_YEAR:
+        return PHANTOM_DROUGHT_DIP_MIN
+    # 1960→1965: ramp up PHANTOM_DROUGHT_DIP_MIN → 1.0 (recovery)
+    if PHANTOM_DROUGHT_DIP_MIN_YEAR < year < PHANTOM_DROUGHT_DIP_END:
+        frac = (year - PHANTOM_DROUGHT_DIP_MIN_YEAR) / float(
+            PHANTOM_DROUGHT_DIP_END - PHANTOM_DROUGHT_DIP_MIN_YEAR,
+        )
+        return PHANTOM_DROUGHT_DIP_MIN + frac * (1.0 - PHANTOM_DROUGHT_DIP_MIN)
+    if year <= PHANTOM_K_PLATEAU_END:
+        return 1.0
+    if year < PHANTOM_K_RAMP_END:
+        return (PHANTOM_K_RAMP_END - year) / float(
+            PHANTOM_K_RAMP_END - PHANTOM_K_PLATEAU_END,
+        )
+    return 0.0
+
 # Era-dependent GW/SW weighting for the density-ratio split.
 # Pre-GMA (before 1981): GW dominated — SRP was the only major SW
 # source; most irrigation was groundwater-fed.  USBR reports ~67% GW
@@ -176,7 +375,7 @@ CANAL_PREDICTOR_START = 1938
 # The GW_WEIGHT multiplies the well-density side of the ratio:
 #   gw_frac = (gw_weight × wd) / (gw_weight × wd + swd_smooth)
 GMA_YEAR = 1981
-CAP_FULL_YEAR = 1993
+CAP_FULL_YEAR = 1990
 GW_WEIGHT_PRE_GMA = 1.0
 GW_WEIGHT_POST_CAP = 0.1
 
@@ -265,27 +464,37 @@ def partition_predictions(
         if well_dens is not None else np.zeros(len(predictions), dtype=bool)
 
     # ---- Hindcast override ramps ----
-    # _wd_alpha: well density override ramp (ramps up 1945→1970,
-    # stays 1.0 forever — 2024 registry applies from 1960 onward).
-    # _override_alpha: irr_cap + urban scaling exemption ramp (ramps
-    # up 1945→1970, stays 1.0 until 1980, ramps down 1981→1985).
-    _RAMP_UP_START, _RAMP_UP_END = 1945, 1970
-    _RAMP_DN_START, _RAMP_DN_END = GMA_YEAR, 1985
-    if year < _RAMP_UP_START:
-        _wd_alpha = 0.0
-    elif year < _RAMP_UP_END:
-        _wd_alpha = (year - _RAMP_UP_START) / (_RAMP_UP_END - _RAMP_UP_START)
+    # LU-only retention ramp (applied only to LU-only pixel scaling at the
+    # crop/urban retention step below): up 1945→1955, plateau 1955–1980,
+    # down 1981→1983. Unchanged shape from prior iteration — LU-only
+    # pixel retention ramps earlier than the phantom-well mechanism
+    # because land-use-based retention reflects ag expansion, not
+    # well-registration lag.
+    _OV_RAMP_UP_START, _OV_RAMP_UP_END = 1945, 1960
+    _RAMP_DN_START, _RAMP_DN_END = GMA_YEAR, 2010
+    if year < 1945:
+        _lu_ramp = 0.0
+    elif year < 1955:
+        _lu_ramp = (year - 1945) / (1955 - 1945)
+    elif year <= 1980:
+        _lu_ramp = 1.0
+    elif year <= 1983:
+        _lu_ramp = 1.0 - (year - 1980) / 3.0
     else:
-        _wd_alpha = 1.0
+        _lu_ramp = 0.0
+
+    # Phantom-well temporal ramp — drives well_density override and
+    # partition-time irr routing.
+    _k_phantom = _phantom_k(year)
     # Note: no pre-1938 _wd_alpha floor — XGBoost treats any
     # well_density > 0 as significant, so even tiny floors inflate
     # predictions massively.  Pre-1938 stays well-only with the
     # year-specific registry (acknowledged limitation).
 
-    if year < _RAMP_UP_START:
+    if year < _OV_RAMP_UP_START:
         _override_alpha = 0.0
-    elif year < _RAMP_UP_END:
-        _override_alpha = (year - _RAMP_UP_START) / (_RAMP_UP_END - _RAMP_UP_START)
+    elif year < _OV_RAMP_UP_END:
+        _override_alpha = (year - _OV_RAMP_UP_START) / (_OV_RAMP_UP_END - _OV_RAMP_UP_START)
     elif year <= 1980:
         _override_alpha = 1.0
     elif year < _RAMP_DN_END:
@@ -296,15 +505,63 @@ def partition_predictions(
     # Backward-compat alias for existing code paths
     _hindcast_alpha = _override_alpha
 
-    # Blend year-specific and 2024 well density using ramp.  Full 2024
-    # override from 1970 onward (no ramp down — post-CAP years benefit
-    # from the complete registry too).
+    # Phantom-well override: pre-GMA unregistered ag wells modeled as
+    # AGRI(p, year) × PHANTOM_M_TOTAL × K(year), combined with the
+    # year-specific registry via per-pixel max(). AGRI-gated so modern
+    # industrial wells (Palo Verde, Intel, urban public supply) are not
+    # projected back into historical eras.
     _gma_fill_mask = np.zeros(len(predictions), dtype=bool)
-    if _wd_alpha > 0 and wd_1981 is not None:
-        blended_wd = well_dens * (1 - _wd_alpha) + wd_1981 * _wd_alpha
-        well_dens = np.nan_to_num(blended_wd, nan=0.0)
+    _phantom_dominant = np.zeros(len(predictions), dtype=bool)
+    _yr_wd_cached = np.nan_to_num(well_dens, nan=0.0) if well_dens is not None else None
+
+    # 2024 registry override: active 1951–1983 (hard window). Gives the
+    # ML model the spatial pattern of where wells actually ended up
+    # post-GMA. No spatial filters on wd_1981 — urban-core areas that
+    # were ag pre-GMA (Chandler, Gilbert, Mesa, east Tucson) have their
+    # volume routed to irrigation via irr_cap_frac=1 downstream.
+    # Magnitude is scaled by the phantom drought-K factor so the 1958–
+    # 1960 drought-recovery trough applies to registered wells too
+    # (irrigation capacity effectively reduced during wet years).
+    _urban_wd_mask = np.zeros(len(predictions), dtype=bool)
+    if _wd_2024_active(year) and wd_1981 is not None and _yr_wd_cached is not None:
+        wd24 = np.nan_to_num(wd_1981, nan=0.0) * _wd_2024_scale(year)
+        well_dens = np.maximum(_yr_wd_cached, wd24)
+        # Track urban pixels where wd_1981 contributed — these get their
+        # partitioned volume routed to irrigation (pre-GMA urban areas
+        # were ag land).
+        uf_retain_col = year_df['annual_urban_fraction'].values \
+            if 'annual_urban_fraction' in year_df.columns else None
+        if uf_retain_col is not None:
+            uf = np.nan_to_num(uf_retain_col, nan=0.0)
+            _urban_wd_mask = (uf > 0.2) & (wd24 > _yr_wd_cached)
+        _yr_wd_cached = well_dens
         has_well = well_dens > 0
-        _gma_fill_mask = has_well
+    # Gate phantom by GEE-LULC start: pre-1938 AGRI is a fixed 1938
+    # snapshot, not representative of the unregistered-well era.
+    if _k_phantom > 0 and year >= CANAL_PREDICTOR_START:
+        agri_col = year_df['AGRI'].values if 'AGRI' in year_df.columns else None
+        if agri_col is not None and _yr_wd_cached is not None:
+            agri = np.clip(np.nan_to_num(agri_col, nan=0.0), 0.0, 1.0)
+            # Year-dependent threshold: tighter early (0.60 at 1938),
+            # drops sharply during 1951–1955 drilling boom, relaxes to
+            # a 0.30 plateau by 1960.
+            _agri_thr = _phantom_agri_threshold(year)
+            ag_gate = agri >= _agri_thr
+            # Canal-gate relaxation: canal-fed ag pixels get a fraction
+            # of phantom strength (conjunctive groundwater use). Pre-1965:
+            # canal weight = 0 (pure canal ag, no backup pumping). Post-
+            # 1975: canal weight = PHANTOM_CANAL_INCLUDE_MAX.
+            _canal_inc = _phantom_canal_include(year)
+            canal_weight = np.where(has_smooth_canal, _canal_inc, 1.0)
+            phantom_wd = (
+                agri * PHANTOM_M_TOTAL * _k_phantom
+                * ag_gate.astype(np.float64)
+                * canal_weight
+            )
+            well_dens = np.maximum(_yr_wd_cached, phantom_wd)
+            has_well = well_dens > 0
+            _gma_fill_mask = has_well
+            _phantom_dominant = phantom_wd > _yr_wd_cached
 
     _has_crop_any = (np.nan_to_num(crop_frac_col, nan=0.0) > 0) \
         if crop_frac_col is not None else np.zeros(len(predictions), dtype=bool)
@@ -331,13 +588,26 @@ def partition_predictions(
     # Scale LU-only pixel predictions:
     # 1925-1937: small ramp 0.05→0.15 to capture early ag boom era
     # 1938-1944: 0 (no override yet)
-    # 1945-1970: ramp 0→1 (matches _wd_alpha)
-    # 1970+: 1.0 (full)
+    # 1945-1955: ramp 0→1 (_lu_ramp up-ramp)
+    # 1955-1980: 1.0 (full)
+    # 1981-1983: ramp 1→0 (_lu_ramp down-ramp)
+    # 1984+: 0 (year-specific registry only)
     if 1925 <= year < CANAL_PREDICTOR_START and lu_only.any():
         early_alpha = 0.10 + (year - 1925) * (0.30 - 0.10) / (1937 - 1925)
         predictions[lu_only] = predictions[lu_only] * early_alpha
-    elif _wd_alpha < 1.0 and lu_only.any():
-        predictions[lu_only] = predictions[lu_only] * _wd_alpha
+    elif _lu_ramp < 1.0 and lu_only.any():
+        predictions[lu_only] = predictions[lu_only] * _lu_ramp
+
+    # Urban wd_1981 pixels (today's urban cores that were ag pre-GMA):
+    # scale their volume by AGRI so only the ag fraction of the pixel
+    # contributes (not the full 4 km² pixel).
+    if _urban_wd_mask.any() and 'AGRI' in year_df.columns:
+        _agri_scale = np.clip(
+            np.nan_to_num(year_df['AGRI'].values, nan=0.0), 0.0, 1.0,
+        )
+        predictions[_urban_wd_mask] = (
+            predictions[_urban_wd_mask] * _agri_scale[_urban_wd_mask]
+        )
 
     # ---- Irrigation / Non-irrigation split ----
     # Use pump-capacity-weighted irrigation fraction when available:
@@ -367,6 +637,37 @@ def partition_predictions(
             irr_cap_frac[_gma_fill_mask] = np.clip(
                 np.nan_to_num(irr_cap_1981[_gma_fill_mask], nan=0.0), 0, 1,
             )
+        # Phantom-dominant pixels (AGRI-driven phantom > year-specific wd)
+        # are primarily irrigation, but may overlap urban encroachment —
+        # route to Irr by (1 - urban_frac) so municipal NonIrr keeps its
+        # share at urbanized ag fringe pixels.  Previously hard-set to
+        # 1.0, which collapsed 1970–1980 NonIrr to ~0.
+        _urban_frac_col = year_df['annual_urban_fraction'].values \
+            if 'annual_urban_fraction' in year_df.columns else None
+        _uf_route = np.clip(np.nan_to_num(
+            _urban_frac_col if _urban_frac_col is not None
+            else np.zeros(len(predictions)), nan=0.0,
+        ), 0, 1)
+        if _phantom_dominant.any():
+            irr_cap_frac[_phantom_dominant] = 1.0 - _uf_route[_phantom_dominant]
+        # Urban pixels where wd_1981 > year-specific: these were ag land
+        # pre-1970 (Chandler/Gilbert/Mesa/east Tucson suburbs of today).
+        # Gradually transition from "route to Irr by (1-uf)" (ag era) to
+        # natural partition (municipal era) as Phoenix/Tucson urbanized
+        # 1970-1980.
+        if _urban_wd_mask.any():
+            if year <= 1970:
+                _urb_to_irr = 1.0
+            elif year < 1980:
+                _urb_to_irr = 1.0 - (year - 1970) / (1980 - 1970)
+            else:
+                _urb_to_irr = 0.0
+            if _urb_to_irr > 0:
+                natural = irr_cap_frac[_urban_wd_mask]
+                ag_share = 1.0 - _uf_route[_urban_wd_mask]
+                irr_cap_frac[_urban_wd_mask] = (
+                    _urb_to_irr * ag_share + (1.0 - _urb_to_irr) * natural
+                )
         mi_cap_frac = 1.0 - irr_cap_frac
 
         # Temporal scaling by crop/urban area changes
@@ -402,7 +703,14 @@ def partition_predictions(
         # boost smoothly toward the modern parquet values.
         if _override_alpha > 0 and urban_frac is not None:
             uf_override = np.clip(np.nan_to_num(urban_frac, nan=0.0), 0, 1)
-            ag_era_cap = 1.0 - uf_override
+            # Cap ag share at the era-observed USGS Irr% so NonIrr has
+            # a realistic floor during the 1970–1984 plateau.  Without
+            # the cap, (1 - urban_frac) ≈ 1 at rural 1970 pixels forces
+            # irr_cap_frac=1 and collapses NonIrr to ~0 (observed
+            # 91.4% ag in 1970, 93.9% in 1975, 89.1% in 1980 — midpoint
+            # 0.92 leaves an ~8% NonIrr floor that matches the anchors).
+            _ag_cap_max = 0.92
+            ag_era_cap = np.minimum(_ag_cap_max, 1.0 - uf_override)
             blended = (
                 irr_cap_frac * (1 - _override_alpha)
                 + ag_era_cap * _override_alpha
@@ -424,9 +732,12 @@ def partition_predictions(
         # Post-CAP: light ag boost at crop pixels (partial blend toward
         # 1-urban_frac) to correct for 2024 registry undercounting
         # irrigation at urban-encroached ag areas.  USGS/ADWR show ag
-        # remained ~72% of water use even in 2017.
-        if crop_frac is not None and year >= _RAMP_DN_END:
-            post_cap_blend = 0.6
+        # remained ~72% of water use even in 2017.  Activated from 2000
+        # (decoupled from _RAMP_DN_END) to recover the 2000–2015 under-
+        # Irr bias that the 2024 registry ramp-down leaves behind.
+        _POST_CAP_BLEND_START = 2000
+        if crop_frac is not None and year >= _POST_CAP_BLEND_START:
+            post_cap_blend = 0.75
             has_crop_px_pc = np.nan_to_num(crop_frac, nan=0.0) > 0
             uf_pc = np.clip(np.nan_to_num(
                 urban_frac if urban_frac is not None
@@ -505,14 +816,17 @@ def partition_predictions(
             if basin_names is not None else np.zeros(len(predictions), dtype=bool)
         apply_uf = (is_other | is_rural_ama) & ~lu_only
         uf = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
-        # Urban scaling exemption: ramp from 1960 (delayed start —
-        # urban development in AZ was minimal pre-1960 so the exemption
-        # is only needed for the peak ag era and beyond).
-        # Ramps up 1960→1970, stays 1.0 until 1980, ramps down 1981→1985.
-        if year < 1960:
+        # Urban scaling exemption: α=0 through 1969 (urban scaling active
+        # → NonIrr at rural AMAs scaled down by urban_frac), then ramps
+        # 1970→1980 (exemption switches on). Pushing the start from 1965
+        # → 1970 suppresses the 1965→1970 NonIrr jump that was making
+        # 1970 total over-predict by ~1.4 MAF. Urban development in
+        # rural AMAs only materialized through the 1970s, justifying the
+        # later exemption-activation window.
+        if year < 1970:
             _urb_alpha = 0.0
-        elif year < 1970:
-            _urb_alpha = (year - 1960) / (1970 - 1960)
+        elif year < 1980:
+            _urb_alpha = (year - 1970) / (1980 - 1970)
         elif year <= 1980:
             _urb_alpha = 1.0
         elif year < _RAMP_DN_END:
@@ -567,9 +881,28 @@ def partition_predictions(
     # gets 1000× more influence than a POD at a dry wash.  This replaces
     # the separate cw_norm boost — canal delivery information is now
     # embedded in the smoothed SW density itself.
-    # Post-GMA (1981+): widen SW smoothing to 8 (2x) to spread
-    # canal-delivered SW influence over the larger service areas.
-    _sw_sigma = 8.0 if year >= GMA_YEAR else sw_smooth_sigma
+    #
+    # σ ramp reflects canal-infrastructure maturation:
+    #   1938–1970: σ = _SW_SIGMA_PRE (2.0, tighter — early SRP reach,
+    #              pre-CAP canal laterals are short and local)
+    #   1960–1985: linear ramp _SW_SIGMA_PRE → 16.0 (earlier start
+    #              spreads SW earlier so 1985–1995 SW anchors get
+    #              enough service-area coverage)
+    #   1985+:     σ = 16 (post-CAP full service areas — matches the
+    #              USGS SW anchors 1990+ better than σ=8)
+    _SW_SIGMA_PRE = 2.0
+    _SW_SIGMA_RAMP_START = 1960
+    _SW_SIGMA_RAMP_END = 1985
+    _SW_SIGMA_POST = 16.0
+    if year <= _SW_SIGMA_RAMP_START:
+        _sw_sigma = _SW_SIGMA_PRE
+    elif year >= _SW_SIGMA_RAMP_END:
+        _sw_sigma = _SW_SIGMA_POST
+    else:
+        _frac = (year - _SW_SIGMA_RAMP_START) / float(
+            _SW_SIGMA_RAMP_END - _SW_SIGMA_RAMP_START,
+        )
+        _sw_sigma = _SW_SIGMA_PRE + _frac * (_SW_SIGMA_POST - _SW_SIGMA_PRE)
 
     def _smooth_sw_density(sw_dens, cw_sf):
         """Weight SW POD density by cw_streamflow and Gaussian-smooth."""

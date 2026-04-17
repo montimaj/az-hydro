@@ -2602,8 +2602,9 @@ from the following sources:
 | Year | Target Total | Model Total | Target GW% | Model GW% | Source |
 |---|---|---|---|---|---|
 | 1950 | 5.40 | 5.40 | 67 % | 65 % | USBR/Circ 115 |
-| 1957 | 7.50 | 5.66 | — | 65 % | ADWR chart |
-| 1970 | 7.66 | 8.92 | 61 % | 69 % | Circ 676 |
+| 1957 | ~6.5 | 5.66 | — | 65 % | ADWR chart |
+| 1960 | 6.30 | 6.26 | 56 % | 61 % | Circ 456 |
+| 1970 | 7.98 | 8.92 | 61 % | 69 % | Circ 676 (incl conv loss) |
 | 1980 | 8.97 | 8.88 | 52 % | 65 % | Circ 1001 |
 | 1985 | 7.20 | 6.38 | 48 % | 49 % | Circ 1004 |
 | 1990 | 7.36 | 6.41 | 42 % | 47 % | Circ 1081 |
@@ -2663,12 +2664,16 @@ from the following sources:
   to NonIrr at urban AMA crop pixels. NonIrr_GW is correspondingly
   over-attributed by similar magnitude. Total GW is well-matched
   (within 5 %).
-- **1970–1980 totals** slightly exceed USGS Circular components
-  (8.9 MAF model vs 7.7 MAF Circ 676 / 8.97 MAF Circ 1001) because the
-  ag-era `irr_cap = 1 − urban_frac` override aggressively routes volume
-  to irrigation at all retained pixels. The ADWR Annual Report 2016
-  chart shows ~9.5 MAF in 1980, between the two USGS circular figures
-  and matching the model better.
+- **1970 total** (model 8.92 MAF) sits between two independent
+  agency estimates: USGS Circular 676 components sum to 7.98 MAF
+  (Public Supply 310 + Rural 50 + Irrigation 6,300 + 240 conv loss +
+  Industrial 180 + Thermo 42 mgd), while the ADWR Annual Report 2016
+  statewide chart shows ~9 MAF for the early-to-mid 1970s. The model
+  brackets the two agency estimates, slightly closer to ADWR's
+  retrospective chart figure than to the Circular sum.
+- **1980 total** (model 8.88 vs USGS Circ 1001 8.97 MAF) — well-
+  matched (-1 %). ADWR chart shows ~9.5 MAF for 1980 (the documented
+  peak), so the model brackets both estimates.
 
 ### `uncertaintyops.py` — Hybrid uncertainty quantification
 
