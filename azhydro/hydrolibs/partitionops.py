@@ -575,21 +575,23 @@ def _phantom_k(year: int) -> float:
 #   gw_frac = (gw_weight × wd) / (gw_weight × wd + swd_smooth)
 GMA_YEAR = 1981
 CAP_FULL_YEAR = 1990
-GW_WEIGHT_PRE_GMA = 2.0
-GW_WEIGHT_POST_CAP = 0.2
+GW_WEIGHT_PRE_1945 = 5.0   # pre-1945: USGS shows ~100% GW (no/minimal SW
+                           # except SRP); push very strongly toward GW
+GW_WEIGHT_PRE_GMA = 2.0    # 1945–1980 GW-dominant era
+GW_WEIGHT_POST_CAP = 0.2   # post-CAP SW-dominant era
 
 
 def _era_gw_weight(year: int) -> float:
     """Return era-dependent GW weight for the density-ratio split.
 
-    Pre-1938 (no GEE LULC): weight = 1.0 (default, GW already dominant
-    from well-only pixel retention).
-    1938–1980: boosted GW weight to match USBR ~67% GW statewide.
-    1981–1993: linear ramp down as CAP comes online.
-    1993+: reduced GW weight to match USGS/ADWR ~42% GW.
+    Pre-1945: weight = 5.0 (very GW-dominant, matches USGS pre-1945
+        showing essentially all pumping was GW).
+    1945–1980: weight = 2.0 (GW-dominant, USBR ~67% GW statewide).
+    1981–1990: linear ramp 2.0 → 0.2 as CAP comes online.
+    1990+: weight = 0.2 (SW-dominant post-CAP, USGS/ADWR ~42% GW).
     """
-    if year < CANAL_PREDICTOR_START:
-        return 1.0
+    if year < 1945:
+        return GW_WEIGHT_PRE_1945
     if year < GMA_YEAR:
         return GW_WEIGHT_PRE_GMA
     if year >= CAP_FULL_YEAR:
@@ -907,12 +909,19 @@ def partition_predictions(
     cw_sf_vals = cw_streamflow_raw if cw_streamflow_raw is not None \
         else np.zeros(len(predictions), dtype=np.float64)
     # Era-dependent SW smoothing sigma:
-    #   pre-CAP (year < 1985): default sw_smooth_sigma (2.0) — tighter
-    #     halo around POD locations matches the smaller pre-CAP canal
-    #     network.
-    #   post-CAP (year >= 1985): sigma = 8 — spreads CAP/SRP delivery
-    #     influence across the broader modern service-area footprint.
-    SW_SIGMA = 4.0 if year >= 1985 else sw_smooth_sigma
+    #   pre-1945:           sigma = 1.0 (very tight — only SRP, minimal
+    #                       canal network; SW rights should not spread
+    #                       across broad halos).
+    #   1945–1984:          default sw_smooth_sigma (2.0) — tighter
+    #                       halo matching the pre-CAP canal network.
+    #   post-CAP (1985+):   sigma = 4.0 — wider halo for CAP/SRP
+    #                       service-area footprint.
+    if year < 1945:
+        SW_SIGMA = 1.0
+    elif year >= 1985:
+        SW_SIGMA = 4.0
+    else:
+        SW_SIGMA = sw_smooth_sigma
     gw_weight = _era_gw_weight(year)
 
     if irr_swd is not None:
@@ -951,13 +960,22 @@ def partition_predictions(
 
     # Post-1985: scale NonIrr SW by urban_frac at every pixel.  The
     # urban share of SW stays as municipal/industrial (NonIrr); the
-    # non-urban portion is DROPPED (post-CAP SW is already over-
-    # predicted, so we don't reattribute the excess to Irr).  Reduces
-    # both NonIrr_SW and Total_SW.
-    if year >= 1985 and urban_frac_col is not None:
+    # non-urban excess is reattributed to Irr SW scaled by crop_frac
+    # (only the cropped portion of the non-urban excess is plausible
+    # irrigation — the desert portion is dropped).
+    #   nonirr_sw_new = nonirr_sw_old × uf
+    #   excess        = nonirr_sw_old × (1 − uf)
+    #   irr_sw_new    = irr_sw_old + excess × crop_frac
+    #   (desert residual excess × (1 − cf) is dropped)
+    if (year >= 1985 and urban_frac_col is not None
+            and crop_frac_col is not None):
         uf_sw = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
+        cf_sw = np.clip(np.nan_to_num(crop_frac_col, nan=0.0), 0, 1)
+        excess_sw = nonirr_sw * (1.0 - uf_sw)
         nonirr_sw = nonirr_sw * uf_sw
-        # Recompute NonIrr total (Irr unchanged)
+        irr_sw = irr_sw + excess_sw * cf_sw
+        # Recompute Irr / NonIrr totals to reflect the reallocation
+        irr = irr_gw + irr_sw
         nonirr = nonirr_gw + nonirr_sw
 
     return {
