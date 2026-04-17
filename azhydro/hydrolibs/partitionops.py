@@ -575,7 +575,7 @@ def _phantom_k(year: int) -> float:
 #   gw_frac = (gw_weight × wd) / (gw_weight × wd + swd_smooth)
 GMA_YEAR = 1981
 CAP_FULL_YEAR = 1990
-GW_WEIGHT_PRE_GMA = 1.0
+GW_WEIGHT_PRE_GMA = 2.0
 GW_WEIGHT_POST_CAP = 0.2
 
 
@@ -802,28 +802,42 @@ def partition_predictions(
     # 1985+ NON-AMA split: per-pixel LULC logic (registry mostly
     # complete post-CAP, so use raw cf/uf instead of AGRI smoothing).
     #   - only crop (cf > 0 AND uf <= 0.20):   irr = pred (full Irr)
-    #   - both crop AND urban (cf > 0 AND uf > 0.20): default partition
-    #                                           (irr = pred × irr_capacity)
-    #   - only urban (cf = 0 AND uf > 0.20):   default partition
-    #                                           (irr = pred × irr_capacity)
+    #   - both crop AND urban (cf > 0 AND uf > 0.20):
+    #                                           irr = pred × (1-uf)
+    #                                           nonirr = pred × uf
+    #   - only urban (cf = 0 AND uf > 0.20):   default partition,
+    #                                           BUT irr = 0 if AGRI < 0.5
+    #                                           (no real ag activity →
+    #                                           drop the Irr portion)
     #   - pure desert (cf = 0 AND uf <= 0.20):
     #       - WITH well: default partition (irr = pred × irr_capacity)
     #       - WITHOUT well: drop (irr = 0, nonirr = 0)
     URBAN_HIGH_THRESHOLD = 0.20
+    ONLY_URBAN_AGRI_FLOOR = 0.50
     if (year >= 1985 and basin_names is not None
             and crop_frac_col is not None and urban_frac_col is not None):
         non_ama = ~np.isin(basin_names, list(AMA_BASINS))
         cf = np.clip(np.nan_to_num(crop_frac_col, nan=0.0), 0, 1)
         uf = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
         only_crop = non_ama & (cf > 0) & ~(uf > URBAN_HIGH_THRESHOLD)
+        both_lu = non_ama & (cf > 0) & (uf > URBAN_HIGH_THRESHOLD)
+        only_urban = non_ama & ~(cf > 0) & (uf > URBAN_HIGH_THRESHOLD)
         pure_desert = non_ama & ~(cf > 0) & ~(uf > URBAN_HIGH_THRESHOLD)
         pure_desert_no_well = pure_desert & ~has_well
-        # both, only_urban, pure_desert_with_well: keep default partition
-        # (irr = pred × irr_frac where irr_frac = irr_capacity_fraction
-        # with adaptive crop floor; at cf=0 floor is moot, so effectively
-        # natural irr_capacity).
         irr[only_crop] = predictions[only_crop]
         nonirr[only_crop] = 0.0
+        irr[both_lu] = predictions[both_lu] * (1.0 - uf[both_lu])
+        nonirr[both_lu] = predictions[both_lu] * uf[both_lu]
+        # Only-urban: zero out Irr where smoothed AGRI is low (no real
+        # ag activity nearby).  NonIrr stays from default partition
+        # (pred × (1−irr_capacity)).  This drops Irr volume at urban-
+        # only pixels lacking ag context.
+        if 'AGRI' in year_df.columns:
+            _agri_only_urban = np.clip(np.nan_to_num(
+                year_df['AGRI'].values, nan=0.0,
+            ), 0, 1)
+            only_urban_low_agri = only_urban & (_agri_only_urban < ONLY_URBAN_AGRI_FLOOR)
+            irr[only_urban_low_agri] = 0.0
         irr[pure_desert_no_well] = 0.0
         nonirr[pure_desert_no_well] = 0.0
 
@@ -892,7 +906,13 @@ def partition_predictions(
     # pre-GMA 62–69% baseline).
     cw_sf_vals = cw_streamflow_raw if cw_streamflow_raw is not None \
         else np.zeros(len(predictions), dtype=np.float64)
-    SW_SIGMA = sw_smooth_sigma  # default 2.0
+    # Era-dependent SW smoothing sigma:
+    #   pre-CAP (year < 1985): default sw_smooth_sigma (2.0) — tighter
+    #     halo around POD locations matches the smaller pre-CAP canal
+    #     network.
+    #   post-CAP (year >= 1985): sigma = 8 — spreads CAP/SRP delivery
+    #     influence across the broader modern service-area footprint.
+    SW_SIGMA = 4.0 if year >= 1985 else sw_smooth_sigma
     gw_weight = _era_gw_weight(year)
 
     if irr_swd is not None:
@@ -928,6 +948,17 @@ def partition_predictions(
     else:
         nonirr_gw = nonirr.copy()
         nonirr_sw = np.zeros_like(nonirr)
+
+    # Post-1985: scale NonIrr SW by urban_frac at every pixel.  The
+    # urban share of SW stays as municipal/industrial (NonIrr); the
+    # non-urban portion is DROPPED (post-CAP SW is already over-
+    # predicted, so we don't reattribute the excess to Irr).  Reduces
+    # both NonIrr_SW and Total_SW.
+    if year >= 1985 and urban_frac_col is not None:
+        uf_sw = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
+        nonirr_sw = nonirr_sw * uf_sw
+        # Recompute NonIrr total (Irr unchanged)
+        nonirr = nonirr_gw + nonirr_sw
 
     return {
         'Irrigation':         irr,
