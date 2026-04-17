@@ -2006,10 +2006,15 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             year_wd = np.nan_to_num(pred_features['well_density'].values, nan=0.0)
             effective_wd = year_wd
             if _wd2024_active and _wd_1981 is not None:
-                # wd_1981 magnitude scaled by phantom K (1951–1983) so
-                # the 1958–1960 drought-recovery dip affects registered
-                # wells too; 1984–2024: full strength.
-                wd24 = np.nan_to_num(_wd_1981, nan=0.0) * partops._wd_2024_scale(year)
+                # Peak USGS pumping years (1951–1955, 1970–1980): use
+                # the full 2024 registry (no _wd_2024_scale dampening
+                # for drought dip / ramp).  Outside those windows: use
+                # the standard scale-only multiplier.
+                wd24_raw = np.nan_to_num(_wd_1981, nan=0.0)
+                if 1951 <= year <= 1955 or 1970 <= year <= 1980:
+                    wd24 = wd24_raw
+                else:
+                    wd24 = wd24_raw * partops._wd_2024_scale(year)
                 effective_wd = np.maximum(effective_wd, wd24)
             if _k_phantom > 0 and 'AGRI' in pred_features.columns:
                 agri = np.clip(np.nan_to_num(pred_features['AGRI'].values, nan=0.0), 0.0, 1.0)
@@ -2023,6 +2028,73 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                     canal_weight = 1.0
                 phantom_wd = agri * partops.PHANTOM_M_TOTAL * _k_phantom * ag_gate * canal_weight
                 effective_wd = np.maximum(effective_wd, phantom_wd)
+
+            # LU-only basin-median fill (ML features ONLY — does NOT
+            # affect the partition's lu_only mask).  At pixels where
+            # effective_wd is still 0 (no year_wd, no wd_2024) but the
+            # pixel has LULC signal, fill with the basin's median
+            # wd_2024 value × scale.
+            #
+            # Gating logic:
+            #   - AMA/INA pixels (any year): raw per-pixel fractions
+            #     (annual_crop_fraction > 0 OR annual_urban_fraction > 0).
+            #   - Outside-AMA pixels at peak years (1951-1955, 1970-1980):
+            #     SMOOTHED ag (AGRI > 0) OR raw urban_fraction > 0.
+            #     AGRI is a Gaussian-filtered crop class that extends
+            #     into ag-fringe pixels — broader coverage at non-AMA
+            #     basins (Yuma, Mohave, etc.) where peak-year ag
+            #     activity wasn't fully captured by raw crop_frac.
+            #     Urban gating stays on raw urban_frac.
+            #   - Outside-AMA pixels at other years: raw per-pixel
+            #     fractions (cf > 0 OR uf > 0).
+            # AGRI-extension at outside-AMA: only at peak years (registry
+            # incomplete then).  Post-CAP (1985+) uses raw cf/uf only.
+            #   1951–55, 1975–80: AGRI > 0.01 (loose, peak years)
+            #   1970–74:           AGRI > 0.10 (standard)
+            #   other years:       no AGRI extension (raw cf/uf only)
+            _is_loose_p = (1951 <= year <= 1955 or 1975 <= year <= 1980)
+            _is_std_p   = (1970 <= year <= 1974)
+            _agri_thr_p = 0.02 if _is_loose_p else 0.10
+            _agri_active = _is_loose_p or _is_std_p
+            if (year >= partops.PHANTOM_INFILL_START
+                    and _wd_1981 is not None
+                    and 'GW_Basin' in year_df.columns):
+                _basins_lu = year_df['GW_Basin'].values
+                _wd24_full = np.nan_to_num(_wd_1981, nan=0.0)
+                _cf_lu = np.clip(np.nan_to_num(
+                    pred_features['annual_crop_fraction'].values
+                    if 'annual_crop_fraction' in pred_features.columns
+                    else np.zeros(len(effective_wd)), nan=0.0,
+                ), 0, 1)
+                _uf_lu = np.clip(np.nan_to_num(
+                    pred_features['annual_urban_fraction'].values
+                    if 'annual_urban_fraction' in pred_features.columns
+                    else np.zeros(len(effective_wd)), nan=0.0,
+                ), 0, 1)
+                _raw_gate = (_cf_lu > 0) | (_uf_lu > 0)
+                if _agri_active:
+                    _agri_lu = np.clip(np.nan_to_num(
+                        pred_features['AGRI'].values
+                        if 'AGRI' in pred_features.columns
+                        else np.zeros(len(effective_wd)), nan=0.0,
+                    ), 0, 1)
+                    _outside_gate = (_agri_lu > _agri_thr_p) | (_uf_lu > 0)
+                    _is_ama = np.isin(_basins_lu, list(partops.AMA_BASINS))
+                    _lulc_gate = np.where(_is_ama, _raw_gate, _outside_gate)
+                else:
+                    _lulc_gate = _raw_gate
+                _lu_scale = partops._phantom_infill_scale(year)
+                if _lu_scale > 0.0:
+                    _basin_series = pd.Series(_basins_lu)
+                    for _b in _basin_series.dropna().unique():
+                        _b_mask = (_basins_lu == _b)
+                        _b_pool = _wd24_full[_b_mask & (_wd24_full > 0)]
+                        if _b_pool.size == 0:
+                            continue
+                        _b_lu = _b_mask & (effective_wd == 0.0) & _lulc_gate
+                        if _b_lu.any():
+                            _basin_med = float(np.median(_b_pool))
+                            effective_wd[_b_lu] = _basin_med * _lu_scale
             pred_features['well_density'] = effective_wd
 
         # Collect subsampled features for era-specific interpretability
