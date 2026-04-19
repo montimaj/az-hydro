@@ -2579,8 +2579,106 @@ Both sections write to `Uncertainty/Sigma_GW/Density_Ratio_Sensitivity.csv`
 with time-series ribbon plots in `Density_Ratio_Sensitivity.png` and
 `Smoothing_Sigma_Sensitivity.png`.
 
+#### ML feature well_density override (1962–2099)
+
+Pre-prediction, the ML feature `well_density` is enhanced by
+`apply_ml_well_density_override` (called from both pipeline.py Step 3
+and uncertaintyops.py `_build_pred_features` — single source of truth):
+
+1. **Per-pixel max blend with the 2024 registry** at peak USGS
+   pumping years (full registry at 1951–1955 / 1970–1980; scaled
+   elsewhere via `_wd_2024_scale`).  The per-pixel-max scale ramps
+   1.0 → 0.2 over 1995–2005 and 0.2 → 0 over 2015–2020, so for
+   year > 2020 this step contributes nothing — the year-specific
+   registry IS the 2024 snapshot already.
+2. **AGRI-gated phantom_wd contribution** (1938–1985 only) for ag
+   pixels the 2024 registry may miss.
+3. **Basin-median LU-only fill** at pixels with crop or urban LULC
+   but no wells.  Active **1962–2099** — extended through projection
+   so LU-expansion pixels (urban/crop areas that grow in LULC
+   projection scenarios) get a basin-typical well-density signal in
+   ML features rather than zero.  Without this extension, projection
+   LU-expansion pixels would have `well_density = 0` → the ML model
+   would under-predict pumping there.
+
+The override does NOT modify the partition's retention mask (which
+uses `year_df['well_density']` directly).  It only enriches the ML
+feature so XGBoost predicts realistic per-pixel pumping at LU-expansion
+pixels in projection.
+
+#### Calibration architecture
+
+Three categories of levers are layered to match USGS/ADWR aggregate
+anchors across all eras:
+
+**1. Input predictor manipulation** (in `partition_predictions` and
+`apply_ml_well_density_override`):
+
+- Per-year well registry (year_df['well_density']) as the primary
+  spatial signal
+- 2024 registry per-pixel-max blend (1951–2020) for ML features
+- Phantom_wd AGRI-gated fill (1938–1985) for ML features at ag pixels
+- Basin-median LU-only fill (1962–2099) for ML features at LU pixels
+  missing wells (extends through projection for continuity)
+- Per-year SW rights density (irr_swd, nonirr_swd) as the SW signal
+- Canal-weighted streamflow as the SW spreading kernel weight
+
+**2. GW weight schedule** (`_era_gw_weight`):
+
+| Era | gw_weight |
+|---|---|
+| Pre-1945 | 5.0 |
+| 1930–1935 (override) | 10.0 |
+| 1945–1985 | 2.0 |
+| 1986–1989 (ramp) | 2.0 → 0.2 |
+| 1990–1997 | 0.2 |
+| 1998–2007 (mid-CAP bump) | 0.5 |
+| 2008+ | 0.2 |
+
+**3. SW smoothing σ schedule** (piecewise-linear ramps between anchor
+years):
+
+| Era | σ |
+|---|---|
+| Pre-1912 | 0.0 |
+| 1912–1948 | piecewise ramps through anchors (Yuma 1.5, Pinal 0.3, well-drilling boom 0.0, Gila 1.0) |
+| 1948–1955 | 1.5 |
+| 1956–1964 | 1.0 |
+| 1965–1984 | linear ramp 1.0 → 4.0 (1973–77 = 2.0 drought override) |
+| 1985–2002 | 4.0 |
+| 2003–2010 | 3.0 |
+| 2011–2021 | linear ramp 4.0 → 6.0 |
+| 2022+ | 6.0 |
+
+**Plus auxiliary retention/partition logic** (era-dependent):
+
+- Pre-1948 retention rules (well & LULC intersection ramps;
+  1930–1937 LU-only thresholds 0.90 → 0.50; 1938–1944 well & cf
+  intersection ramps 0.95 → 0.70)
+- Pre-1945 SW-gate (SW only at canal/sw_rights pixels; otherwise SW
+  collapses back to GW)
+- 1986+ NON-URBAN-AMA partition (only_crop / both_lu / pure_desert
+  with AGRI-halo gate)
+- AGRI extension for retention (loose 0.02 / std 0.10 windows)
+- 1970–1985 NON-AMA `irr_frac = 1 − uf` override
+- NonIrr_SW excess routing (1986–2010 gw_share split / 2011+
+  canal-heavy floor)
+- 2003–2012 desert-well scaling (× 0.75)
+- `URBAN_AMA_BASINS = {Phoenix, Tucson}` and `CANAL_HEAVY_BASINS`
+  (Lake Havasu, Yuma, Parker, Harquahala, Gila Bend, Hualapai
+  Valley, Prescott, Pinal) basin sets
+
+All three categories of levers, plus the auxiliary rules, are tuned
+against USGS Total_GW pre-1950 and USGS/ADWR aggregate breakdowns
+1950–2017.
+
 #### Key helpers
 
+- **`apply_ml_well_density_override(pred_features, year, year_df, wd_2024)`**
+  — applies the pre-prediction well_density override (per-pixel max
+  with 2024 registry + AGRI-gated phantom_wd + basin-median LU-only
+  fill).  Single source of truth shared between pipeline.py Step 3 and
+  uncertaintyops.py UQ ensemble construction.  Active 1962–2099.
 - **`_era_gw_weight(year)`** — returns the era-dependent `gw_weight`
   (5.0 pre-1945, 2.0 pre-GMA, mid-CAP bump 0.5 at 1998–2007, 0.2
   post-CAP, with 1930–1935 = 10.0 override).

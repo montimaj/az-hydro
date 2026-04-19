@@ -207,21 +207,6 @@ def _set_pre_gma_context(az_df: pd.DataFrame, ref_year: int = 2024) -> None:
     )
 
 
-def _wd_feature_alpha(year: int) -> float:
-    """Return the well-density feature blend alpha for *year*.
-
-    Mirrors the pipeline.py blend (1945→1970 ramp 0→1, stays 1.0
-    forever).  Used in _build_pred_features to apply the same blend
-    to ML feature `well_density` as the production pipeline.
-    """
-    RAMP_S, RAMP_E = 1945, 1970
-    if year < RAMP_S:
-        return 0.0
-    if year < RAMP_E:
-        return (year - RAMP_S) / (RAMP_E - RAMP_S)
-    return 1.0
-
-
 # ── Helper ───────────────────────────────────────────────────────────────────
 
 def _build_pred_features(
@@ -233,7 +218,14 @@ def _build_pred_features(
 
     XGBoost features = columns from ``create_az_data_parquet`` minus
     *drop_attrs* minus the target (``gw_pumping_mm``).
+
+    Applies the same pre-1981 well_density override as the central
+    pipeline (via ``partops.apply_ml_well_density_override``) so UQ
+    ensemble members use identical ML features as the central
+    prediction.
     """
+    from hydrolibs import partitionops as partops
+
     drop_list = [a for a in drop_attrs if a in year_df.columns]
     pred = year_df.drop(
         columns=drop_list + ['gw_pumping_mm'],
@@ -244,21 +236,15 @@ def _build_pred_features(
             pred[c] = 0
     pred = pred[feature_cols]
 
-    # Pre-GMA well_density blend (mirrors pipeline.py logic).  Without
-    # this blend, UQ ML predictions pre-1981 use sparse year-specific
-    # well registries and under-predict relative to the central run.
+    # Apply the shared well_density override (single source of truth
+    # with pipeline.py).  Skipped when no Year column or no wd_2024
+    # context loaded.
     yr = int(year_df['Year'].iloc[0]) if 'Year' in year_df.columns and len(year_df) else None
-    wd_1981 = _PRE_GMA_CTX.get('wd_1981')
-    if (yr is not None and yr < 1981 and wd_1981 is not None
-            and 'well_density' in pred.columns and len(pred) == len(wd_1981)):
-        alpha = _wd_feature_alpha(yr)
-        if alpha > 0:
-            year_wd = pred['well_density'].values
-            pred = pred.copy()
-            pred['well_density'] = (
-                year_wd * (1 - alpha)
-                + np.nan_to_num(wd_1981, nan=0.0) * alpha
-            )
+    wd_2024 = _PRE_GMA_CTX.get('wd_1981')  # context key kept for backwards compat
+    if yr is not None and wd_2024 is not None and len(pred) == len(wd_2024):
+        pred = partops.apply_ml_well_density_override(
+            pred, yr, year_df, wd_2024,
+        )
 
     inf_mask = np.isinf(pred.values)
     nan_mask = pred.isna().values

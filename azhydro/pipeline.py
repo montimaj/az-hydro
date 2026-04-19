@@ -1791,14 +1791,6 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     _irr_cap_1981 = _gma_df['irr_capacity_fraction'].values if 'irr_capacity_fraction' in _gma_df.columns else None
     logger.info('Loaded %d well density + irr_capacity from parquet for pre-GMA partitioning override', _gma_ref_yr)
 
-    # 1938 well registry snapshot — used in partition for 1930–1937 where
-    # year-specific registries are notably sparser than 1938.
-    _wd_1938_df = az_df[az_df.Year == 1938]
-    _wd_1938 = _wd_1938_df['well_density'].values if 'well_density' in _wd_1938_df.columns else None
-    _irr_wd_1938 = _wd_1938_df['irr_well_density'].values if 'irr_well_density' in _wd_1938_df.columns else None
-    _nonirr_wd_1938 = _wd_1938_df['nonirr_well_density'].values if 'nonirr_well_density' in _wd_1938_df.columns else None
-    logger.info('Loaded 1938 well registry snapshot for 1930-1937 partition override')
-
     def _pixel_stats(pred_vals):
         """Compute depth and volume stats in multiple units.
 
@@ -1997,113 +1989,12 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                     )
         pred_features = pred_features.replace([np.inf, -np.inf], np.nan).fillna(0)
 
-        # Mirror partitionops well-density overrides in ML features:
-        #  (1) 2024 registry override: hard-active 1951–1983 as the
-        #      primary "where wells were likely drilled" spatial pattern.
-        #  (2) Phantom-well override: AGRI-gated fill for ag pixels the
-        #      2024 registry may miss (abandoned pre-GMA wells).
-        # Both combine via per-pixel max with year-specific well density.
-        _k_phantom = partops._phantom_k(year)
-        _wd2024_active = partops._wd_2024_active(year)
-        if (
-            (_k_phantom > 0 or _wd2024_active)
-            and year >= partops.CANAL_PREDICTOR_START
-            and 'well_density' in pred_features.columns
-        ):
-            pred_features = pred_features.copy()
-            year_wd = np.nan_to_num(pred_features['well_density'].values, nan=0.0)
-            effective_wd = year_wd
-            if _wd2024_active and _wd_1981 is not None:
-                # Peak USGS pumping years (1951–1955, 1970–1980): use
-                # the full 2024 registry (no _wd_2024_scale dampening
-                # for drought dip / ramp).  Outside those windows: use
-                # the standard scale-only multiplier.
-                wd24_raw = np.nan_to_num(_wd_1981, nan=0.0)
-                if 1951 <= year <= 1955 or 1970 <= year <= 1980:
-                    wd24 = wd24_raw
-                else:
-                    wd24 = wd24_raw * partops._wd_2024_scale(year)
-                effective_wd = np.maximum(effective_wd, wd24)
-            if _k_phantom > 0 and 'AGRI' in pred_features.columns:
-                agri = np.clip(np.nan_to_num(pred_features['AGRI'].values, nan=0.0), 0.0, 1.0)
-                _agri_thr = partops._phantom_agri_threshold(year)
-                ag_gate = (agri >= _agri_thr).astype(np.float64)
-                _canal_inc = partops._phantom_canal_include(year)
-                if 'canal_density' in pred_features.columns:
-                    canal_d = np.nan_to_num(pred_features['canal_density'].values, nan=0.0)
-                    canal_weight = np.where(canal_d > 0, _canal_inc, 1.0)
-                else:
-                    canal_weight = 1.0
-                phantom_wd = agri * partops.PHANTOM_M_TOTAL * _k_phantom * ag_gate * canal_weight
-                effective_wd = np.maximum(effective_wd, phantom_wd)
-
-            # LU-only basin-median fill (ML features ONLY — does NOT
-            # affect the partition's lu_only mask).  At pixels where
-            # effective_wd is still 0 (no year_wd, no wd_2024) but the
-            # pixel has LULC signal, fill with the basin's median
-            # wd_2024 value × scale.
-            #
-            # Gating logic:
-            #   - AMA/INA pixels (any year): raw per-pixel fractions
-            #     (annual_crop_fraction > 0 OR annual_urban_fraction > 0).
-            #   - Outside-AMA pixels at peak years (1951-1955, 1970-1980):
-            #     SMOOTHED ag (AGRI > 0) OR raw urban_fraction > 0.
-            #     AGRI is a Gaussian-filtered crop class that extends
-            #     into ag-fringe pixels — broader coverage at non-AMA
-            #     basins (Yuma, Mohave, etc.) where peak-year ag
-            #     activity wasn't fully captured by raw crop_frac.
-            #     Urban gating stays on raw urban_frac.
-            #   - Outside-AMA pixels at other years: raw per-pixel
-            #     fractions (cf > 0 OR uf > 0).
-            # AGRI-extension at outside-AMA: only at peak years (registry
-            # incomplete then).  Post-CAP (1985+) uses raw cf/uf only.
-            #   1951–55, 1975–80: AGRI > 0.01 (loose, peak years)
-            #   1970–74:           AGRI > 0.10 (standard)
-            #   other years:       no AGRI extension (raw cf/uf only)
-            _is_loose_p = (1951 <= year <= 1955 or 1975 <= year <= 1980)
-            _is_std_p   = (1970 <= year <= 1974)
-            _agri_thr_p = 0.02 if _is_loose_p else 0.10
-            _agri_active = _is_loose_p or _is_std_p
-            if (year >= partops.PHANTOM_INFILL_START
-                    and _wd_1981 is not None
-                    and 'GW_Basin' in year_df.columns):
-                _basins_lu = year_df['GW_Basin'].values
-                _wd24_full = np.nan_to_num(_wd_1981, nan=0.0)
-                _cf_lu = np.clip(np.nan_to_num(
-                    pred_features['annual_crop_fraction'].values
-                    if 'annual_crop_fraction' in pred_features.columns
-                    else np.zeros(len(effective_wd)), nan=0.0,
-                ), 0, 1)
-                _uf_lu = np.clip(np.nan_to_num(
-                    pred_features['annual_urban_fraction'].values
-                    if 'annual_urban_fraction' in pred_features.columns
-                    else np.zeros(len(effective_wd)), nan=0.0,
-                ), 0, 1)
-                _raw_gate = (_cf_lu > 0) | (_uf_lu > 0)
-                if _agri_active:
-                    _agri_lu = np.clip(np.nan_to_num(
-                        pred_features['AGRI'].values
-                        if 'AGRI' in pred_features.columns
-                        else np.zeros(len(effective_wd)), nan=0.0,
-                    ), 0, 1)
-                    _outside_gate = (_agri_lu > _agri_thr_p) | (_uf_lu > 0)
-                    _is_ama = np.isin(_basins_lu, list(partops.AMA_BASINS))
-                    _lulc_gate = np.where(_is_ama, _raw_gate, _outside_gate)
-                else:
-                    _lulc_gate = _raw_gate
-                _lu_scale = partops._phantom_infill_scale(year)
-                if _lu_scale > 0.0:
-                    _basin_series = pd.Series(_basins_lu)
-                    for _b in _basin_series.dropna().unique():
-                        _b_mask = (_basins_lu == _b)
-                        _b_pool = _wd24_full[_b_mask & (_wd24_full > 0)]
-                        if _b_pool.size == 0:
-                            continue
-                        _b_lu = _b_mask & (effective_wd == 0.0) & _lulc_gate
-                        if _b_lu.any():
-                            _basin_med = float(np.median(_b_pool))
-                            effective_wd[_b_lu] = _basin_med * _lu_scale
-            pred_features['well_density'] = effective_wd
+        # Mirror partitionops well-density overrides in ML features.
+        # Single source of truth shared with UQ ensemble members
+        # (uncertaintyops._build_pred_features).
+        pred_features = partops.apply_ml_well_density_override(
+            pred_features, year, year_df, _wd_1981,
+        )
 
         # Collect subsampled features for era-specific interpretability
         for era_name, (y1, y2) in ERA_BOUNDS.items():
@@ -2166,8 +2057,6 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             wd_1981=_wd_1981, irr_wd_1981=_irr_wd_1981,
             nonirr_wd_1981=_nonirr_wd_1981,
             irr_cap_1981=_irr_cap_1981,
-            wd_1938=_wd_1938, irr_wd_1938=_irr_wd_1938,
-            nonirr_wd_1938=_nonirr_wd_1938,
         )
 
         predictions = cat_predictions['Irrigation'] + cat_predictions['Non_Irrigation']

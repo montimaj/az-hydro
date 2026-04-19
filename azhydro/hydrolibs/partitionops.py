@@ -408,14 +408,22 @@ PHANTOM_DROUGHT_DIP_MIN_YEAR = 1960
 PHANTOM_DROUGHT_DIP_END = 1965
 PHANTOM_DROUGHT_DIP_MIN = 0.20   # phantom K drops to 20% of plateau
 
-# 2024-registry override active window: 1951–2020 with the 1958–1961
-# drought-recovery trough skipped.  Magnitude ramps 1.0 → 0.2 over
-# 1995–2005, holds at 0.2 through 2015 to preserve a residual registry
-# signal post-CAP (where year-specific registration is complete but the
-# 2024 snapshot still helps recover the 2000–2015 under-Irr bias), then
-# ramps 0.2 → 0 over 2015–2020.
+# 2024-registry override active window: 1951–2099 with the 1958–1961
+# drought-recovery trough skipped.  Window extends through projection
+# (2025–2099) so the basin-median LU-only fill applies to LULC-
+# expansion pixels in the projection (pixels that become urban/crop
+# after 2024 but have no 2024-registered wells).  Without this
+# extension, projection LU-expansion pixels would have well_density=0
+# in ML features → predicted Total under-shoots growing M&I demand.
+#
+# The per-pixel-max scale ramps 1.0 → 0.2 over 1995–2005, holds at
+# 0.2 through 2015, and ramps 0.2 → 0 over 2015–2020 (i.e., the
+# explicit per-pixel-max blend contributes nothing for year > 2020,
+# which is correct: post-2020 the year-specific registry IS the 2024
+# snapshot already, so the per-pixel max would add nothing).  The
+# basin-median LU-only fill is what's active for projection years.
 WD_2024_ACTIVE_START = 1951
-WD_2024_ACTIVE_END = 2020
+WD_2024_ACTIVE_END = 2099
 WD_2024_RAMP_DOWN_START = 1995
 WD_2024_RAMP_DOWN_END = 2005
 WD_2024_TAIL = 0.2
@@ -596,6 +604,140 @@ def _phantom_k(year: int) -> float:
         )
     return 0.0
 
+
+def apply_ml_well_density_override(
+        pred_features: pd.DataFrame,
+        year: int,
+        year_df: pd.DataFrame,
+        wd_2024: np.ndarray | None,
+) -> pd.DataFrame:
+    """Apply pre-1981 well_density override to ML feature matrix.
+
+    Mirrors the partition-time well-density logic so that ML
+    predictions use the same effective well density as the partition
+    expects.  Single source of truth for both the central pipeline
+    (Step 3 prediction loop) and the UQ ensemble members.
+
+    Logic (lifted verbatim from pipeline.py 1995-2106):
+      (1) Per-pixel max blend with the 2024 snapshot
+          (``wd_2024``): full at peak years 1951-1955 / 1970-1980;
+          scaled elsewhere via ``_wd_2024_scale(year)``.
+      (2) AGRI-gated phantom_wd contribution
+          (``_phantom_k(year) × PHANTOM_M_TOTAL × ag_gate × canal_weight``).
+      (3) LU-only basin-median fill at ag-LULC pixels missing wells
+          (``_phantom_infill_scale(year) × basin_median(wd_2024)``).
+
+    Args:
+        pred_features: ML feature DataFrame (will be copied if modified).
+        year: Prediction year.
+        year_df: Per-pixel-per-year DataFrame (must contain ``GW_Basin``
+            for the basin-median fill step).
+        wd_2024: 2024 well-density snapshot per pixel (1-D), or None
+            to skip the override entirely.
+
+    Returns:
+        pred_features with ``well_density`` column updated (same object
+        if no modification needed; a copy otherwise).
+    """
+    _k_phantom = _phantom_k(year)
+    _wd2024_active = _wd_2024_active(year)
+    if not (
+        (_k_phantom > 0 or _wd2024_active)
+        and year >= CANAL_PREDICTOR_START
+        and 'well_density' in pred_features.columns
+    ):
+        return pred_features
+
+    pred_features = pred_features.copy()
+    year_wd = np.nan_to_num(pred_features['well_density'].values, nan=0.0)
+    effective_wd = year_wd
+    if _wd2024_active and wd_2024 is not None:
+        # Peak USGS pumping years (1951–1955, 1970–1980): use the full
+        # 2024 registry (no _wd_2024_scale dampening for drought dip /
+        # ramp).  Outside those windows: use the standard scale-only
+        # multiplier.
+        wd24_raw = np.nan_to_num(wd_2024, nan=0.0)
+        if 1951 <= year <= 1955 or 1970 <= year <= 1980:
+            wd24 = wd24_raw
+        else:
+            wd24 = wd24_raw * _wd_2024_scale(year)
+        effective_wd = np.maximum(effective_wd, wd24)
+    if _k_phantom > 0 and 'AGRI' in pred_features.columns:
+        agri = np.clip(np.nan_to_num(pred_features['AGRI'].values, nan=0.0), 0.0, 1.0)
+        _agri_thr = _phantom_agri_threshold(year)
+        ag_gate = (agri >= _agri_thr).astype(np.float64)
+        _canal_inc = _phantom_canal_include(year)
+        if 'canal_density' in pred_features.columns:
+            canal_d = np.nan_to_num(pred_features['canal_density'].values, nan=0.0)
+            canal_weight = np.where(canal_d > 0, _canal_inc, 1.0)
+        else:
+            canal_weight = 1.0
+        phantom_wd = agri * PHANTOM_M_TOTAL * _k_phantom * ag_gate * canal_weight
+        effective_wd = np.maximum(effective_wd, phantom_wd)
+
+    # LU-only basin-median fill (ML features ONLY — does NOT affect
+    # the partition's lu_only mask).  At pixels where effective_wd is
+    # still 0 (no year_wd, no wd_2024) but the pixel has LULC signal,
+    # fill with the basin's median wd_2024 value × scale.
+    #
+    # Gating logic:
+    #   - AMA/INA pixels (any year): raw per-pixel fractions
+    #     (annual_crop_fraction > 0 OR annual_urban_fraction > 0).
+    #   - Outside-AMA pixels at peak years (1951-1955, 1970-1980):
+    #     SMOOTHED ag (AGRI > 0) OR raw urban_fraction > 0.
+    #   - Outside-AMA pixels at other years: raw per-pixel fractions.
+    # AGRI-extension at outside-AMA: only at peak years (registry
+    # incomplete then).  Post-CAP (1985+) uses raw cf/uf only.
+    #   1951–55, 1975–80: AGRI > 0.02 (loose, peak years)
+    #   1970–74:           AGRI > 0.10 (standard)
+    #   other years:       no AGRI extension (raw cf/uf only)
+    _is_loose_p = (1951 <= year <= 1955 or 1975 <= year <= 1980)
+    _is_std_p   = (1970 <= year <= 1974)
+    _agri_thr_p = 0.02 if _is_loose_p else 0.10
+    _agri_active = _is_loose_p or _is_std_p
+    if (year >= PHANTOM_INFILL_START
+            and wd_2024 is not None
+            and 'GW_Basin' in year_df.columns):
+        _basins_lu = year_df['GW_Basin'].values
+        _wd24_full = np.nan_to_num(wd_2024, nan=0.0)
+        _cf_lu = np.clip(np.nan_to_num(
+            pred_features['annual_crop_fraction'].values
+            if 'annual_crop_fraction' in pred_features.columns
+            else np.zeros(len(effective_wd)), nan=0.0,
+        ), 0, 1)
+        _uf_lu = np.clip(np.nan_to_num(
+            pred_features['annual_urban_fraction'].values
+            if 'annual_urban_fraction' in pred_features.columns
+            else np.zeros(len(effective_wd)), nan=0.0,
+        ), 0, 1)
+        _raw_gate = (_cf_lu > 0) | (_uf_lu > 0)
+        if _agri_active:
+            _agri_lu = np.clip(np.nan_to_num(
+                pred_features['AGRI'].values
+                if 'AGRI' in pred_features.columns
+                else np.zeros(len(effective_wd)), nan=0.0,
+            ), 0, 1)
+            _outside_gate = (_agri_lu > _agri_thr_p) | (_uf_lu > 0)
+            _is_ama = np.isin(_basins_lu, list(AMA_BASINS))
+            _lulc_gate = np.where(_is_ama, _raw_gate, _outside_gate)
+        else:
+            _lulc_gate = _raw_gate
+        _lu_scale = _phantom_infill_scale(year)
+        if _lu_scale > 0.0:
+            _basin_series = pd.Series(_basins_lu)
+            for _b in _basin_series.dropna().unique():
+                _b_mask = (_basins_lu == _b)
+                _b_pool = _wd24_full[_b_mask & (_wd24_full > 0)]
+                if _b_pool.size == 0:
+                    continue
+                _b_lu = _b_mask & (effective_wd == 0.0) & _lulc_gate
+                if _b_lu.any():
+                    _basin_med = float(np.median(_b_pool))
+                    effective_wd[_b_lu] = _basin_med * _lu_scale
+    pred_features['well_density'] = effective_wd
+    return pred_features
+
+
 # Era-dependent GW/SW weighting for the density-ratio split.
 # Pre-GMA (before 1981): GW dominated — SRP was the only major SW
 # source; most irrigation was groundwater-fed.  USBR reports ~67% GW
@@ -667,9 +809,6 @@ def partition_predictions(
         irr_wd_1981: np.ndarray | None = None,
         nonirr_wd_1981: np.ndarray | None = None,
         irr_cap_1981: np.ndarray | None = None,
-        wd_1938: np.ndarray | None = None,
-        irr_wd_1938: np.ndarray | None = None,
-        nonirr_wd_1938: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """
     Partition total pumping predictions into 8 withdrawal categories.
