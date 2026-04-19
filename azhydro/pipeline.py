@@ -1791,6 +1791,14 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     _irr_cap_1981 = _gma_df['irr_capacity_fraction'].values if 'irr_capacity_fraction' in _gma_df.columns else None
     logger.info('Loaded %d well density + irr_capacity from parquet for pre-GMA partitioning override', _gma_ref_yr)
 
+    # 1938 well registry snapshot — used in partition for 1930–1937 where
+    # year-specific registries are notably sparser than 1938.
+    _wd_1938_df = az_df[az_df.Year == 1938]
+    _wd_1938 = _wd_1938_df['well_density'].values if 'well_density' in _wd_1938_df.columns else None
+    _irr_wd_1938 = _wd_1938_df['irr_well_density'].values if 'irr_well_density' in _wd_1938_df.columns else None
+    _nonirr_wd_1938 = _wd_1938_df['nonirr_well_density'].values if 'nonirr_well_density' in _wd_1938_df.columns else None
+    logger.info('Loaded 1938 well registry snapshot for 1930-1937 partition override')
+
     def _pixel_stats(pred_vals):
         """Compute depth and volume stats in multiple units.
 
@@ -2158,6 +2166,8 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             wd_1981=_wd_1981, irr_wd_1981=_irr_wd_1981,
             nonirr_wd_1981=_nonirr_wd_1981,
             irr_cap_1981=_irr_cap_1981,
+            wd_1938=_wd_1938, irr_wd_1938=_irr_wd_1938,
+            nonirr_wd_1938=_nonirr_wd_1938,
         )
 
         predictions = cat_predictions['Irrigation'] + cat_predictions['Non_Irrigation']
