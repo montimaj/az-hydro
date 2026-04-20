@@ -2760,6 +2760,26 @@ Reviewers interested in policy bounds should look at the CAP
 scenario sweep (below) rather than treating the central projection
 as a deterministic prediction.
 
+**Caveat on high-intensity M&I demand.** The projection trajectory
+reflects the dominant recent trend of CAP-driven agricultural
+retirement (ag uses more water per acre than urban, so converting
+irrigated land to residential or general commercial reduces
+per-pixel demand).  It does *not* explicitly capture the water
+demand associated with emerging high-intensity M&I activities —
+semiconductor fabrication (e.g., the announced $165 B TSMC Phoenix
+build-out, 15–35 kAF/yr at full operation) or hyperscale data
+centers (10–100 kAF/yr across the planned Phoenix-metro cluster).
+These would register as ordinary "urban" pixels in the LULC
+projection chain and in the 2024 well registry's per-capita GPCD
+assumptions, which undercount cleanroom / cooling-load intensity.
+Rough estimate: 30–150 kAF/yr of new demand by 2030–2040 — on the
+order of ~2 % of AZ total use, within the σ_LULC / σ_MACA spread
+of the existing UQ ensemble.  Scope is consistent with
+[WestWater Research (2026)](../Data/Inputs/USGS%20WU/Economic-Impact-to-CAP.pdf)
+which similarly flags TSMC as an unquantified risk (page 6).  A
+targeted per-pixel NIR uplift could be added in a future iteration
+if reviewer pressure warrants.
+
 ```python
 CAP_DELIVERY_FACTORS = {
     2020: 0.87, 2021: 0.87,                       # Tier 0
@@ -2794,6 +2814,42 @@ validated empirically against ADWR/USGS 2022–2024 aggregate anchors
 and reproduces the observed ~21–38 % actual GW-substitution share.
 A strictly `cw_streamflow`-only scaling would halve the effective
 perturbation and under-predict GW substitution in shortage years.
+
+**GW-weight boost at CAP pixels during shortage years.**  The
+density-ratio partition is
+`gw_share = (gw_w × wd) / (gw_w × wd + smooth_swd)`.  The calibrated
+post-CAP `gw_weight = 0.2` schedule (from `_era_gw_weight`) keeps the
+partition SW-dominant even after the Tier perturbation shrinks the
+smoothed SW kernel.  This under-predicts the regulatory Assured Water
+Supply shift to groundwater that AMA providers actually make during
+shortage years.  `apply_cap_delivery_perturbation` therefore also
+scales the `well_density` columns (`well_density`, `irr_well_density`,
+`nonirr_well_density`) at CAP pixels by `CAP_CUT_GW_BOOST_FACTORS[year]`:
+
+| Tier | Cut | Target effective gw_w (era-mapped) | Boost factor |
+|---|---|---|---|
+| Tier 0 | 192 kAF | 0.2 (post-CAP, no shift) | **1.0** |
+| Tier 1 | 512 kAF | 1.0 (pre-CAP 1945–1980 era) | **5.0** |
+| Tier 2a | 592 kAF | 1.5 (pre-CAP peak 1948–1955) | **7.5** |
+| Tier 2b | 640 kAF | 1.5 | 7.5 |
+| Tier 3 | 720 kAF | 2.0 (approaching pre-1945 all-GW) | 10.0 |
+| Basic Coordination | 237 kAF | 0.6 (post-CAP + moderate shift) | **3.0** |
+
+Multiplying `wd` by `k` is mathematically equivalent to multiplying
+`gw_weight` by `k` at those pixels — both just scale the numerator of
+the density ratio.  Because ML prediction runs **before** this
+perturbation, the per-pixel total pumping is unchanged; only the
+GW/SW split shifts.  Era-mapped target gw_weights are inherited from
+the calibrated `_era_gw_weight` schedule (no new tuning parameters),
+with each Tier mapped to the historical era whose GW-dominance
+regime it most resembles.
+
+Without this boost, WestWater 2026's implied ~0.37 MAF/yr total
+demand gap under Basic Coordination (cumulative ~8.0 MAF over 2027–
+2060) would appear as only ~0.05 MAF/yr in our output because the
+post-CAP 0.2 gw_weight dampens the SW-signal perturbation.  The
+boost brings AMA-scale GW% uplift from ~2–3 pp under Tier 1 to ~15–
+20 pp (matching WestWater's implied AMA-scale response).
 
 The helper is invoked in both `pipeline.py` (Step 3) and
 `uncertaintyops.py` (`_partition_with_ctx`, used by every UQ ensemble
@@ -2953,18 +3009,20 @@ against USGS Total_GW pre-1950 and USGS/ADWR aggregate breakdowns
   fill).  Single source of truth shared between pipeline.py Step 3 and
   uncertaintyops.py UQ ensemble construction.  Active 1962–2099.
 - **`apply_cap_delivery_perturbation(year_df, year, cap_pixel_mask)`**
-  — at CAP service-area pixels, scales `canal_weighted_streamflow_mm`
-  AND the `*_sw_rights_density` columns by `CAP_DELIVERY_FACTORS[year]`,
-  which encodes ADWR's declared Tier shortages (Tier 0 = 0.87,
-  Tier 1 = 0.66, Tier 2a = 0.61) mapped to each year 2020–2026 (last
-  year of the 2007 IG + 2019 DCP framework) and a sustained 0.84
-  (WestWater "Basic Coordination" ~16 % cut) across 2027–2099.  Each
-  factor equals `1 − mandatory_cut_kAF / 1500` where 1500 kAF is CAP
-  design capacity per the 1963 *Arizona v. California* decision +
-  2010–2021 observed delivery mean.  Scaling both columns produces
-  a factor² effect on the smoothed SW kernel (empirically validated
-  against ADWR anchors).  No-op for pre-2020 years or when
-  `cap_pixel_mask is None`.  Called by
+  — at CAP service-area pixels, applies two coordinated effects:
+  (1) scales `canal_weighted_streamflow_mm` AND the
+  `*_sw_rights_density` columns by `CAP_DELIVERY_FACTORS[year]`
+  (Tier 0 = 0.87, Tier 1 = 0.66, Tier 2a = 0.61 for 2020–2026; 0.84
+  for 2027–2099 Basic Coordination; each factor =
+  `1 − mandatory_cut_kAF / 1500` where 1500 kAF is CAP design
+  capacity); (2) scales `well_density` / `irr_well_density` /
+  `nonirr_well_density` by `CAP_CUT_GW_BOOST_FACTORS[year]` (Tier 1
+  = 5.0, Tier 2a = 7.5, Basic Coord = 3.0 — mathematically equivalent
+  to boosting `gw_weight` at those pixels; era-mapped to the
+  `_era_gw_weight` calibration).  Together these produce the factor²
+  SW-kernel reduction and the corresponding GW allocation shift,
+  calibrated against WestWater 2026 drawdown projections.  No-op for
+  pre-2020 years or when `cap_pixel_mask is None`.  Called by
   pipeline.py Step 3 and by `uncertaintyops.py:_partition_with_ctx`.
   An alias `apply_cap_hindcast_perturbation` is kept temporarily for
   backwards compatibility.

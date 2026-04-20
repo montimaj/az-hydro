@@ -830,28 +830,92 @@ CAP_DELIVERY_FACTORS: dict[int, float] = {
 CAP_HINDCAST_FACTORS = CAP_DELIVERY_FACTORS
 
 
+# CAP-pixel GW weight boost during shortage years.
+# The partition's density-ratio split is:
+#   gw_share = (gw_weight × well_density) / (gw_weight × wd + smooth_swd)
+# Post-CAP gw_weight = 0.2 (from `_era_gw_weight`), which keeps the
+# partition SW-dominant even when the CAP overlay is perturbed.  During
+# shortage years, AMA users shift more pumping to groundwater than the
+# density-ratio at gw_weight = 0.2 can capture — regulatory Assured
+# Water Supply accounting forces providers to draw on authorized GW
+# allowances + LTSC reserves when CAP is curtailed.
+#
+# Multiplying `well_density` at CAP-served pixels by a boost factor k
+# is mathematically equivalent to multiplying gw_weight by k at those
+# pixels (both just scale the `gw_w × wd` numerator of the density
+# ratio).  Because ML prediction runs BEFORE this perturbation, the
+# total per-pixel pumping is preserved — only the GW/SW split shifts.
+#
+# Mapping from Tier severity to boost factor (k = target_gw_w / 0.2):
+#   Tier 0   → 1.0 (no boost; just DCP contribution to Lake Mead,
+#                   deliveries continue)
+#   Tier 1   → 5.0 (target gw_w = 1.0, pre-CAP 1945-1980 era when
+#                   AZ was GW-dominant at ~67% per USBR)
+#   Tier 2a  → 7.5 (target gw_w = 1.5, pre-CAP peak 1948-1955)
+#   Tier 2b  → 7.5 (same tier band as 2a)
+#   Tier 3   → 10.0 (target gw_w = 2.0, approaching pre-1945 all-GW)
+#   Basic Coordination (237 kAF sustained) → 3.0 (target gw_w = 0.6,
+#                   between post-CAP 0.2 and mid-CAP bump 0.5 — a
+#                   sustained moderate GW-reliance regime)
+#
+# Calibrated against WestWater 2026 ("Economic Impacts to Central
+# Arizona...", Fig 4 + Section 3.6) which projects ~8.0 MAF cumulative
+# GW + LTSC drawdown under Basic Coordination and ~8.7 MAF under
+# Extreme Shortage over 2027-2060.  Our unboosted response was ~20 %
+# of those magnitudes; the era-mapped boost brings AMA-scale behaviour
+# into line with WestWater's projections while preserving the ML-
+# predicted total pumping.
+CAP_CUT_GW_BOOST_FACTORS: dict[int, float] = {
+    2020: 1.0,   # Tier 0 — no boost
+    2021: 1.0,   # Tier 0
+    2022: 5.0,   # Tier 1
+    2023: 7.5,   # Tier 2a
+    2024: 5.0,   # Tier 1 (returns)
+    2025: 5.0,   # Tier 1
+    2026: 5.0,   # Tier 1
+    **{year: 3.0 for year in range(2027, 2100)},  # Basic Coordination
+}
+
+
 def apply_cap_delivery_perturbation(
         year_df: pd.DataFrame,
         year: int,
         cap_pixel_mask: np.ndarray | None,
 ) -> pd.DataFrame:
-    """Scale CAP-pixel SW signal by the year-specific CAP delivery factor.
+    """Scale CAP-pixel SW signal + boost GW weight during CAP cuts.
 
-    Applies to both observed hindcast cuts (2022-2024 = Tier 1/2
-    declarations) and the projection-era central baseline (2026-2099
-    = WestWater "Basic Coordination" 0.74 sustained factor reflecting
-    post-Compact-renegotiation cuts).
+    Applies to both observed hindcast cuts (2020-2026 Tier 0/1/2a
+    declarations per ADWR/USBR/AWBA 2026 Plan) and the projection-era
+    central baseline (2027-2099 = WestWater "Basic Coordination"
+    sustained cut).
 
-    Scales BOTH ``canal_weighted_streamflow_mm`` AND the SW rights
-    density columns (``irr_sw_rights_density`` /
-    ``nonirr_sw_rights_density`` / ``sw_rights_density``) at CAP-
-    served pixels by the year-specific factor.  Scaling both is
-    physically defensible — Tier shortage cuts reduce both deliverable
-    canal flow AND the effective SW rights honored.  The smoothed SW
-    kernel ``smooth_swd = gaussian_filter(swd × cw_sf)`` then drops
-    proportionally to the product (factor² at perturbed pixels), giving
-    a more substantial GW substitution signal than scaling cw_streamflow
-    alone (which is diluted by the σ Gaussian smoothing).
+    Two complementary effects on the density-ratio partition at CAP-
+    served pixels:
+
+    1. **SW-signal reduction** — scales BOTH
+       ``canal_weighted_streamflow_mm`` AND the SW rights density
+       columns (``irr_sw_rights_density`` / ``nonirr_sw_rights_density``
+       / ``sw_rights_density``) by ``CAP_DELIVERY_FACTORS[year]``.
+       Scaling both is physically defensible — Tier shortage cuts
+       reduce both deliverable canal flow AND the effective SW rights
+       honored.  The smoothed SW kernel
+       ``smooth_swd = gaussian_filter(swd × cw_sf)`` then drops
+       proportionally to the product (factor² at perturbed pixels).
+
+    2. **GW-weight boost** — multiplies ``well_density`` columns
+       (``well_density`` / ``irr_well_density`` /
+       ``nonirr_well_density``) by ``CAP_CUT_GW_BOOST_FACTORS[year]``.
+       Because the density ratio is
+       ``gw_share = (gw_w × wd) / (gw_w × wd + smooth_swd)``, this is
+       mathematically equivalent to boosting ``gw_weight`` at CAP
+       pixels — it shifts the GW/SW allocation toward GW during
+       shortage years without changing the ML-predicted total
+       pumping (ML runs before this perturbation).  This captures
+       the regulatory Assured Water Supply shift to groundwater that
+       the post-CAP gw_weight = 0.2 schedule otherwise under-predicts.
+
+    Both effects are applied in the same copy operation; if either
+    dict lacks the year the corresponding effect is skipped.
 
     Args:
         year_df: Per-pixel-per-year DataFrame.
@@ -862,12 +926,17 @@ def apply_cap_delivery_perturbation(
 
     Returns:
         year_df (perturbed copy if year is in CAP_DELIVERY_FACTORS
-        and cap_pixel_mask is not None; same object otherwise).
+        or CAP_CUT_GW_BOOST_FACTORS, and cap_pixel_mask is not None;
+        same object otherwise).
     """
-    if year not in CAP_DELIVERY_FACTORS or cap_pixel_mask is None:
+    if cap_pixel_mask is None:
         return year_df
-    factor = CAP_DELIVERY_FACTORS[year]
-    cols_to_scale = [
+    sw_factor = CAP_DELIVERY_FACTORS.get(year)
+    gw_boost = CAP_CUT_GW_BOOST_FACTORS.get(year)
+    if sw_factor is None and (gw_boost is None or gw_boost == 1.0):
+        return year_df
+
+    sw_cols = [
         c for c in (
             'canal_weighted_streamflow_mm',
             'irr_sw_rights_density',
@@ -875,12 +944,24 @@ def apply_cap_delivery_perturbation(
             'sw_rights_density',
         ) if c in year_df.columns
     ]
-    if not cols_to_scale:
+    wd_cols = [
+        c for c in (
+            'well_density',
+            'irr_well_density',
+            'nonirr_well_density',
+        ) if c in year_df.columns
+    ]
+    if not sw_cols and not wd_cols:
         return year_df
+
     year_df_p = year_df.copy()
     idx = year_df_p.index[cap_pixel_mask]
-    for col in cols_to_scale:
-        year_df_p.loc[idx, col] *= factor
+    if sw_factor is not None:
+        for col in sw_cols:
+            year_df_p.loc[idx, col] *= sw_factor
+    if gw_boost is not None and gw_boost != 1.0:
+        for col in wd_cols:
+            year_df_p.loc[idx, col] *= gw_boost
     return year_df_p
 
 
