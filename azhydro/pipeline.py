@@ -1791,9 +1791,11 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     _irr_cap_1981 = _gma_df['irr_capacity_fraction'].values if 'irr_capacity_fraction' in _gma_df.columns else None
     logger.info('Loaded %d well density + irr_capacity from parquet for pre-GMA partitioning override', _gma_ref_yr)
 
-    # Load CAP service-area pixel mask for the 2022-2024 CAP-cut
-    # hindcast perturbation (partops.apply_cap_hindcast_perturbation).
-    # Mask is rasterized to the same grid as the basin reference.
+    # Load CAP service-area pixel mask for the CAP delivery
+    # perturbation (partops.apply_cap_delivery_perturbation): observed
+    # 2022-2024 Tier 1/2 cuts plus the 2026-2099 sustained
+    # post-Compact-renegotiation baseline.  Mask is rasterized to the
+    # same grid as the basin reference.
     _cap_pixel_mask = None
     _cap_geojson = os.path.join(
         OUTPUT_DIR, 'GW_Data', 'Vector_Reproj', 'CAP_Service_Area.geojson',
@@ -2088,11 +2090,14 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         # year_df already carries basin-delta-corrected LULC columns (URBAN,
         # AGRI, annual_crop_fraction, annual_urban_fraction) from the
         # parquet; no partition-time smoothing needed.
-        # Apply CAP-cut hindcast perturbation for 2022-2024 (no-op for
-        # other years).  This scales canal_weighted_streamflow at CAP-
-        # served pixels to mirror real Tier-shortage cuts that the raw
-        # Colorado River gauge data does not capture.
-        year_df_partition = partops.apply_cap_hindcast_perturbation(
+        # Apply CAP delivery perturbation: observed Tier 1/2 cuts
+        # (2022-2024) and the WestWater "Basic Coordination" central
+        # baseline (factor 0.74 sustained 2026-2099).  Scales
+        # canal_weighted_streamflow + sw_rights densities at CAP-
+        # served pixels to mirror real shortage allocations that the
+        # raw Colorado River gauge data does not capture.  No-op for
+        # 1896-2021 and 2025 (no scheduled cut).
+        year_df_partition = partops.apply_cap_delivery_perturbation(
             year_df, year, _cap_pixel_mask,
         )
         cat_predictions = partops.partition_predictions(

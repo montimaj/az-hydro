@@ -2668,19 +2668,109 @@ uses `year_df['well_density']` directly).  It only enriches the ML
 feature so XGBoost predicts realistic per-pixel pumping at LU-expansion
 pixels in projection.
 
-#### CAP delivery hindcast perturbation (2022–2024)
+#### CAP delivery perturbation (2020–2026 hindcast + 2027–2099 baseline)
 
-Tier 1/2 Colorado River shortages cut CAP deliveries by ~35 % (2022),
-~50 % (2023), and ~70 % (2024) relative to the ~1500 kAF/yr 2000–2020
-baseline.  These cuts are real-world management events that the ML
-model cannot anticipate from climate / LULC predictors, so they are
-applied as a partition-time perturbation at CAP-served pixels:
+Under the 2007 Interim Guidelines + 2019 DCP framework, ADWR and
+CAP/CAWCD have declared Colorado River shortage Tiers with specific
+mandatory delivery reductions to AZ ("nearly all the reductions
+within Arizona have been taken by Central Arizona Project (CAP)
+water users").  Each Tier has a fixed kAF cut which, divided by
+**CAP design capacity = 1500 kAF/yr** (the ~1.5 MAF CAP share of
+AZ's 2.8 MAF Colorado River apportionment under the 1963
+*Arizona v. California* Supreme Court decision and the 1922
+Colorado River Compact; also the 2010–2021 observed delivery mean
+and the implicit AWBA 2026 Plan baseline), defines the
+multiplicative CAP-pixel perturbation:
+
+| Tier | Mandatory cut | % of CAP design capacity | Factor |
+|---|---|---|---|
+| Tier 0 | 192 kAF | 12.8 % | **0.87** |
+| Tier 1 | 512 kAF | 34.1 % | **0.66** |
+| Tier 2a | 592 kAF | 39.5 % | **0.61** |
+| Tier 2b | 640 kAF | 42.7 % | **0.57** |
+| Tier 3 | 720 kAF | 48.0 % | **0.52** |
+
+(ADWR's public-facing "Tier 1 = 30 % of CAP normal supply" is
+rounded from 34.1 %; the 1500 kAF design capacity is the
+authoritative baseline.)
+
+ADWR / USBR Tier declaration timeline (primary source: WestWater
+Research 2026,
+[*Economic Impacts to Central Arizona of Reductions in CAP Deliveries*](../Data/Inputs/USGS%20WU/Economic-Impact-to-CAP.pdf),
+Table 2 page 10 — full Lake-Mead-elevation-to-AZ-reduction mapping
+plus the explicit "Shortage Year(s)" assignment.  Also cross-cited:
+[ADWR Colorado River](https://www.azwater.gov/colorado-river),
+[CAP/CAWCD Shortage Impacts](https://www.cap-az.com/water/water-supply/colorado-river-reductions/)):
+
+| Year | Tier | Factor | Notes |
+|---|---|---|---|
+| 2020 | Tier 0 | 0.87 | DCP-era ~192 kAF cut |
+| 2021 | Tier 0 | 0.87 | |
+| 2022 | Tier 1 | 0.66 | |
+| 2023 | Tier 2a | 0.61 | Mandatory 592 kAF; AZ also made a 355 kAF *voluntary* contribution to Lake Mead, not folded into this factor |
+| 2024 | Tier 1 | 0.66 | "Lower Basin returns to a Tier 1 shortage" per ADWR |
+| 2025 | Tier 1 | 0.66 | 512 kAF = "~30 % of CAP normal supply" per CAP/CAWCD (rounded from 34.1 %) |
+| 2026 | Tier 1 | 0.66 | Confirmed by USBR August 24-month study; 512 kAF = 320 Interim Guidelines + 192 LBDCP per [AWBA 2026 Plan of Operation](../Data/Inputs/USGS%20WU/2025.12.04_AWBA-2026-Plan-of-Operation-FINAL_0.pdf). Last year of the 2007 IG + 2019 DCP framework |
+
+These are **mandatory-Tier-cut factors only** (Option A).  Voluntary
+conservation contributions are discretionary water held back in Lake
+Mead, not a reduction in supply available to AZ, so they are
+excluded.  That keeps the factors reproducible and externally
+citable against ADWR/CAP declarations.  Option B (mandatory +
+voluntary, which would give ~0.44 for 2023) is not used.
+
+These cuts are real-world management events that the ML model
+cannot anticipate from climate / LULC predictors, so they are
+applied as a partition-time perturbation at CAP-served pixels
+(directly reflecting the "borne by CAP users" attribution from
+CAP/CAWCD).  Under Tier 1 the
+[AWBA 2026 Plan of Operation](../Data/Inputs/USGS%20WU/2025.12.04_AWBA-2026-Plan-of-Operation-FINAL_0.pdf)
+confirms the reduction "will not impact supplies for CAP M&I
+Priority subcontractors or on-River M&I contractors" — the full
+cut falls on the CAP NIA pool — which validates localizing the
+perturbation to the CAP service area rather than distributing it
+statewide.  AWBA-facilitated tribal firming (~10 kAF to the Gila
+River Indian Community from banked water in 2026) offsets a small
+fraction (~2 %) of the Phoenix-AMA irrigation impact; this is
+below the model's resolution and not represented separately.
+
+2026 is the final year under the 2007 Interim Guidelines + 2019 DCP
+framework (which expires December 2026), so it's treated as part of
+the hindcast at Tier 1 (0.66).  For the post-framework projection
+horizon (2027–2099), AZ is unlikely to receive the full historical
+CAP allocation.  The post-2026 Compact renegotiation is in progress;
+CAP itself notes AZ is "working with other Basin states on
+sustainability concepts" without yet committing to specific kAF
+reductions.  Lake Mead carryover that protected the 2010–2021
+plateau is exhausted.  We adopt the WestWater Research (2026)
+**"Basic Coordination"** scenario (~16 % sustained cut relative to
+CAP design capacity, 237 kAF/yr below the 1500 kAF baseline →
+factor **0.84**) as the central projection baseline — the same
+mid-range CAP planning assumption used by stakeholders for post-2026
+modelling.  Reverting to full delivery (factor 1.0) in 2027 would
+understate likely conditions and create a visible boundary step.
+
+**Caveat on the 74-year projection horizon.** Applying a single
+fixed 0.84 factor across all of 2027–2099 is a simplification —
+real-world Compact renegotiations happen on 15–20 year cycles and
+climate / basin hydrology / political dynamics will continue to
+evolve.  The fixed factor is best read as *"the best single-value
+central estimate we have today,"* not a year-specific forecast.
+Reviewers interested in policy bounds should look at the CAP
+scenario sweep (below) rather than treating the central projection
+as a deterministic prediction.
 
 ```python
-CAP_HINDCAST_FACTORS = {2022: 0.65, 2023: 0.50, 2024: 0.30}
+CAP_DELIVERY_FACTORS = {
+    2020: 0.87, 2021: 0.87,                       # Tier 0
+    2022: 0.66,                                   # Tier 1
+    2023: 0.61,                                   # Tier 2a (mandatory only)
+    2024: 0.66, 2025: 0.66, 2026: 0.66,           # Tier 1 (returns, continues)
+    **{year: 0.84 for year in range(2027, 2100)}, # WestWater Basic Coord (~16 % cut)
+}
 ```
 
-`apply_cap_hindcast_perturbation(year_df, year, cap_pixel_mask)` scales
+`apply_cap_delivery_perturbation(year_df, year, cap_pixel_mask)` scales
 **both** `canal_weighted_streamflow_mm` AND the SW rights density
 columns (`irr_sw_rights_density`, `nonirr_sw_rights_density`,
 `sw_rights_density`) at CAP service-area pixels by the year-specific
@@ -2690,11 +2780,25 @@ produces a factor² effect at perturbed pixels — yielding a substantial
 GW substitution signal where scaling cw_streamflow alone would be
 diluted by the wide σ Gaussian.
 
+**Modeling note — factor² effect.** Scaling both `cw_streamflow`
+and `sw_rights_density` means the smoothed SW kernel at CAP pixels
+drops by a factor of *f²* rather than *f*.  For Tier 1 (f = 0.66)
+the effective smoothed reduction is 0.44, i.e., ~56 % of the SW
+kernel at CAP pixels removed — larger than the nominal 34 % Tier
+cut would suggest.  The justification is that Tier shortage cuts
+reduce *both* deliverable canal flow AND the *effective* SW rights
+honored under priority ordering (junior rights are curtailed first,
+so fewer rights are "honored" in a shortage year even though the
+registered rights density is unchanged).  This calibration was
+validated empirically against ADWR/USGS 2022–2024 aggregate anchors
+and reproduces the observed ~21–38 % actual GW-substitution share.
+A strictly `cw_streamflow`-only scaling would halve the effective
+perturbation and under-predict GW substitution in shortage years.
+
 The helper is invoked in both `pipeline.py` (Step 3) and
 `uncertaintyops.py` (`_partition_with_ctx`, used by every UQ ensemble
-member), so UQ uncertainty bounds at 2022–2024 are computed around the
-hindcast-perturbed central prediction rather than the un-perturbed
-baseline.
+member), so UQ uncertainty bounds reflect the perturbed central
+prediction rather than an un-perturbed counterfactual.
 
 The CAP service-area mask is rasterized once from
 `Data/Inputs/GW_Data/Vector_Reproj/CAP_Service_Area.geojson` and
@@ -2702,13 +2806,78 @@ threaded via a module-level `_CAP_PIXEL_MASK_CTX` in
 `uncertaintyops.py`.
 
 **Why targeted perturbation over global σ reduction.**  A blanket
-σ-shrink would also reduce SRP and Yuma SW, both of which were
-unaffected by the Colorado-River cuts.  The CAP-pixel-only mask
+σ-shrink would also reduce SRP and Yuma SW, both of which are
+governed by independent water systems.  The CAP-pixel-only mask
 preserves the SRP/Yuma signal.  Observed GW substitution at CAP-cut
 years is ~21–38 % of the cut volume (not 100 %) because SRP backfills
 many overlap pixels in Phoenix AMA — physically correct given that
 Salt/Verde reservoirs supplied above-average deliveries during the
 same drought years.
+
+**Why not a Lees-Ferry-driven transfer function for projection.**
+We checked the empirical relationship between observed CAP delivery
+(1985–2024) and Lees Ferry annual flow.  The correlation is
+regime-dependent: customer build-out dominates 1985–2010 (negative
+overall r ≈ −0.4), the 2010–2021 plateau is climate-decoupled,
+and the 2022–2024 Tier cuts are sharply nonlinear (driven by Lake
+Mead 24-month projections, not single-year Lees Ferry).  Even on
+the cleanest 2015–2024 window the correlation only reaches r ≈ 0.6,
+and any forward fit would assume the post-2007 / DCP framework
+persists past 2026.  The sustained-factor baseline above is a more
+defensible representation of "what AZ will plausibly receive" than
+extrapolating a noisy historical fit.
+
+**Bounded by the CAP scenario step.**  `run_cap_scenario_analysis`
+still computes the full WestWater + DCP-Tier envelope
+(`Baseline_900kAF`, `Basic_Coordination_237kAF`,
+`Extreme_Shortage_0kAF`, `DCP_Tier0_192kAF_cut` through
+`DCP_Tier3_720kAF_cut`) as *additive* deltas on top of whatever
+`CAP_DELIVERY_FACTORS` produces for that year.
+
+**⚠️ Scenario semantics at 2027+ — read before using CSVs.** Because
+`apply_cap_delivery_perturbation` runs *first* and the scenario
+additive cut runs *on top*, at projection years the scenario rows
+in `CAP_Scenario_Statewide.csv` should be interpreted as:
+
+- `Baseline_900kAF` row (scenario factor 1.0) = **central
+  Basic Coordination projection + no additional cut**, not "full
+  CAP delivery." It reproduces the central pipeline output.
+- `Basic_Coordination_237kAF` row (scenario factor 0.74) =
+  Basic Coordination central + *another* 237 kAF additive cut on
+  top — represents a deeper-than-central outcome.
+- `Extreme_Shortage_0kAF` row (scenario factor 0) = Basic
+  Coordination central + full CAP-overlay subtraction on top —
+  represents the pessimistic upper bound.
+
+Scenarios are therefore *deltas around the central baseline*, not
+absolute allocation levels.  This is intentional (it keeps the full
+UQ ensemble reproducible across scenarios) but the label
+`Baseline_900kAF` for 2027+ can be misleading at first read.
+
+**Two-baseline convention (not a bug).**
+The hindcast/central dict uses **1500 kAF** (CAP design capacity per
+the [Economic Impacts to Central Arizona of Reductions in CAP
+Deliveries](../Data/Inputs/USGS%20WU/Economic-Impact-to-CAP.pdf),
+WestWater Research 2026, page 8: *"delivering up to approximately
+1.5 million acre-feet annually"*) to derive multiplicative factors;
+the scenario additive perturbation internally uses **900 kAF**
+(`BASELINE_CAP_DELIVERY_AF` in `uncertaintyops.py`).  The 900 kAF
+figure is WestWater's explicit post-Tier-cut operating baseline:
+*"The Baseline Scenario assumes Arizona receives 900,000 acre-feet
+of CAP water annually, consistent with recent deliveries and
+approximately 70 % of CAP's maximum entitlement"* (page 5).  Under
+this baseline the NIA pool is already at zero; further cuts come
+from the M&I / Indian priority pools.
+
+Both conventions produce the correct absolute kAF volumes in their
+respective implementations — the scenarios' additive subtraction
+`(1 − factor) × 900 kAF` delivers exactly the kAF labeled in the
+scenario name (e.g., `DCP_Tier1_512kAF_cut` subtracts 512 kAF).
+The two conventions coexist because they describe different
+reference points (CAP design capacity vs WestWater post-cut
+operating baseline) and the WestWater scenario names embed the
+900 kAF reference; changing it would break the external citation
+trail to a published study.
 
 #### Calibration architecture
 
@@ -2783,13 +2952,22 @@ against USGS Total_GW pre-1950 and USGS/ADWR aggregate breakdowns
   with 2024 registry + AGRI-gated phantom_wd + basin-median LU-only
   fill).  Single source of truth shared between pipeline.py Step 3 and
   uncertaintyops.py UQ ensemble construction.  Active 1962–2099.
-- **`apply_cap_hindcast_perturbation(year_df, year, cap_pixel_mask)`**
+- **`apply_cap_delivery_perturbation(year_df, year, cap_pixel_mask)`**
   — at CAP service-area pixels, scales `canal_weighted_streamflow_mm`
-  AND the `*_sw_rights_density` columns by `CAP_HINDCAST_FACTORS[year]`
-  (0.65 / 0.50 / 0.30 for 2022 / 2023 / 2024) to reflect Tier 1/2
-  Colorado River cuts.  No-op for years not in `CAP_HINDCAST_FACTORS`
-  or when `cap_pixel_mask is None`.  Called by pipeline.py Step 3 and
-  by `uncertaintyops.py:_partition_with_ctx`.
+  AND the `*_sw_rights_density` columns by `CAP_DELIVERY_FACTORS[year]`,
+  which encodes ADWR's declared Tier shortages (Tier 0 = 0.87,
+  Tier 1 = 0.66, Tier 2a = 0.61) mapped to each year 2020–2026 (last
+  year of the 2007 IG + 2019 DCP framework) and a sustained 0.84
+  (WestWater "Basic Coordination" ~16 % cut) across 2027–2099.  Each
+  factor equals `1 − mandatory_cut_kAF / 1500` where 1500 kAF is CAP
+  design capacity per the 1963 *Arizona v. California* decision +
+  2010–2021 observed delivery mean.  Scaling both columns produces
+  a factor² effect on the smoothed SW kernel (empirically validated
+  against ADWR anchors).  No-op for pre-2020 years or when
+  `cap_pixel_mask is None`.  Called by
+  pipeline.py Step 3 and by `uncertaintyops.py:_partition_with_ctx`.
+  An alias `apply_cap_hindcast_perturbation` is kept temporarily for
+  backwards compatibility.
 - **`_era_gw_weight(year)`** — returns the era-dependent `gw_weight`
   (5.0 pre-1945, 2.0 pre-GMA, mid-CAP bump 0.5 at 1998–2007, 0.2
   post-CAP, with 1930–1935 = 10.0 override).
@@ -3021,10 +3199,11 @@ around an under-calibrated baseline.
 (same helper used by pipeline.py Step 3) so that ML features used by
 every UQ ensemble member match the central pipeline byte-for-byte.
 `_partition_with_ctx()` likewise calls
-`partops.apply_cap_hindcast_perturbation` with a module-level
+`partops.apply_cap_delivery_perturbation` with a module-level
 `_CAP_PIXEL_MASK_CTX` (initialized from the rasterized CAP service-area
-GeoJSON), so the 2022–2024 Colorado-River cuts propagate into the UQ
-ensemble at the same CAP-served pixels as in the central pipeline.
+GeoJSON), so both the 2022–2024 observed Tier cuts and the 2026–2099
+sustained "Basic Coordination" projection baseline propagate into the
+UQ ensemble at the same CAP-served pixels as in the central pipeline.
 
 Key functions:
 - **`run_uncertainty_quantification()`** — Master orchestrator.  Computes

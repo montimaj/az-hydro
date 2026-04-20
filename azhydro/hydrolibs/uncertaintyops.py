@@ -163,10 +163,12 @@ _PRE_GMA_CTX: dict[str, np.ndarray | None] = {
     'irr_cap_1981': None,
 }
 
-# CAP-cut hindcast context for UQ ensemble.  When set, every UQ
-# ensemble member's _partition_with_ctx call will apply the same
-# CAP-pixel cw_streamflow scaling that the central pipeline uses
-# for 2022-2024 (partops.apply_cap_hindcast_perturbation).
+# CAP delivery perturbation context for UQ ensemble.  When set,
+# every UQ ensemble member's _partition_with_ctx call will apply the
+# same CAP-pixel cw_streamflow + SW rights scaling that the central
+# pipeline uses (partops.apply_cap_delivery_perturbation): observed
+# 2022-2024 Tier cuts plus the 2026-2099 sustained "Basic
+# Coordination" baseline.
 _CAP_PIXEL_MASK_CTX: dict[str, np.ndarray | None] = {'mask': None}
 
 
@@ -327,15 +329,17 @@ def _partition_with_ctx(partops, predictions, year_df, raster_shape,
     plumbing so all UQ ensemble members partition identically to the
     central pipeline run.
 
-    Also applies the 2022-2024 CAP-cut hindcast perturbation when the
-    CAP pixel-mask context has been set (via _set_cap_pixel_mask_context).
-    No-op for years not in CAP_HINDCAST_FACTORS.
+    Also applies the CAP delivery perturbation when the CAP pixel-
+    mask context has been set (via _set_cap_pixel_mask_context):
+    observed 2022-2024 Tier cuts plus the 2026-2099 sustained "Basic
+    Coordination" baseline.  No-op for years not in
+    CAP_DELIVERY_FACTORS.
 
     sw_smooth_sigma=None (default) → use the calibrated era-based
     schedule inside partition_predictions.  Explicit value → override
     the era schedule (used by the σ-sensitivity diagnostic only).
     """
-    year_df = partops.apply_cap_hindcast_perturbation(
+    year_df = partops.apply_cap_delivery_perturbation(
         year_df, year, _CAP_PIXEL_MASK_CTX.get('mask'),
     )
     return partops.partition_predictions(
@@ -3464,9 +3468,10 @@ def run_uncertainty_quantification(
     # 2024 well/irr_capacity arrays in partition_predictions).
     _set_pre_gma_context(az_df, ref_year=2024)
 
-    # Initialise CAP-cut hindcast pixel mask so UQ ensemble members at
-    # 2022-2024 apply the same CAP perturbation as the central pipeline
-    # (mirrors partops.apply_cap_hindcast_perturbation).
+    # Initialise CAP delivery pixel mask so UQ ensemble members apply
+    # the same CAP perturbation as the central pipeline at observed
+    # 2022-2024 cuts and the 2026-2099 sustained baseline (mirrors
+    # partops.apply_cap_delivery_perturbation).
     try:
         import geopandas as gpd
         import rasterio

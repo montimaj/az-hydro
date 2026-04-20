@@ -738,33 +738,109 @@ def apply_ml_well_density_override(
     return pred_features
 
 
-# CAP delivery hindcast factors — known historical CAP cuts driven by
-# Tier shortage declarations from USBR (drought governance, not
-# hydrology).  The model's `canal_weighted_streamflow_mm` is computed
-# from raw Colorado River gauges and does NOT reflect Tier-allocation
-# cuts.  Apply these factors at CAP-served pixels to scale the SW
-# signal before the partition runs, so the GW/SW split correctly
-# routes more pumping to GW (substituting for lost SW deliveries).
+# CAP delivery factors — observed historical Tier shortage cuts
+# (2022-2024) plus a sustained projection-era cut (2026-2099) driven
+# by post-2026 Colorado River Compact renegotiation.  The model's
+# `canal_weighted_streamflow_mm` is computed from raw Colorado River
+# gauges and does NOT reflect Tier-allocation cuts; apply these
+# factors at CAP-served pixels to scale the SW signal before the
+# partition runs, so the GW/SW split correctly routes more pumping
+# to GW (substituting for lost SW deliveries).
 #
-# Factors derived from actual CAP delivery records (DRI request data,
-# CAP Delivery Data DRI Request.xlsx) divided by a pre-cut baseline
-# of ~1500 kAF/yr (typical 2000-2020 direct + recharge total).
-#   2022: ~984 kAF / 1500 → 0.65  (Tier 1 cut, ~35 % reduction)
-#   2023: ~774 / 1500     → 0.50  (continued Tier 1+, ~50 % reduction)
-#   2024: ~447 / 1500     → 0.30  (Tier 2 cut, ~70 % reduction)
-CAP_HINDCAST_FACTORS: dict[int, float] = {
-    2022: 0.65,
-    2023: 0.50,
-    2024: 0.30,
+# Hindcast factors derived from ADWR's official Tier shortage
+# declarations under the 2007 Interim Guidelines + 2019 DCP.  The
+# implicit baseline is **CAP design capacity = 1500 kAF/yr** — AZ's
+# Colorado River apportionment is 2.8 MAF total (1963 Arizona v.
+# California + Colorado River Compact), of which CAP is designed to
+# deliver ~1.5 MAF and the remaining ~1.3 MAF serves on-River users
+# and tribal rights.  This 1500 kAF figure is consistent with the
+# 2010-2021 observed CAP delivery plateau (mean ~1500 kAF/yr from
+# CAP's DRI request data), the AWBA 2026 Plan of Operation, and
+# WestWater Research 2026 ("Economic Impacts to Central Arizona of
+# Reductions in CAP Deliveries", page 8: "delivering up to
+# approximately 1.5 million acre-feet annually").
+#
+# Tier Year-of-Shortage assignments below are taken directly from
+# WestWater 2026 Table 2 (page 10), which is the primary external
+# source for the 2024-2026 Tier 1 attribution.
+#
+# ADWR's "Tier 1 = 30 % of CAP normal supply" is a rounded public-
+# facing figure (actual: 512/1500 = 34.1 %), not a precise baseline
+# definition.
+#
+#   Tier 0:   192 kAF mandatory cut / 1500 = 12.8 % → factor 0.872 ≈ 0.87
+#   Tier 1:   512 kAF               / 1500 = 34.1 % → factor 0.659 ≈ 0.66
+#   Tier 2a:  592 kAF               / 1500 = 39.5 % → factor 0.605 ≈ 0.61
+#   Tier 2b:  640 kAF               / 1500 = 42.7 % → factor 0.573 ≈ 0.57
+#   Tier 3:   720 kAF               / 1500 = 48.0 % → factor 0.520 ≈ 0.52
+#
+# Option A (mandatory cuts only).  Voluntary conservation contributions
+# (e.g., AZ's 355 kAF extra in 2023) are discretionary water held back
+# in Lake Mead, not a reduction in supply available to AZ — they are
+# NOT added into these factors so the values are reproducible and
+# externally citable.
+#
+# ADWR Tier declaration timeline:
+#   2020, 2021: Tier 0
+#   2022:       Tier 1
+#   2023:       Tier 2a
+#   2024:       Tier 1 (returns after 2023 Tier 2a; 512 kAF, "30 % of
+#                       CAP normal supply" per ADWR)
+#   2025:       Tier 1 (continued; 512 kAF cut per CAP/CAWCD)
+#   2026:       Tier 1 (confirmed by USBR August 24-month study per
+#                       AWBA 2026 Plan of Operation; 512 kAF = 320
+#                       Interim Guidelines + 192 LBDCP; last year of
+#                       the 2007 IG + 2019 DCP framework)
+#
+# Projection (2027-2099) factor of 0.84 corresponds to the WestWater
+# Research (2026) "Basic Coordination" scenario — a sustained
+# 237 kAF/yr cut relative to CAP design capacity (237/1500 ≈ 15.8 %
+# reduction) representing a likely negotiated outcome of the
+# post-2026 Compact renegotiation.  This is more defensible than
+# reverting to full delivery (factor 1.0) at the projection boundary,
+# given that AZ has already committed to long-term reductions and the
+# Lake Mead carryover that protected the 2010-2021 plateau is now
+# exhausted.  Applying a single fixed factor across 74 years is a
+# simplification — real Compact renegotiations happen every 15-20
+# years and climate/allocation conditions will continue to evolve;
+# the fixed 0.84 is best read as "the best single-value central
+# estimate we have today," not a forecast of any specific year.
+#
+# The CAP scenario step in `uncertaintyops.run_cap_scenario_analysis`
+# still computes the full policy envelope (Baseline_900kAF,
+# Basic_Coordination_237kAF, Extreme_Shortage_0kAF, DCP_Tier*) as
+# *additive* deltas on top of this central factor.  At 2027+,
+# scenario "Baseline_900kAF" therefore represents "central Basic
+# Coordination projection + no additional cut" — NOT "no cut from
+# full CAP delivery."
+CAP_DELIVERY_FACTORS: dict[int, float] = {
+    2020: 0.87,  # Tier 0
+    2021: 0.87,  # Tier 0
+    2022: 0.66,  # Tier 1
+    2023: 0.61,  # Tier 2a
+    2024: 0.66,  # Tier 1 (returns after 2023 Tier 2a)
+    2025: 0.66,  # Tier 1
+    2026: 0.66,  # Tier 1 (last year of 2007 IG + 2019 DCP framework)
+    **{year: 0.84 for year in range(2027, 2100)},  # WestWater Basic Coord
 }
 
+# Backwards-compat alias — older external callers may still import
+# the hindcast-only name.  Will be removed after downstream code is
+# updated.
+CAP_HINDCAST_FACTORS = CAP_DELIVERY_FACTORS
 
-def apply_cap_hindcast_perturbation(
+
+def apply_cap_delivery_perturbation(
         year_df: pd.DataFrame,
         year: int,
         cap_pixel_mask: np.ndarray | None,
 ) -> pd.DataFrame:
-    """Scale CAP-pixel SW signal for known historical CAP cuts (2022-2024).
+    """Scale CAP-pixel SW signal by the year-specific CAP delivery factor.
+
+    Applies to both observed hindcast cuts (2022-2024 = Tier 1/2
+    declarations) and the projection-era central baseline (2026-2099
+    = WestWater "Basic Coordination" 0.74 sustained factor reflecting
+    post-Compact-renegotiation cuts).
 
     Scales BOTH ``canal_weighted_streamflow_mm`` AND the SW rights
     density columns (``irr_sw_rights_density`` /
@@ -785,12 +861,12 @@ def apply_cap_hindcast_perturbation(
             perturbation entirely.
 
     Returns:
-        year_df (perturbed copy if year is in CAP_HINDCAST_FACTORS
+        year_df (perturbed copy if year is in CAP_DELIVERY_FACTORS
         and cap_pixel_mask is not None; same object otherwise).
     """
-    if year not in CAP_HINDCAST_FACTORS or cap_pixel_mask is None:
+    if year not in CAP_DELIVERY_FACTORS or cap_pixel_mask is None:
         return year_df
-    factor = CAP_HINDCAST_FACTORS[year]
+    factor = CAP_DELIVERY_FACTORS[year]
     cols_to_scale = [
         c for c in (
             'canal_weighted_streamflow_mm',
@@ -806,6 +882,10 @@ def apply_cap_hindcast_perturbation(
     for col in cols_to_scale:
         year_df_p.loc[idx, col] *= factor
     return year_df_p
+
+
+# Backwards-compat alias for the old hindcast-only function name.
+apply_cap_hindcast_perturbation = apply_cap_delivery_perturbation
 
 
 # Era-dependent GW/SW weighting for the density-ratio split.
