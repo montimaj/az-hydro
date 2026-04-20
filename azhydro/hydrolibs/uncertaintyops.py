@@ -134,6 +134,7 @@ COMPONENT_T_SCALE = {
     'Irr': 1.0,             # half-range of 2 scenarios — no correction
     'LULC': 1.0,            # scenario-based — no correction
     'GW': T_SCALE_GW,       # sample-based (5 recent HarDWR snapshots)
+    'USBR': T_SCALE_GW,     # sample-based (5 USBR ensemble members; same N as GW)
 }
 
 COMPONENT_N = {
@@ -142,6 +143,7 @@ COMPONENT_N = {
     'Irr': 2,                                       # 2 (half-range, not std)
     'LULC': len(USGS_LULC_SCENARIOS),               # 4
     'GW': len(INFRASTRUCTURE_SNAPSHOT_YEARS),       # 5
+    'USBR': 5,                                      # 5 USBR ensemble members (Rupp + mixed SRES)
 }
 
 # Category / CU raster groups
@@ -1639,6 +1641,212 @@ def compute_sigma_lulc(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# σ_USBR — Upper Basin Colorado River streamflow ensemble uncertainty
+# ═════════════════════════════════════════════════════════════════════════════
+
+def compute_sigma_usbr(
+        model,
+        feature_cols: list[str],
+        az_df: pd.DataFrame,
+        drop_attrs: tuple[str, ...],
+        pred_data_dir: str,
+        output_dir: str,
+        usbr_dir: str,
+        start_year: int,
+        end_year: int,
+        year_list: list[int],
+        mosaic_res: int,
+        members: list[str] | None = None,
+) -> tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]:
+    """Compute σ_USBR — inter-USBR-member spread of CAP delivery driven
+    by Upper Basin Colorado River streamflow uncertainty.
+
+    For each year × USBR ensemble member, perturbs
+    ``canal_weighted_streamflow_mm`` AND the SW rights density
+    columns at CAP service-area pixels by the member's annual
+    Lees-Ferry-flow ratio (member_annual_mean / ensemble_annual_mean).
+    Re-runs the partition for each member and computes per-pixel std
+    across members → σ_USBR.
+
+    σ_USBR captures the **Upper-Basin-headwater hydrologic uncertainty
+    that σ_MACA does not** — MACA's 5-GCM ensemble downscales to AZ-
+    local domain, which captures Salt/Verde/Gila watershed climate
+    but not the Wyoming/Colorado/Utah snowpack that drives Lees Ferry
+    inflow → CAP imports.  σ_USBR uses 5 CMIP3 USBR members chosen as
+    CMIP3-equivalents of the σ_MACA Rupp 2013 GCMs, with mixed SRES
+    coverage to span both GCM-corner and emission-scenario axes.
+
+    Members ranked by their Lees Ferry mean flow:
+        a1b.ncar_ccsm3_0.1     (≈ MACA CCSM4, center)
+        b1.cnrm_cm3.1          (≈ CNRM-CM5, cool-wet, low emissions)
+        a2.ukmo_hadcm3.1       (≈ HadGEM2-ES, hot-dry, high emissions)
+        a2.miroc3_2_medres.1   (≈ MIROC-ESM, hot-wet, high emissions)
+        b1.inmcm3_0.1          (≈ inmcm4, cool-dry, low emissions)
+
+    For USGS-observed years where streamflow is bias-corrected back
+    to USGS observations, σ_USBR is naturally smaller because the
+    raw USBR ensemble spread there reflects model variability that is
+    constrained out in the central-pipeline streamflow assembly.
+
+    Args:
+        model: Trained ML model.
+        feature_cols: Feature column names.
+        az_df: Arizona training DataFrame.
+        drop_attrs: Columns to drop before prediction.
+        pred_data_dir: Directory containing predictor rasters.
+        output_dir: Base output directory for uncertainty products.
+        usbr_dir: Directory containing USBR ensemble CSVs.
+        start_year, end_year, year_list: Prediction year range.
+        mosaic_res: Raster resolution in meters.
+        members: USBR member names; defaults to
+            ``streamflowops.USBR_REPRESENTATIVE_MEMBERS``.
+
+    Returns:
+        (sigma_usbr, cat_sigma_usbr) — per-year total σ + per-category
+        per-year σ arrays (same shape convention as the other σ
+        components for direct quadrature into σ_total).
+    """
+    import hydrolibs.partitionops as partops
+    import hydrolibs.streamflowops as sfops
+    from hydrolibs.rasterops import read_raster_as_arr, write_raster
+    from hydrolibs.sysops import makedirs
+
+    if members is None:
+        members = sfops.USBR_REPRESENTATIVE_MEMBERS
+
+    logger.info(
+        'Computing σ_USBR (inter-USBR-member streamflow uncertainty, '
+        '%d members)...', len(members),
+    )
+    base_dir = os.path.join(output_dir, 'Sigma_USBR')
+    raster_dir = os.path.join(base_dir, 'Rasters')
+    makedirs(raster_dir)
+
+    ref_basin_file = os.path.join(pred_data_dir, f'GW_Basin_{year_list[0]}.tif')
+    basin_arr, bfile = read_raster_as_arr(ref_basin_file, get_file=True)
+    basin_flat = basin_arr.ravel()
+    valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
+    raster_shape = basin_arr.shape
+    bfile.close()
+    ref_raster_file = os.path.join(
+        pred_data_dir, f'Predictor_{year_list[0]}.tif',
+    )
+
+    pixel_area_m2 = mosaic_res ** 2
+    mm_to_m3 = pixel_area_m2 / 1000
+
+    # CAP pixel mask (set earlier in run_uncertainty_quantification via
+    # _set_cap_pixel_mask_context).  This mask aligns with the valid-
+    # pixel ordering of year_df rows.
+    cap_pixel_mask = _CAP_PIXEL_MASK_CTX.get('mask')
+    if cap_pixel_mask is None:
+        logger.warning(
+            'σ_USBR: CAP pixel mask not set; σ_USBR will be zero. '
+            'Ensure _set_cap_pixel_mask_context runs before σ_USBR.'
+        )
+        return {}, {c: {} for c in partops.CATEGORIES}
+
+    # Pre-compute per-year per-member ratios at Lees Ferry (00013).
+    # These multiply cw_streamflow + sw_rights_density at CAP pixels
+    # (multiplicative perturbation, member-vs-ensemble-mean).
+    logger.info('  Loading USBR member ratios for Lees Ferry...')
+    ratios = sfops.compute_usbr_member_annual_ratios(
+        usbr_dir, members, usbr_ids=['00013'],
+    )
+    lees_ratios = ratios.get('00013', {})
+
+    sigma_usbr: dict[int, np.ndarray] = {}
+    yearly_stats: dict = {}
+    basin_accum: dict = {'basin': {}, 'subbasin': {}}
+    cat_basin_accum: dict[str, dict] = {
+        c: {'basin': {}} for c in partops.CATEGORIES
+    }
+    cat_sigma_usbr: dict[str, dict[int, np.ndarray]] = {
+        c: {} for c in partops.CATEGORIES
+    }
+
+    sw_cols = (
+        'canal_weighted_streamflow_mm',
+        'irr_sw_rights_density',
+        'nonirr_sw_rights_density',
+        'sw_rights_density',
+    )
+
+    for year in range(start_year, end_year + 1):
+        year_df = az_df[az_df.Year == year].copy()
+        if year_df.empty:
+            continue
+
+        # Predict once per year (raw ML prediction is identical across
+        # members because all perturbed columns are in DROP_ATTRS).
+        pf_base = _build_pred_features(year_df, feature_cols, drop_attrs)
+        raw = np.abs(model.predict(pf_base))
+
+        member_preds = []
+        member_cats = []
+        for m in members:
+            ratio = lees_ratios.get(m, {}).get(year, 1.0)
+            if not np.isfinite(ratio) or ratio <= 0:
+                ratio = 1.0
+            sc_year_df = year_df.copy()
+            cap_idx = sc_year_df.index[cap_pixel_mask]
+            for col in sw_cols:
+                if col in sc_year_df.columns:
+                    sc_year_df.loc[cap_idx, col] = (
+                        sc_year_df.loc[cap_idx, col].values * ratio
+                    )
+            cats = _partition_with_ctx(
+                partops, raw, sc_year_df, raster_shape, valid_mask,
+                year=year, skip_cap_perturbation=True,
+            )
+            pred = cats['Irrigation'] + cats['Non_Irrigation']
+            member_preds.append(pred)
+            member_cats.append(cats)
+
+        sc_stack = np.stack(member_preds, axis=0)
+        std = _safe_nanstd(sc_stack, axis=0, ddof=1)
+        sigma_usbr[year] = std
+
+        cat_std = _compute_category_sigmas(member_cats)
+        for c in partops.CATEGORIES:
+            cat_sigma_usbr[c][year] = cat_std[c]
+
+        bv, sbv = _aggregate_member_volumes(
+            member_preds, year_df, mm_to_m3,
+        )
+        _accumulate_basin_sigma(basin_accum, year, bv, sbv)
+        cat_bv = _aggregate_category_member_volumes(
+            member_cats, year_df, mm_to_m3,
+        )
+        _accumulate_category_basin_sigma(cat_basin_accum, year, cat_bv)
+
+        _write_std_raster(
+            std, basin_flat, valid_mask, raster_shape,
+            ref_raster_file,
+            os.path.join(raster_dir, f'Sigma_USBR_mm_{year}.tif'),
+            read_raster_as_arr, write_raster,
+        )
+        yearly_stats[year] = _pixel_stats(std, mm_to_m3)
+
+        if year % 20 == 0 or year == end_year:
+            logger.info(
+                f'    Year {year}: mean σ_USBR = '
+                f'{yearly_stats[year]["Mean_Depth_mm"]:.2f} mm'
+            )
+
+    _save_summary(yearly_stats, base_dir, 'USBR')
+    _write_basin_sigma_csv(basin_accum, base_dir, 'USBR')
+    for cat in partops.CATEGORIES:
+        _write_basin_sigma_csv(
+            cat_basin_accum[cat], base_dir,
+            f'USBR_{cat}', basin_only=True,
+        )
+
+    logger.info('  σ_USBR complete.')
+    return sigma_usbr, cat_sigma_usbr
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # σ_gw — GW fraction inter-snapshot uncertainty
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -2840,7 +3048,24 @@ def _plot_cap_scenarios(
         # Quadrature accumulation (√N dampening) would underestimate
         # the cumulative uncertainty.
         sigma_total_gw = sigma_lookup.get('Total_GW', {})
-        for sc in state_cumul['Scenario'].unique():
+        # WestWater-named scenarios (Basic_Coordination, Extreme_Shortage)
+        # often produce drawdowns nearly identical to mid-band DCP Tier
+        # scenarios because they share boost-factor era mappings.  Use
+        # dashed lines for the WestWater scenarios and solid for DCP
+        # Tiers so visual overlap is distinguishable.  Plot solid lines
+        # first, then dashed on top (otherwise the dashed Basic
+        # Coordination line gets covered by the solid Tier 2a/2b lines
+        # they overlap with around ~27 MAF).
+        westwater_scenarios = (
+            'Baseline_900kAF',
+            'Basic_Coordination_237kAF',
+            'Extreme_Shortage_0kAF',
+        )
+        sc_order = sorted(
+            state_cumul['Scenario'].unique(),
+            key=lambda s: 1 if s in westwater_scenarios else 0,
+        )
+        for sc in sc_order:
             sdf = state_cumul[
                 state_cumul.Scenario == sc
             ].sort_values('Year')
@@ -2855,7 +3080,8 @@ def _plot_cap_scenarios(
             else:
                 color = scenario_colors.get(sc, '#333')
                 marker = None
-                lw = 1.6
+                lw = 1.8
+            linestyle = '--' if sc in westwater_scenarios else '-'
             lbl = sc.replace('_', ' ')
             years = sdf['Year'].values
             values = sdf['Cumulative_Delta_GW_AF'].values / 1e6
@@ -2868,10 +3094,13 @@ def _plot_cap_scenarios(
                         years, values - sig_cum, values + sig_cum,
                         color=color, alpha=0.15, linewidth=0,
                     )
+            zorder = 5 if sc in westwater_scenarios else 3
             ax.plot(
                 years, values,
                 label=lbl, color=color, linewidth=lw,
+                linestyle=linestyle,
                 marker=marker, markevery=10, markersize=5,
+                zorder=zorder,
             )
         ax.set_xlabel('Year', fontweight='bold')
         ax.set_ylabel('Cumulative Additional GW (MAF)', fontweight='bold')
@@ -3772,6 +4001,31 @@ def run_uncertainty_quantification(
     else:
         logger.info('  σ_gw skipped.')
 
+    # ── σ_USBR (Upper Basin Colorado River streamflow uncertainty) ──
+    # Captures inter-USBR-member spread of CAP delivery driven by
+    # Upper Basin headwater hydrology — the dominant climate-uncertainty
+    # axis that σ_MACA does not reach (MACA downscales to AZ-local
+    # domain only).  Applies to all years 1896-2099; will be near-zero
+    # for USGS-observed years (where streamflow is observed) and
+    # substantial for projection (2026+) where USBR ensemble drives
+    # the central estimate.
+    sigma_usbr = cat_sigma_usbr = {}
+    if 'sigma-usbr' not in skip:
+        usbr_dir = os.path.join(input_dir, 'GW_Data', 'USBR')
+        if os.path.isdir(usbr_dir):
+            sigma_usbr, cat_sigma_usbr = compute_sigma_usbr(
+                model, feature_cols, az_df, drop_attrs,
+                pred_data_dir, unc_dir, usbr_dir,
+                start_year, end_year, year_list, mosaic_res,
+            )
+        else:
+            logger.warning(
+                '  σ_USBR skipped: USBR data dir not found at %s',
+                usbr_dir,
+            )
+    else:
+        logger.info('  σ_USBR skipped.')
+
     # ── Density-ratio partitioning sensitivity (±20%) ──
     if 'density-sensitivity' not in skip:
         run_density_ratio_sensitivity(
@@ -3791,6 +4045,7 @@ def run_uncertainty_quantification(
             'Irr': sigma_irr,
             'LULC': sigma_lulc,
             'GW': sigma_gw,
+            'USBR': sigma_usbr,
         }
         cat_sigma_components = {
             'MACA': cat_sigma_maca,
@@ -3798,6 +4053,7 @@ def run_uncertainty_quantification(
             'Irr': cat_sigma_irr,
             'LULC': cat_sigma_lulc,
             'GW': cat_sigma_gw,
+            'USBR': cat_sigma_usbr,
         }
         prediction_raster_dir = (
             os.path.join(model_dir, pred_base, 'Predicted_Rasters', 'Depth_mm')
@@ -5284,6 +5540,7 @@ def _plot_uncertainty_time_series(
         'Irr': 'Irrigation Fraction (σ_irr)',
         'LULC': 'LULC Projection (σ_LULC)',
         'GW': 'Well Density (σ_gw)',
+        'USBR': 'Upper Basin Streamflow (σ_USBR)',
     }
 
     for name, comp in sigma_components.items():

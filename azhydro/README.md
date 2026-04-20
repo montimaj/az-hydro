@@ -187,6 +187,7 @@ Step 3h is excluded from `--steps all` because Step 3g already produces the grap
 | `sigma-irr` | Skip σ_irr — irrigation fraction uncertainty |
 | `sigma-lulc` | Skip σ_LULC — LULC projection spread (requires GEE download) |
 | `sigma-gw` | Skip σ_gw — well-density feature sensitivity across 5 recent HarDWR snapshots (2020–2024) |
+| `sigma-usbr` | Skip σ_USBR — Upper Basin Colorado River streamflow uncertainty (5 USBR CMIP3 ensemble members spanning Rupp 2013 GCM corners + mixed SRES). Captures CAP-delivery uncertainty driven by Wyoming/Colorado/Utah snowpack — the gap σ_MACA cannot reach (MACA only downscales to AZ-local domain). |
 | `density-sensitivity` | Skip partition-level diagnostic (density-ratio ±20% + smoothing-sigma sweep {2, 8}) |
 | `sigma-total` | Skip σ_total quadrature, basin σ, visualizations, and raster augmentation |
 | `sigma-cu` | Skip σ_CU — consumptive use uncertainty (IE × Withdrawal error propagation) |
@@ -1309,10 +1310,10 @@ the graphical abstract as part of its full raster-map suite.
 #### 3d. Hybrid uncertainty quantification (`uncertaintyops.run_uncertainty_quantification()`)
 
 Pixel-level uncertainty is quantified for every year (1896–2099) by
-computing five independent error components and combining them via
+computing **six independent error components** and combining them via
 quadrature:
 
-$$\sigma_{\text{total}} = \sqrt{\sigma_{\text{MACA}}^2 + \sigma_{\text{model}}^2 + \sigma_{\text{irr}}^2 + \sigma_{\text{LULC}}^2 + \sigma_{\text{gw}}^2}$$
+$$\sigma_{\text{total}} = \sqrt{\sigma_{\text{MACA}}^2 + \sigma_{\text{model}}^2 + \sigma_{\text{irr}}^2 + \sigma_{\text{LULC}}^2 + \sigma_{\text{gw}}^2 + \sigma_{\text{USBR}}^2}$$
 
 Each component isolates a specific source of prediction uncertainty.
 Every ensemble member's total prediction is also partitioned into the 8
@@ -1320,12 +1321,26 @@ withdrawal categories *before* computing std, yielding per-category σ for
 each component.  Per-category σ_total is then obtained by the same
 quadrature formula applied category-wise.
 
-**Sample-based vs scenario-based components.**  σ_model (10 random seeds)
-and σ_gw (5 recent HarDWR well-density snapshots, 2020–2024) are
-*sample-based*: their ensemble members are random draws from a larger
-population, so Student's t-distribution critical values are used instead
-of z = 1.96 to account for small-N estimation uncertainty
-(t₉ = 2.262 for σ_model, t₄ = 2.776 for σ_gw).
+**Climate-driver decomposition.**  Two of the six components capture
+climate uncertainty along *different geographic axes*:
+
+- **σ_MACA** — AZ-local downscaled CMIP5 climate (5 GCMs).  Drives
+  ET / ETo / precipitation, which controls AZ-local watershed
+  streamflow (Salt, Verde, Gila, Bill Williams) and irrigation demand.
+- **σ_USBR** — Upper Basin Colorado River streamflow (5 USBR CMIP3
+  ensemble members).  Drives Lees Ferry inflow → CAP imports.
+
+Geographic decoupling is essential: ~92 % of Colorado River flow at
+Lees Ferry derives from Wyoming / Colorado / Utah snowpack, which AZ-
+local MACA downscaling does not capture.  σ_USBR fills that gap.
+
+**Sample-based vs scenario-based components.**  σ_model (10 random seeds),
+σ_gw (5 recent HarDWR well-density snapshots, 2020–2024), and σ_USBR
+(5 USBR ensemble members) are *sample-based*: their ensemble members
+are random draws from a larger population, so Student's t-distribution
+critical values are used instead of z = 1.96 to account for small-N
+estimation uncertainty (t₉ = 2.262 for σ_model, t₄ = 2.776 for σ_gw
+and σ_USBR).
 The t-correction is applied by inflating σ by t/z *before* quadrature,
 so all downstream CI computation uses a single multiplier (z = 1.96).
 σ_MACA, σ_LULC, and σ_irr are *scenario-based*: their spread bounds
@@ -1503,19 +1518,75 @@ if 2099 Arizona had 2020-era wells"), but because ``well_density`` is
 the dominant SHAP feature, probing it at real observed amounts still
 exercises the model's primary sensitivity axis.
 
+##### σ_USBR — Upper Basin Colorado River streamflow uncertainty (all years, 1896–2099)
+
+σ_USBR captures **inter-USBR-ensemble-member spread of CAP delivery**
+driven by Upper Basin Colorado River streamflow uncertainty — the
+gap σ_MACA cannot reach (MACA downscales to AZ-local domain only,
+not the Wyoming / Colorado / Utah snowpack that produces ~92 % of
+Lees Ferry flow).
+
+For each year × USBR ensemble member, the helper perturbs both
+``canal_weighted_streamflow_mm`` AND the SW-rights density columns
+at CAP service-area pixels by the member's annual Lees-Ferry-flow
+ratio (``member_annual_mean / ensemble_annual_mean``), re-runs the
+partition, and computes per-pixel std across members:
+
+$$\sigma_{\text{USBR}}(x, y, t) = \text{std}\bigl[\hat{y}_{m_1}, \hat{y}_{m_2}, \hat{y}_{m_3}, \hat{y}_{m_4}, \hat{y}_{m_5}\bigr]$$
+
+**Member selection (Rupp 2013 corner-spanning + mixed SRES).** Five
+USBR CMIP3 members chosen as CMIP3-equivalents of the σ_MACA
+Rupp 2013 GCM set, each at the SRES emissions scenario most consistent
+with the GCM's climate corner:
+
+| USBR member | ≈ MACA equivalent | Climate corner | SRES |
+|---|---|---|---|
+| `a1b.ncar_ccsm3_0.1` | CCSM4 | Center / median | A1B |
+| `b1.cnrm_cm3.1` | CNRM-CM5 | Cool-wet | B1 |
+| `a2.ukmo_hadcm3.1` | HadGEM2-ES365 | Hot-dry | A2 |
+| `a2.miroc3_2_medres.1` | MIROC-ESM-CHEM | Hot-wet | A2 |
+| `b1.inmcm3_0.1` | inmcm4 | Cool-dry | B1 |
+
+This sampling spans **both the GCM-corner and emission-scenario
+axes** within σ_USBR, while remaining methodologically consistent
+with σ_MACA's Rupp 2013 selection.
+
+**Behavior across eras.** σ_USBR is computed for all years 1896–2099
+but contributes meaningfully only where the USBR ensemble actually
+drives the central streamflow signal:
+
+- **Pre-1922 / sparse USGS years**: USBR gap-fills → moderate σ_USBR
+- **1922–2025**: USGS observations dominate → small σ_USBR (member spread is constrained out by USGS bias-correction in the central pipeline)
+- **2026+ projection**: USBR CMIP ensemble mean is the central signal → **largest σ_USBR contribution**
+
+**Scope (current implementation).** σ_USBR perturbs Lees Ferry only,
+applied at CAP service-area pixels.  This captures the dominant
+unresolved climate uncertainty for AZ projection (CAP imports from
+Upper Basin), since SRP / Salt / Verde watersheds are AZ-internal
+and already covered by σ_MACA's Lower Basin downscaling.  Future
+extensions could add Imperial Dam (Yuma) or per-watershed Salt /
+Verde USBR perturbations.
+
 ##### σ_total — Quadrature combination
 
-The five components are assumed independent and combined in quadrature.
-Sample-based σ (Model, GW) are scaled by t/z before squaring, so the
-resulting σ_total already incorporates the t-correction.
+The six components are assumed independent and combined in quadrature.
+Sample-based σ (Model, GW, USBR) are scaled by t/z before squaring,
+so the resulting σ_total already incorporates the t-correction.
 
-**Independence assumption.**  The quadrature formula assumes all five
-components are mutually uncorrelated.  In practice, σ_MACA and σ_LULC
-both perturb future-year predictors and may share structural correlations
-(e.g. a hot-dry climate scenario also affects land use).  The combined
-σ_total should therefore be interpreted as an approximate bound; true
-combined uncertainty could be modestly larger or smaller depending on
-the sign of inter-component correlations.
+**Independence assumption.**  The quadrature formula assumes all six
+components are mutually uncorrelated.  In practice, σ_MACA, σ_LULC,
+and σ_USBR all carry SRES-flavored climate uncertainty (LULC
+scenarios named B1/B2/A1B/A2; USBR members tagged by SRES; MACA
+GCMs partition T × P space at given RCPs) — e.g. a hot-dry climate
+scenario also affects land use, and Upper Basin streamflow shares
+emission-pathway dependence with AZ-local climate.  σ_MACA and
+σ_USBR are *partially* decoupled by the geographic decomposition
+(AZ-local vs Upper Basin headwaters).  Treating all six as
+independent therefore *slightly overestimates* σ_total — a
+conservative bias acceptable for paper-bound UQ envelopes.  The
+combined σ_total should be interpreted as an approximate bound;
+true combined uncertainty could be modestly larger or smaller
+depending on the sign of inter-component correlations.
 
 For each year the output is a 2-band raster:
 
@@ -2757,28 +2828,36 @@ below the model's resolution and not represented separately.
 2026 is the final year under the 2007 Interim Guidelines + 2019 DCP
 framework (which expires December 2026), so it's treated as part of
 the hindcast at Tier 1 (0.66).  For the post-framework projection
-horizon (2027–2099), AZ is unlikely to receive the full historical
-CAP allocation.  The post-2026 Compact renegotiation is in progress;
-CAP itself notes AZ is "working with other Basin states on
-sustainability concepts" without yet committing to specific kAF
-reductions.  Lake Mead carryover that protected the 2010–2021
-plateau is exhausted.  We adopt the WestWater Research (2026)
-**"Basic Coordination"** scenario (~16 % sustained cut relative to
-CAP design capacity, 237 kAF/yr below the 1500 kAF baseline →
-factor **0.84**) as the central projection baseline — the same
-mid-range CAP planning assumption used by stakeholders for post-2026
-modelling.  Reverting to full delivery (factor 1.0) in 2027 would
-understate likely conditions and create a visible boundary step.
+horizon (2027–2099), the central projection assumes **continued
+Tier 1 shortage conditions** — the dominant recent regime.  AZ has
+been in Tier 1 (or Tier 2a) every year 2022–2026, USBR's 24-month
+projections suggest Lake Mead will remain in the 1050–1075 ft
+elevation band (Tier 1 trigger range) for the near term under
+current Compact conditions, and the Lake Mead carryover that
+protected the 2010–2021 plateau is exhausted.  Continuing factor
+0.66 (= Tier 1's 512 kAF cut from the 1500 kAF design capacity, ≈
+34 % reduction) past 2026 is the most defensible single central
+estimate; it preserves continuity at the 2026→2027 boundary (no
+boundary step) and matches the regime AZ stakeholders are actively
+planning around.
+
+**This is a separate choice from WestWater Research (2026)'s "Basic
+Coordination" scenario** (which assumes a maximum policy shortage
+reducing deliveries to 237 kAF — a 663 kAF cut from the 900 kAF
+baseline, or 74 % reduction).  Basic Coordination is an upper-bound
+*stress* scenario, not a central estimate, and is evaluated as one
+alternative trajectory in the CAP scenario sweep (below) along with
+Extreme Shortage and the DCP Tier 0–3 alternatives.
 
 **Caveat on the 74-year projection horizon.** Applying a single
-fixed 0.84 factor across all of 2027–2099 is a simplification —
+fixed 0.66 factor across all of 2027–2099 is a simplification —
 real-world Compact renegotiations happen on 15–20 year cycles and
 climate / basin hydrology / political dynamics will continue to
-evolve.  The fixed factor is best read as *"the best single-value
-central estimate we have today,"* not a year-specific forecast.
-Reviewers interested in policy bounds should look at the CAP
-scenario sweep (below) rather than treating the central projection
-as a deterministic prediction.
+evolve.  The fixed factor is best read as *"the most likely
+sustained shortage condition we'd plan around today,"* not a
+year-specific forecast.  Reviewers interested in policy bounds
+should look at the CAP scenario sweep (below) rather than treating
+the central projection as a deterministic prediction.
 
 **Caveat on high-intensity M&I demand.** The projection trajectory
 reflects the dominant recent trend of CAP-driven agricultural
@@ -2806,7 +2885,7 @@ CAP_DELIVERY_FACTORS = {
     2022: 0.66,                                   # Tier 1
     2023: 0.61,                                   # Tier 2a (mandatory only)
     2024: 0.66, 2025: 0.66, 2026: 0.66,           # Tier 1 (returns, continues)
-    **{year: 0.84 for year in range(2027, 2100)}, # WestWater Basic Coord (~16 % cut)
+    **{year: 0.66 for year in range(2027, 2100)}, # Sustained Tier 1
 }
 ```
 
@@ -2853,7 +2932,7 @@ scales the `well_density` columns (`well_density`, `irr_well_density`,
 | Tier 2a | 592 kAF | 1.5 (pre-CAP peak 1948–1955) | **7.5** |
 | Tier 2b | 640 kAF | 1.5 | 7.5 |
 | Tier 3 | 720 kAF | 2.0 (approaching pre-1945 all-GW) | 10.0 |
-| Basic Coordination | 237 kAF | 0.6 (post-CAP + moderate shift) | **3.0** |
+| **Projection 2027–2099 (sustained Tier 1)** | 512 kAF | 1.0 (pre-CAP era) | **5.0** |
 
 Multiplying `wd` by `k` is mathematically equivalent to multiplying
 `gw_weight` by `k` at those pixels — both just scale the numerator of
@@ -2933,10 +3012,13 @@ un-perturbed reference:
 Scenario deltas in `CAP_Scenario_Cumulative.csv` are therefore
 **directly comparable to WestWater 2026's 8.0 MAF anchor** (also a
 with-cut-vs-no-cut projection delta).  The central pipeline output
-for 2027+ still embodies Basic Coordination (via
-`CAP_DELIVERY_FACTORS[2027+] = 0.84` and the 3× well_density boost),
-but the scenario CSVs measure deltas against the no-cut
-counterfactual rather than against the central projection.
+for 2027+ embodies a **sustained Tier 1 shortage assumption** (via
+`CAP_DELIVERY_FACTORS[2027+] = 0.66` and `CAP_CUT_GW_BOOST_FACTORS
+[2027+] = 5.0` — same magnitudes as the 2022/2024–2026 hindcast).
+This represents AZ's most likely sustained shortage condition, not
+WestWater's max-policy-shortage Basic Coordination scenario; the
+latter is one of several alternative trajectories evaluated in the
+scenario sweep, with deltas measured against the no-cut Baseline.
 
 Each scenario applies two coordinated effects (mirroring the
 hindcast perturbation in `partops.apply_cap_delivery_perturbation`):
@@ -3046,17 +3128,20 @@ against USGS Total_GW pre-1950 and USGS/ADWR aggregate breakdowns
   — at CAP service-area pixels, applies two coordinated effects:
   (1) scales `canal_weighted_streamflow_mm` AND the
   `*_sw_rights_density` columns by `CAP_DELIVERY_FACTORS[year]`
-  (Tier 0 = 0.87, Tier 1 = 0.66, Tier 2a = 0.61 for 2020–2026; 0.84
-  for 2027–2099 Basic Coordination; each factor =
+  (Tier 0 = 0.87, Tier 1 = 0.66, Tier 2a = 0.61 for 2020–2026;
+  **Tier 1 sustained = 0.66 for 2027–2099**; each factor =
   `1 − mandatory_cut_kAF / 1500` where 1500 kAF is CAP design
   capacity); (2) scales `well_density` / `irr_well_density` /
-  `nonirr_well_density` by `CAP_CUT_GW_BOOST_FACTORS[year]` (Tier 1
-  = 5.0, Tier 2a = 7.5, Basic Coord = 3.0 — mathematically equivalent
-  to boosting `gw_weight` at those pixels; era-mapped to the
-  `_era_gw_weight` calibration).  Together these produce the factor²
-  SW-kernel reduction and the corresponding GW allocation shift,
-  calibrated against WestWater 2026 drawdown projections.  No-op for
-  pre-2020 years or when `cap_pixel_mask is None`.  Called by
+  `nonirr_well_density` by `CAP_CUT_GW_BOOST_FACTORS[year]`
+  (Tier 1 = 5.0, Tier 2a = 7.5; **Sustained Tier 1 projection =
+  5.0 for 2027–2099** — mathematically equivalent to boosting
+  `gw_weight` at those pixels; era-mapped to the `_era_gw_weight`
+  calibration).  The 2026→2027 boundary is smooth because both
+  factors carry forward unchanged from the hindcast Tier 1 regime.
+  Together these produce the factor² SW-kernel reduction and the
+  corresponding GW allocation shift, calibrated against WestWater
+  2026 drawdown projections.  No-op for pre-2020 years or when
+  `cap_pixel_mask is None`.  Called by
   pipeline.py Step 3 and by `uncertaintyops.py:_partition_with_ctx`.
   An alias `apply_cap_hindcast_perturbation` is kept temporarily for
   backwards compatibility.

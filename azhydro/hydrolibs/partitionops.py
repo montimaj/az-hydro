@@ -792,27 +792,34 @@ def apply_ml_well_density_override(
 #                       Interim Guidelines + 192 LBDCP; last year of
 #                       the 2007 IG + 2019 DCP framework)
 #
-# Projection (2027-2099) factor of 0.84 corresponds to the WestWater
-# Research (2026) "Basic Coordination" scenario — a sustained
-# 237 kAF/yr cut relative to CAP design capacity (237/1500 ≈ 15.8 %
-# reduction) representing a likely negotiated outcome of the
-# post-2026 Compact renegotiation.  This is more defensible than
-# reverting to full delivery (factor 1.0) at the projection boundary,
-# given that AZ has already committed to long-term reductions and the
-# Lake Mead carryover that protected the 2010-2021 plateau is now
-# exhausted.  Applying a single fixed factor across 74 years is a
-# simplification — real Compact renegotiations happen every 15-20
-# years and climate/allocation conditions will continue to evolve;
-# the fixed 0.84 is best read as "the best single-value central
-# estimate we have today," not a forecast of any specific year.
+# Projection (2027-2099) factor of 0.66 represents **sustained Tier 1
+# shortage conditions** — the dominant recent regime.  AZ has been in
+# Tier 1 (or Tier 2a) every year 2022-2026, and USBR's 24-month
+# projections suggest Lake Mead will remain in the 1050-1075 ft
+# elevation band (Tier 1 trigger range) for the near-term under
+# current Compact conditions.  Continuing factor 0.66 (= Tier 1's
+# 512 kAF cut from 1500 kAF design capacity, ≈ 34 % reduction) past
+# 2026 is the most defensible single central estimate; it preserves
+# continuity at the 2026→2027 boundary (no boundary step) and
+# matches the regime AZ stakeholders are actively planning around.
 #
-# The CAP scenario step in `uncertaintyops.run_cap_scenario_analysis`
-# still computes the full policy envelope (Baseline_900kAF,
-# Basic_Coordination_237kAF, Extreme_Shortage_0kAF, DCP_Tier*) as
-# *additive* deltas on top of this central factor.  At 2027+,
-# scenario "Baseline_900kAF" therefore represents "central Basic
-# Coordination projection + no additional cut" — NOT "no cut from
-# full CAP delivery."
+# This is a SEPARATE choice from WestWater Research (2026)'s "Basic
+# Coordination" scenario.  Basic Coord assumes a maximum policy
+# shortage that reduces deliveries to 237 kAF (= 663 kAF cut from
+# 900 kAF baseline = 74 % reduction) — an upper-bound stress
+# scenario, not a central estimate.  Basic Coordination, Extreme
+# Shortage, and the DCP Tier 0-3 alternatives are all evaluated as
+# alternative *what-if* trajectories in the CAP scenario step
+# (`uncertaintyops.run_cap_scenario_analysis`), where the no-cut
+# Baseline_900kAF row provides the counterfactual reference.
+#
+# Applying a single fixed factor across 74 years is a simplification
+# — real Compact renegotiations happen every 15-20 years and
+# climate/allocation conditions will continue to evolve.  The fixed
+# 0.66 is best read as "the most likely sustained shortage condition
+# we'd plan around today," not a year-specific forecast.  The CAP
+# scenario sweep is the right place to look for policy-bounds
+# uncertainty.
 CAP_DELIVERY_FACTORS: dict[int, float] = {
     2020: 0.87,  # Tier 0
     2021: 0.87,  # Tier 0
@@ -821,7 +828,7 @@ CAP_DELIVERY_FACTORS: dict[int, float] = {
     2024: 0.66,  # Tier 1 (returns after 2023 Tier 2a)
     2025: 0.66,  # Tier 1
     2026: 0.66,  # Tier 1 (last year of 2007 IG + 2019 DCP framework)
-    **{year: 0.84 for year in range(2027, 2100)},  # WestWater Basic Coord
+    **{year: 0.66 for year in range(2027, 2100)},  # Sustained Tier 1
 }
 
 # Backwards-compat alias — older external callers may still import
@@ -854,9 +861,11 @@ CAP_HINDCAST_FACTORS = CAP_DELIVERY_FACTORS
 #   Tier 2a  → 7.5 (target gw_w = 1.5, pre-CAP peak 1948-1955)
 #   Tier 2b  → 7.5 (same tier band as 2a)
 #   Tier 3   → 10.0 (target gw_w = 2.0, approaching pre-1945 all-GW)
-#   Basic Coordination (237 kAF sustained) → 3.0 (target gw_w = 0.6,
-#                   between post-CAP 0.2 and mid-CAP bump 0.5 — a
-#                   sustained moderate GW-reliance regime)
+#
+# Projection 2027-2099 inherits the Tier 1 boost (5.0) since the
+# central CAP_DELIVERY_FACTORS for those years also represents
+# sustained Tier 1 conditions.  This keeps the 2026→2027 boundary
+# smooth and matches the regime AZ stakeholders plan around.
 #
 # Calibrated against WestWater 2026 ("Economic Impacts to Central
 # Arizona...", Fig 4 + Section 3.6) which projects ~8.0 MAF cumulative
@@ -873,7 +882,7 @@ CAP_CUT_GW_BOOST_FACTORS: dict[int, float] = {
     2024: 5.0,   # Tier 1 (returns)
     2025: 5.0,   # Tier 1
     2026: 5.0,   # Tier 1
-    **{year: 3.0 for year in range(2027, 2100)},  # Basic Coordination
+    **{year: 5.0 for year in range(2027, 2100)},  # Sustained Tier 1
 }
 
 

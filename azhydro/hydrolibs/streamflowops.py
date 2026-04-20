@@ -72,7 +72,12 @@ BASIN_DELIVERY_START: dict[str, int] = {
 
 
 def _load_usbr_data(usbr_dir, usbr_id):
-    """Load and average USBR ensemble data for a given USBR site ID."""
+    """Load and average USBR ensemble data for a given USBR site ID.
+
+    Returns the ensemble mean across all member columns (112 SRES ×
+    GCM × realization combinations) — used by the central pipeline.
+    For ensemble spread, use ``_load_usbr_member_data()`` instead.
+    """
     usbr_files = glob(os.path.join(usbr_dir, f'streamflow_*_{usbr_id}.csv'))
     if not usbr_files:
         return None
@@ -87,6 +92,229 @@ def _load_usbr_data(usbr_dir, usbr_id):
         usbr_parts.append(udf[['date', 'discharge_cfs']].set_index('date'))
     usbr_monthly = pd.concat(usbr_parts)
     return usbr_monthly.groupby(level=0).mean()
+
+
+def _load_usbr_member_data(usbr_dir, usbr_id, member_name):
+    """Load a SINGLE USBR ensemble member's time series.
+
+    Used by ``uncertaintyops.compute_sigma_usbr`` to sample inter-
+    member spread for the streamflow uncertainty component.
+
+    Args:
+        usbr_dir: Directory containing USBR ensemble CSVs.
+        usbr_id: USBR site ID (e.g. '00013' for Lees Ferry).
+        member_name: Column name of the desired member, e.g.
+            'a1b.cnrm_cm3.1' (SRES.GCM.realization).
+
+    Returns:
+        DataFrame indexed by date with single 'discharge_cfs' column,
+        or None if the member or file is not found.
+    """
+    usbr_files = glob(os.path.join(usbr_dir, f'streamflow_*_{usbr_id}.csv'))
+    if not usbr_files:
+        return None
+    parts = []
+    for usbr_file in usbr_files:
+        udf = pd.read_csv(usbr_file)
+        if member_name not in udf.columns:
+            continue
+        udf['discharge_cfs'] = udf[member_name]
+        udf['date'] = pd.to_datetime(
+            udf['Year'].astype(str) + '-'
+            + udf['Month'].astype(str).str.zfill(2) + '-01',
+        )
+        parts.append(udf[['date', 'discharge_cfs']].set_index('date'))
+    if not parts:
+        return None
+    out = pd.concat(parts)
+    return out.groupby(level=0).mean()
+
+
+def list_usbr_members(usbr_dir, usbr_id='00013'):
+    """List all USBR ensemble member column names available for a site.
+
+    Defaults to Lees Ferry (00013) since all USBR sites carry the
+    same column set (the 112-member CMIP3 SRES ensemble).
+    Returns a list of member name strings (e.g.
+    ``['a1b.bccr_bcm2_0.1', 'a1b.cccma_cgcm3_1.1', ...]``).
+    """
+    files = glob(os.path.join(usbr_dir, f'streamflow_*_{usbr_id}.csv'))
+    if not files:
+        return []
+    df = pd.read_csv(files[0], nrows=0)
+    return [c for c in df.columns if c not in ('Year', 'Month')]
+
+
+# 5 USBR ensemble members spanning both GCM corners (Rupp et al. 2013
+# Southwest US climate-fidelity ranking) AND SRES emission scenarios.
+# Each member sits at a physically consistent (GCM, SRES) corner:
+#   - center / median GCM at A1B (medium-pathway central)
+#   - hot-dry GCM at A2 (high emissions amplifies hot-dry tendency)
+#   - hot-wet GCM at A2 (high emissions amplifies precipitation extremes)
+#   - cool-wet GCM at B1 (low emissions, classical cool-wet outcome)
+#   - cool-dry GCM at B1 (low emissions, cool-dry outcome)
+# CMIP3 GCM names are the closest equivalents of the σ_MACA CMIP5 set
+# (CCSM4 ≈ ncar_ccsm3_0, CNRM-CM5 ≈ cnrm_cm3, HadGEM2-ES ≈ ukmo_hadcm3,
+# MIROC-ESM ≈ miroc3_2_medres, inmcm4 ≈ inmcm3_0) — see Rupp et al.
+# 2013 ranking of GCM Southwest US climate fidelity.
+USBR_REPRESENTATIVE_MEMBERS: list[str] = [
+    'a1b.ncar_ccsm3_0.1',         # center / median (≈ MACA CCSM4)
+    'b1.cnrm_cm3.1',              # cool-wet, low emissions (≈ CNRM-CM5)
+    'a2.ukmo_hadcm3.1',           # hot-dry, high emissions (≈ HadGEM2-ES)
+    'a2.miroc3_2_medres.1',       # hot-wet, high emissions (≈ MIROC-ESM)
+    'b1.inmcm3_0.1',              # cool-dry, low emissions (≈ inmcm4)
+]
+
+
+# USBR-backed gauge → perturbation region mapping for σ_USBR.
+# Each USBR site contributes streamflow uncertainty to a specific
+# AZ delivery system; member-vs-mean ratios scale the corresponding
+# region's cw_streamflow during σ_USBR computation.
+USBR_SITE_REGIONS: dict[str, str] = {
+    '00013': 'CAP',    # Lees Ferry → CAP service area
+    '00014': 'YUMA',   # Imperial Dam → Yuma basin
+    '00061': 'SRP',    # Salt R at Chrysotile → Salt-Verde watershed
+    '00062': 'SRP',    # Salt R at Roosevelt → Salt-Verde watershed
+    '00064': 'SRP',    # Verde R below Bartlett → Salt-Verde watershed
+}
+
+
+def compute_usbr_member_annual_ratios(
+        usbr_dir: str,
+        members: list[str],
+        usbr_ids: list[str] | None = None,
+) -> dict:
+    """Per-year ratios of (member annual mean / ensemble annual mean).
+
+    For each (USBR site × member × year), computes the ratio of that
+    member's annual mean streamflow to the ensemble-mean streamflow
+    in the same year.  This is the multiplicative perturbation
+    σ_USBR applies to ``canal_weighted_streamflow_mm`` at the
+    corresponding region (CAP / Yuma / SRP) when computing σ_USBR.
+
+    For USGS-observed years (where the ensemble mean equals the
+    USGS observation regardless of member), all ratios will be ~1.0
+    → σ_USBR contribution near zero (correct: we have observations).
+    For USBR-driven years (pre-USGS gap-fill + projection), members
+    diverge → ratios spread → σ_USBR contribution non-zero.
+
+    Args:
+        usbr_dir: Directory containing USBR ensemble CSVs.
+        members: List of USBR ensemble member names (e.g.
+            ``USBR_REPRESENTATIVE_MEMBERS``).
+        usbr_ids: USBR site IDs to load.  If None, defaults to all
+            sites in ``USBR_SITE_REGIONS``.
+
+    Returns:
+        Nested dict ``{usbr_id: {member_name: {year: ratio}}}``
+        where ratio = member_annual_mean / ensemble_annual_mean.
+        Years missing from a member's record map to 1.0 (no
+        perturbation).
+    """
+    if usbr_ids is None:
+        usbr_ids = list(USBR_SITE_REGIONS.keys())
+
+    out: dict = {sid: {m: {} for m in members} for sid in usbr_ids}
+
+    for sid in usbr_ids:
+        files = glob(os.path.join(usbr_dir, f'streamflow_*_{sid}.csv'))
+        if not files:
+            continue
+        df = pd.read_csv(files[0])
+        # Identify model columns (filter parser artifacts and missing)
+        model_cols = [
+            c for c in df.columns
+            if c not in ('Year', 'Month')
+            and not c.startswith('Unnamed')
+            and df[c].notna().any()
+        ]
+        if not model_cols:
+            continue
+        # Annual ensemble mean (averaged across all members + months)
+        df['ens_mean'] = df[model_cols].mean(axis=1)
+        annual_ens = df.groupby('Year')['ens_mean'].mean()
+        for m in members:
+            if m not in df.columns:
+                continue
+            annual_m = df.groupby('Year')[m].mean()
+            ratio_yr = (annual_m / annual_ens).replace(
+                [np.inf, -np.inf], np.nan,
+            ).fillna(1.0)
+            out[sid][m] = {int(y): float(v) for y, v in ratio_yr.items()}
+
+    return out
+
+
+def select_representative_usbr_members(
+        usbr_dir,
+        n_members: int = 5,
+        ref_usbr_id: str = '00013',
+) -> list[str]:
+    """Pick N representative USBR ensemble members spanning the
+    hydrologic envelope at the reference site.
+
+    Selection logic:
+        1. Filter out unnamed / NaN-mean parser-artifact columns.
+        2. Rank all members by long-term mean flow at the reference
+           site (default Lees Ferry 00013 — the CAP-relevant signal).
+        3. Pick N members at evenly-spaced percentiles spanning the
+           envelope (e.g. for N=5: 10th / 30th / 50th / 70th / 90th
+           percentile members).
+        4. The selection guarantees dry / dry-quartile / median /
+           wet-quartile / wet representation.  SRES coverage is a
+           consequence — the 113-member ensemble has even SRES
+           distribution, so percentile-spaced selection naturally
+           mixes a1b / a2 / b1 in proportion to their share.
+
+    Args:
+        usbr_dir: Directory containing USBR ensemble CSVs.
+        n_members: Target number of members (default 5; 5–10 are
+            sensible values).  Choose 5 for a UQ envelope that
+            matches σ_MACA's 5-GCM ensemble size; choose 10 for a
+            tighter sigma estimate.
+        ref_usbr_id: USBR site for ranking (default Lees Ferry 00013
+            — the dominant CAP-relevant signal).  Members ranked by
+            their mean flow at this site span the relevant
+            uncertainty for AZ withdrawals.
+
+    Returns:
+        List of member name strings ordered driest → wettest.
+    """
+    all_members = list_usbr_members(usbr_dir, ref_usbr_id)
+    if not all_members:
+        return []
+
+    files = glob(os.path.join(usbr_dir, f'streamflow_*_{ref_usbr_id}.csv'))
+    df = pd.read_csv(files[0])
+    # Filter to valid members (drop parser artifacts like 'Unnamed: 114'
+    # and any column with NaN-mean flow).
+    valid_members = []
+    member_means = {}
+    for m in all_members:
+        if m.startswith('Unnamed'):
+            continue
+        mean_flow = df[m].mean()
+        if not np.isfinite(mean_flow):
+            continue
+        valid_members.append(m)
+        member_means[m] = float(mean_flow)
+
+    if not valid_members:
+        return []
+
+    # Sort driest → wettest and pick at evenly spaced percentiles
+    sorted_m = sorted(valid_members, key=lambda x: member_means[x])
+    # Even spacing 0.1 → 0.9 (avoids the absolute extremes which can be
+    # outliers); for n=5 this gives 10/30/50/70/90 percentiles.
+    pcts = np.linspace(0.1, 0.9, n_members)
+    selected = []
+    for p in pcts:
+        idx = int(p * (len(sorted_m) - 1))
+        cand = sorted_m[idx]
+        if cand not in selected:
+            selected.append(cand)
+
+    return selected
 
 
 def _download_usgs_monthly(site_id, param_cd, stat_cd, start_year, end_year):
