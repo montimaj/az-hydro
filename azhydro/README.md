@@ -3007,15 +3007,41 @@ Key functions:
   smoothing-kernel sweep (`sw_smooth_sigma ∈ {2, 8}`).  Writes one CSV
   with a `Perturbation_Type` column and two ribbon-plot PNGs.
 - **`run_cap_scenario_analysis()`** — Simulates CAP delivery reduction
-  scenarios by scaling `canal_weighted_streamflow_mm` at CAP service-area
-  pixels and re-running the density-ratio partitioning. Total withdrawals
-  stay fixed; only the GW/SW split changes. Scenarios include three
-  WestWater Research (2026) Post-2026 Colorado River alternatives
-  (Baseline 900 kAF, Basic Coordination 237 kAF, Extreme Shortage 0 kAF)
-  and five DCP shortage tiers (Tier 0–3). Outputs per-basin and statewide
-  CSVs with scenario-aware non-well offset for estimated statewide total
-  water use, cumulative additional GW drawdown, and multi-panel time-series
-  plots. Skip via `--skip-uq cap-scenario`.
+  scenarios by perturbing `canal_weighted_streamflow_mm` at CAP service-
+  area pixels and re-running the density-ratio partitioning. Total
+  withdrawals stay fixed; only the GW/SW split changes. Scenarios
+  include three WestWater Research (2026) Post-2026 Colorado River
+  alternatives (Baseline 900 kAF, Basic Coordination 237 kAF, Extreme
+  Shortage 0 kAF) and five DCP shortage tiers (Tier 0–3). Outputs
+  per-basin and statewide CSVs with scenario-aware non-well offset for
+  estimated statewide total water use, cumulative additional GW
+  drawdown, and multi-panel time-series plots with ±1σ ribbons (drawn
+  when per-category σ rasters from `Sigma_Total/Rasters/` are
+  available — the block runs after sigma-total so they always are
+  unless `--skip-uq sigma-total`).  Skip via `--skip-uq cap-scenario`.
+
+  **Additive CAP-import perturbation.**  The previous multiplicative
+  form `cw_sf *= factor` zeroed the *entire* canal-weighted streamflow
+  signal at CAP-service-area pixels — including the SRP and Salt/Verde
+  watershed contributions in Phoenix AMA where CAP overlaps with SRP
+  service area.  At factor=0 (Extreme_Shortage_0kAF) this collapsed
+  the smoothed kernel `gaussian_filter(swd × cw_sf)` to zero across
+  central AZ, driving ~3× over-substitution of GW for SW (~2.7 MAF/yr
+  extra GW for a nominal 900 kAF/yr CAP cut).  The current form
+  subtracts only the AF-calibrated CAP-import slice:
+
+  ```
+  cw_sf_scenario[i] = cw_sf_baseline[i] − (1 − factor) × cap_overlay_per_pixel[i]
+  cap_overlay_per_pixel[i] = (BASELINE_CAP_DELIVERY_AF × m³/AF × 1000 / pixel_area_m2)
+                             × (canal_density[i] / Σ canal_density at CAP pixels)
+  ```
+
+  with `BASELINE_CAP_DELIVERY_AF = 900_000` matching the
+  `Baseline_900kAF` scenario name.  At factor=0 the helper subtracts
+  exactly 900 kAF distributed canal-density-weighted across the CAP
+  service area; SRP / Salt / Verde watershed flows survive intact.
+  Scenario factors stay monotonic (`remaining_kAF / 900`), so DCP
+  tiers strictly order by cut magnitude.
 
   **Non-well offset.**  Statewide totals add a fixed
   `NON_WELL_OFFSET_FIXED_AF = 350_000` AF (reclaimed water only) on top of

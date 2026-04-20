@@ -2014,6 +2014,48 @@ CAP_SCENARIOS: dict[str, float] = {
 NON_WELL_OFFSET_FIXED_AF = 350_000  # Reclaimed water only
 NON_WELL_OFFSET_CAP_AF = 0          # Captured by model SW (no double-count)
 
+# Baseline CAP delivery (AF) used for the additive scenario perturbation
+# to canal_weighted_streamflow_mm.  Scenario factors represent the
+# fraction of this baseline that remains (factor=0 → subtract the full
+# 900 kAF overlay equivalent; factor=0.2 → subtract 720 kAF, matching
+# DCP_Tier3_720kAF_cut).  Isolating an AF-calibrated CAP-import slice
+# preserves the SRP and Salt/Verde watershed signal at CAP-overlap
+# pixels in Phoenix AMA — the multiplicative ``cw_sf *= factor``
+# alternative would zero those out as well, producing physically
+# implausible 100-percent SW collapse and ~3× over-substitution.
+BASELINE_CAP_DELIVERY_AF = 900_000
+
+
+def _compute_cap_overlay_per_pixel(
+        year_df: pd.DataFrame,
+        cap_pixel_mask: np.ndarray,
+        pixel_area_m2: float,
+) -> np.ndarray:
+    """Per-pixel CAP-import contribution (mm/yr) to canal_weighted_streamflow.
+
+    Distributes the ``BASELINE_CAP_DELIVERY_AF`` volume across CAP
+    service-area pixels weighted by ``canal_density`` (matching the
+    distribution rule used by streamflowops when the CAP overlay is
+    added to canal-weighted streamflow).  Returned array is aligned
+    to ``cap_pixel_mask.sum()`` rows in the same order as
+    ``year_df.index[cap_pixel_mask]``.
+    """
+    if 'canal_density' not in year_df.columns:
+        return np.zeros(int(cap_pixel_mask.sum()), dtype=np.float32)
+    canal_dens_cap = year_df.loc[
+        year_df.index[cap_pixel_mask], 'canal_density',
+    ].values
+    cap_canal_sum = float(canal_dens_cap.sum())
+    if cap_canal_sum <= 0:
+        return np.zeros_like(canal_dens_cap, dtype=np.float32)
+    af_to_m3 = 1.0 / M3_TO_AF
+    cap_overlay_total_mm = (
+        BASELINE_CAP_DELIVERY_AF * af_to_m3 * 1000.0 / pixel_area_m2
+    )
+    return (cap_overlay_total_mm * (canal_dens_cap / cap_canal_sum)).astype(
+        np.float32
+    )
+
 
 def run_cap_scenario_analysis(
         model,
@@ -2031,10 +2073,17 @@ def run_cap_scenario_analysis(
 ) -> None:
     """Simulate CAP delivery reduction scenarios via partition perturbation.
 
-    For each scenario, scales ``canal_weighted_streamflow_mm`` at CAP
-    service-area pixels by the scenario factor and re-runs
-    ``partition_predictions()`` with the same ML predictions. Total
-    withdrawals per pixel stay fixed; only the GW/SW split changes.
+    For each scenario, the CAP-import contribution to
+    ``canal_weighted_streamflow_mm`` at CAP service-area pixels is
+    reduced by ``(1 - factor) × cap_overlay_per_pixel`` (where
+    ``cap_overlay_per_pixel`` distributes ``BASELINE_CAP_DELIVERY_AF``
+    canal-density-weighted across the CAP service area), and
+    ``partition_predictions()`` is re-run with the same ML predictions.
+    Total withdrawals per pixel stay fixed; only the GW/SW split
+    changes.  The additive subtraction preserves the SRP / Salt-Verde
+    watershed signal at CAP-overlap pixels — the prior multiplicative
+    ``cw_sf *= factor`` form would zero those out as well, producing
+    ~3× over-substitution at the Extreme_Shortage_0kAF endpoint.
 
     Scenarios follow WestWater Research (2026) and USBR DEIS DCP tiers.
 
@@ -2116,6 +2165,13 @@ def run_cap_scenario_analysis(
         # Pre-compute per-basin masks once per year
         basin_masks = {b: (pixel_basins == b) for b in all_basins}
 
+        # Per-pixel CAP-import overlay contribution (mm/yr) — additive
+        # perturbation magnitude.  Recomputed per year because the rows
+        # of year_df are filtered from az_df.
+        cap_overlay_per_pixel = _compute_cap_overlay_per_pixel(
+            year_df, cap_pixel_mask, pixel_area_m2,
+        )
+
         # Baseline partition (kept for delta computation)
         cats_base = _partition_with_ctx(
             partops, raw, year_df, raster_shape, valid_mask, year=year,
@@ -2165,10 +2221,18 @@ def run_cap_scenario_analysis(
             if factor == 1.0:
                 continue
             sc_df = year_df.copy()
-            sc_df.loc[
-                sc_df.index[cap_pixel_mask],
-                'canal_weighted_streamflow_mm',
-            ] *= factor
+            # Additive perturbation: subtract (1 - factor) of the
+            # CAP-import overlay from canal_weighted_streamflow at CAP
+            # pixels, leaving the SRP / Salt-Verde watershed component
+            # intact.  See _compute_cap_overlay_per_pixel docstring.
+            cap_idx = sc_df.index[cap_pixel_mask]
+            new_cw = (
+                sc_df.loc[cap_idx, 'canal_weighted_streamflow_mm'].values
+                - (1.0 - factor) * cap_overlay_per_pixel
+            )
+            sc_df.loc[cap_idx, 'canal_weighted_streamflow_mm'] = np.clip(
+                new_cw, 0.0, None,
+            )
             cats = _partition_with_ctx(
                 partops, raw, sc_df, raster_shape, valid_mask, year=year,
             )
@@ -2267,12 +2331,54 @@ def run_cap_scenario_analysis(
     logger.info('  CAP scenario CSVs saved to %s', cap_dir)
 
     # --- Plots ---
+    sigma_rasters_dir = os.path.join(output_dir, 'Sigma_Total', 'Rasters')
+    az_sigma_per_cat = _load_az_sigma_per_category(
+        sigma_rasters_dir, projection_start, end_year, pixel_area_m2,
+    )
     _plot_cap_scenarios(
         statewide_df, delta_df,
         scenarios, cap_dir,
         projection_start, end_year,
+        az_sigma_per_cat,
     )
     logger.info('  CAP scenario plots saved to %s', cap_dir)
+
+
+def _load_az_sigma_per_category(
+        sigma_rasters_dir: str,
+        start_year: int,
+        end_year: int,
+        pixel_area_m2: float,
+) -> dict[str, dict[int, float]]:
+    """Statewide σ (AF/yr) per category per year, by quadrature spatial sum.
+
+    Returns ``{cat: {year: sigma_af}}``.  Returns an empty dict when no
+    σ rasters are found (e.g., when sigma-total was skipped) so callers
+    can fall back to plotting without ribbons.
+    """
+    cats = (
+        'Total_GW', 'Total_SW',
+        'Irrigation_GW', 'Irrigation_SW',
+        'Non_Irrigation_GW', 'Non_Irrigation_SW',
+    )
+    out: dict[str, dict[int, float]] = {cat: {} for cat in cats}
+    if not os.path.isdir(sigma_rasters_dir):
+        return out
+    from hydrolibs.rasterops import read_raster_as_arr
+    mm_to_m3 = pixel_area_m2 / 1000.0
+    for cat in cats:
+        for yr in range(start_year, end_year + 1):
+            f = os.path.join(
+                sigma_rasters_dir, f'Sigma_Total_{cat}_mm_{yr}.tif',
+            )
+            if not os.path.isfile(f):
+                continue
+            arr = read_raster_as_arr(f, get_file=False)
+            arr = np.where(np.isfinite(arr), arr, 0.0)
+            sigma_m3 = arr * mm_to_m3
+            sigma_total_m3 = float(np.sqrt(np.sum(sigma_m3 ** 2)))
+            out[cat][yr] = sigma_total_m3 * M3_TO_AF
+    return out
 
 
 def _plot_cap_scenarios(
@@ -2282,51 +2388,91 @@ def _plot_cap_scenarios(
         out_dir: str,
         start_year: int,
         end_year: int,
+        az_sigma_per_cat: dict[str, dict[int, float]] | None = None,
 ) -> None:
-    """Render CAP scenario time-series plots."""
+    """Render CAP scenario time-series plots.
+
+    If ``az_sigma_per_cat`` is provided (statewide σ AF/yr per category
+    per year, from ``Uncertainty/Sigma_Total/Rasters``), each scenario
+    line is drawn with a ±σ ribbon at α=0.15.  Scenarios are
+    deterministic re-partitions of fixed central-ML predictions, so the
+    σ source is the same as for the central pipeline; the ribbon
+    represents prediction uncertainty (climate / model / irr / lulc / gw)
+    rather than scenario uncertainty.
+    """
     import matplotlib.pyplot as plt
     from hydrolibs.visualops import apply_journal_style
 
     apply_journal_style()
+    sigma_lookup = az_sigma_per_cat or {}
 
     cat_pairs = [
-        ('Total_GW_AF', 'Total_SW_AF', 'Total'),
-        ('Irrigation_GW_AF', 'Irrigation_SW_AF', 'Irrigation'),
-        ('Non_Irrigation_GW_AF', 'Non_Irrigation_SW_AF', 'Non-Irrigation'),
+        ('Total_GW_AF', 'Total_SW_AF', 'Total', 'Total_GW', 'Total_SW'),
+        ('Irrigation_GW_AF', 'Irrigation_SW_AF', 'Irrigation',
+         'Irrigation_GW', 'Irrigation_SW'),
+        ('Non_Irrigation_GW_AF', 'Non_Irrigation_SW_AF', 'Non-Irrigation',
+         'Non_Irrigation_GW', 'Non_Irrigation_SW'),
     ]
 
     scenario_colors = {
         'Baseline_900kAF': '#2C3E50',
         'Basic_Coordination_237kAF': '#E67E22',
-        'Extreme_Shortage_0kAF': '#E74C3C',
+        'Extreme_Shortage_0kAF': '#C0392B',
     }
-    dcp_colors = {
-        'DCP_Tier0_192kAF_cut': '#85C1E9',
-        'DCP_Tier1_512kAF_cut': '#5DADE2',
-        'DCP_Tier2a_592kAF_cut': '#2E86C1',
-        'DCP_Tier2b_640kAF_cut': '#1B4F72',
-        'DCP_Tier3_720kAF_cut': '#154360',
+    # Distinct hue+marker per DCP tier (mild → severe).  The previous
+    # all-blue gradient ran together visually; this uses the
+    # ColorBrewer YlOrRd 5-class palette starting at the darker end so
+    # every line is clearly distinguishable, plus per-tier markers as
+    # a second discriminator.
+    dcp_styles = {
+        'DCP_Tier0_192kAF_cut':  ('#FDD49E', 'o'),  # light orange
+        'DCP_Tier1_512kAF_cut':  ('#FDBB84', 's'),  # orange
+        'DCP_Tier2a_592kAF_cut': ('#FC8D59', '^'),  # darker orange
+        'DCP_Tier2b_640kAF_cut': ('#E34A33', 'D'),  # red
+        'DCP_Tier3_720kAF_cut':  ('#B30000', 'v'),  # dark red
     }
+    dcp_colors = {k: v[0] for k, v in dcp_styles.items()}
+    dcp_markers = {k: v[1] for k, v in dcp_styles.items()}
+
+    def _ribbon(ax, years, values, sigma_cat, color):
+        """Overlay ±σ ribbon when σ data is available."""
+        if not sigma_cat:
+            return
+        sig = np.array(
+            [sigma_cat.get(int(y), 0.0) / 1e6 for y in years]
+        )
+        if not np.any(sig > 0):
+            return
+        v = np.asarray(values, dtype=float)
+        ax.fill_between(
+            years, np.clip(v - sig, 0, None), v + sig,
+            color=color, alpha=0.15, linewidth=0,
+        )
 
     # --- WestWater scenarios (3 main) ---
     westwater = ['Baseline_900kAF', 'Basic_Coordination_237kAF',
                  'Extreme_Shortage_0kAF']
     fig, axes = plt.subplots(3, 2, figsize=(18, 12), sharex=True)
 
-    for row, (gw_col, sw_col, label) in enumerate(cat_pairs):
-        for col, (vol_col, gs_label) in enumerate(
-            [(gw_col, 'GW'), (sw_col, 'SW')],
+    for row, (gw_col, sw_col, label, gw_key, sw_key) in enumerate(cat_pairs):
+        for col, (vol_col, gs_label, sig_key) in enumerate(
+            [(gw_col, 'GW', gw_key), (sw_col, 'SW', sw_key)],
         ):
             ax = axes[row, col]
+            sigma_cat = sigma_lookup.get(sig_key, {})
             for sc in westwater:
-                sdf = statewide_df[statewide_df.Scenario == sc].sort_values('Year')
+                sdf = statewide_df[
+                    statewide_df.Scenario == sc
+                ].sort_values('Year')
                 if sdf.empty:
                     continue
                 color = scenario_colors.get(sc, '#333')
-                lbl = sc.replace('_', ' ').replace(' kAF', ' kAF')
+                lbl = sc.replace('_', ' ')
+                values = sdf[vol_col].values / 1e6
+                _ribbon(ax, sdf['Year'].values, values, sigma_cat, color)
                 ax.plot(
-                    sdf['Year'], sdf[vol_col] / 1e6,
-                    label=lbl, color=color, linewidth=1.5,
+                    sdf['Year'], values,
+                    label=lbl, color=color, linewidth=1.6,
                 )
             ax.set_ylabel('Volume (MAF)', fontweight='bold')
             ax.set_title(f'{label} {gs_label}', fontweight='bold')
@@ -2335,7 +2481,8 @@ def _plot_cap_scenarios(
     axes[-1, 0].set_xlabel('Year', fontweight='bold')
     axes[-1, 1].set_xlabel('Year', fontweight='bold')
     fig.suptitle(
-        'CAP Delivery Reduction Scenarios — GW/SW Partition Shift',
+        'CAP Delivery Reduction Scenarios — GW/SW Partition Shift '
+        '(±1σ shading)',
         fontweight='bold', fontsize=14,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -2349,23 +2496,33 @@ def _plot_cap_scenarios(
     if dcp_names:
         fig, axes = plt.subplots(3, 2, figsize=(18, 12), sharex=True)
         all_dcp = ['Baseline_900kAF'] + dcp_names
-        all_dcp_colors = {**{'Baseline_900kAF': '#2C3E50'}, **dcp_colors}
-        for row, (gw_col, sw_col, label) in enumerate(cat_pairs):
-            for col, (vol_col, gs_label) in enumerate(
-                [(gw_col, 'GW'), (sw_col, 'SW')],
+        for row, (gw_col, sw_col, label, gw_key, sw_key) in enumerate(cat_pairs):
+            for col, (vol_col, gs_label, sig_key) in enumerate(
+                [(gw_col, 'GW', gw_key), (sw_col, 'SW', sw_key)],
             ):
                 ax = axes[row, col]
+                sigma_cat = sigma_lookup.get(sig_key, {})
                 for sc in all_dcp:
                     sdf = statewide_df[
                         statewide_df.Scenario == sc
                     ].sort_values('Year')
                     if sdf.empty:
                         continue
-                    color = all_dcp_colors.get(sc, '#333')
+                    if sc == 'Baseline_900kAF':
+                        color = '#2C3E50'
+                        marker = None
+                        lw = 2.0
+                    else:
+                        color = dcp_colors.get(sc, '#333')
+                        marker = dcp_markers.get(sc)
+                        lw = 1.6
                     lbl = sc.replace('_', ' ')
+                    values = sdf[vol_col].values / 1e6
+                    _ribbon(ax, sdf['Year'].values, values, sigma_cat, color)
                     ax.plot(
-                        sdf['Year'], sdf[vol_col] / 1e6,
-                        label=lbl, color=color, linewidth=1.2,
+                        sdf['Year'], values,
+                        label=lbl, color=color, linewidth=lw,
+                        marker=marker, markevery=10, markersize=5,
                     )
                 ax.set_ylabel('Volume (MAF)', fontweight='bold')
                 ax.set_title(f'{label} {gs_label}', fontweight='bold')
@@ -2374,7 +2531,8 @@ def _plot_cap_scenarios(
         axes[-1, 0].set_xlabel('Year', fontweight='bold')
         axes[-1, 1].set_xlabel('Year', fontweight='bold')
         fig.suptitle(
-            'DCP Shortage Tier Scenarios — GW/SW Partition Shift',
+            'DCP Shortage Tier Scenarios — GW/SW Partition Shift '
+            '(±1σ shading)',
             fontweight='bold', fontsize=14,
         )
         fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -2406,7 +2564,7 @@ def _plot_cap_scenarios(
                     lbl = sc.replace('_', ' ')
                     ax.plot(
                         bdf['Year'], bdf['Delta_GW_AF'] / 1e3,
-                        label=lbl, color=color, linewidth=1.5,
+                        label=lbl, color=color, linewidth=1.6,
                     )
                 ax.axhline(0, color='gray', linewidth=0.5, linestyle='--')
                 ax.set_ylabel('ΔGW (kAF)', fontweight='bold')
@@ -2434,18 +2592,49 @@ def _plot_cap_scenarios(
         )['Cumulative_Delta_GW_AF'].sum()
 
         fig, ax = plt.subplots(figsize=(12, 6))
+        # σ for cumulative ΔGW: cumulative quadrature of σ_Total_GW
+        # (treating annual σ as independent year-over-year — overestimates
+        # if temporally correlated, but a useful ceiling on the band).
+        sigma_total_gw = sigma_lookup.get('Total_GW', {})
         for sc in state_cumul['Scenario'].unique():
-            sdf = state_cumul[state_cumul.Scenario == sc].sort_values('Year')
-            color = {**scenario_colors, **dcp_colors}.get(sc, '#333')
+            sdf = state_cumul[
+                state_cumul.Scenario == sc
+            ].sort_values('Year')
+            if sc == 'Baseline_900kAF':
+                color = '#2C3E50'
+                marker = None
+                lw = 2.0
+            elif sc in dcp_colors:
+                color = dcp_colors[sc]
+                marker = dcp_markers.get(sc)
+                lw = 1.6
+            else:
+                color = scenario_colors.get(sc, '#333')
+                marker = None
+                lw = 1.6
             lbl = sc.replace('_', ' ')
+            years = sdf['Year'].values
+            values = sdf['Cumulative_Delta_GW_AF'].values / 1e6
+            if sigma_total_gw:
+                sig_cum = np.sqrt(np.cumsum(np.array([
+                    (sigma_total_gw.get(int(y), 0.0) / 1e6) ** 2
+                    for y in years
+                ])))
+                if np.any(sig_cum > 0):
+                    ax.fill_between(
+                        years, values - sig_cum, values + sig_cum,
+                        color=color, alpha=0.12, linewidth=0,
+                    )
             ax.plot(
-                sdf['Year'], sdf['Cumulative_Delta_GW_AF'] / 1e6,
-                label=lbl, color=color, linewidth=1.5,
+                years, values,
+                label=lbl, color=color, linewidth=lw,
+                marker=marker, markevery=10, markersize=5,
             )
         ax.set_xlabel('Year', fontweight='bold')
         ax.set_ylabel('Cumulative Additional GW (MAF)', fontweight='bold')
         ax.set_title(
-            'Cumulative Additional Groundwater Drawdown Under CAP Reduction',
+            'Cumulative Additional Groundwater Drawdown Under CAP '
+            'Reduction (±1σ shading)',
             fontweight='bold',
         )
         ax.legend(fontsize=8)
@@ -3348,30 +3537,6 @@ def run_uncertainty_quantification(
     else:
         logger.info('  Density-ratio sensitivity skipped.')
 
-    # ── CAP delivery reduction scenario analysis ──
-    if 'cap-scenario' not in skip:
-        cap_geojson = os.path.join(
-            vector_dir, 'CAP', 'CAP_Service_Area.geojson',
-        )
-        if not os.path.isfile(cap_geojson):
-            cap_geojson = os.path.join(
-                os.path.dirname(basin_shp), 'CAP_Service_Area.geojson',
-            )
-        if os.path.isfile(cap_geojson):
-            run_cap_scenario_analysis(
-                model, feature_cols, az_df, drop_attrs,
-                pred_data_dir, unc_dir, start_year, end_year,
-                year_list, mosaic_res,
-                cap_service_area_geojson=cap_geojson,
-            )
-        else:
-            logger.warning(
-                '  CAP service area geojson not found; '
-                'skipping CAP scenario analysis'
-            )
-    else:
-        logger.info('  CAP scenario analysis skipped.')
-
     # ── σ_total + augmentation ──
     full_pred_dir = os.path.join(model_dir, pred_base)
     if 'sigma-total' not in skip:
@@ -3433,6 +3598,32 @@ def run_uncertainty_quantification(
         )
     else:
         logger.info('  σ_total + augmentation skipped.')
+
+    # ── CAP delivery reduction scenario analysis ──
+    # Runs after sigma-total so per-category σ rasters in
+    # Uncertainty/Sigma_Total/Rasters/ are available for plot ribbons.
+    if 'cap-scenario' not in skip:
+        cap_geojson = os.path.join(
+            vector_dir, 'CAP', 'CAP_Service_Area.geojson',
+        )
+        if not os.path.isfile(cap_geojson):
+            cap_geojson = os.path.join(
+                os.path.dirname(basin_shp), 'CAP_Service_Area.geojson',
+            )
+        if os.path.isfile(cap_geojson):
+            run_cap_scenario_analysis(
+                model, feature_cols, az_df, drop_attrs,
+                pred_data_dir, unc_dir, start_year, end_year,
+                year_list, mosaic_res,
+                cap_service_area_geojson=cap_geojson,
+            )
+        else:
+            logger.warning(
+                '  CAP service area geojson not found; '
+                'skipping CAP scenario analysis'
+            )
+    else:
+        logger.info('  CAP scenario analysis skipped.')
 
     # ── Surface Water Capture Index with propagated σ_GW ──
     #
