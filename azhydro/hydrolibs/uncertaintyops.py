@@ -1783,7 +1783,8 @@ def run_density_ratio_sensitivity(
         year_list: list[int],
         mosaic_res: int,
         delta: float = 0.2,
-        smooth_sigmas: tuple[float, float] = (2.0, 8.0),
+        sigma_factor: float = 2.0,
+        sigma_floor: float = 0.5,
 ) -> None:
     """
     Partition-level sensitivity diagnostic covering two orthogonal knobs
@@ -1797,16 +1798,28 @@ def run_density_ratio_sensitivity(
        well-count and SW-rights-count inputs.
 
     2. **Smoothing kernel width** — ``sw_smooth_sigma`` in
-       ``partition_predictions`` is swept across two values (default
-       ``smooth_sigmas=(2.0, 8.0)``) while densities are held at baseline.
-       Probes how sensitive the split is to the assumed canal-service-area
-       radius (~4 km vs ~16 km at 2 km resolution).
+       ``partition_predictions`` is perturbed *per year* around the
+       era-default σ schedule (``partops.era_sw_sigma(year)``) by a
+       factor (default 2×).  At each year:
+
+           σ_low  = max(σ_era / sigma_factor, sigma_floor)
+           σ_high = σ_era × sigma_factor
+
+       This anchors the sensitivity envelope to the actual production
+       σ at every year (rather than a fixed global pair like
+       ``{2, 8}``), so the ribbon represents factor-of-2 perturbations
+       around what the partition is actually using.  The earlier
+       fixed-pair sweep produced misleading asymmetry because
+       ``{2, 8}`` poorly bracketed the production schedule (which spans
+       0.0 → 6.0 across eras).
 
     Writes ``Density_Ratio_Sensitivity.csv`` with one row per
     (Year, Perturbation_Type, Category):
         Year, Perturbation_Type, Category, Baseline_AF, Plus_AF, Minus_AF,
-        Delta_Plus_AF, Delta_Minus_AF, Pct_Change_Plus, Pct_Change_Minus
-    where ``Perturbation_Type`` ∈ {'Density', 'Smoothing'}.
+        Delta_Plus_AF, Delta_Minus_AF, Pct_Change_Plus, Pct_Change_Minus,
+        Sigma_Era, Sigma_Low, Sigma_High
+    where ``Perturbation_Type`` ∈ {'Density', 'Smoothing'} and the
+    ``Sigma_*`` columns are populated only for Smoothing rows.
 
     Writes two PNG plots — one per perturbation section.
 
@@ -1827,8 +1840,11 @@ def run_density_ratio_sensitivity(
         year_list (list[int]): Full list of prediction years.
         mosaic_res (int): Raster resolution in meters.
         delta (float): Density perturbation magnitude (default 0.2 = ±20%).
-        smooth_sigmas (tuple[float, float]): Low/high values of
-            ``sw_smooth_sigma`` to sweep (default ``(2.0, 8.0)``).
+        sigma_factor (float): Multiplicative perturbation around the era
+            σ (default 2.0 → halve / double).
+        sigma_floor (float): Minimum σ_low to keep the kernel
+            non-degenerate (default 0.5; era values of 0.0 are bumped
+            to this floor for the low leg only).
 
     Returns:
         None.
@@ -1838,8 +1854,9 @@ def run_density_ratio_sensitivity(
 
     logger.info(
         'Running partition sensitivity analysis '
-        '(density ±%.0f%%, smoothing σ ∈ {%.1f, %.1f})...',
-        delta * 100, smooth_sigmas[0], smooth_sigmas[1],
+        '(density ±%.0f%%, smoothing σ × {1/%.1f, %.1f} per-year '
+        'around era schedule, floor=%.1f)...',
+        delta * 100, sigma_factor, sigma_factor, sigma_floor,
     )
     sens_dir = os.path.join(output_dir, 'Sigma_GW')
     makedirs(sens_dir)
@@ -1860,7 +1877,8 @@ def run_density_ratio_sensitivity(
         'irr_sw_rights_density', 'nonirr_sw_rights_density',
     )
 
-    def _mk_row(yr, ptype, cat, base_af, plus_af, minus_af):
+    def _mk_row(yr, ptype, cat, base_af, plus_af, minus_af,
+                sigma_era=None, sigma_low=None, sigma_high=None):
         d_plus = plus_af - base_af
         d_minus = minus_af - base_af
         pct_plus = (d_plus / base_af * 100) if base_af > 0 else 0.0
@@ -1876,6 +1894,9 @@ def run_density_ratio_sensitivity(
             'Delta_Minus_AF': round(d_minus, 2),
             'Pct_Change_Plus': round(pct_plus, 2),
             'Pct_Change_Minus': round(pct_minus, 2),
+            'Sigma_Era': round(sigma_era, 4) if sigma_era is not None else np.nan,
+            'Sigma_Low': round(sigma_low, 4) if sigma_low is not None else np.nan,
+            'Sigma_High': round(sigma_high, 4) if sigma_high is not None else np.nan,
         }
 
     rows = []
@@ -1924,13 +1945,27 @@ def run_density_ratio_sensitivity(
         )
 
         # --- Smoothing section: baseline densities, swept sigma ---
+        # Per-year sweep anchored to the era schedule:
+        #   σ_low  = max(σ_era / sigma_factor, sigma_floor)
+        #   σ_high = σ_era × sigma_factor
+        # When σ_era == 0 (very-pre-Yuma years), the σ_low leg is
+        # bumped to sigma_floor and σ_high to sigma_floor × sigma_factor
+        # so the kernel remains non-degenerate and the perturbation
+        # actually moves something.
+        sigma_era = partops.era_sw_sigma(year)
+        if sigma_era <= 0:
+            sigma_low = sigma_floor
+            sigma_high = sigma_floor * sigma_factor
+        else:
+            sigma_low = max(sigma_era / sigma_factor, sigma_floor)
+            sigma_high = sigma_era * sigma_factor
         cats_smooth_high = _partition_with_ctx(
             partops, raw, year_df, raster_shape, valid_mask,
-            year=year, sw_smooth_sigma=smooth_sigmas[1],
+            year=year, sw_smooth_sigma=sigma_high,
         )
         cats_smooth_low = _partition_with_ctx(
             partops, raw, year_df, raster_shape, valid_mask,
-            year=year, sw_smooth_sigma=smooth_sigmas[0],
+            year=year, sw_smooth_sigma=sigma_low,
         )
 
         for cat in partops.CATEGORIES:
@@ -1944,7 +1979,11 @@ def run_density_ratio_sensitivity(
             # Smoothing row ("Plus" = high sigma = wider reach)
             s_plus_af = float(np.nansum(cats_smooth_high[cat])) * mm_to_m3 * M3_TO_AF
             s_minus_af = float(np.nansum(cats_smooth_low[cat])) * mm_to_m3 * M3_TO_AF
-            rows.append(_mk_row(year, 'Smoothing', cat, base_af, s_plus_af, s_minus_af))
+            rows.append(_mk_row(
+                year, 'Smoothing', cat, base_af, s_plus_af, s_minus_af,
+                sigma_era=sigma_era, sigma_low=sigma_low,
+                sigma_high=sigma_high,
+            ))
 
         if year % 20 == 0 or year == end_year:
             logger.info('    Sensitivity year %d done', year)
@@ -1980,8 +2019,15 @@ def run_density_ratio_sensitivity(
     )
     _plot_sens_section(
         sens_df[sens_df.Perturbation_Type == 'Smoothing'], plot_cats,
-        title=f'Smoothing Sigma Sensitivity (σ = {smooth_sigmas[0]:.0f} vs {smooth_sigmas[1]:.0f})',
-        ribbon_label=f'sw_smooth_sigma = {smooth_sigmas[0]:.0f} vs {smooth_sigmas[1]:.0f}',
+        title=(
+            f'Smoothing Sigma Sensitivity '
+            f'(σ_era × {{1/{sigma_factor:.0f}, {sigma_factor:.0f}}} '
+            f'per year, floor={sigma_floor:.1f})'
+        ),
+        ribbon_label=(
+            f'sw_smooth_sigma = era × {{1/{sigma_factor:.0f}, '
+            f'{sigma_factor:.0f}}} (per year)'
+        ),
         out_path=os.path.join(sens_dir, 'Smoothing_Sigma_Sensitivity.png'),
         start_year=start_year, end_year=end_year,
     )
@@ -2667,6 +2713,7 @@ def _plot_sens_section(
     from hydrolibs.visualops import (
         ERA_COLORS,
         ERA_PERIODS,
+        _format_volume_axis,
         apply_journal_style,
     )
 
@@ -2716,7 +2763,7 @@ def _plot_sens_section(
         ax.plot(years, minus_af, color=color, linewidth=0.8,
                 linestyle='--', alpha=0.6)
 
-        ax.set_ylabel('Volume (AF)', fontweight='bold')
+        _format_volume_axis(ax, unit='AF', label='Volume')
         ax.set_title(cat_titles.get(cat, cat), fontweight='bold', fontsize=12)
         ax.grid(True, alpha=0.3, linestyle='--')
 
@@ -5070,6 +5117,7 @@ def _plot_component_basin_sigma(
     Reads ``{Basin|Subbasin}_Sigma_{comp_name}.csv`` from *comp_dir*
     and writes PNGs into ``{comp_dir}Plots/``.
     """
+    from hydrolibs.visualops import _format_volume_axis
     apply_journal_style()
     plot_dir = os.path.join(comp_dir, 'Plots')
     makedirs(plot_dir)
@@ -5111,7 +5159,7 @@ def _plot_component_basin_sigma(
             )
             ax1.plot(years, mean_m3, color='#2980B9', linewidth=1.5,
                      marker='.', markersize=2, label='Mean volume')
-            ax1.set_ylabel('Volume (m³)', fontweight='bold')
+            _format_volume_axis(ax1, unit='m3', label='Volume')
             ax1.set_title(
                 f'{level}: {region} — {comp_title}',
                 fontweight='bold', fontsize=14,
@@ -5123,7 +5171,7 @@ def _plot_component_basin_sigma(
                 ax1.get_ylim()[0] * M3_TO_AF,
                 ax1.get_ylim()[1] * M3_TO_AF,
             )
-            ax1r.set_ylabel('Volume (AF)', fontweight='bold')
+            _format_volume_axis(ax1r, unit='AF', label='Volume')
 
             handles1 = ax1.get_legend_handles_labels()[0]
             era_handles = [
@@ -5145,7 +5193,7 @@ def _plot_component_basin_sigma(
             ax2.plot(years, sigma_m3, color='#E74C3C', linewidth=1.5,
                      marker='.', markersize=2, label=f'σ_{comp_name}')
             ax2.set_xlabel('Year', fontweight='bold')
-            ax2.set_ylabel('σ (m³)', fontweight='bold')
+            _format_volume_axis(ax2, unit='m3', label='σ')
             ax2.grid(True, alpha=0.3, linestyle='--')
 
             ax2r = ax2.twinx()
@@ -5153,7 +5201,7 @@ def _plot_component_basin_sigma(
                 ax2.get_ylim()[0] * M3_TO_AF,
                 ax2.get_ylim()[1] * M3_TO_AF,
             )
-            ax2r.set_ylabel('σ (AF)', fontweight='bold')
+            _format_volume_axis(ax2r, unit='AF', label='σ')
 
             ax2.set_xlim(years.min() - 1, years.max() + 1)
             plt.tight_layout()
@@ -5179,7 +5227,7 @@ def _plot_component_basin_sigma(
                      label=region)
             ax2.plot(years, rdf['CV'].values, linewidth=1, label=region)
 
-        ax1.set_ylabel(f'σ_{comp_name} (m³)', fontweight='bold')
+        _format_volume_axis(ax1, unit='m3', label=f'σ_{comp_name}')
         ax1.set_title(
             f'All {level}s — {comp_title}',
             fontweight='bold', fontsize=14,
@@ -5191,7 +5239,7 @@ def _plot_component_basin_sigma(
             ax1.get_ylim()[0] * M3_TO_AF,
             ax1.get_ylim()[1] * M3_TO_AF,
         )
-        ax1r.set_ylabel(f'σ_{comp_name} (AF)', fontweight='bold')
+        _format_volume_axis(ax1r, unit='AF', label=f'σ_{comp_name}')
 
         ax2.set_xlabel('Year', fontweight='bold')
         ax2.set_ylabel('CV', fontweight='bold')
@@ -5224,6 +5272,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
     from hydrolibs.visualops import (
         ERA_COLORS,
         ERA_PERIODS,
+        _format_volume_axis,
         apply_journal_style,
     )
 
@@ -5268,7 +5317,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
             )
             ax1.plot(years, mean_m3, color='#2980B9', linewidth=1.5,
                      marker='.', markersize=2, label='Mean volume')
-            ax1.set_ylabel('Volume (m³)', fontweight='bold')
+            _format_volume_axis(ax1, unit='m3', label='Volume')
             ax1.set_title(
                 f'{level}: {region} — Mean Prediction ± 95 % CI',
                 fontweight='bold', fontsize=14,
@@ -5280,7 +5329,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
                 ax1.get_ylim()[0] * M3_TO_AF,
                 ax1.get_ylim()[1] * M3_TO_AF,
             )
-            ax1r.set_ylabel('Volume (AF)', fontweight='bold')
+            _format_volume_axis(ax1r, unit='AF', label='Volume')
 
             handles1 = ax1.get_legend_handles_labels()[0]
             era_handles = [
@@ -5302,7 +5351,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
             ax2.plot(years, sigma_m3, color='#E74C3C', linewidth=1.5,
                      marker='.', markersize=2, label='σ_total')
             ax2.set_xlabel('Year', fontweight='bold')
-            ax2.set_ylabel('σ (m³)', fontweight='bold')
+            _format_volume_axis(ax2, unit='m3', label='σ')
             ax2.grid(True, alpha=0.3, linestyle='--')
 
             ax2r = ax2.twinx()
@@ -5310,7 +5359,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
                 ax2.get_ylim()[0] * M3_TO_AF,
                 ax2.get_ylim()[1] * M3_TO_AF,
             )
-            ax2r.set_ylabel('σ (AF)', fontweight='bold')
+            _format_volume_axis(ax2r, unit='AF', label='σ')
 
             ax2.set_xlim(years.min() - 1, years.max() + 1)
             plt.tight_layout()
@@ -5336,7 +5385,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
                      label=region)
             ax2.plot(years, rdf['CV'].values, linewidth=1, label=region)
 
-        ax1.set_ylabel('σ_total (m³)', fontweight='bold')
+        _format_volume_axis(ax1, unit='m3', label='σ_total')
         ax1.set_title(
             f'All {level}s — σ_total Time Series',
             fontweight='bold', fontsize=14,
@@ -5348,7 +5397,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
             ax1.get_ylim()[0] * M3_TO_AF,
             ax1.get_ylim()[1] * M3_TO_AF,
         )
-        ax1r.set_ylabel('σ_total (AF)', fontweight='bold')
+        _format_volume_axis(ax1r, unit='AF', label='σ_total')
 
         ax2.set_xlabel('Year', fontweight='bold')
         ax2.set_ylabel('CV', fontweight='bold')
@@ -5404,7 +5453,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
             )
             ax1.plot(years, mean_m3, color='#2980B9', linewidth=1.5,
                      marker='.', markersize=2, label='Mean volume')
-            ax1.set_ylabel('Volume (m\u00b3)', fontweight='bold')
+            _format_volume_axis(ax1, unit='m3', label='Volume')
             ax1.set_title(
                 'Arizona \u2014 Mean Prediction \u00b1 95 % CI',
                 fontweight='bold', fontsize=14,
@@ -5416,7 +5465,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
                 ax1.get_ylim()[0] * M3_TO_AF,
                 ax1.get_ylim()[1] * M3_TO_AF,
             )
-            ax1r.set_ylabel('Volume (AF)', fontweight='bold')
+            _format_volume_axis(ax1r, unit='AF', label='Volume')
 
             handles1 = ax1.get_legend_handles_labels()[0]
             era_handles = [
@@ -5438,7 +5487,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
             ax2.plot(years, sigma_m3, color='#E74C3C', linewidth=1.5,
                      marker='.', markersize=2, label='\u03c3_total')
             ax2.set_xlabel('Year', fontweight='bold')
-            ax2.set_ylabel('\u03c3 (m\u00b3)', fontweight='bold')
+            _format_volume_axis(ax2, unit='m3', label='\u03c3')
             ax2.grid(True, alpha=0.3, linestyle='--')
 
             ax2r = ax2.twinx()
@@ -5446,7 +5495,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
                 ax2.get_ylim()[0] * M3_TO_AF,
                 ax2.get_ylim()[1] * M3_TO_AF,
             )
-            ax2r.set_ylabel('\u03c3 (AF)', fontweight='bold')
+            _format_volume_axis(ax2r, unit='AF', label='\u03c3')
 
             ax2.set_xlim(years.min() - 1, years.max() + 1)
             plt.tight_layout()

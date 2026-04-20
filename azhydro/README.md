@@ -151,6 +151,7 @@ Step 3h is excluded from `--steps all` because Step 3g already produces the grap
 | `4c` | CAP/SRP surface-water validation |
 | `4d` | Effective precipitation intercomparison |
 | `4e` | Non-irrigation vs USGS Public Supply intercomparison |
+| `4f` | USGS statewide calibration overview (AZ-wide annual Total GW/SW bars ±1σ vs USGS Circular & OFR 94-476 anchors). Mirrors USGS OFR 94-476 Figure 1 in bar form. |
 
 #### Step 0 sub-steps
 
@@ -2111,6 +2112,44 @@ Three categories are compared at the basin level:
 
 All outputs are written to `{prediction_dir}PS_Intercomparison/`.
 
+#### Step 4f — USGS statewide calibration overview (`run_usgs_az_calibration_overview()`)
+
+Generates AZ-wide annual `Total_GW` and `Total_SW` bar plots with ±1σ
+error caps and overlays the per-source USGS Circular and OFR 94-476
+anchors as red triangles — a direct visual analogue of USGS OFR 94-476
+(Anning & Duet 1994) Figure 1.  Reads the model statewide annual values
+from `Annual_Summaries/Total_GW.csv` and `Total_SW.csv`, derives σ per
+year per category by spatial quadrature of
+`Uncertainty/Sigma_Total/Rasters/Sigma_Total_{cat}_mm_{year}.tif`, and
+loads the published anchors from
+`Data/Inputs/USGS WU/USGS_AZ_Water_Use_1950_1980.csv` (rows whose
+`Category` contains "Total").
+
+The overview renders the calibration table from the README's
+"Calibration targets vs final model outputs" subsection at a glance —
+each USGS triangle should sit on or very near the corresponding model
+bar.  Pre-1950 anchors come from OFR 94-476 (GW only); post-1950 from
+USGS Circulars (115, 398, 456, 556, 676, 765, 1001, 1004, 1081, 1200,
+1268, 1344, 1405, 1441), with both GW and SW where the source reports
+them.  Default plot range is 1915–2017 (USGS coverage); SW panel
+starts at 1950.  Outputs:
+
+- `USGS_Calibration_Bars/USGS_AZ_Calibration_Bars.csv` — side-by-side
+  Year × {Model_GW_kAF, Model_SW_kAF, Sigma_Model_GW_kAF,
+  Sigma_Model_SW_kAF, USGS_GW_kAF, USGS_SW_kAF, USGS_Source}.
+- `USGS_Calibration_Bars/USGS_AZ_Total_GW_Bars.png` — bar comparison
+  for Total_GW (1915–end_year).
+- `USGS_Calibration_Bars/USGS_AZ_Total_SW_Bars.png` — bar comparison
+  for Total_SW (1950–end_year; pre-1950 USGS reports no SW separately).
+
+Note on σ magnitude: the spatial quadrature `√(Σ σ_pixel²)` assumes
+per-pixel errors are independent, which is conservative — the AZ-wide
+σ caps are visibly small (≤1–2 % of the bar value).  This matches the
+convention used by `_plot_basin_sigma_time_series` for AZ-wide
+aggregation.  Per-basin σ is much larger (see basin σ plots) but
+suppressed when summed across ~50 basins under the independence
+assumption.
+
 ---
 
 ## Library modules (`hydrolibs/`)
@@ -2571,19 +2610,36 @@ writes both as sections of one CSV with a `Perturbation_Type` column:
   probe the GW/SW ratio's sensitivity to coordinated scaling of its
   numerator and denominator.
 - **Smoothing** — the Gaussian canal-reach kernel `sw_smooth_sigma` is
-  swept across {2, 8} (~4 km / ~16 km radius at 2 km resolution) with
-  densities held at baseline, to probe the assumed canal service-area
-  extent.
+  perturbed *per year* around the era-default schedule
+  (`partops.era_sw_sigma(year)`) by a factor of two:
+
+      σ_low  = max(σ_era / 2, 0.5)        # halve, with floor
+      σ_high = σ_era × 2                  # double
+
+  This anchors the sensitivity envelope to whatever σ the partition is
+  actually using at each year (1.0–6.0 across eras), so the ribbon
+  represents factor-of-2 perturbations around the production σ rather
+  than a fixed global pair.  An earlier fixed `{2, 8}` sweep produced
+  misleading asymmetry — `{2, 8}` poorly bracketed the production
+  schedule (which spans 0.0 → 6.0) and the ribbon biased systematically
+  above or below the baseline depending on which side of the mid-point
+  the era σ sat.
 
 `partition_predictions` accepts `sw_smooth_sigma` as an opt-in override
-(default `None` → era-default σ schedule).  Production calls (central
-pipeline + UQ ensemble members) leave it unset so the era schedule is
-used; only the smoothing-sensitivity diagnostic above passes explicit
-σ values to override the schedule.
+(default `None` → uses `era_sw_sigma(year)` from the era schedule).
+Production calls (central pipeline + UQ ensemble members) leave it
+unset; only the smoothing-sensitivity diagnostic above passes explicit
+σ values to override the schedule.  The Smoothing rows in the output
+CSV include `Sigma_Era`, `Sigma_Low`, and `Sigma_High` columns
+documenting the per-year sweep range.
 
 Both sections write to `Uncertainty/Sigma_GW/Density_Ratio_Sensitivity.csv`
 with time-series ribbon plots in `Density_Ratio_Sensitivity.png` and
-`Smoothing_Sigma_Sensitivity.png`.
+`Smoothing_Sigma_Sensitivity.png`.  The smoothing ribbon represents the
+min/max envelope between the σ_low and σ_high partition runs — it is
+**not** a confidence interval, and asymmetry around the baseline is
+expected because the partition response to σ is monotonic but
+nonlinear (Gaussian area scales as σ²).
 
 #### ML feature well_density override (1962–2099)
 
@@ -2683,8 +2739,8 @@ anchors across all eras:
 | 1998–2007 (mid-CAP bump) | 0.5 |
 | 2008+ | 0.2 |
 
-**3. SW smoothing σ schedule** (piecewise-linear ramps between anchor
-years):
+**3. SW smoothing σ schedule** (`partops.era_sw_sigma(year)`,
+piecewise-linear ramps between anchor years):
 
 | Era | σ |
 |---|---|
@@ -2737,6 +2793,12 @@ against USGS Total_GW pre-1950 and USGS/ADWR aggregate breakdowns
 - **`_era_gw_weight(year)`** — returns the era-dependent `gw_weight`
   (5.0 pre-1945, 2.0 pre-GMA, mid-CAP bump 0.5 at 1998–2007, 0.2
   post-CAP, with 1930–1935 = 10.0 override).
+- **`era_sw_sigma(year)`** — single source of truth for the SW
+  Gaussian smoothing σ schedule (0.0 pre-1912, piecewise anchors
+  1912–1948, 1.0–6.0 across post-1948 eras with overrides at 1973–77
+  and 2003–10).  `partition_predictions` calls it whenever
+  `sw_smooth_sigma is None`; the σ-sensitivity diagnostic in
+  `uncertaintyops` calls it to anchor the per-year halve/double sweep.
 - **`focal_fill_irr_fraction()`** — fills edge-pixel gaps (`irr_frac < 0.05`)
   with a focal mean of valid neighbors, avoiding NaN propagation along
   irrigated-area boundaries.
@@ -3166,6 +3228,18 @@ Basin-scale comparison of ML predictions with independent USGS datasets.
 - PS monthly HUC12 data (Mgal/d, 2000–2020) → annual basin volumes (AF).
 - Reports PS/ML ratio per basin (expected ≤ 100% since PS ⊂ non-irrigation).
 - Produces metrics, per-basin tables, temporal agreement, and time series.
+
+**USGS statewide calibration overview** (`run_usgs_az_calibration_overview()`):
+- AZ-wide annual `Total_GW` and `Total_SW` bar plots with ±1σ caps
+  and USGS Circular / OFR 94-476 anchors overlaid as red triangles.
+- Mirrors USGS OFR 94-476 (Anning & Duet 1994) Figure 1 in bar form.
+- Reads model statewide values from `Annual_Summaries/Total_{GW,SW}.csv`,
+  σ from `Uncertainty/Sigma_Total/Rasters/`, anchors from
+  `Data/Inputs/USGS WU/USGS_AZ_Water_Use_1950_1980.csv`.
+- Default range 1915–2017; SW panel starts at 1950.
+- Outputs:
+  `USGS_Calibration_Bars/USGS_AZ_Calibration_Bars.csv`,
+  `USGS_AZ_Total_GW_Bars.png`, `USGS_AZ_Total_SW_Bars.png`.
 
 ### `rasterops.py` — Raster I/O utilities
 

@@ -868,6 +868,71 @@ def _era_gw_weight(year: int) -> float:
     return GW_WEIGHT_PRE_GMA + frac * (GW_WEIGHT_POST_CAP - GW_WEIGHT_PRE_GMA)
 
 
+def era_sw_sigma(year: int) -> float:
+    """Return the era-dependent SW-smoothing σ (Gaussian kernel width).
+
+    Single source of truth for the SW canal-reach kernel σ used by
+    ``partition_predictions``.  Production callers leave the
+    ``sw_smooth_sigma`` argument None and get this value automatically;
+    the σ-sensitivity diagnostic in ``uncertaintyops`` calls this
+    helper to anchor a per-year sweep around the actual production σ
+    instead of a fixed global pair.
+
+    Schedule (calibrated against USGS Total_GW & GW/SW shares):
+
+    | Era                | σ                                |
+    |--------------------|-----------------------------------|
+    | < 1912             | 0.0                               |
+    | 1912–1948          | piecewise-linear through anchors  |
+    | 1948–1955          | 1.5                               |
+    | 1956–1964          | 1.0                               |
+    | 1965–1984          | linear ramp 1.0 → 4.0             |
+    | 1973–1977 override | 2.0 (drought)                     |
+    | 1985–2002          | 4.0                               |
+    | 2003–2010 override | 3.0 (CAP-era ag retirement)       |
+    | 2008–2021          | linear ramp 4.0 → 6.0             |
+    | 2022+              | 6.0                               |
+
+    Anchor points for 1912–1948 (year, σ):
+    (1912, 0.0), (1915, 1.5), (1917, 0.3), (1929, 0.3),
+    (1935, 0.0), (1940, 0.3), (1945, 1.0), (1948, 1.5).
+    """
+    if year < 1912:
+        return 0.0
+    if year < 1948:
+        anchors = [
+            (1912, 0.0), (1915, 1.5), (1917, 0.3), (1929, 0.3),
+            (1935, 0.0), (1940, 0.3), (1945, 1.0), (1948, 1.5),
+        ]
+        for i in range(len(anchors) - 1):
+            y0, s0 = anchors[i]
+            y1, s1 = anchors[i + 1]
+            if y0 <= year <= y1:
+                if y1 == y0:
+                    return s0
+                frac = (year - y0) / (y1 - y0)
+                return s0 + frac * (s1 - s0)
+        return 0.0
+    if 1948 <= year <= 1955:
+        return 1.5
+    if year < 1965:
+        return 1.0
+    if year >= 2022:
+        return 6.0
+    if 2003 <= year <= 2010:
+        return 3.0
+    if year >= 2008:
+        frac = (year - 2008) / (2022 - 2008)
+        return 4.0 + frac * (6.0 - 4.0)
+    if year >= 1985:
+        return 4.0
+    if 1973 <= year <= 1977:
+        return 2.0
+    # 1965-1984 ramp (20 years)
+    frac = (year - 1965) / (1985 - 1965)
+    return 1.0 + frac * (4.0 - 1.0)
+
+
 def partition_predictions(
         predictions: np.ndarray,
         year_df,
@@ -1373,50 +1438,7 @@ def partition_predictions(
     #   1940: 0.3    Gila Project deliveries (USGS 1940 = 1.80)
     #   1945: 1.0    Gila dam era (USGS 1945 = 2.80)
     #   1948: 1.5    pre-GMA baseline (matches 1948–1955 era)
-    if year < 1912:
-        SW_SIGMA = 0.0
-    elif year < 1948:
-        _sigma_anchors = [
-            (1912, 0.0), (1915, 1.5), (1917, 0.3), (1929, 0.3),
-            (1935, 0.0), (1940, 0.3), (1945, 1.0), (1948, 1.5),
-        ]
-        SW_SIGMA = 0.0
-        for i in range(len(_sigma_anchors) - 1):
-            y0, s0 = _sigma_anchors[i]
-            y1, s1 = _sigma_anchors[i + 1]
-            if y0 <= year <= y1:
-                if y1 == y0:
-                    SW_SIGMA = s0
-                else:
-                    frac = (year - y0) / (y1 - y0)
-                    SW_SIGMA = s0 + frac * (s1 - s0)
-                break
-    elif 1948 <= year <= 1955:
-        SW_SIGMA = 1.5
-    elif year < 1965:
-        SW_SIGMA = 1.0
-    elif year >= 2022:
-        SW_SIGMA = 6.0
-    elif 2003 <= year <= 2010:
-        # CAP-era ag-retirement window.  Model has ~correct Total GW
-        # at 2005 but excess SW; reducing sigma tightens the SW halo
-        # so less volume gets attributed as SW via the density ratio.
-        # Drops SW and lifts GW without changing total retained
-        # volume (1985-2010 routing conserves excess via gw_share
-        # split, so sigma only redistributes GW↔SW).
-        SW_SIGMA = 3.0
-    elif year >= 2008:
-        # 2011-2021 ramp (after the 2003-2010 override).
-        frac = (year - 2008) / (2022 - 2008)
-        SW_SIGMA = 4.0 + frac * (6.0 - 4.0)
-    elif year >= 1985:
-        SW_SIGMA = 4.0
-    elif 1973 <= year <= 1977:
-        SW_SIGMA = 2.0
-    else:
-        # 1965-1984 ramp (20 years)
-        frac = (year - 1965) / (1985 - 1965)
-        SW_SIGMA = 1.0 + frac * (4.0 - 1.0)
+    SW_SIGMA = era_sw_sigma(year)
     # Caller-supplied σ override (used by the density-ratio
     # sensitivity diagnostic to sweep σ at constant year).  Production
     # callers leave this None and use the era schedule above.

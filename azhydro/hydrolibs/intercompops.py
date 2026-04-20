@@ -69,6 +69,8 @@ MGAL_TO_M3 = 3785.41178                # 1 Mgal → m³
 M3_TO_AF = 1 / 1233.48184              # m³ → acre-feet
 M_TO_MM = 1000.0                        # meters → millimeters
 MM_TO_FT = 1.0 / 304.8                 # millimeters → feet
+# 1 mgd × 365.25 days × 1e6 gal ÷ 325,851 gal/AF ≈ 1,120.34 AF/yr
+MGD_TO_AF_PER_YEAR = 365.25 * 1e6 / 325_851.0
 
 # NHM sentinel values (no irrigated area or null ET)
 NHM_SENTINEL = {999, 888}
@@ -4916,3 +4918,313 @@ def run_ps_intercomparison(
     logger.info(f'\n{metrics_df.to_string(index=False)}')
 
     return metrics_df
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# USGS AZ statewide calibration overview
+# Mirrors USGS OFR 94-476 (Anning & Duet 1994) Figure 1 + post-1950 USGS
+# Circular anchors as a direct visual calibration check on the model's
+# AZ-wide annual Total_GW (and Total_SW) time series.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _load_usgs_az_anchors(usgs_csv: str) -> pd.DataFrame:
+    """Load USGS AZ statewide annual water-use anchors as a tidy DataFrame.
+
+    Reads ``USGS_AZ_Water_Use_1950_1980.csv`` and returns rows whose
+    ``Category`` contains ``Total`` (e.g. ``Total Offstream``,
+    ``Total (excl power)``, ``Total (GW only)``).  All values are
+    normalized to thousand acre-feet (kAF), preferring the explicit
+    ``*_1000AF`` columns and falling back to ``*_mgd × 1.12034`` when
+    only the daily-rate columns are populated.
+
+    Returned columns: ``Year, Source, GW_kAF, SW_kAF, Total_kAF``.
+    """
+    # The USGS calibration CSV has quoted Notes with embedded commas
+    # AND a few post-1950 rows carry an extra (empty) field, so the
+    # default parser truncates or skips them.  Read manually via the
+    # csv module to reliably extract the first 11 columns per row.
+    import csv
+    cols = [
+        'Year', 'Source', 'Category',
+        'GW_mgd', 'SW_mgd', 'Total_mgd',
+        'GW_1000AF', 'SW_1000AF', 'Total_1000AF',
+        'CU_1000AF', 'Notes',
+    ]
+    rows = []
+    with open(usgs_csv, newline='') as fh:
+        reader = csv.reader(fh, quotechar='"')
+        next(reader, None)  # skip header
+        for raw in reader:
+            if not raw:
+                continue
+            # Pad short rows; take first 11 from longer rows.
+            fields = (raw + [''] * (11 - len(raw)))[:11]
+            rows.append(fields)
+    df = pd.DataFrame(rows, columns=cols)
+    df['Year'] = pd.to_numeric(df['Year'], errors='coerce')
+    df = df.dropna(subset=['Year'])
+    df['Year'] = df['Year'].astype(int)
+    df = df.loc[
+        df['Category'].astype(str).str.contains('Total', case=False, na=False)
+    ].copy()
+
+    def _kaf(row, col_kaf, col_mgd):
+        v = pd.to_numeric(row.get(col_kaf), errors='coerce')
+        if pd.notna(v):
+            return float(v)
+        v = pd.to_numeric(row.get(col_mgd), errors='coerce')
+        if pd.notna(v):
+            return float(v) * MGD_TO_AF_PER_YEAR / 1000.0
+        return np.nan
+
+    df['GW_kAF'] = df.apply(lambda r: _kaf(r, 'GW_1000AF', 'GW_mgd'), axis=1)
+    df['SW_kAF'] = df.apply(lambda r: _kaf(r, 'SW_1000AF', 'SW_mgd'), axis=1)
+    df['Total_kAF'] = df.apply(
+        lambda r: _kaf(r, 'Total_1000AF', 'Total_mgd'), axis=1,
+    )
+    return (
+        df[['Year', 'Source', 'GW_kAF', 'SW_kAF', 'Total_kAF']]
+        .sort_values('Year').reset_index(drop=True)
+    )
+
+
+def _load_az_sigma_total_for_category(
+        sigma_rasters_dir: str,
+        cat_name: str,
+        years: list[int],
+        pixel_area_m2: float,
+) -> dict[int, float]:
+    """AZ-wide σ (AF/yr) per year for one category, by spatial quadrature.
+
+    Reads ``Sigma_Total_{cat_name}_mm_{year}.tif`` from *sigma_rasters_dir*
+    and aggregates the per-pixel σ to an AZ-wide σ via
+    ``sqrt(sum(σ_pixel²))`` (treats per-pixel σ as approximately
+    independent for the spatial sum — matches what `_plot_basin_sigma`
+    does at the AZ level).
+    """
+    out: dict[int, float] = {}
+    if not os.path.isdir(sigma_rasters_dir):
+        return out
+    mm_to_m3 = pixel_area_m2 / 1000.0
+    for yr in years:
+        f = os.path.join(
+            sigma_rasters_dir, f'Sigma_Total_{cat_name}_mm_{yr}.tif',
+        )
+        if not os.path.isfile(f):
+            continue
+        arr = read_raster_as_arr(f, get_file=False)
+        arr = np.where(np.isfinite(arr), arr, 0.0)
+        sigma_m3 = arr * mm_to_m3
+        sigma_total_m3 = float(np.sqrt(np.sum(sigma_m3 ** 2)))
+        out[yr] = sigma_total_m3 * M3_TO_AF
+    return out
+
+
+def _plot_usgs_calibration_bars(
+        df: pd.DataFrame,
+        column: str,        # 'GW' or 'SW'
+        title: str,
+        out_path: str,
+        bar_color: str,
+        anchor_color: str,
+) -> None:
+    """Annual model bars (MAF) with ±1σ caps + USGS anchor markers."""
+    years = df['Year'].astype(int).values
+    model = df[f'Model_{column}_kAF'].values / 1000.0  # → MAF
+    sigma = df[f'Sigma_Model_{column}_kAF'].values / 1000.0  # → MAF
+    usgs = df[f'USGS_{column}_kAF'].values / 1000.0  # → MAF
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    ax.bar(
+        years, model, color=bar_color, alpha=0.85,
+        edgecolor='#1B4F72', linewidth=0.4,
+        label=f'Model annual Total {column}',
+    )
+    valid_sig = ~np.isnan(sigma) & ~np.isnan(model)
+    if np.any(valid_sig):
+        ax.errorbar(
+            years[valid_sig], model[valid_sig],
+            yerr=sigma[valid_sig],
+            fmt='none', ecolor='#34495E', elinewidth=0.6, capsize=2,
+            alpha=0.7, label='±1σ',
+        )
+    valid_u = ~np.isnan(usgs)
+    if np.any(valid_u):
+        ax.scatter(
+            years[valid_u], usgs[valid_u],
+            marker='v', color=anchor_color, edgecolor='black',
+            linewidth=0.6, s=80, zorder=5,
+            label='USGS anchor (Circulars / OFR 94-476)',
+        )
+
+    ax.set_xlabel('Year', fontweight='bold')
+    ax.set_ylabel(f'Total {column} Withdrawal (MAF)', fontweight='bold')
+    ax.set_title(title, fontweight='bold', fontsize=13)
+    ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+    ax.legend(loc='upper left', fontsize=9, framealpha=0.9)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+
+
+def run_usgs_az_calibration_overview(
+        annual_summaries_dir: str,
+        usgs_csv: str,
+        sigma_rasters_dir: str,
+        output_dir: str,
+        pixel_area_m2: float = 4_000_000,
+        start_year: int = 1915,
+        end_year: int = 2017,
+) -> pd.DataFrame:
+    """AZ-wide annual Total GW & SW bars with ±1σ caps + USGS anchors.
+
+    Mirrors USGS OFR 94-476 (Anning & Duet 1994) Figure 1 in bar form
+    and overlays the per-source Circular and OFR 94-476 anchors as a
+    direct visual calibration check.  The bar plot shows annual model
+    statewide volumes (in MAF) with ±1σ error caps; reference markers
+    are USGS Circular and OFR 94-476 reported totals at the same year.
+
+    Args:
+        annual_summaries_dir: Directory containing ``Total_GW.csv`` and
+            ``Total_SW.csv`` (columns ``Year, Volume_AF``).
+        usgs_csv: Path to ``USGS_AZ_Water_Use_1950_1980.csv``.
+        sigma_rasters_dir: Path to
+            ``Uncertainty/Sigma_Total/Rasters/`` containing
+            per-category σ rasters.  When absent, bars render without
+            error caps.
+        output_dir: Output directory for the bar PNGs and side-by-side
+            CSV.
+        pixel_area_m2: Pixel area in m² (default 4e6 = 2 km grid).
+        start_year, end_year: Plot range.  Default 1915–2017 matches
+            USGS coverage.
+
+    Outputs:
+        - ``USGS_AZ_Calibration_Bars.csv`` — side-by-side
+          model + σ + USGS anchor table.
+        - ``USGS_AZ_Total_GW_Bars.png`` — bar comparison for Total_GW.
+        - ``USGS_AZ_Total_SW_Bars.png`` — bar comparison for Total_SW
+          (1950+ only; pre-1950 USGS reports no SW separately).
+
+    Returns:
+        DataFrame written to the side-by-side CSV.
+    """
+    from hydrolibs.visualops import apply_journal_style
+    apply_journal_style()
+    makedirs(output_dir)
+
+    gw_csv = os.path.join(annual_summaries_dir, 'Total_GW.csv')
+    sw_csv = os.path.join(annual_summaries_dir, 'Total_SW.csv')
+    if not (os.path.isfile(gw_csv) and os.path.isfile(sw_csv)):
+        logger.warning(
+            'Annual summaries Total_GW/SW not found at %s; '
+            'skipping USGS calibration overview',
+            annual_summaries_dir,
+        )
+        return pd.DataFrame()
+
+    gw_df = pd.read_csv(gw_csv)[['Year', 'Volume_AF']].rename(
+        columns={'Volume_AF': 'Model_GW_AF'},
+    )
+    sw_df = pd.read_csv(sw_csv)[['Year', 'Volume_AF']].rename(
+        columns={'Volume_AF': 'Model_SW_AF'},
+    )
+    model_df = (
+        gw_df.merge(sw_df, on='Year', how='outer')
+        .sort_values('Year').reset_index(drop=True)
+    )
+
+    yrs_in_range = [
+        int(y) for y in model_df['Year'].astype(int).values
+        if start_year <= int(y) <= end_year
+    ]
+    sigma_gw = _load_az_sigma_total_for_category(
+        sigma_rasters_dir, 'Total_GW', yrs_in_range, pixel_area_m2,
+    )
+    sigma_sw = _load_az_sigma_total_for_category(
+        sigma_rasters_dir, 'Total_SW', yrs_in_range, pixel_area_m2,
+    )
+
+    if not os.path.isfile(usgs_csv):
+        logger.warning(
+            'USGS calibration CSV not found at %s; '
+            'skipping anchor overlay',
+            usgs_csv,
+        )
+        usgs_df = pd.DataFrame(
+            columns=['Year', 'Source', 'GW_kAF', 'SW_kAF', 'Total_kAF'],
+        )
+    else:
+        usgs_df = _load_usgs_az_anchors(usgs_csv)
+
+    out_rows = []
+    for yr in yrs_in_range:
+        m_row = model_df[model_df['Year'] == yr]
+        u_row = usgs_df[usgs_df['Year'] == yr]
+        out_rows.append({
+            'Year': yr,
+            'Model_GW_kAF': (
+                float(m_row['Model_GW_AF'].iloc[0]) / 1000.0
+                if not m_row.empty else np.nan
+            ),
+            'Model_SW_kAF': (
+                float(m_row['Model_SW_AF'].iloc[0]) / 1000.0
+                if not m_row.empty else np.nan
+            ),
+            'Sigma_Model_GW_kAF': (
+                sigma_gw[yr] / 1000.0 if yr in sigma_gw else np.nan
+            ),
+            'Sigma_Model_SW_kAF': (
+                sigma_sw[yr] / 1000.0 if yr in sigma_sw else np.nan
+            ),
+            'USGS_GW_kAF': (
+                float(u_row['GW_kAF'].iloc[0])
+                if not u_row.empty
+                and pd.notna(u_row['GW_kAF'].iloc[0])
+                else np.nan
+            ),
+            'USGS_SW_kAF': (
+                float(u_row['SW_kAF'].iloc[0])
+                if not u_row.empty
+                and pd.notna(u_row['SW_kAF'].iloc[0])
+                else np.nan
+            ),
+            'USGS_Source': (
+                u_row['Source'].iloc[0] if not u_row.empty else ''
+            ),
+        })
+    out_df = pd.DataFrame(out_rows)
+    out_df.to_csv(
+        os.path.join(output_dir, 'USGS_AZ_Calibration_Bars.csv'),
+        index=False,
+    )
+
+    _plot_usgs_calibration_bars(
+        out_df,
+        column='GW',
+        title=(
+            'Arizona — Annual Total Groundwater Withdrawal\n'
+            '(Model bars ±1σ vs USGS anchors)'
+        ),
+        out_path=os.path.join(output_dir, 'USGS_AZ_Total_GW_Bars.png'),
+        bar_color='#3498DB',
+        anchor_color='#E74C3C',
+    )
+
+    sw_df_plot = out_df[out_df['Year'] >= 1950].reset_index(drop=True)
+    if not sw_df_plot.empty:
+        _plot_usgs_calibration_bars(
+            sw_df_plot,
+            column='SW',
+            title=(
+                'Arizona — Annual Total Surface-Water Withdrawal\n'
+                '(Model bars ±1σ vs USGS anchors)'
+            ),
+            out_path=os.path.join(output_dir, 'USGS_AZ_Total_SW_Bars.png'),
+            bar_color='#16A085',
+            anchor_color='#E74C3C',
+        )
+
+    logger.info(
+        'USGS calibration overview written to %s', output_dir,
+    )
+    return out_df

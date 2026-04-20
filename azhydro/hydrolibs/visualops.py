@@ -76,21 +76,59 @@ def _add_ft_twinx(ax):
 
 
 def _add_m3_twinx(ax):
-    """Add a m³ twinx to an AF volume axis. Call after all plotting."""
+    """Add a km³ twinx to an AF volume axis. Call after all plotting.
+
+    Tick labels render in km³ (×10⁹ m³) to suppress matplotlib's offset
+    notation and match the MAF order of magnitude on the primary axis.
+    """
     lo, hi = ax.get_ylim()
     ax_m3 = ax.twinx()
-    ax_m3.set_ylabel(r'(m$^3$)', fontweight='bold')
     ax_m3.set_ylim(lo * _AF_TO_M3, hi * _AF_TO_M3)
+    _format_volume_axis(ax_m3, unit='m3', label='')
+    ax_m3.set_ylabel(r'(km$^3$)', fontweight='bold')
     return ax_m3
 
 
 def _add_af_twinx(ax):
-    """Add an AF twinx to a m³ volume axis. Call after all plotting."""
+    """Add a MAF twinx to a m³ volume axis. Call after all plotting.
+
+    Tick labels render in MAF to suppress matplotlib's offset notation
+    and match the km³ order of magnitude on the primary m³ axis.
+    """
     lo, hi = ax.get_ylim()
     ax_af = ax.twinx()
-    ax_af.set_ylabel('(acre-ft)', fontweight='bold')
     ax_af.set_ylim(lo / _AF_TO_M3, hi / _AF_TO_M3)
+    _format_volume_axis(ax_af, unit='AF', label='')
+    ax_af.set_ylabel('(MAF)', fontweight='bold')
     return ax_af
+
+
+def _format_volume_axis(ax, unit: str = 'AF', label: str = 'Volume') -> None:
+    """Format an AF or m³ volume/sigma axis to a MAF-scale display.
+
+    Suppresses matplotlib's offset notation (no more "1e7" hovering at
+    the top of the axis) by converting tick labels to MAF (millions of
+    acre-feet) for AF axes, or km³ (×10⁹ m³) for m³ axes.  Both units
+    have the same order of magnitude so paired m³/AF twinx panels read
+    cleanly side-by-side.
+
+    Args:
+        ax: matplotlib axis to restyle.
+        unit: ``'AF'`` for acre-foot data, ``'m3'`` (or ``'m³'``) for
+            cubic-meter data.
+        label: y-axis label prefix (e.g. ``'Volume'``, ``'σ'``,
+            ``'σ_total'``); the unit suffix is appended automatically.
+    """
+    if unit == 'AF':
+        ax.yaxis.set_major_formatter(
+            ticker.FuncFormatter(lambda x, _: f'{x / 1e6:,.2f}'),
+        )
+        ax.set_ylabel(f'{label} (MAF)', fontweight='bold')
+    elif unit in ('m3', 'm³'):
+        ax.yaxis.set_major_formatter(
+            ticker.FuncFormatter(lambda x, _: f'{x / 1e9:,.2f}'),
+        )
+        ax.set_ylabel(rf'{label} (km$^3$)', fontweight='bold')
 
 
 def _add_dual_volume_axes(ax, label: str = ''):
@@ -2346,7 +2384,7 @@ def create_full_period_time_series(
     ax2.plot(years, vol_m3, color=COLORS['predicted'], linewidth=1.5, marker='.',
              markersize=3, label='Predicted')
     ax2.set_xlabel('Year', fontweight='bold')
-    ax2.set_ylabel(r'Total Volume (m$^3$)', fontweight='bold')
+    _format_volume_axis(ax2, unit='m3', label='Total Volume')
     ax2.grid(True, alpha=0.3, linestyle='--')
 
     # 95% CI from model uncertainty
@@ -2718,7 +2756,7 @@ def create_basin_time_series(
 
         era_shaded_ts(ax2, years, vol_m3, std_vol, color=single_color)
         ax2.set_xlabel('Year', fontweight='bold')
-        ax2.set_ylabel(r'Volume (m$^3$)', fontweight='bold')
+        _format_volume_axis(ax2, unit='m3', label='Volume')
         ax2.grid(True, alpha=0.3, linestyle='--')
 
         # Overlay actual data for this basin
@@ -2924,7 +2962,7 @@ def create_subbasin_time_series(
 
         era_shaded_ts(ax2, years, vol_m3, std_vol, color=single_color)
         ax2.set_xlabel('Year', fontweight='bold')
-        ax2.set_ylabel(r'Volume (m$^3$)', fontweight='bold')
+        _format_volume_axis(ax2, unit='m3', label='Volume')
         ax2.grid(True, alpha=0.3, linestyle='--')
 
         # Overlay actual data for this sub-basin
@@ -6514,15 +6552,15 @@ def plot_intercomp_time_series(
                 lo, hi = axes[0].get_ylim()
                 ax_ft.set_ylim(lo * mm_to_ft, hi * mm_to_ft)
 
-                axes[1].set_ylabel(r'Volume (m$^3$)')
+                _format_volume_axis(axes[1], unit='m3', label='Volume')
                 axes[1].set_xlabel('Year')
                 axes[1].grid(True, alpha=0.3, linestyle='--')
                 axes[1].legend(fontsize=9)
                 axes[1].xaxis.set_major_locator(MaxNLocator(integer=True))
                 ax_af = axes[1].twinx()
-                ax_af.set_ylabel('Volume (AF)')
                 lo, hi = axes[1].get_ylim()
                 ax_af.set_ylim(lo * m3_to_af, hi * m3_to_af)
+                _format_volume_axis(ax_af, unit='AF', label='Volume')
             else:
                 axes[0].set_ylabel(cat_title)
                 axes[0].set_xlabel('Year')

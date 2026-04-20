@@ -3378,6 +3378,40 @@ def run_ps_intercomparison() -> pd.DataFrame:
     )
 
 
+def run_usgs_az_calibration_overview() -> pd.DataFrame:
+    """
+    AZ-wide annual Total GW & SW bar plots ±1σ vs USGS anchors.
+
+    Mirrors USGS OFR 94-476 (Anning & Duet 1994) Figure 1 in bar form
+    and overlays the per-source Circular and OFR 94-476 anchors as a
+    direct visual calibration check on the model's statewide annual
+    time series (1915–2017).
+    """
+    logger.info('=' * 60)
+    logger.info('Step 4f: USGS Statewide Calibration Overview')
+    logger.info('=' * 60)
+
+    prediction_dir = os.path.join(
+        MODEL_DIR, f'Full_Prediction_{PREDICTION_MODEL}',
+    )
+    annual_summaries_dir = os.path.join(prediction_dir, 'Annual_Summaries')
+    sigma_rasters_dir = os.path.join(
+        prediction_dir, 'Uncertainty', 'Sigma_Total', 'Rasters',
+    )
+    usgs_csv = os.path.join(
+        INPUT_DIR, 'USGS WU', 'USGS_AZ_Water_Use_1950_1980.csv',
+    )
+    output_dir = os.path.join(prediction_dir, 'USGS_Calibration_Bars')
+
+    return intercompops.run_usgs_az_calibration_overview(
+        annual_summaries_dir=annual_summaries_dir,
+        usgs_csv=usgs_csv,
+        sigma_rasters_dir=sigma_rasters_dir,
+        output_dir=output_dir,
+        pixel_area_m2=MOSAIC_RASTER_RES ** 2,
+    )
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -3403,6 +3437,8 @@ Pipeline steps (comma-separated or 'all'):
   4c   CAP/SRP surface-water validation
   4d   Effective precipitation intercomparison
   4e   Non-irrigation vs USGS Public Supply intercomparison
+  4f   USGS statewide calibration overview (AZ-wide annual Total GW/SW
+       bars ±1σ vs USGS Circular & OFR 94-476 anchors)
 
 Step 0 sub-steps (use with --skip-prep to skip individual sub-steps):
   gee           GEE tile download & mosaic
@@ -3745,6 +3781,10 @@ def main() -> None:
     # Step 4e — Non-irrigation vs USGS Public Supply intercomparison
     if should_run('4e'):
         run_ps_intercomparison()
+
+    # Step 4f — USGS statewide calibration overview (bars vs anchors)
+    if should_run('4f'):
+        run_usgs_az_calibration_overview()
 
     logger.info('\n' + '='*60)
     logger.info('Pipeline complete!')
