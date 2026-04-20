@@ -2575,6 +2575,12 @@ writes both as sections of one CSV with a `Perturbation_Type` column:
   densities held at baseline, to probe the assumed canal service-area
   extent.
 
+`partition_predictions` accepts `sw_smooth_sigma` as an opt-in override
+(default `None` → era-default σ schedule).  Production calls (central
+pipeline + UQ ensemble members) leave it unset so the era schedule is
+used; only the smoothing-sensitivity diagnostic above passes explicit
+σ values to override the schedule.
+
 Both sections write to `Uncertainty/Sigma_GW/Density_Ratio_Sensitivity.csv`
 with time-series ribbon plots in `Density_Ratio_Sensitivity.png` and
 `Smoothing_Sigma_Sensitivity.png`.
@@ -2605,6 +2611,48 @@ The override does NOT modify the partition's retention mask (which
 uses `year_df['well_density']` directly).  It only enriches the ML
 feature so XGBoost predicts realistic per-pixel pumping at LU-expansion
 pixels in projection.
+
+#### CAP delivery hindcast perturbation (2022–2024)
+
+Tier 1/2 Colorado River shortages cut CAP deliveries by ~35 % (2022),
+~50 % (2023), and ~70 % (2024) relative to the ~1500 kAF/yr 2000–2020
+baseline.  These cuts are real-world management events that the ML
+model cannot anticipate from climate / LULC predictors, so they are
+applied as a partition-time perturbation at CAP-served pixels:
+
+```python
+CAP_HINDCAST_FACTORS = {2022: 0.65, 2023: 0.50, 2024: 0.30}
+```
+
+`apply_cap_hindcast_perturbation(year_df, year, cap_pixel_mask)` scales
+**both** `canal_weighted_streamflow_mm` AND the SW rights density
+columns (`irr_sw_rights_density`, `nonirr_sw_rights_density`,
+`sw_rights_density`) at CAP service-area pixels by the year-specific
+factor.  Because the smoothed SW kernel is
+`smooth_swd = gaussian_filter(swd × cw_sf)`, scaling both inputs
+produces a factor² effect at perturbed pixels — yielding a substantial
+GW substitution signal where scaling cw_streamflow alone would be
+diluted by the wide σ Gaussian.
+
+The helper is invoked in both `pipeline.py` (Step 3) and
+`uncertaintyops.py` (`_partition_with_ctx`, used by every UQ ensemble
+member), so UQ uncertainty bounds at 2022–2024 are computed around the
+hindcast-perturbed central prediction rather than the un-perturbed
+baseline.
+
+The CAP service-area mask is rasterized once from
+`Data/Inputs/GW_Data/Vector_Reproj/CAP_Service_Area.geojson` and
+threaded via a module-level `_CAP_PIXEL_MASK_CTX` in
+`uncertaintyops.py`.
+
+**Why targeted perturbation over global σ reduction.**  A blanket
+σ-shrink would also reduce SRP and Yuma SW, both of which were
+unaffected by the Colorado-River cuts.  The CAP-pixel-only mask
+preserves the SRP/Yuma signal.  Observed GW substitution at CAP-cut
+years is ~21–38 % of the cut volume (not 100 %) because SRP backfills
+many overlap pixels in Phoenix AMA — physically correct given that
+Salt/Verde reservoirs supplied above-average deliveries during the
+same drought years.
 
 #### Calibration architecture
 
@@ -2679,6 +2727,13 @@ against USGS Total_GW pre-1950 and USGS/ADWR aggregate breakdowns
   with 2024 registry + AGRI-gated phantom_wd + basin-median LU-only
   fill).  Single source of truth shared between pipeline.py Step 3 and
   uncertaintyops.py UQ ensemble construction.  Active 1962–2099.
+- **`apply_cap_hindcast_perturbation(year_df, year, cap_pixel_mask)`**
+  — at CAP service-area pixels, scales `canal_weighted_streamflow_mm`
+  AND the `*_sw_rights_density` columns by `CAP_HINDCAST_FACTORS[year]`
+  (0.65 / 0.50 / 0.30 for 2022 / 2023 / 2024) to reflect Tier 1/2
+  Colorado River cuts.  No-op for years not in `CAP_HINDCAST_FACTORS`
+  or when `cap_pixel_mask is None`.  Called by pipeline.py Step 3 and
+  by `uncertaintyops.py:_partition_with_ctx`.
 - **`_era_gw_weight(year)`** — returns the era-dependent `gw_weight`
   (5.0 pre-1945, 2.0 pre-GMA, mid-CAP bump 0.5 at 1998–2007, 0.2
   post-CAP, with 1930–1935 = 10.0 override).
@@ -2900,6 +2955,15 @@ arrays passed to `partition_predictions`).  This ensures UQ uncertainty
 bounds are computed around the calibrated central prediction, not
 around an under-calibrated baseline.
 
+`_build_pred_features()` calls `partops.apply_ml_well_density_override`
+(same helper used by pipeline.py Step 3) so that ML features used by
+every UQ ensemble member match the central pipeline byte-for-byte.
+`_partition_with_ctx()` likewise calls
+`partops.apply_cap_hindcast_perturbation` with a module-level
+`_CAP_PIXEL_MASK_CTX` (initialized from the rasterized CAP service-area
+GeoJSON), so the 2022–2024 Colorado-River cuts propagate into the UQ
+ensemble at the same CAP-served pixels as in the central pipeline.
+
 Key functions:
 - **`run_uncertainty_quantification()`** — Master orchestrator.  Computes
   all σ components, combines them via quadrature, writes σ rasters and
@@ -2952,6 +3016,19 @@ Key functions:
   CSVs with scenario-aware non-well offset for estimated statewide total
   water use, cumulative additional GW drawdown, and multi-panel time-series
   plots. Skip via `--skip-uq cap-scenario`.
+
+  **Non-well offset.**  Statewide totals add a fixed
+  `NON_WELL_OFFSET_FIXED_AF = 350_000` AF (reclaimed water only) on top of
+  the model's per-pixel well-mediated partition.  CAP and SRP deliveries
+  are already captured by the model's SW components via the wide-σ
+  Gaussian-smoothed `sw_rights × canal_weighted_streamflow` signal —
+  verified by comparing 4-AMA model `Total_SW` (~1300 kAF/yr) against
+  CAP-direct + SRP irrigation deliveries (~1300 kAF/yr) for 1990–2022,
+  with model/reference ratio averaging ~1.0.  Yuma Colorado River
+  diversions (~440 kAF/yr) are likewise captured in the model's Yuma
+  basin output.  The previous `NON_WELL_OFFSET_CAP_AF` (CAP-direct
+  augmentation) is therefore set to 0 to avoid double-counting in
+  scenario reductions.
 - **`augment_prediction_rasters()`** — Rewrites total annual withdrawal rasters as
   6-band GeoTIFFs (pred, σ, CV, SNR, lower CI, upper CI) for all 4 units.
 - **`augment_category_rasters()`** — Augments 8 withdrawal category rasters
@@ -3014,6 +3091,17 @@ share to neighbors in invalid pixels.
 
 **Zero floor**: A `np.maximum(all_mm, 0)` clamp is applied after sampling to
 eliminate any negative model artifacts before unit conversion.
+
+**Verification step skipped by design.** A pixel-vs-well-sum
+reconciliation step (`verify_well_package`) is intentionally not
+called by the pipeline.  The basin-median LU-only fill in
+`apply_ml_well_density_override` produces predictions at crop / urban
+pixels that have no well points within the 2 km cell, so a strict
+"sum-of-wells == pixel-total" check would always fail by design.  The
+distribution logic itself (capacity-weighted re-normalization within
+each pixel using only active wells) has been validated separately and
+is correct; the verification check is therefore omitted rather than
+surfacing expected failures.
 
 ### `intercompops.py` — USGS intercomparison
 

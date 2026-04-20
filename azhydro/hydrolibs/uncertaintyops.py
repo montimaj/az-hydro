@@ -163,6 +163,27 @@ _PRE_GMA_CTX: dict[str, np.ndarray | None] = {
     'irr_cap_1981': None,
 }
 
+# CAP-cut hindcast context for UQ ensemble.  When set, every UQ
+# ensemble member's _partition_with_ctx call will apply the same
+# CAP-pixel cw_streamflow scaling that the central pipeline uses
+# for 2022-2024 (partops.apply_cap_hindcast_perturbation).
+_CAP_PIXEL_MASK_CTX: dict[str, np.ndarray | None] = {'mask': None}
+
+
+def _set_cap_pixel_mask_context(cap_pixel_mask: np.ndarray | None) -> None:
+    """Populate the module-level CAP-pixel mask context for UQ.
+
+    Mirrors the central pipeline's CAP-cut hindcast perturbation so
+    UQ ensemble members compute σ around the same perturbed central
+    value at 2022-2024.
+    """
+    _CAP_PIXEL_MASK_CTX['mask'] = cap_pixel_mask
+    if cap_pixel_mask is not None:
+        logger.info(
+            'UQ CAP-cut hindcast context loaded: %d pixels',
+            int(cap_pixel_mask.sum()),
+        )
+
 
 def _set_pre_gma_context(az_df: pd.DataFrame, ref_year: int = 2024) -> None:
     """Populate the module-level pre-GMA partitioning context from az_df.
@@ -299,13 +320,24 @@ def _predict_total(model, pred_features, year_df, partops,
 
 
 def _partition_with_ctx(partops, predictions, year_df, raster_shape,
-                         valid_mask, year, sw_smooth_sigma=4.0):
+                         valid_mask, year, sw_smooth_sigma=None):
     """Call partops.partition_predictions with the pre-GMA context kwargs.
 
     Centralises the wd_1981/irr_wd_1981/nonirr_wd_1981/irr_cap_1981
     plumbing so all UQ ensemble members partition identically to the
     central pipeline run.
+
+    Also applies the 2022-2024 CAP-cut hindcast perturbation when the
+    CAP pixel-mask context has been set (via _set_cap_pixel_mask_context).
+    No-op for years not in CAP_HINDCAST_FACTORS.
+
+    sw_smooth_sigma=None (default) → use the calibrated era-based
+    schedule inside partition_predictions.  Explicit value → override
+    the era schedule (used by the σ-sensitivity diagnostic only).
     """
+    year_df = partops.apply_cap_hindcast_perturbation(
+        year_df, year, _CAP_PIXEL_MASK_CTX.get('mask'),
+    )
     return partops.partition_predictions(
         predictions, year_df, raster_shape, valid_mask,
         sw_smooth_sigma=sw_smooth_sigma, year=year,
@@ -1862,13 +1894,15 @@ def run_density_ratio_sensitivity(
         pf_base = _build_pred_features(year_df, feature_cols, drop_attrs)
         raw = np.abs(model.predict(pf_base))
 
-        # --- Baseline partition ---
+        # --- Baseline partition (era-default σ schedule) ---
         cats_base = _partition_with_ctx(
             partops, raw, year_df, raster_shape, valid_mask,
-            year=year, sw_smooth_sigma=4.0,
+            year=year,
         )
 
-        # --- Density section: both sides of ratio, opposite signs ---
+        # --- Density section: both sides of ratio, opposite signs.
+        # Use era-default σ so baseline vs density-perturbed isolates
+        # the density effect cleanly.
         plus_df = year_df.copy()
         plus_df['irr_well_density'] = year_df['irr_well_density'].values * (1 + delta)
         plus_df['nonirr_well_density'] = year_df['nonirr_well_density'].values * (1 + delta)
@@ -1876,7 +1910,7 @@ def run_density_ratio_sensitivity(
         plus_df['nonirr_sw_rights_density'] = year_df['nonirr_sw_rights_density'].values * max(1 - delta, 0)
         cats_density_plus = _partition_with_ctx(
             partops, raw, plus_df, raster_shape, valid_mask,
-            year=year, sw_smooth_sigma=4.0,
+            year=year,
         )
 
         minus_df = year_df.copy()
@@ -1886,7 +1920,7 @@ def run_density_ratio_sensitivity(
         minus_df['nonirr_sw_rights_density'] = year_df['nonirr_sw_rights_density'].values * (1 + delta)
         cats_density_minus = _partition_with_ctx(
             partops, raw, minus_df, raster_shape, valid_mask,
-            year=year, sw_smooth_sigma=4.0,
+            year=year,
         )
 
         # --- Smoothing section: baseline densities, swept sigma ---
@@ -1967,8 +2001,18 @@ CAP_SCENARIOS: dict[str, float] = {
     'DCP_Tier3_720kAF_cut': 0.200,
 }
 
-NON_WELL_OFFSET_FIXED_AF = 790_000 + 350_000  # Yuma + reclaimed
-NON_WELL_OFFSET_CAP_AF = 950_000              # CAP-dependent other
+# Non-well offset: only reclaimed water (350 kAF) is added on top of
+# the model's per-pixel partition.  CAP and SRP deliveries are already
+# captured by the model's SW components via the wide-σ Gaussian-
+# smoothed sw_rights × canal_weighted_streamflow signal — verified by
+# comparing model 4-AMA Total_SW (~1300 kAF/yr) against CAP-direct +
+# SRP irrigation district deliveries (~1300 kAF/yr) for 1990-2022,
+# with model/reference ratio averaging ~1.0.  Yuma direct Colorado
+# River diversions are also captured in the model's Yuma basin output
+# (~440 kAF/yr).  Reclaimed water is the only delivery source not
+# captured by any model feature, so it remains as a fixed offset.
+NON_WELL_OFFSET_FIXED_AF = 350_000  # Reclaimed water only
+NON_WELL_OFFSET_CAP_AF = 0          # Captured by model SW (no double-count)
 
 
 def run_cap_scenario_analysis(
@@ -3183,6 +3227,48 @@ def run_uncertainty_quantification(
     # central pipeline run (well-density blend in ML features +
     # 2024 well/irr_capacity arrays in partition_predictions).
     _set_pre_gma_context(az_df, ref_year=2024)
+
+    # Initialise CAP-cut hindcast pixel mask so UQ ensemble members at
+    # 2022-2024 apply the same CAP perturbation as the central pipeline
+    # (mirrors partops.apply_cap_hindcast_perturbation).
+    try:
+        import geopandas as gpd
+        import rasterio
+        from rasterio.features import rasterize as rio_rasterize
+        from hydrolibs.rasterops import read_raster_as_arr
+        _cap_geojson = os.path.join(vector_dir, 'CAP_Service_Area.geojson')
+        if os.path.isfile(_cap_geojson):
+            _ref_basin_file = os.path.join(
+                pred_data_dir, f'GW_Basin_{year_list[0]}.tif',
+            )
+            _basin_arr, _bf = read_raster_as_arr(_ref_basin_file, get_file=True)
+            _basin_flat = _basin_arr.ravel()
+            _valid_mask_local = ~np.isnan(_basin_flat) & (_basin_flat != 0)
+            _raster_shape = _basin_arr.shape
+            _bf.close()
+            _cap_gdf = gpd.read_file(_cap_geojson)
+            with rasterio.open(_ref_basin_file) as _ref_src:
+                _cap_gdf_proj = _cap_gdf.to_crs(_ref_src.crs)
+                _cap_arr = rio_rasterize(
+                    [(geom, 1) for geom in _cap_gdf_proj.geometry],
+                    out_shape=_raster_shape,
+                    transform=_ref_src.transform,
+                    fill=0,
+                    dtype='uint8',
+                )
+            _cap_pixel_mask_uq = _cap_arr.ravel()[_valid_mask_local] > 0
+            _set_cap_pixel_mask_context(_cap_pixel_mask_uq)
+        else:
+            logger.warning(
+                'UQ CAP-cut context: %s not found; '
+                'CAP-cut hindcast perturbation skipped in UQ ensemble.',
+                _cap_geojson,
+            )
+    except Exception as _e:
+        logger.warning(
+            'UQ CAP-cut context could not be loaded: %s — '
+            'CAP-cut hindcast perturbation skipped in UQ ensemble.', _e,
+        )
 
     skip = skip_uq_steps or set()
     if skip:

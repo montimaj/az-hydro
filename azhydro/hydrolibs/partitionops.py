@@ -738,6 +738,76 @@ def apply_ml_well_density_override(
     return pred_features
 
 
+# CAP delivery hindcast factors — known historical CAP cuts driven by
+# Tier shortage declarations from USBR (drought governance, not
+# hydrology).  The model's `canal_weighted_streamflow_mm` is computed
+# from raw Colorado River gauges and does NOT reflect Tier-allocation
+# cuts.  Apply these factors at CAP-served pixels to scale the SW
+# signal before the partition runs, so the GW/SW split correctly
+# routes more pumping to GW (substituting for lost SW deliveries).
+#
+# Factors derived from actual CAP delivery records (DRI request data,
+# CAP Delivery Data DRI Request.xlsx) divided by a pre-cut baseline
+# of ~1500 kAF/yr (typical 2000-2020 direct + recharge total).
+#   2022: ~984 kAF / 1500 → 0.65  (Tier 1 cut, ~35 % reduction)
+#   2023: ~774 / 1500     → 0.50  (continued Tier 1+, ~50 % reduction)
+#   2024: ~447 / 1500     → 0.30  (Tier 2 cut, ~70 % reduction)
+CAP_HINDCAST_FACTORS: dict[int, float] = {
+    2022: 0.65,
+    2023: 0.50,
+    2024: 0.30,
+}
+
+
+def apply_cap_hindcast_perturbation(
+        year_df: pd.DataFrame,
+        year: int,
+        cap_pixel_mask: np.ndarray | None,
+) -> pd.DataFrame:
+    """Scale CAP-pixel SW signal for known historical CAP cuts (2022-2024).
+
+    Scales BOTH ``canal_weighted_streamflow_mm`` AND the SW rights
+    density columns (``irr_sw_rights_density`` /
+    ``nonirr_sw_rights_density`` / ``sw_rights_density``) at CAP-
+    served pixels by the year-specific factor.  Scaling both is
+    physically defensible — Tier shortage cuts reduce both deliverable
+    canal flow AND the effective SW rights honored.  The smoothed SW
+    kernel ``smooth_swd = gaussian_filter(swd × cw_sf)`` then drops
+    proportionally to the product (factor² at perturbed pixels), giving
+    a more substantial GW substitution signal than scaling cw_streamflow
+    alone (which is diluted by the σ Gaussian smoothing).
+
+    Args:
+        year_df: Per-pixel-per-year DataFrame.
+        year: Prediction year.
+        cap_pixel_mask: Boolean mask of CAP-service-area pixels
+            aligned with year_df row order, or None to skip
+            perturbation entirely.
+
+    Returns:
+        year_df (perturbed copy if year is in CAP_HINDCAST_FACTORS
+        and cap_pixel_mask is not None; same object otherwise).
+    """
+    if year not in CAP_HINDCAST_FACTORS or cap_pixel_mask is None:
+        return year_df
+    factor = CAP_HINDCAST_FACTORS[year]
+    cols_to_scale = [
+        c for c in (
+            'canal_weighted_streamflow_mm',
+            'irr_sw_rights_density',
+            'nonirr_sw_rights_density',
+            'sw_rights_density',
+        ) if c in year_df.columns
+    ]
+    if not cols_to_scale:
+        return year_df
+    year_df_p = year_df.copy()
+    idx = year_df_p.index[cap_pixel_mask]
+    for col in cols_to_scale:
+        year_df_p.loc[idx, col] *= factor
+    return year_df_p
+
+
 # Era-dependent GW/SW weighting for the density-ratio split.
 # Pre-GMA (before 1981): GW dominated — SRP was the only major SW
 # source; most irrigation was groundwater-fed.  USBR reports ~67% GW
@@ -803,7 +873,7 @@ def partition_predictions(
         year_df,
         raster_shape: tuple,
         valid_mask: np.ndarray,
-        sw_smooth_sigma: float = 2.0,
+        sw_smooth_sigma: float | None = None,
         year: int = 0,
         wd_1981: np.ndarray | None = None,
         irr_wd_1981: np.ndarray | None = None,
@@ -820,9 +890,11 @@ def partition_predictions(
             ``annual_gw_fraction``, ``canal_density`` when available).
         raster_shape (tuple): (rows, cols) of the full raster grid.
         valid_mask (np.ndarray): Mask of valid (in-AZ) pixels in the flattened raster (1-D bool array).
-        sw_smooth_sigma (float): Gaussian smoothing kernel width (in pixels) used to
-            spread SW-rights-density influence across canal service areas.
-            Default 2.0 (~4 km radius at 2 km resolution).
+        sw_smooth_sigma (float, optional): If passed, **overrides** the
+            era-based piecewise SW smoothing schedule with this single
+            value (used by the density-ratio sensitivity diagnostic to
+            sweep σ at constant year).  Default None → use the
+            calibrated era schedule (recommended for production runs).
         year (int): Prediction year. Canal-only pixels are kept only for
             years >= ``CANAL_PREDICTOR_START`` (1938) when GEE predictor
             data is available.
@@ -1345,6 +1417,11 @@ def partition_predictions(
         # 1965-1984 ramp (20 years)
         frac = (year - 1965) / (1985 - 1965)
         SW_SIGMA = 1.0 + frac * (4.0 - 1.0)
+    # Caller-supplied σ override (used by the density-ratio
+    # sensitivity diagnostic to sweep σ at constant year).  Production
+    # callers leave this None and use the era schedule above.
+    if sw_smooth_sigma is not None:
+        SW_SIGMA = float(sw_smooth_sigma)
     gw_weight = _era_gw_weight(year)
 
     if irr_swd is not None:

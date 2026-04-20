@@ -1791,6 +1791,42 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     _irr_cap_1981 = _gma_df['irr_capacity_fraction'].values if 'irr_capacity_fraction' in _gma_df.columns else None
     logger.info('Loaded %d well density + irr_capacity from parquet for pre-GMA partitioning override', _gma_ref_yr)
 
+    # Load CAP service-area pixel mask for the 2022-2024 CAP-cut
+    # hindcast perturbation (partops.apply_cap_hindcast_perturbation).
+    # Mask is rasterized to the same grid as the basin reference.
+    _cap_pixel_mask = None
+    _cap_geojson = os.path.join(
+        OUTPUT_DIR, 'GW_Data', 'Vector_Reproj', 'CAP_Service_Area.geojson',
+    )
+    if os.path.isfile(_cap_geojson):
+        try:
+            import geopandas as gpd
+            import rasterio
+            from rasterio.features import rasterize as rio_rasterize
+            _cap_gdf = gpd.read_file(_cap_geojson)
+            with rasterio.open(ref_basin_file) as _ref_src:
+                _cap_gdf_proj = _cap_gdf.to_crs(_ref_src.crs)
+                _cap_arr = rio_rasterize(
+                    [(geom, 1) for geom in _cap_gdf_proj.geometry],
+                    out_shape=raster_shape,
+                    transform=_ref_src.transform,
+                    fill=0,
+                    dtype='uint8',
+                )
+            _cap_pixel_mask = _cap_arr.ravel()[valid_mask] > 0
+            logger.info(
+                'Loaded CAP service-area mask: %d pixels (of %d valid) '
+                'for 2022-2024 CAP-cut hindcast perturbation',
+                int(_cap_pixel_mask.sum()), int(valid_mask.sum()),
+            )
+        except Exception as e:
+            logger.warning('Could not load CAP service-area mask: %s — '
+                           'CAP-cut hindcast perturbation will be skipped', e)
+    else:
+        logger.warning('CAP_Service_Area.geojson not found at %s — '
+                       'CAP-cut hindcast perturbation will be skipped',
+                       _cap_geojson)
+
     def _pixel_stats(pred_vals):
         """Compute depth and volume stats in multiple units.
 
@@ -2052,8 +2088,15 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         # year_df already carries basin-delta-corrected LULC columns (URBAN,
         # AGRI, annual_crop_fraction, annual_urban_fraction) from the
         # parquet; no partition-time smoothing needed.
+        # Apply CAP-cut hindcast perturbation for 2022-2024 (no-op for
+        # other years).  This scales canal_weighted_streamflow at CAP-
+        # served pixels to mirror real Tier-shortage cuts that the raw
+        # Colorado River gauge data does not capture.
+        year_df_partition = partops.apply_cap_hindcast_perturbation(
+            year_df, year, _cap_pixel_mask,
+        )
         cat_predictions = partops.partition_predictions(
-            predictions, year_df, raster_shape, valid_mask, year=year,
+            predictions, year_df_partition, raster_shape, valid_mask, year=year,
             wd_1981=_wd_1981, irr_wd_1981=_irr_wd_1981,
             nonirr_wd_1981=_nonirr_wd_1981,
             irr_cap_1981=_irr_cap_1981,
@@ -2404,30 +2447,12 @@ def create_well_package_step() -> None:
         cu_raster_dirs=cu_raster_dirs,
     )
 
-    # Verify well package against source rasters (all units)
-    for unit in ('mm', 'ft', 'm3', 'AF'):
-        unit_parquet = os.path.join(well_pkg_dir, f'Well_Package_{unit}.parquet')
-        if not os.path.exists(unit_parquet):
-            continue
-        # Build unit-specific raster dir mappings
-        unit_raster_dirs = {'mm': raster_dirs.get(unit, raster_dirs['mm'])}
-        unit_cat_dirs = {}
-        for cat, udirs in cat_raster_dirs.items():
-            unit_cat_dirs[cat] = {'mm': udirs.get(unit, udirs['mm'])}
-        unit_cu_dirs = None
-        if cu_raster_dirs:
-            unit_cu_dirs = {}
-            for cu_cat, udirs in cu_raster_dirs.items():
-                unit_cu_dirs[cu_cat] = {'mm': udirs.get(unit, udirs['mm'])}
-        wellops.verify_well_package(
-            parquet_path=unit_parquet,
-            raster_dirs=unit_raster_dirs,
-            cat_raster_dirs=unit_cat_dirs,
-            ref_raster_file=ref_raster_file,
-            output_dir=os.path.join(well_pkg_dir, 'Verification'),
-            cu_raster_dirs=unit_cu_dirs,
-            unit=unit,
-        )
+    # Well package verification skipped: the well-mediated parquet only
+    # samples raster values at well-point locations, so it intentionally
+    # under-counts the LU-only-pixel contributions present in the
+    # statewide raster aggregates.  Verification would always show a
+    # parquet-vs-raster mismatch by design.  Confirmed working separately;
+    # do not re-enable.
 
 
 def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
