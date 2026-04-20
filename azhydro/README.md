@@ -3259,9 +3259,15 @@ every UQ ensemble member match the central pipeline byte-for-byte.
 `_partition_with_ctx()` likewise calls
 `partops.apply_cap_delivery_perturbation` with a module-level
 `_CAP_PIXEL_MASK_CTX` (initialized from the rasterized CAP service-area
-GeoJSON), so both the 2022–2024 observed Tier cuts and the 2026–2099
+GeoJSON), so both the 2020–2026 observed Tier cuts and the 2027–2099
 sustained "Basic Coordination" projection baseline propagate into the
-UQ ensemble at the same CAP-served pixels as in the central pipeline.
+UQ ensemble at the same CAP-served pixels as in the central pipeline
+— *including* the paired SW-signal reduction
+(`CAP_DELIVERY_FACTORS`) and GW-weight boost
+(`CAP_CUT_GW_BOOST_FACTORS`).  The CAP scenario sweep in
+`run_cap_scenario_analysis` also operates on top of this perturbed
+baseline, adding scenario-specific SW deltas without re-touching
+well_density.
 
 Key functions:
 - **`run_uncertainty_quantification()`** — Master orchestrator.  Computes
