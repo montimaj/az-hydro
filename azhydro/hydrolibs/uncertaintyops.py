@@ -322,7 +322,8 @@ def _predict_total(model, pred_features, year_df, partops,
 
 
 def _partition_with_ctx(partops, predictions, year_df, raster_shape,
-                         valid_mask, year, sw_smooth_sigma=None):
+                         valid_mask, year, sw_smooth_sigma=None,
+                         skip_cap_perturbation=False):
     """Call partops.partition_predictions with the pre-GMA context kwargs.
 
     Centralises the wd_1981/irr_wd_1981/nonirr_wd_1981/irr_cap_1981
@@ -331,17 +332,24 @@ def _partition_with_ctx(partops, predictions, year_df, raster_shape,
 
     Also applies the CAP delivery perturbation when the CAP pixel-
     mask context has been set (via _set_cap_pixel_mask_context):
-    observed 2022-2024 Tier cuts plus the 2026-2099 sustained "Basic
+    observed 2022-2026 Tier cuts plus the 2027-2099 sustained "Basic
     Coordination" baseline.  No-op for years not in
     CAP_DELIVERY_FACTORS.
 
     sw_smooth_sigma=None (default) → use the calibrated era-based
     schedule inside partition_predictions.  Explicit value → override
     the era schedule (used by the σ-sensitivity diagnostic only).
+
+    skip_cap_perturbation=False (default) → apply the central CAP
+    delivery perturbation.  True → bypass it (used by
+    ``run_cap_scenario_analysis`` so scenario baselines represent
+    true "no-cut" counterfactuals rather than central-perturbed
+    projections).
     """
-    year_df = partops.apply_cap_delivery_perturbation(
-        year_df, year, _CAP_PIXEL_MASK_CTX.get('mask'),
-    )
+    if not skip_cap_perturbation:
+        year_df = partops.apply_cap_delivery_perturbation(
+            year_df, year, _CAP_PIXEL_MASK_CTX.get('mask'),
+        )
     return partops.partition_predictions(
         predictions, year_df, raster_shape, valid_mask,
         sw_smooth_sigma=sw_smooth_sigma, year=year,
@@ -384,10 +392,28 @@ def _compute_category_sigmas(
     return cat_sigmas
 
 
-def _pixel_stats(pred_vals, mm_to_m3):
-    """Compute summary statistics in multiple units."""
+def _pixel_stats(pred_vals, mm_to_m3, min_depth_threshold=0.0):
+    """Compute summary statistics in multiple units.
+
+    When ``min_depth_threshold`` > 0, ``Mean_Depth_mm`` / ``_ft`` are
+    averaged only over pixels where ``pred_vals >= min_depth_threshold``
+    (the "active pumping pixel" convention — see pipeline.py's
+    ``_pixel_stats`` docstring).  Default 0.0 preserves the legacy
+    nanmean-over-all-pixels behaviour, which is the right choice for
+    sigma statistics where every pixel's uncertainty is meaningful.
+    """
     n = len(pred_vals)
-    mean_mm = float(np.nanmean(pred_vals)) if n > 0 else 0.0
+    if n == 0:
+        mean_mm = 0.0
+    elif min_depth_threshold > 0:
+        finite = np.isfinite(pred_vals)
+        active = finite & (pred_vals >= min_depth_threshold)
+        mean_mm = (
+            float(pred_vals[active].mean()) if np.any(active)
+            else float(np.nanmean(pred_vals))
+        )
+    else:
+        mean_mm = float(np.nanmean(pred_vals))
     vol_m3 = float(np.nansum(pred_vals)) * mm_to_m3
     return {
         'Mean_Depth_mm': round(mean_mm, 4),
@@ -1534,13 +1560,20 @@ def compute_sigma_lulc(
             scenario_preds.append(pred)
             scenario_cats.append(cat)
 
-        # Collect per-scenario volumes
+        # Collect per-scenario volumes.  Use 5 mm threshold for mean
+        # depth (matches pipeline.py _pixel_stats default) so that the
+        # Mean_Depth reflects intensity at active pumping pixels
+        # rather than being diluted by LU-only basin-median fill.
         for si, scenario in enumerate(USGS_LULC_SCENARIOS):
-            sc_stats = _pixel_stats(scenario_preds[si], mm_to_m3)
+            sc_stats = _pixel_stats(
+                scenario_preds[si], mm_to_m3, min_depth_threshold=5.0,
+            )
             sc_stats['Year'] = year
             scenario_volumes[scenario].append(sc_stats)
             for c in partops.CATEGORIES:
-                cat_stats = _pixel_stats(scenario_cats[si][c], mm_to_m3)
+                cat_stats = _pixel_stats(
+                    scenario_cats[si][c], mm_to_m3, min_depth_threshold=5.0,
+                )
                 cat_stats['Year'] = year
                 scenario_cat_volumes[scenario][c].append(cat_stats)
 
@@ -2051,6 +2084,34 @@ CAP_SCENARIOS: dict[str, float] = {
     'DCP_Tier3_720kAF_cut': 0.200,
 }
 
+# Scenario-specific well_density boost factors, paralleling the
+# hindcast ``CAP_CUT_GW_BOOST_FACTORS`` in partitionops.py.  Applied
+# to the same well_density / irr_well_density / nonirr_well_density
+# columns at CAP pixels during scenario runs.  Mathematically
+# equivalent to boosting ``gw_weight`` at those pixels — shifts the
+# density-ratio allocation toward GW without changing the ML-predicted
+# total pumping.  Mapping from scenario cut severity to era-analogous
+# boost is the same logic used in the hindcast:
+#   Baseline (no cut)  → 1.0  (gw_w stays at calibrated schedule)
+#   Tier 0 (192 kAF)   → 1.0  (no boost; just DCP contribution)
+#   Tier 1 (512 kAF)   → 5.0  (pre-CAP 1945-1980 gw_w=1.0)
+#   Tier 2a (592 kAF)  → 7.5  (pre-CAP peak 1948-1955 gw_w=1.5)
+#   Tier 2b (640 kAF)  → 7.5
+#   Tier 3 (720 kAF)   → 10.0 (approaching pre-1945 all-GW)
+#   Basic Coord        → 7.5  (663 kAF effective cut ≈ Tier 2a)
+#   Extreme Shortage   → 12.5 (900 kAF full CAP-overlay cut, beyond
+#                              Tier 3; approaching all-GW regime)
+CAP_SCENARIO_GW_BOOSTS: dict[str, float] = {
+    'Baseline_900kAF': 1.0,
+    'Basic_Coordination_237kAF': 7.5,
+    'Extreme_Shortage_0kAF': 12.5,
+    'DCP_Tier0_192kAF_cut': 1.0,
+    'DCP_Tier1_512kAF_cut': 5.0,
+    'DCP_Tier2a_592kAF_cut': 7.5,
+    'DCP_Tier2b_640kAF_cut': 7.5,
+    'DCP_Tier3_720kAF_cut': 10.0,
+}
+
 # Non-well offset: only reclaimed water (350 kAF) is added on top of
 # the model's per-pixel partition.  CAP and SRP deliveries are already
 # captured by the model's SW components via the wide-σ Gaussian-
@@ -2123,17 +2184,44 @@ def run_cap_scenario_analysis(
 ) -> None:
     """Simulate CAP delivery reduction scenarios via partition perturbation.
 
-    For each scenario, the CAP-import contribution to
-    ``canal_weighted_streamflow_mm`` at CAP service-area pixels is
-    reduced by ``(1 - factor) × cap_overlay_per_pixel`` (where
-    ``cap_overlay_per_pixel`` distributes ``BASELINE_CAP_DELIVERY_AF``
-    canal-density-weighted across the CAP service area), and
-    ``partition_predictions()`` is re-run with the same ML predictions.
+    **Counterfactual semantics (important for WestWater comparison).**
+    Every scenario — *including* ``Baseline_900kAF`` — bypasses the
+    central `partops.apply_cap_delivery_perturbation` (via
+    ``_partition_with_ctx(..., skip_cap_perturbation=True)``).
+    ``Baseline_900kAF`` therefore represents a **true no-cut
+    counterfactual** (full CAP delivery, no central Tier perturbation)
+    and every non-Baseline scenario applies its own cut on that
+    un-perturbed reference.  This makes
+    ``CAP_Scenario_Cumulative.csv`` directly comparable to WestWater
+    2026's ~8.0 MAF drawdown anchor, which is also a "with-cut vs
+    no-cut" delta within a single climate/LULC projection.
+
+    For each scenario two complementary perturbations are applied at
+    CAP service-area pixels:
+
+    1. **Additive SW cut** — the CAP-import contribution to
+       ``canal_weighted_streamflow_mm`` is reduced by
+       ``(1 - factor) × cap_overlay_per_pixel`` (where
+       ``cap_overlay_per_pixel`` distributes
+       ``BASELINE_CAP_DELIVERY_AF`` canal-density-weighted across the
+       CAP service area).  The subtraction preserves the SRP /
+       Salt-Verde watershed signal at CAP-overlap pixels — the prior
+       multiplicative ``cw_sf *= factor`` form would zero those out
+       as well, producing ~3× over-substitution at the
+       ``Extreme_Shortage_0kAF`` endpoint.
+
+    2. **Multiplicative GW-weight boost** — the ``well_density``
+       columns (`well_density`, `irr_well_density`,
+       `nonirr_well_density`) are scaled by
+       ``CAP_SCENARIO_GW_BOOSTS[scenario]``.  Mathematically
+       equivalent to boosting ``gw_weight`` at CAP pixels, this
+       shifts the density-ratio allocation toward GW during shortage
+       scenarios without affecting the ML-predicted total pumping.
+       Mirrors the hindcast boost logic in
+       ``partops.apply_cap_delivery_perturbation``.
+
     Total withdrawals per pixel stay fixed; only the GW/SW split
-    changes.  The additive subtraction preserves the SRP / Salt-Verde
-    watershed signal at CAP-overlap pixels — the prior multiplicative
-    ``cw_sf *= factor`` form would zero those out as well, producing
-    ~3× over-substitution at the Extreme_Shortage_0kAF endpoint.
+    changes.
 
     Scenarios follow WestWater Research (2026) and USBR DEIS DCP tiers.
 
@@ -2222,9 +2310,16 @@ def run_cap_scenario_analysis(
             year_df, cap_pixel_mask, pixel_area_m2,
         )
 
-        # Baseline partition (kept for delta computation)
+        # Baseline partition = true "no-cut counterfactual" (bypass
+        # central CAP perturbation so Baseline_900kAF truly means
+        # "no CAP cuts applied").  Every non-Baseline scenario will
+        # also set skip_cap_perturbation=True and apply its own
+        # scenario-specific perturbation — this keeps all scenario
+        # deltas measured against the same no-cut reference, which
+        # is what WestWater 2026's 8.0 MAF drawdown anchor represents.
         cats_base = _partition_with_ctx(
             partops, raw, year_df, raster_shape, valid_mask, year=year,
+            skip_cap_perturbation=True,
         )
         base_basin_gw: dict[str, float] = {}
         base_basin_sw: dict[str, float] = {}
@@ -2266,16 +2361,20 @@ def run_cap_scenario_analysis(
 
         del cats_base
 
-        # Process each non-baseline scenario one at a time
+        # Process each non-baseline scenario one at a time.  Each
+        # scenario is applied on the un-perturbed year_df (matching
+        # the no-cut counterfactual baseline above) so that scenario
+        # deltas are directly comparable to WestWater 2026's
+        # with-cut-vs-no-cut projections.
         for sc_name, factor in scenarios.items():
             if factor == 1.0:
                 continue
             sc_df = year_df.copy()
-            # Additive perturbation: subtract (1 - factor) of the
-            # CAP-import overlay from canal_weighted_streamflow at CAP
-            # pixels, leaving the SRP / Salt-Verde watershed component
-            # intact.  See _compute_cap_overlay_per_pixel docstring.
             cap_idx = sc_df.index[cap_pixel_mask]
+            # Additive SW cut: subtract (1 - factor) of the CAP-import
+            # overlay from canal_weighted_streamflow at CAP pixels,
+            # leaving the SRP / Salt-Verde watershed component
+            # intact.  See _compute_cap_overlay_per_pixel docstring.
             new_cw = (
                 sc_df.loc[cap_idx, 'canal_weighted_streamflow_mm'].values
                 - (1.0 - factor) * cap_overlay_per_pixel
@@ -2283,8 +2382,23 @@ def run_cap_scenario_analysis(
             sc_df.loc[cap_idx, 'canal_weighted_streamflow_mm'] = np.clip(
                 new_cw, 0.0, None,
             )
+            # GW-weight boost: scale well_density columns at CAP
+            # pixels to shift the density-ratio allocation toward GW
+            # (mathematically equivalent to boosting gw_weight at
+            # those pixels).  Parallels the hindcast boost logic in
+            # partops.apply_cap_delivery_perturbation.
+            gw_boost = CAP_SCENARIO_GW_BOOSTS.get(sc_name, 1.0)
+            if gw_boost != 1.0:
+                for col in (
+                    'well_density',
+                    'irr_well_density',
+                    'nonirr_well_density',
+                ):
+                    if col in sc_df.columns:
+                        sc_df.loc[cap_idx, col] *= gw_boost
             cats = _partition_with_ctx(
                 partops, raw, sc_df, raster_shape, valid_mask, year=year,
+                skip_cap_perturbation=True,
             )
 
             sw_row = {'Year': year, 'Scenario': sc_name}
@@ -2381,9 +2495,14 @@ def run_cap_scenario_analysis(
     logger.info('  CAP scenario CSVs saved to %s', cap_dir)
 
     # --- Plots ---
-    sigma_rasters_dir = os.path.join(output_dir, 'Sigma_Total', 'Rasters')
-    az_sigma_per_cat = _load_az_sigma_per_category(
-        sigma_rasters_dir, projection_start, end_year, pixel_area_m2,
+    # Use basin-level σ aggregation (not pixel-level) so ribbons on
+    # the CAP scenario plots reflect realistic spatial correlation.
+    # Pixel quadrature suppresses AZ-wide σ by ~5× (treating every
+    # 2 km pixel as independent), producing ribbons so thin they're
+    # invisible on the cumulative drawdown plot.  Basin-level matches
+    # the aggregation used in Basin_Sigma_Total.csv.
+    az_sigma_per_cat = _load_az_sigma_per_category_basin(
+        output_dir, projection_start, end_year,
     )
     _plot_cap_scenarios(
         statewide_df, delta_df,
@@ -2394,6 +2513,70 @@ def run_cap_scenario_analysis(
     logger.info('  CAP scenario plots saved to %s', cap_dir)
 
 
+def _load_az_sigma_per_category_basin(
+        unc_dir: str,
+        start_year: int,
+        end_year: int,
+) -> dict[str, dict[int, float]]:
+    """Statewide σ (AF/yr) per category per year via basin-level quadrature.
+
+    Reads the per-component per-category per-basin σ CSVs written by
+    ``compute_sigma_{component}`` (5 components × 8 categories ×
+    {Basin, Subbasin}).  Aggregates per basin in quadrature across
+    components (σ_total = √(Σ σ_i²)), then across basins in quadrature
+    (AZ-wide σ = √(Σ basin_σ²)).
+
+    This is the same aggregation used in Basin_Sigma_Total.csv and
+    produces AZ-wide σ values that are ~5× larger than pure pixel-
+    level quadrature, because they respect intra-basin correlation
+    more honestly (basins are aggregated as spatially-coherent units
+    rather than treating every 2 km pixel as independent).
+
+    Returns ``{cat: {year: sigma_af}}``.  Returns an empty dict if
+    the per-component CSVs are missing (e.g., Step 3b not run).
+    """
+    cats = (
+        'Total_GW', 'Total_SW',
+        'Irrigation', 'Irrigation_GW', 'Irrigation_SW',
+        'Non_Irrigation', 'Non_Irrigation_GW', 'Non_Irrigation_SW',
+    )
+    components = ('MACA', 'Model', 'Irr', 'LULC', 'GW')
+    out: dict[str, dict[int, float]] = {cat: {} for cat in cats}
+
+    for cat in cats:
+        # Load per-component per-basin σ for this category
+        comp_dfs = []
+        for comp in components:
+            f = os.path.join(
+                unc_dir, f'Sigma_{comp}', f'Basin_Sigma_{comp}_{cat}.csv',
+            )
+            if os.path.isfile(f):
+                d = pd.read_csv(f)[['Year', 'Region', 'Sigma_Volume_AF']].rename(
+                    columns={'Sigma_Volume_AF': f'sigma_{comp}'},
+                )
+                comp_dfs.append(d)
+        if not comp_dfs:
+            continue
+        # Merge components per (Year, Region)
+        merged = comp_dfs[0]
+        for d in comp_dfs[1:]:
+            merged = merged.merge(d, on=['Year', 'Region'], how='outer')
+        sigma_cols = [c for c in merged.columns if c.startswith('sigma_')]
+        merged[sigma_cols] = merged[sigma_cols].fillna(0.0)
+        merged['basin_sigma'] = np.sqrt(
+            (merged[sigma_cols] ** 2).sum(axis=1),
+        )
+        # AZ-wide quadrature across basins per year
+        az = merged.groupby('Year')['basin_sigma'].apply(
+            lambda s: float(np.sqrt((s ** 2).sum())),
+        )
+        for yr, v in az.items():
+            yr_int = int(yr)
+            if start_year <= yr_int <= end_year:
+                out[cat][yr_int] = v
+    return out
+
+
 def _load_az_sigma_per_category(
         sigma_rasters_dir: str,
         start_year: int,
@@ -2401,6 +2584,12 @@ def _load_az_sigma_per_category(
         pixel_area_m2: float,
 ) -> dict[str, dict[int, float]]:
     """Statewide σ (AF/yr) per category per year, by quadrature spatial sum.
+
+    **Pixel-level quadrature** — assumes every 2 km pixel is
+    independent, which suppresses AZ-wide σ by a factor of ~5× vs
+    basin-level aggregation.  For CAP-scenario / cumulative plots,
+    prefer ``_load_az_sigma_per_category_basin`` which handles
+    intra-basin correlation more honestly.
 
     Returns ``{cat: {year: sigma_af}}``.  Returns an empty dict when no
     σ rasters are found (e.g., when sigma-total was skipped) so callers
@@ -2642,9 +2831,14 @@ def _plot_cap_scenarios(
         )['Cumulative_Delta_GW_AF'].sum()
 
         fig, ax = plt.subplots(figsize=(12, 6))
-        # σ for cumulative ΔGW: cumulative quadrature of σ_Total_GW
-        # (treating annual σ as independent year-over-year — overestimates
-        # if temporally correlated, but a useful ceiling on the band).
+        # σ for cumulative ΔGW: *linear* temporal accumulation of
+        # per-year σ_Total_GW (basin-aggregated).  Linear rather than
+        # quadrature because year-to-year σ values share common drivers
+        # (GCM climate ensemble, XGBRF seed, IrrMapper vs regression,
+        # LULC scenario, well-density reference year) — they are
+        # temporally correlated, so errors accumulate coherently.
+        # Quadrature accumulation (√N dampening) would underestimate
+        # the cumulative uncertainty.
         sigma_total_gw = sigma_lookup.get('Total_GW', {})
         for sc in state_cumul['Scenario'].unique():
             sdf = state_cumul[
@@ -2666,14 +2860,13 @@ def _plot_cap_scenarios(
             years = sdf['Year'].values
             values = sdf['Cumulative_Delta_GW_AF'].values / 1e6
             if sigma_total_gw:
-                sig_cum = np.sqrt(np.cumsum(np.array([
-                    (sigma_total_gw.get(int(y), 0.0) / 1e6) ** 2
-                    for y in years
-                ])))
+                sig_cum = np.cumsum(np.array([
+                    sigma_total_gw.get(int(y), 0.0) / 1e6 for y in years
+                ]))
                 if np.any(sig_cum > 0):
                     ax.fill_between(
                         years, values - sig_cum, values + sig_cum,
-                        color=color, alpha=0.12, linewidth=0,
+                        color=color, alpha=0.15, linewidth=0,
                     )
             ax.plot(
                 years, values,
@@ -4707,6 +4900,11 @@ def _replot_from_augmented_rasters(
 
     # ── zonal-stats helpers ───────────────────────────────────────────────
 
+    # 5 mm/yr threshold for "active pumping pixel" mean depth (matches
+    # pipeline.py _pixel_stats default).  Volume sums remain over all
+    # valid pixels — threshold only filters the Mean_Depth average.
+    _ACTIVE_PUMPING_THRESHOLD_MM = 5.0
+
     def _az_wide_stats(raster_path):
         """AZ-wide prediction and σ from all valid pixels."""
         with rio.open(raster_path) as src:
@@ -4721,7 +4919,11 @@ def _replot_from_augmented_rasters(
         if not np.any(valid):
             return None, None
 
-        mean_mm = float(np.nanmean(pred[valid]))
+        active = valid & (pred >= _ACTIVE_PUMPING_THRESHOLD_MM)
+        if np.any(active):
+            mean_mm = float(pred[active].mean())
+        else:
+            mean_mm = float(np.nanmean(pred[valid]))
         vol_m3 = float(np.nansum(pred[valid])) * mm_to_m3
         vol_af = vol_m3 * m3_to_af
         sigma_depth = float(np.nanmean(sigma[valid]))
@@ -4772,7 +4974,11 @@ def _replot_from_augmented_rasters(
                 if not np.any(valid):
                     continue
 
-                mean_mm = float(np.nanmean(pred[valid]))
+                active = valid & (pred >= _ACTIVE_PUMPING_THRESHOLD_MM)
+                if np.any(active):
+                    mean_mm = float(pred[active].mean())
+                else:
+                    mean_mm = float(np.nanmean(pred[valid]))
                 vol_af = float(np.nansum(pred[valid])) * mm_to_m3 * m3_to_af
                 vol_m3 = float(np.nansum(pred[valid])) * mm_to_m3
                 lower_vol = (

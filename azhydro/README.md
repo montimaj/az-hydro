@@ -1225,6 +1225,26 @@ Unit conversions:
 - m³ → AF: m³ / 1233.48
 - mm → ft: mm / 304.8
 
+**Mean-depth convention (active pumping pixel average).**  `Mean_Depth_mm`
+and `Mean_Depth_ft` in the `Annual_Summaries/*.csv` outputs (and the
+downstream `Full_Period_Time_Series.csv` consumed by the graphical
+abstract and time-series plots) are averaged only over **pixels where
+the prediction is ≥ 5 mm/yr** — the "active pumping pixel" threshold.
+This filters out near-zero predictions from the basin-median LU-only
+fill in `apply_ml_well_density_override` (sub-1 mm/yr values at every
+crop / urban pixel in AZ), so the reported mean reflects per-pixel
+irrigation / M&I intensity rather than an AZ-wide dilution.  Volume
+sums (`Volume_m3`, `Volume_AF`) are unchanged — they remain full-state
+nansums so total volumes are conserved.  Empirically, the 5 mm
+threshold removes 79 % of pixels but loses only 0.3 % of the 2024
+volume (6.823 → 6.804 MAF), while shifting the reported mean depth
+from 30 mm (diluted) to 145 mm (intensity-scale, matching typical
+irrigation application rates).  The same 5 mm threshold is applied to
+per-category, per-basin, per-sub-basin, and σ_LULC-scenario
+aggregations for consistency.  σ statistics (sigma rasters / sigma
+basin CSVs) use the legacy `threshold=0` convention — every pixel's
+uncertainty is meaningful regardless of magnitude.
+
 #### 3c. Era summary maps
 
 After the prediction loop, the pipeline generates era summary maps for
@@ -2890,25 +2910,39 @@ still computes the full WestWater + DCP-Tier envelope
 `DCP_Tier3_720kAF_cut`) as *additive* deltas on top of whatever
 `CAP_DELIVERY_FACTORS` produces for that year.
 
-**⚠️ Scenario semantics at 2027+ — read before using CSVs.** Because
-`apply_cap_delivery_perturbation` runs *first* and the scenario
-additive cut runs *on top*, at projection years the scenario rows
-in `CAP_Scenario_Statewide.csv` should be interpreted as:
+**Scenario semantics — no-cut counterfactual reference.** Every
+scenario row (including `Baseline_900kAF`) is computed with
+`_partition_with_ctx(..., skip_cap_perturbation=True)`, bypassing
+the central `apply_cap_delivery_perturbation`.  The `Baseline_900kAF`
+row therefore represents a **true no-cut counterfactual** — full CAP
+delivery, no central Tier/Basic-Coordination perturbation applied —
+and every non-Baseline scenario applies its own cut on top of that
+un-perturbed reference:
 
-- `Baseline_900kAF` row (scenario factor 1.0) = **central
-  Basic Coordination projection + no additional cut**, not "full
-  CAP delivery." It reproduces the central pipeline output.
-- `Basic_Coordination_237kAF` row (scenario factor 0.74) =
-  Basic Coordination central + *another* 237 kAF additive cut on
-  top — represents a deeper-than-central outcome.
-- `Extreme_Shortage_0kAF` row (scenario factor 0) = Basic
-  Coordination central + full CAP-overlay subtraction on top —
-  represents the pessimistic upper bound.
+- `Baseline_900kAF` (scenario factor 1.0) = **no cuts at all**
+  (counterfactual full delivery).
+- `Basic_Coordination_237kAF` (factor 0.263) = 663 kAF additive
+  SW cut + 7.5× well_density boost — WestWater's post-Compact
+  central assumption.
+- `DCP_Tier1_512kAF_cut` (factor 0.431) = 512 kAF additive SW cut +
+  5× well_density boost — same magnitudes used by the central
+  hindcast for 2022/2024-2026.
+- `Extreme_Shortage_0kAF` (factor 0) = 900 kAF (full CAP overlay)
+  additive SW cut + 12.5× well_density boost — pessimistic bound.
 
-Scenarios are therefore *deltas around the central baseline*, not
-absolute allocation levels.  This is intentional (it keeps the full
-UQ ensemble reproducible across scenarios) but the label
-`Baseline_900kAF` for 2027+ can be misleading at first read.
+Scenario deltas in `CAP_Scenario_Cumulative.csv` are therefore
+**directly comparable to WestWater 2026's 8.0 MAF anchor** (also a
+with-cut-vs-no-cut projection delta).  The central pipeline output
+for 2027+ still embodies Basic Coordination (via
+`CAP_DELIVERY_FACTORS[2027+] = 0.84` and the 3× well_density boost),
+but the scenario CSVs measure deltas against the no-cut
+counterfactual rather than against the central projection.
+
+Each scenario applies two coordinated effects (mirroring the
+hindcast perturbation in `partops.apply_cap_delivery_perturbation`):
+(1) additive SW cut on `canal_weighted_streamflow_mm` and (2)
+multiplicative `well_density` boost from `CAP_SCENARIO_GW_BOOSTS`,
+with severity mapped to era-analogous `gw_weight` targets.
 
 **Two-baseline convention (not a bug).**
 The hindcast/central dict uses **1500 kAF** (CAP design capacity per
@@ -3687,13 +3721,18 @@ Data/Outputs/
         │   └── Volume_AF/
         ├── {Category}_Rasters/              # 8 withdrawal categories (4 units, 6-band)
         ├── Irrigation_CU_Rasters/           # CU (4 units, 6-band)
-        ├── Annual_Summaries/                # Cached per-year stats (for fast re-runs)
+        ├── Annual_Summaries/                # Cached per-year stats (for fast re-runs) †
         │   ├── Total_Predicted.csv          #   AZ-wide total predicted stats
         │   ├── {Category}.csv               #   Per-category stats
         │   ├── {CU_Category}.csv            #   Consumptive use stats
         │   ├── Actual.csv                   #   Metered actual stats (1984–2024)
         │   ├── Basin_Total.csv              #   Per-basin stats
         │   └── Subbasin_Total.csv           #   Per-sub-basin stats
+        │   # † Mean_Depth_mm / Mean_Depth_ft are averaged over
+        │   #   "active pumping pixels" (pred ≥ 5 mm/yr) to reflect
+        │   #   per-pixel irrigation intensity; Volume_m3 / Volume_AF
+        │   #   sum over ALL valid pixels so volume is conserved.
+        │   #   See `_pixel_stats` in pipeline.py for the convention.
         ├── OOD_Rasters/                     # Out-of-distribution detection
         │   ├── OOD_Flag_{year}.tif          #   OOD probability [0,1] (χ² CDF)
         │   ├── OOD_Summary.csv              #   Per-year OOD statistics
