@@ -206,12 +206,18 @@ def _build_cap_pixel_mask(
         import rasterio
         from rasterio.features import rasterize as rio_rasterize
         from hydrolibs.rasterops import read_raster_as_arr
-        cap_geojson = os.path.join(vector_dir, 'CAP_Service_Area.geojson')
-        if not os.path.isfile(cap_geojson):
+        candidates = [
+            os.path.join(vector_dir, 'CAP_Service_Area.geojson'),
+            os.path.join(vector_dir, 'CAP', 'CAP_Service_Area.geojson'),
+        ]
+        cap_geojson = next(
+            (p for p in candidates if os.path.isfile(p)), None,
+        )
+        if cap_geojson is None:
             logger.warning(
-                'UQ CAP-cut context: %s not found; '
-                'CAP-cut hindcast perturbation skipped in UQ ensemble.',
-                cap_geojson,
+                'UQ CAP-cut context: CAP_Service_Area.geojson not '
+                'found in any of %s; CAP-cut hindcast perturbation '
+                'skipped in UQ ensemble.', candidates,
             )
             return None
         ref_basin_file = os.path.join(
