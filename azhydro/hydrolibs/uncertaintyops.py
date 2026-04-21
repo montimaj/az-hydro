@@ -189,6 +189,65 @@ def _set_cap_pixel_mask_context(cap_pixel_mask: np.ndarray | None) -> None:
         )
 
 
+def _build_cap_pixel_mask(
+        vector_dir: str,
+        pred_data_dir: str,
+        ref_year: int,
+) -> np.ndarray | None:
+    """Rasterise the CAP service-area geojson onto the valid-pixel grid.
+
+    Returns a 1-D boolean mask aligned with the order of valid pixels
+    in ``year_df`` (i.e. matching ``year_df.index[cap_pixel_mask]``
+    used downstream).  Returns None and logs a warning if the geojson
+    or reference basin raster is missing or fails to load.
+    """
+    try:
+        import geopandas as gpd
+        import rasterio
+        from rasterio.features import rasterize as rio_rasterize
+        from hydrolibs.rasterops import read_raster_as_arr
+        cap_geojson = os.path.join(vector_dir, 'CAP_Service_Area.geojson')
+        if not os.path.isfile(cap_geojson):
+            logger.warning(
+                'UQ CAP-cut context: %s not found; '
+                'CAP-cut hindcast perturbation skipped in UQ ensemble.',
+                cap_geojson,
+            )
+            return None
+        ref_basin_file = os.path.join(
+            pred_data_dir, f'GW_Basin_{ref_year}.tif',
+        )
+        if not os.path.isfile(ref_basin_file):
+            logger.warning(
+                'UQ CAP-cut context: reference basin raster %s not '
+                'found; CAP-cut perturbation skipped.',
+                ref_basin_file,
+            )
+            return None
+        basin_arr, bf = read_raster_as_arr(ref_basin_file, get_file=True)
+        basin_flat = basin_arr.ravel()
+        valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
+        raster_shape = basin_arr.shape
+        bf.close()
+        cap_gdf = gpd.read_file(cap_geojson)
+        with rasterio.open(ref_basin_file) as ref_src:
+            cap_gdf_proj = cap_gdf.to_crs(ref_src.crs)
+            cap_arr = rio_rasterize(
+                [(geom, 1) for geom in cap_gdf_proj.geometry],
+                out_shape=raster_shape,
+                transform=ref_src.transform,
+                fill=0,
+                dtype='uint8',
+            )
+        return cap_arr.ravel()[valid_mask] > 0
+    except Exception as e:
+        logger.warning(
+            'UQ CAP-cut context could not be loaded: %s — '
+            'CAP-cut hindcast perturbation skipped in UQ ensemble.', e,
+        )
+        return None
+
+
 def _set_pre_gma_context(az_df: pd.DataFrame, ref_year: int = 2024) -> None:
     """Populate the module-level pre-GMA partitioning context from az_df.
 
@@ -1656,6 +1715,7 @@ def compute_sigma_usbr(
         end_year: int,
         year_list: list[int],
         mosaic_res: int,
+        vector_dir: str | None = None,
         members: list[str] | None = None,
 ) -> tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]:
     """Compute σ_USBR — inter-USBR-member spread of CAP delivery driven
@@ -1737,12 +1797,24 @@ def compute_sigma_usbr(
 
     # CAP pixel mask (set earlier in run_uncertainty_quantification via
     # _set_cap_pixel_mask_context).  This mask aligns with the valid-
-    # pixel ordering of year_df rows.
+    # pixel ordering of year_df rows.  Falls back to building it from
+    # vector_dir if the orchestrator setup did not run or failed.
     cap_pixel_mask = _CAP_PIXEL_MASK_CTX.get('mask')
+    if cap_pixel_mask is None and vector_dir is not None:
+        logger.info(
+            'σ_USBR: CAP pixel mask not in context; building from %s.',
+            vector_dir,
+        )
+        cap_pixel_mask = _build_cap_pixel_mask(
+            vector_dir, pred_data_dir, year_list[0],
+        )
+        if cap_pixel_mask is not None:
+            _set_cap_pixel_mask_context(cap_pixel_mask)
     if cap_pixel_mask is None:
         logger.warning(
-            'σ_USBR: CAP pixel mask not set; σ_USBR will be zero. '
-            'Ensure _set_cap_pixel_mask_context runs before σ_USBR.'
+            'σ_USBR: CAP pixel mask not set and could not be built; '
+            'σ_USBR will be zero. Ensure vector_dir contains '
+            'CAP_Service_Area.geojson.'
         )
         return {}, {c: {} for c in partops.CATEGORIES}
 
@@ -3903,44 +3975,11 @@ def run_uncertainty_quantification(
     # the same CAP perturbation as the central pipeline at observed
     # 2022-2024 cuts and the 2026-2099 sustained baseline (mirrors
     # partops.apply_cap_delivery_perturbation).
-    try:
-        import geopandas as gpd
-        import rasterio
-        from rasterio.features import rasterize as rio_rasterize
-        from hydrolibs.rasterops import read_raster_as_arr
-        _cap_geojson = os.path.join(vector_dir, 'CAP_Service_Area.geojson')
-        if os.path.isfile(_cap_geojson):
-            _ref_basin_file = os.path.join(
-                pred_data_dir, f'GW_Basin_{year_list[0]}.tif',
-            )
-            _basin_arr, _bf = read_raster_as_arr(_ref_basin_file, get_file=True)
-            _basin_flat = _basin_arr.ravel()
-            _valid_mask_local = ~np.isnan(_basin_flat) & (_basin_flat != 0)
-            _raster_shape = _basin_arr.shape
-            _bf.close()
-            _cap_gdf = gpd.read_file(_cap_geojson)
-            with rasterio.open(_ref_basin_file) as _ref_src:
-                _cap_gdf_proj = _cap_gdf.to_crs(_ref_src.crs)
-                _cap_arr = rio_rasterize(
-                    [(geom, 1) for geom in _cap_gdf_proj.geometry],
-                    out_shape=_raster_shape,
-                    transform=_ref_src.transform,
-                    fill=0,
-                    dtype='uint8',
-                )
-            _cap_pixel_mask_uq = _cap_arr.ravel()[_valid_mask_local] > 0
-            _set_cap_pixel_mask_context(_cap_pixel_mask_uq)
-        else:
-            logger.warning(
-                'UQ CAP-cut context: %s not found; '
-                'CAP-cut hindcast perturbation skipped in UQ ensemble.',
-                _cap_geojson,
-            )
-    except Exception as _e:
-        logger.warning(
-            'UQ CAP-cut context could not be loaded: %s — '
-            'CAP-cut hindcast perturbation skipped in UQ ensemble.', _e,
-        )
+    _cap_pixel_mask_uq = _build_cap_pixel_mask(
+        vector_dir, pred_data_dir, year_list[0],
+    )
+    if _cap_pixel_mask_uq is not None:
+        _set_cap_pixel_mask_context(_cap_pixel_mask_uq)
 
     skip = skip_uq_steps or set()
     if skip:
@@ -4026,6 +4065,7 @@ def run_uncertainty_quantification(
                 model, feature_cols, az_df, drop_attrs,
                 pred_data_dir, unc_dir, usbr_dir,
                 start_year, end_year, year_list, mosaic_res,
+                vector_dir=vector_dir,
             )
         else:
             logger.warning(
