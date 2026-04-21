@@ -1749,9 +1749,18 @@ def compute_sigma_usbr(
     # Pre-compute per-year per-member ratios at Lees Ferry (00013).
     # These multiply cw_streamflow + sw_rights_density at CAP pixels
     # (multiplicative perturbation, member-vs-ensemble-mean).
-    logger.info('  Loading USBR member ratios for Lees Ferry...')
+    # backfill_years extends σ_USBR coverage to pre-1950 hindcast
+    # years (USBR ensemble starts 1950), filling them with each
+    # member's long-term mean ratio so the climatological-mean
+    # streamflow used by the central pipeline carries a proportional
+    # uncertainty contribution rather than σ_USBR=0.
+    logger.info(
+        '  Loading USBR member ratios for Lees Ferry (with backfill '
+        'for pre-USBR years %d-1949)...', start_year,
+    )
     ratios = sfops.compute_usbr_member_annual_ratios(
         usbr_dir, members, usbr_ids=['00013'],
+        backfill_years=range(start_year, end_year + 1),
     )
     lees_ratios = ratios.get('00013', {})
 

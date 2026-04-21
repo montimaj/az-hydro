@@ -3947,9 +3947,16 @@ _SIGMA_CU_POOL_MAP = {
     'Irrigation_SW_CU': 'Irrigation_SW',
 }
 
-# σ components in the three-way decomposition
+# σ components in the three-way decomposition.
+# - Mgmt: irrigation mapping (σ_Irr), LULC scenarios (σ_LULC),
+#         well-density temporal sensitivity (σ_GW).
+# - Clim: AZ-local downscaled climate (σ_MACA) +
+#         Upper Basin Colorado River streamflow (σ_USBR).
+#         Both are climate-driven but cover different geographic
+#         basins — see README §3d climate-driver decomposition.
+# - Model: XGBRF seed ensemble (σ_Model).
 _SIGMA_MGMT_COMPONENTS = ('Irr', 'LULC', 'GW')
-_SIGMA_CLIM_COMPONENTS = ('MACA',)
+_SIGMA_CLIM_COMPONENTS = ('MACA', 'USBR')
 _SIGMA_MODEL_COMPONENTS = ('Model',)
 _ALL_SIGMA_COMPONENTS = (
     _SIGMA_MGMT_COMPONENTS + _SIGMA_CLIM_COMPONENTS + _SIGMA_MODEL_COMPONENTS
@@ -3961,6 +3968,7 @@ _SIGMA_COMPONENT_DIRS = {
     'Irr':   'Sigma_Irr',
     'LULC':  'Sigma_LULC',
     'GW':    'Sigma_GW',
+    'USBR':  'Sigma_USBR',
 }
 
 
@@ -4070,12 +4078,16 @@ def _load_sigma_attribution_data(
     rows = []
     for basin, sigmas in per_basin.items():
         s_maca = sigmas.get('Sigma_MACA_m3', 0.0)
+        s_usbr = sigmas.get('Sigma_USBR_m3', 0.0)
         s_irr = sigmas.get('Sigma_Irr_m3', 0.0)
         s_lulc = sigmas.get('Sigma_LULC_m3', 0.0)
         s_gw = sigmas.get('Sigma_GW_m3', 0.0)
         s_model = sigmas.get('Sigma_Model_m3', 0.0)
         sigma_mgmt_sq = s_irr ** 2 + s_lulc ** 2 + s_gw ** 2
-        sigma_clim_sq = s_maca ** 2
+        # Clim = AZ-local downscaled climate (MACA) + Upper Basin
+        # Colorado River streamflow (USBR).  Both are climate-driven
+        # but geographically decoupled — see README §3d.
+        sigma_clim_sq = s_maca ** 2 + s_usbr ** 2
         sigma_model_sq = s_model ** 2
         sigma_total_sq = sigma_mgmt_sq + sigma_clim_sq + sigma_model_sq
         if sigma_total_sq > 0:
@@ -4087,6 +4099,7 @@ def _load_sigma_attribution_data(
         rows.append({
             'Region': basin,
             'Sigma_MACA_m3': s_maca,
+            'Sigma_USBR_m3': s_usbr,
             'Sigma_Irr_m3': s_irr,
             'Sigma_LULC_m3': s_lulc,
             'Sigma_GW_m3': s_gw,
@@ -4165,6 +4178,7 @@ def _load_sigma_cu_attribution_data(
         rows.append({
             'Region': basin,
             'Sigma_MACA_m3': row['Sigma_MACA_m3'] * ie_mean,
+            'Sigma_USBR_m3': row.get('Sigma_USBR_m3', 0.0) * ie_mean,
             'Sigma_Irr_m3':  row['Sigma_Irr_m3'] * ie_mean,
             'Sigma_LULC_m3': row['Sigma_LULC_m3'] * ie_mean,
             'Sigma_GW_m3':   row['Sigma_GW_m3'] * ie_mean,
@@ -4997,12 +5011,14 @@ def _load_year_resolved_attribution(
     for year in sorted(merged):
         sigmas = merged[year]
         s_maca = sigmas.get('Sigma_MACA_m3', 0.0)
+        s_usbr = sigmas.get('Sigma_USBR_m3', 0.0)
         s_irr = sigmas.get('Sigma_Irr_m3', 0.0)
         s_lulc = sigmas.get('Sigma_LULC_m3', 0.0)
         s_gw = sigmas.get('Sigma_GW_m3', 0.0)
         s_model = sigmas.get('Sigma_Model_m3', 0.0)
         sigma_mgmt_sq = s_irr ** 2 + s_lulc ** 2 + s_gw ** 2
-        sigma_clim_sq = s_maca ** 2
+        # Clim = MACA + USBR (geographically decoupled climate components)
+        sigma_clim_sq = s_maca ** 2 + s_usbr ** 2
         sigma_model_sq = s_model ** 2
         sigma_total_sq = sigma_mgmt_sq + sigma_clim_sq + sigma_model_sq
         if sigma_total_sq <= 0:

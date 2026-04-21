@@ -183,6 +183,7 @@ def compute_usbr_member_annual_ratios(
         usbr_dir: str,
         members: list[str],
         usbr_ids: list[str] | None = None,
+        backfill_years: range | tuple[int, int] | None = None,
 ) -> dict:
     """Per-year ratios of (member annual mean / ensemble annual mean).
 
@@ -198,18 +199,33 @@ def compute_usbr_member_annual_ratios(
     For USBR-driven years (pre-USGS gap-fill + projection), members
     diverge → ratios spread → σ_USBR contribution non-zero.
 
+    **Pre-USBR backfill.** The USBR ensemble starts in 1950, so years
+    before that have no member-specific ratio.  When ``backfill_years``
+    is provided, missing years inside that range are filled with each
+    member's *long-term mean ratio* (avg across all years in the USBR
+    record).  This gives a non-zero σ_USBR contribution for pre-1950
+    years driven by the climatological inter-member spread, which is
+    appropriate because the central pipeline uses climatological-mean
+    streamflow for those years (real uncertainty exists, just not
+    captured by year-specific USBR data).
+
     Args:
         usbr_dir: Directory containing USBR ensemble CSVs.
         members: List of USBR ensemble member names (e.g.
             ``USBR_REPRESENTATIVE_MEMBERS``).
         usbr_ids: USBR site IDs to load.  If None, defaults to all
             sites in ``USBR_SITE_REGIONS``.
+        backfill_years: Optional ``range(start, stop+1)`` or
+            ``(start, end)`` tuple specifying years for which
+            missing entries should be filled with the per-member
+            long-term mean ratio.  Typically pass
+            ``range(start_year, end_year + 1)`` to cover the full
+            σ_USBR computation horizon.  When None, missing years
+            map to 1.0 (no perturbation, σ_USBR=0 there).
 
     Returns:
         Nested dict ``{usbr_id: {member_name: {year: ratio}}}``
         where ratio = member_annual_mean / ensemble_annual_mean.
-        Years missing from a member's record map to 1.0 (no
-        perturbation).
     """
     if usbr_ids is None:
         usbr_ids = list(USBR_SITE_REGIONS.keys())
@@ -241,6 +257,24 @@ def compute_usbr_member_annual_ratios(
                 [np.inf, -np.inf], np.nan,
             ).fillna(1.0)
             out[sid][m] = {int(y): float(v) for y, v in ratio_yr.items()}
+
+    # Backfill years outside the USBR record with each member's
+    # long-term mean ratio (climatological proxy for pre-USBR years).
+    if backfill_years is not None:
+        if isinstance(backfill_years, tuple):
+            backfill_years = range(backfill_years[0], backfill_years[1] + 1)
+        for sid in usbr_ids:
+            for m in members:
+                yr_dict = out[sid][m]
+                if not yr_dict:
+                    continue
+                # Per-member long-term mean ratio (climatological)
+                long_term = float(np.mean(list(yr_dict.values())))
+                if not np.isfinite(long_term) or long_term <= 0:
+                    long_term = 1.0
+                for yr in backfill_years:
+                    if int(yr) not in yr_dict:
+                        yr_dict[int(yr)] = long_term
 
     return out
 

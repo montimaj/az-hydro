@@ -1555,9 +1555,21 @@ with σ_MACA's Rupp 2013 selection.
 but contributes meaningfully only where the USBR ensemble actually
 drives the central streamflow signal:
 
-- **Pre-1922 / sparse USGS years**: USBR gap-fills → moderate σ_USBR
-- **1922–2025**: USGS observations dominate → small σ_USBR (member spread is constrained out by USGS bias-correction in the central pipeline)
-- **2026+ projection**: USBR CMIP ensemble mean is the central signal → **largest σ_USBR contribution**
+- **Pre-1950 (1896–1949)**: USBR ensemble unavailable (CMIP3 record
+  starts 1950).  σ_USBR uses each member's *long-term mean ratio* as
+  a backfill (climatological inter-member spread, ~7–8 % of cw_sf).
+  This gives a non-zero σ_USBR contribution for the early hindcast,
+  appropriate because the central pipeline uses climatological-mean
+  streamflow for these years (real uncertainty exists, just not
+  year-specific).  Backfill is enabled via the
+  ``backfill_years`` argument to
+  ``streamflowops.compute_usbr_member_annual_ratios``.
+- **1950–2025**: Member ratios use actual USBR data; USGS
+  observations dominate the central streamflow signal, so the σ_USBR
+  contribution is constrained relative to projection.
+- **2026+ projection**: USBR CMIP ensemble mean is the central
+  signal → **largest σ_USBR contribution** (member spread up to
+  ~50 % of cw_sf in dry years).
 
 **Scope (current implementation).** σ_USBR perturbs Lees Ferry only,
 applied at CAP service-area pixels.  This captures the dominant
@@ -1893,9 +1905,10 @@ the σ attribution diagnostic suite below).
 maps that classify each groundwater basin by whether its total
 uncertainty is dominated by **management**-driven factors (σ_irr,
 σ_LULC, σ_GW — fixable by better data), **climate**-driven factors
-(σ_MACA — inherent to the GCM scenario spread), or the **model**
-training-procedure floor (σ_Model — inherent to the ML ensemble). The
-decomposition writes the three variance shares
+(σ_MACA + σ_USBR — inherent to the GCM scenario spread for AZ-local
+forcing and Upper Basin Colorado River streamflow respectively), or
+the **model** training-procedure floor (σ_Model — inherent to the ML
+ensemble). The decomposition writes the three variance shares
 (`σ_mgmt² / σ_total²`, `σ_clim² / σ_total²`, `σ_model² / σ_total²`)
 per basin per era per withdrawal pool, summing to 1.0.
 
@@ -1955,10 +1968,12 @@ figures, one per era × attribution type:
   ternary withdrawal attribution share the same CSV per era (their
   colors are derived from the same underlying three shares). Contains
   one row per basin × pool with columns `Era, Pool, Region,
-  Sigma_MACA_m3, Sigma_Irr_m3, Sigma_LULC_m3, Sigma_GW_m3,
-  Sigma_Model_m3, Mean_Wd_m3, Sigma_Mgmt_m3, Sigma_Clim_m3,
-  Sigma_Model_Total_m3, Sigma_TotalQ_m3, Mgmt_Share, Clim_Share,
-  Model_Share`.
+  Sigma_MACA_m3, Sigma_USBR_m3, Sigma_Irr_m3, Sigma_LULC_m3,
+  Sigma_GW_m3, Sigma_Model_m3, Mean_Wd_m3, Sigma_Mgmt_m3,
+  Sigma_Clim_m3, Sigma_Model_Total_m3, Sigma_TotalQ_m3, Mgmt_Share,
+  Clim_Share, Model_Share`. The Climate class is `σ_clim² =
+  σ_MACA² + σ_USBR²` (AZ-local GCM forcing + Upper Basin streamflow
+  in quadrature, treated as independent climate axes).
 - `Sigma_CU_Attribution_{Hindcast,Historical,Projection}.csv` — same
   columns plus `IE_Mean, IE_Std`, for the CU variant.
 - `Sigma_Attribution_Timeseries.csv` — per-year three-way shares for
