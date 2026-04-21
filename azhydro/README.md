@@ -1526,11 +1526,62 @@ gap σ_MACA cannot reach (MACA downscales to AZ-local domain only,
 not the Wyoming / Colorado / Utah snowpack that produces ~92 % of
 Lees Ferry flow).
 
-For each year × USBR ensemble member, the helper perturbs both
-``canal_weighted_streamflow_mm`` AND the SW-rights density columns
-at CAP service-area pixels by the member's annual Lees-Ferry-flow
-ratio (``member_annual_mean / ensemble_annual_mean``), re-runs the
-partition, and computes per-pixel std across members:
+For each year × USBR ensemble member, the helper perturbs two
+pathways across **all CO-river-served basins** (CAP service area
+plus the COLORADO RIVER mainstem corridor — Parker / CRIT / Mohave
+Valley / Yuma — i.e. any pixel whose surface watershed contains a
+gauge in ``streamflowops.USBR_DERIVED_GAUGES``: Lees Ferry, Imperial
+Dam, or CAP Canal at Havasu).  The ML prediction and the partition
+both re-run per member:
+
+1. **ML-feature pathway (additive on `streamflow_mm`)**.
+   ``streamflow_mm`` at any pixel equals
+   ``local_watershed_runoff + co_flow``, where ``co_flow`` is the
+   Lees-Ferry-derived component injected by
+   ``streamflowops._create_streamflow_rasters``.  Per-pixel
+   ``co_flow_mm`` is the sum of two contributions:
+   - **CAP overlay** (uniform across CAP service-area pixels, added
+     post-1985):
+     ``cap_co_flow_mm = LF_ens_mean × m3s_to_mm_yr / cap_area_m2``.
+   - **Surface-watershed component** (per-watershed,
+     LF-share-weighted): for each watershed,
+     ``ws_co_flow_mm = lf_share × LF_ens_mean × m3s_to_mm_yr /
+     ws_area_m2``, where ``lf_share`` = (# LF-derived gauges) /
+     (# total gauges in the watershed).  The COLORADO RIVER
+     watershed has ``lf_share = 1.0`` (its single mapped gauge is
+     LF-derived); Bill Williams has ``lf_share = 0.5`` (CAP Canal
+     at Havasu spatial-joins into it alongside the local Bill
+     Williams gauge).
+   The perturbation is
+   ``streamflow_mm_m = central + (ratio_m − 1) × co_flow_mm``,
+   preserving the local-watershed component exactly.
+2. **Partition pathway (multiplicative on `cw_streamflow` +
+   SW rights)**.  Restricted to **CAP pixels only** (post-1985).
+   ``canal_weighted_streamflow_mm``, ``irr_sw_rights_density``,
+   ``nonirr_sw_rights_density``, and ``sw_rights_density`` at CAP
+   pixels are multiplied by the member's ratio
+   (``member_annual_mean / ensemble_annual_mean``).  Not extended to
+   CO-watershed pixels because (a) it would over-scale local Bill
+   Williams flow, and (b) senior mainstem priority makes the
+   partition response physically rigid at non-CAP CO pixels.
+
+**Era-specific gating** (per-pathway):
+- **CAP pixel perturbation** (both pathways): gated to
+  ``year ≥ partops.CAP_OPERATIONAL_START`` (1985, Phoenix-reach
+  completion).
+- **CO watershed pixel perturbation** (ML-feature pathway only):
+  gated to ``year ≥ sfops.USBR_DATA_START`` (1950, USBR CMIP3
+  ensemble first year).  No pre-1950 backfill — the per-member
+  1950-2005 long-term mean ratios collapse to ~1.0 (std ≈ 0.011)
+  by construction (averaging ``member/ensemble_mean`` over many
+  years drives each member's mean ratio toward 1.0), so a
+  climatological backfill would produce misleading near-zero σ
+  pre-1950 implying we modeled it.  The honest answer: σ_USBR is
+  **structurally absent before 1950** because the USBR ensemble
+  carries no inter-member disagreement on climatological-mean
+  Lees Ferry flow, only on year-to-year variability.
+
+Per-pixel σ across members:
 
 $$\sigma_{\text{USBR}}(x, y, t) = \text{std}\bigl[\hat{y}_{m_1}, \hat{y}_{m_2}, \hat{y}_{m_3}, \hat{y}_{m_4}, \hat{y}_{m_5}\bigr]$$
 
@@ -1551,33 +1602,35 @@ This sampling spans **both the GCM-corner and emission-scenario
 axes** within σ_USBR, while remaining methodologically consistent
 with σ_MACA's Rupp 2013 selection.
 
-**Behavior across eras.** σ_USBR is computed for all years 1896–2099
-but contributes meaningfully only where the USBR ensemble actually
-drives the central streamflow signal:
+**Behavior across eras (region-specific gating):**
 
-- **Pre-1950 (1896–1949)**: USBR ensemble unavailable (CMIP3 record
-  starts 1950).  σ_USBR uses each member's *long-term mean ratio* as
-  a backfill (climatological inter-member spread, ~7–8 % of cw_sf).
-  This gives a non-zero σ_USBR contribution for the early hindcast,
-  appropriate because the central pipeline uses climatological-mean
-  streamflow for these years (real uncertainty exists, just not
-  year-specific).  Backfill is enabled via the
-  ``backfill_years`` argument to
-  ``streamflowops.compute_usbr_member_annual_ratios``.
-- **1950–2025**: Member ratios use actual USBR data; USGS
-  observations dominate the central streamflow signal, so the σ_USBR
-  contribution is constrained relative to projection.
-- **2026+ projection**: USBR CMIP ensemble mean is the central
-  signal → **largest σ_USBR contribution** (member spread up to
-  ~50 % of cw_sf in dry years).
+| Era | CAP pixels | CO watershed pixels |
+|---|:---:|:---:|
+| 1896–1949 | 0 (CAP not built) | 0 (pre-USBR-ensemble; no inter-member spread to model) |
+| 1950–1984 | 0 (CAP not built) | σ > 0 (year-specific USBR ratios) |
+| 1985–2025 | σ > 0 (CAP overlay + partition pathway) | σ > 0 |
+| 2026+ projection | **largest σ_USBR contribution** (member spread up to ~50 % of CO inflow in dry years) | σ > 0 |
 
-**Scope (current implementation).** σ_USBR perturbs Lees Ferry only,
-applied at CAP service-area pixels.  This captures the dominant
-unresolved climate uncertainty for AZ projection (CAP imports from
-Upper Basin), since SRP / Salt / Verde watersheds are AZ-internal
-and already covered by σ_MACA's Lower Basin downscaling.  Future
-extensions could add Imperial Dam (Yuma) or per-watershed Salt /
-Verde USBR perturbations.
+The 1949→1950 boundary is a known data-availability discontinuity
+(USBR CMIP3 record begins 1950), not a physical regime change.
+Pre-1950 σ_USBR is reported as zero rather than backfilled because
+per-member 1950-2005 long-term mean ratios collapse to ~1.0 (std
+≈ 0.011) — there is no inter-member spread on the climatological
+mean to extrapolate, only on year-to-year variability.  Reporting
+it as "modeled and ≈ 0" would mislead; reporting it as "structurally
+absent" is honest.
+
+**Scope (current implementation).**  σ_USBR uses Lees Ferry as the
+sole USBR-perturbation site, applied at all pixels whose surface
+watershed mean includes one of three LF-derived USGS gauges
+(``streamflowops.USBR_DERIVED_GAUGES``: 09380000 Lees Ferry,
+09429490 Above Imperial Dam, 09426650 CAP Canal at Havasu).  This
+expands σ_USBR coverage from CAP-only to **all CO-river-served AZ
+basins**: CAP service area (Maricopa / Pinal / Pima) plus the
+COLORADO RIVER mainstem corridor (Mohave / La Paz / Yuma counties)
+plus the Bill Williams sub-basin (LF-share = 0.5 via the CAP Canal
+at Havasu spatial join).  SRP / Salt / Verde watersheds are AZ-
+internal and remain covered by σ_MACA only.
 
 ##### σ_total — Quadrature combination
 

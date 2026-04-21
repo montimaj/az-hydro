@@ -820,6 +820,14 @@ def apply_ml_well_density_override(
 # we'd plan around today," not a year-specific forecast.  The CAP
 # scenario sweep is the right place to look for policy-bounds
 # uncertainty.
+# First year CAP delivered Colorado River water to AZ.  Phoenix
+# reach completed 1985; Tucson reach completed 1993.  Used to gate
+# σ_USBR (Upper Basin streamflow uncertainty has no propagation
+# pathway through the partition before CAP is operational because
+# canal_weighted_streamflow at CAP-pixel locations contributes no
+# Colorado River signal pre-1985).
+CAP_OPERATIONAL_START = 1985
+
 CAP_DELIVERY_FACTORS: dict[int, float] = {
     2020: 0.87,  # Tier 0
     2021: 0.87,  # Tier 0

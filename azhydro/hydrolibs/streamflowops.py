@@ -179,11 +179,42 @@ USBR_SITE_REGIONS: dict[str, str] = {
 }
 
 
+# USGS gauges whose flow is Lees-Ferry-derived — either directly
+# (Lees Ferry, Imperial Dam above the main AZ-CA mainstem
+# diversion) or through the CAP delivery chain (CAP Canal at
+# Havasu).  Used by σ_USBR to identify which gauges in any surface-
+# watershed gauge list should be scaled by the Lees-Ferry-member
+# ratio when building the per-watershed CAP-overlay-equivalent
+# co_flow value.  Bill Williams (09426620), Little Colorado, and
+# in-state gauges are NOT in this set — those are local AZ flow,
+# not Upper Basin Colorado.
+USBR_DERIVED_GAUGES: set[str] = {
+    '09380000',  # Colorado River at Lees Ferry
+    '09429490',  # Colorado River above Imperial Dam
+    '09426650',  # CAP Canal at Havasu Pumping Plant
+}
+
+
+# First year of USBR CMIP3 ensemble data at the AZ gauges.  σ_USBR
+# is structurally absent before this year because we have no inter-
+# member spread to compute (all 5 representative members agree on
+# the climatological mean to within ~1 % over 1950-2005, so a
+# climatological-mean backfill would produce phantom near-zero σ
+# that misleads readers about what was actually modeled).
+USBR_DATA_START: int = 1950
+
+# CMIP3 historical-period boundary.  Reserved for any future use
+# that needs to distinguish constrained-to-observation members
+# (1950-2005) from projection-era members (2006-2099).
+USBR_HISTORICAL_END: int = 2005
+
+
 def compute_usbr_member_annual_ratios(
         usbr_dir: str,
         members: list[str],
         usbr_ids: list[str] | None = None,
         backfill_years: range | tuple[int, int] | None = None,
+        long_term_mean_window: tuple[int, int] | None = None,
 ) -> dict:
     """Per-year ratios of (member annual mean / ensemble annual mean).
 
@@ -260,6 +291,10 @@ def compute_usbr_member_annual_ratios(
 
     # Backfill years outside the USBR record with each member's
     # long-term mean ratio (climatological proxy for pre-USBR years).
+    # If long_term_mean_window is provided, the long-term mean is
+    # computed over (start, end) inclusive — typically (1950, 2005)
+    # to use the CMIP3 constrained-to-observation period rather than
+    # mixing in projection-era spread.
     if backfill_years is not None:
         if isinstance(backfill_years, tuple):
             backfill_years = range(backfill_years[0], backfill_years[1] + 1)
@@ -268,14 +303,181 @@ def compute_usbr_member_annual_ratios(
                 yr_dict = out[sid][m]
                 if not yr_dict:
                     continue
-                # Per-member long-term mean ratio (climatological)
-                long_term = float(np.mean(list(yr_dict.values())))
+                # Per-member long-term mean ratio (climatological).
+                if long_term_mean_window is not None:
+                    lo, hi = long_term_mean_window
+                    window_vals = [
+                        v for y, v in yr_dict.items() if lo <= y <= hi
+                    ]
+                    long_term = float(np.mean(window_vals)) \
+                        if window_vals else 1.0
+                else:
+                    long_term = float(np.mean(list(yr_dict.values())))
                 if not np.isfinite(long_term) or long_term <= 0:
                     long_term = 1.0
                 for yr in backfill_years:
                     if int(yr) not in yr_dict:
                         yr_dict[int(yr)] = long_term
 
+    return out
+
+
+def compute_usbr_ensemble_annual_mean(
+        usbr_dir: str,
+        members: list[str],
+        usbr_id: str = '00013',
+        backfill_years: range | tuple[int, int] | None = None,
+        long_term_mean_window: tuple[int, int] | None = None,
+) -> dict[int, float]:
+    """Per-year ensemble mean streamflow across *members* at *usbr_id*
+    (m³/s).
+
+    Used by ``uncertaintyops.compute_sigma_usbr`` (option-2 additive
+    perturbation) to compute the central CAP-overlay ``co_flow``
+    value that the per-member Upper Basin perturbation acts on:
+    ``delta_m = (ratio_m - 1) × co_flow_year_mm``.  Only the
+    representative members count toward the mean — keeping the
+    central baseline consistent with the σ_USBR ratio denominator.
+
+    Args:
+        usbr_dir: Directory containing USBR ensemble CSVs.
+        members: USBR ensemble member names (e.g.
+            ``USBR_REPRESENTATIVE_MEMBERS``).
+        usbr_id: USBR site ID (default '00013' = Lees Ferry).
+        backfill_years: Optional range/tuple specifying years to fill
+            with the long-term mean (typically pre-USBR years
+            1896-1949).  Pre-USBR years are filled with the same
+            constant value so σ_USBR per-member spread is driven by
+            the ratios alone (the central is constant pre-USBR).
+        long_term_mean_window: Optional (start, end) inclusive window
+            for computing the backfill long-term mean.  Default uses
+            all available years; pass (1950, 2005) to restrict to
+            the CMIP3 historical period.
+
+    Returns:
+        ``{year: mean_m3s}`` — annual mean across members, or ``{}``
+        if no data found.
+    """
+    files = glob(os.path.join(usbr_dir, f'streamflow_*_{usbr_id}.csv'))
+    if not files:
+        return {}
+    df = pd.read_csv(files[0])
+    member_cols = [
+        m for m in members
+        if m in df.columns and df[m].notna().any()
+    ]
+    if not member_cols:
+        return {}
+    cfs_to_m3s = 0.028316846592
+    df['mem_mean'] = df[member_cols].mean(axis=1)
+    annual = df.groupby('Year')['mem_mean'].mean() * cfs_to_m3s
+    out = {int(y): float(v) for y, v in annual.items()}
+
+    if backfill_years is not None:
+        if isinstance(backfill_years, tuple):
+            backfill_years = range(backfill_years[0], backfill_years[1] + 1)
+        if long_term_mean_window is not None:
+            lo, hi = long_term_mean_window
+            window_vals = [v for y, v in out.items() if lo <= y <= hi]
+            long_term = float(np.mean(window_vals)) \
+                if window_vals else 0.0
+        else:
+            long_term = float(np.mean(list(out.values()))) \
+                if out else 0.0
+        for yr in backfill_years:
+            if int(yr) not in out:
+                out[int(yr)] = long_term
+
+    return out
+
+
+def get_co_river_watershed_lf_shares(
+        sites_csv: str,
+        watershed_geojson: str,
+) -> dict[int, dict]:
+    """Per-watershed Lees-Ferry-derived gauge share + watershed area.
+
+    For each surface watershed in *watershed_geojson*, identifies the
+    USGS gauges spatially joined to it (mirrors
+    ``_get_site_watershed_map``) and computes:
+
+      * ``lf_share`` = N_LF_derived_gauges / N_total_gauges
+        (fraction of the watershed's averaged streamflow that derives
+        from Upper Basin Colorado River flow at Lees Ferry).  LF-
+        derived = membership in ``USBR_DERIVED_GAUGES``.
+      * ``ws_area_m2`` = the polygon's area in m² (used to normalise
+        m³/s → mm/yr, mirroring ``create_streamflow_rasters``).
+      * ``n_total`` = number of gauges joined to the watershed.
+
+    Watersheds with zero LF-derived gauges (lf_share = 0) are still
+    returned so callers can iterate the full mapping but skip those
+    that contribute no σ_USBR signal.
+
+    Args:
+        sites_csv: Path to the streamflow sites CSV.
+        watershed_geojson: Path to Surface_Watershed.geojson.
+
+    Returns:
+        ``{watershed_oid: {'lf_share': float, 'ws_area_m2': float,
+        'n_total': int}}``
+    """
+    import geopandas as gpd
+    from dataretrieval import nwis
+
+    sites_df = pd.read_csv(sites_csv, dtype=str)
+    site_ids = sites_df['USGS_SITE_ID'].tolist()
+    info, _ = nwis.get_info(sites=site_ids)
+    info = info[['site_no', 'dec_lat_va', 'dec_long_va']].drop_duplicates(
+        'site_no',
+    )
+    site_gdf = gpd.GeoDataFrame(
+        info,
+        geometry=gpd.points_from_xy(
+            info['dec_long_va'].astype(float),
+            info['dec_lat_va'].astype(float),
+        ),
+        crs='EPSG:4326',
+    )
+    ws = gpd.read_file(watershed_geojson)
+    if site_gdf.crs != ws.crs:
+        site_gdf = site_gdf.to_crs(ws.crs)
+    joined = gpd.sjoin(
+        site_gdf, ws[['OBJECTID', 'WATERSHED', 'geometry']],
+        how='left', predicate='within',
+    )
+    # Nearest-watershed fallback for boundary gauges (Imperial Dam).
+    unmatched = joined[joined['OBJECTID'].isna()]
+    for idx, row in unmatched.iterrows():
+        dists = ws.geometry.distance(row.geometry)
+        nearest_idx = dists.idxmin()
+        nearest = ws.loc[nearest_idx]
+        joined.loc[idx, 'OBJECTID'] = nearest['OBJECTID']
+        joined.loc[idx, 'WATERSHED'] = nearest['WATERSHED']
+
+    # Per-watershed gauge lists.
+    ws_sites: dict[int, list[str]] = {}
+    for _, row in joined.dropna(subset=['OBJECTID']).iterrows():
+        oid = int(row['OBJECTID'])
+        ws_sites.setdefault(oid, []).append(row['site_no'])
+
+    # Project to local UTM for per-watershed area in m².
+    ws_proj = ws.to_crs(ws.estimate_utm_crs())
+    ws_area_m2 = {
+        int(r['OBJECTID']): float(r.geometry.area)
+        for _, r in ws_proj.iterrows()
+    }
+
+    out: dict[int, dict] = {}
+    for oid in sorted(ws_area_m2):
+        gauges = ws_sites.get(oid, [])
+        n_total = len(gauges)
+        n_lf = sum(1 for g in gauges if g in USBR_DERIVED_GAUGES)
+        lf_share = n_lf / n_total if n_total > 0 else 0.0
+        out[oid] = {
+            'lf_share': lf_share,
+            'ws_area_m2': ws_area_m2.get(oid, 0.0),
+            'n_total': n_total,
+        }
     return out
 
 

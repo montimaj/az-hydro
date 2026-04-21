@@ -254,6 +254,114 @@ def _build_cap_pixel_mask(
         return None
 
 
+def _build_co_watershed_co_flow_arrays(
+        sites_csv: str,
+        watershed_geojson: str,
+        pred_data_dir: str,
+        ref_year: int,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Per-pixel Lees-Ferry-share + watershed-area arrays for σ_USBR.
+
+    Rasterises the surface-watershed polygons onto the valid-pixel
+    grid (matching the basin reference) and looks up each pixel's
+    watershed-level ``lf_share`` and ``ws_area_m2`` via
+    ``streamflowops.get_co_river_watershed_lf_shares``.
+
+    Together with the per-year USBR ensemble-mean Lees Ferry flow,
+    these arrays produce per-pixel ``co_flow_mm`` for the additive
+    σ_USBR perturbation:
+        co_flow_mm[pix] = lf_share[pix] × LF_m3s × m3s_to_mm_yr
+                         / ws_area_m2[pix]
+
+    Returns ``(lf_share_per_pixel, ws_area_m2_per_pixel)`` — both
+    1-D float arrays aligned with the valid-pixel ordering of
+    ``year_df.index``.  Pixels in non-LF-derived watersheds have
+    ``lf_share = 0`` (no σ_USBR contribution).  Returns ``(None,
+    None)`` if any input is missing.
+    """
+    try:
+        import geopandas as gpd
+        import rasterio
+        from rasterio.features import rasterize as rio_rasterize
+        from hydrolibs.rasterops import read_raster_as_arr
+        from hydrolibs import streamflowops as sfops
+
+        if not os.path.isfile(sites_csv):
+            logger.warning(
+                'σ_USBR CO-watershed context: sites CSV %s not '
+                'found; CO-mainstem σ_USBR perturbation skipped.',
+                sites_csv,
+            )
+            return None, None
+        if not os.path.isfile(watershed_geojson):
+            logger.warning(
+                'σ_USBR CO-watershed context: watershed geojson %s '
+                'not found; CO-mainstem σ_USBR perturbation skipped.',
+                watershed_geojson,
+            )
+            return None, None
+        ref_basin_file = os.path.join(
+            pred_data_dir, f'GW_Basin_{ref_year}.tif',
+        )
+        if not os.path.isfile(ref_basin_file):
+            logger.warning(
+                'σ_USBR CO-watershed context: reference basin raster '
+                '%s not found; CO-mainstem σ_USBR perturbation '
+                'skipped.', ref_basin_file,
+            )
+            return None, None
+
+        basin_arr, bf = read_raster_as_arr(ref_basin_file, get_file=True)
+        basin_flat = basin_arr.ravel()
+        valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
+        raster_shape = basin_arr.shape
+        bf.close()
+
+        ws_gdf = gpd.read_file(watershed_geojson)
+        with rasterio.open(ref_basin_file) as ref_src:
+            ws_gdf_proj = ws_gdf.to_crs(ref_src.crs)
+            ws_oid_arr = rio_rasterize(
+                [(geom, int(oid)) for geom, oid
+                 in zip(ws_gdf_proj.geometry, ws_gdf_proj['OBJECTID'])],
+                out_shape=raster_shape,
+                transform=ref_src.transform,
+                fill=0,
+                dtype='int32',
+            )
+        ws_oid_per_pixel = ws_oid_arr.ravel()[valid_mask]
+
+        shares = sfops.get_co_river_watershed_lf_shares(
+            sites_csv, watershed_geojson,
+        )
+        # Per-watershed → per-pixel mapping via vectorised lookup.
+        lf_share_per_pixel = np.zeros(
+            ws_oid_per_pixel.shape, dtype=np.float32,
+        )
+        ws_area_per_pixel = np.ones(
+            ws_oid_per_pixel.shape, dtype=np.float64,
+        )  # area=1 fallback to avoid divide-by-zero (lf_share=0 there)
+        for oid, info in shares.items():
+            mask = ws_oid_per_pixel == oid
+            lf_share_per_pixel[mask] = info['lf_share']
+            if info['ws_area_m2'] > 0:
+                ws_area_per_pixel[mask] = info['ws_area_m2']
+
+        n_perturbed = int((lf_share_per_pixel > 0).sum())
+        logger.info(
+            'σ_USBR CO-watershed context: %d pixels in LF-derived '
+            'watersheds (%.1f%% of valid).',
+            n_perturbed,
+            100.0 * n_perturbed / max(1, len(lf_share_per_pixel)),
+        )
+        return lf_share_per_pixel, ws_area_per_pixel
+    except Exception as e:
+        logger.warning(
+            'σ_USBR CO-watershed context could not be loaded: %s — '
+            'CO-mainstem σ_USBR perturbation skipped.', e,
+        )
+        return None, None
+
+
 def _set_pre_gma_context(az_df: pd.DataFrame, ref_year: int = 2024) -> None:
     """Populate the module-level pre-GMA partitioning context from az_df.
 
@@ -1722,6 +1830,8 @@ def compute_sigma_usbr(
         year_list: list[int],
         mosaic_res: int,
         vector_dir: str | None = None,
+        sites_csv: str | None = None,
+        watershed_geojson: str | None = None,
         members: list[str] | None = None,
 ) -> tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]:
     """Compute σ_USBR — inter-USBR-member spread of CAP delivery driven
@@ -1824,23 +1934,83 @@ def compute_sigma_usbr(
         )
         return {}, {c: {} for c in partops.CATEGORIES}
 
-    # Pre-compute per-year per-member ratios at Lees Ferry (00013).
-    # These multiply cw_streamflow + sw_rights_density at CAP pixels
-    # (multiplicative perturbation, member-vs-ensemble-mean).
-    # backfill_years extends σ_USBR coverage to pre-1950 hindcast
-    # years (USBR ensemble starts 1950), filling them with each
-    # member's long-term mean ratio so the climatological-mean
-    # streamflow used by the central pipeline carries a proportional
-    # uncertainty contribution rather than σ_USBR=0.
+    # CO River watershed perturbation context.  Builds per-pixel
+    # lf_share + watershed area arrays so σ_USBR can perturb
+    # streamflow_mm at any pixel whose surface watershed contains
+    # one or more LF-derived gauges (Lees Ferry, Imperial Dam,
+    # CAP Canal at Havasu — see streamflowops.USBR_DERIVED_GAUGES).
+    # This extends σ_USBR scope to all CO-river-served basins:
+    # Parker / CRIT / Mohave / Yuma / mainstem AZ — not just CAP
+    # service area.
+    if sites_csv is not None and watershed_geojson is not None:
+        co_lf_share, co_ws_area = _build_co_watershed_co_flow_arrays(
+            sites_csv, watershed_geojson, pred_data_dir, year_list[0],
+        )
+    else:
+        co_lf_share = co_ws_area = None
+    co_watershed_active = (
+        co_lf_share is not None and (co_lf_share > 0).any()
+    )
+
+    # σ_USBR loop bounds (region-specific gating applied per-pixel
+    # inside the loop; loop start is the earliest year *any* region
+    # has signal):
+    #   * CAP pixel perturbation gated to year >= CAP_OPERATIONAL_START
+    #     (1985, Phoenix reach completion).
+    #   * CO watershed pixel perturbation gated to
+    #     year >= USBR_DATA_START (1950, USBR CMIP3 ensemble first
+    #     year).  No pre-1950 backfill — per-member 1950-2005 long-
+    #     term mean ratios collapse to ~1.0 (std 0.011) by
+    #     construction, which would produce misleading near-zero σ
+    #     pre-1950 implying we modeled it.  Honest answer is "no
+    #     inter-member spread available pre-1950 → σ_USBR absent."
+    if co_watershed_active:
+        usbr_start = max(start_year, sfops.USBR_DATA_START)
+    else:
+        usbr_start = max(start_year, partops.CAP_OPERATIONAL_START)
+    if usbr_start > start_year:
+        reason = (
+            'pre-USBR-ensemble' if co_watershed_active
+            else 'pre-CAP-operational, no CO-mainstem context'
+        )
+        logger.info(
+            '  σ_USBR: skipping years %d-%d (%s).',
+            start_year, usbr_start - 1, reason,
+        )
+
+    # Pre-compute per-year per-member ratios + ensemble-mean flow at
+    # Lees Ferry (00013).  Two pathways:
+    #   (1) ML-feature pathway — additive perturbation on
+    #       ``streamflow_mm`` (an ML feature) at CAP pixels (uniform
+    #       CAP overlay) AND CO watershed pixels (per-watershed
+    #       LF-share × LF flow / ws_area).  Local watershed runoff
+    #       baked into streamflow_mm is preserved exactly; only the
+    #       LF-attributable component is scaled.
+    #   (2) Partition pathway — multiplicative perturbation on
+    #       ``cw_streamflow`` + ``sw_rights_density`` columns at CAP
+    #       pixels only (NOT extended to CO watershed pixels because
+    #       it would over-scale local Bill Williams flow and the
+    #       senior mainstem priority makes this pathway physically
+    #       small at CO watershed pixels).
     logger.info(
-        '  Loading USBR member ratios for Lees Ferry (with backfill '
-        'for pre-USBR years %d-1949)...', start_year,
+        '  Loading USBR member ratios + ensemble-mean flow for '
+        'Lees Ferry (years %d-%d, no pre-1950 backfill)...',
+        usbr_start, end_year,
     )
     ratios = sfops.compute_usbr_member_annual_ratios(
         usbr_dir, members, usbr_ids=['00013'],
-        backfill_years=range(start_year, end_year + 1),
     )
     lees_ratios = ratios.get('00013', {})
+    lees_ens_mean_m3s = sfops.compute_usbr_ensemble_annual_mean(
+        usbr_dir, members, usbr_id='00013',
+    )
+
+    # CAP service-area in m² from the rasterised pixel mask.  This is
+    # the same area the central streamflowops uses to convert Lees
+    # Ferry m³/s → CAP-overlay mm/yr (modulo small rasterisation
+    # rounding vs the polygon area).
+    cap_area_m2 = int(cap_pixel_mask.sum()) * pixel_area_m2
+    m3s_to_mm_yr = 31_557_600_000.0  # seconds/year × 1000 mm/m
 
     sigma_usbr: dict[int, np.ndarray] = {}
     yearly_stats: dict = {}
@@ -1852,6 +2022,8 @@ def compute_sigma_usbr(
         c: {} for c in partops.CATEGORIES
     }
 
+    # Partition-stage columns get the multiplicative perturbation.
+    # ``streamflow_mm`` is handled separately (additive, ML feature).
     sw_cols = (
         'canal_weighted_streamflow_mm',
         'irr_sw_rights_density',
@@ -1859,15 +2031,43 @@ def compute_sigma_usbr(
         'sw_rights_density',
     )
 
-    for year in range(start_year, end_year + 1):
+    for year in range(usbr_start, end_year + 1):
         year_df = az_df[az_df.Year == year].copy()
         if year_df.empty:
             continue
 
-        # Predict once per year (raw ML prediction is identical across
-        # members because all perturbed columns are in DROP_ATTRS).
-        pf_base = _build_pred_features(year_df, feature_cols, drop_attrs)
-        raw = np.abs(model.predict(pf_base))
+        # Build per-pixel co_flow_mm (sum of two contributions):
+        #   * CAP overlay — uniform CAP-area-normalised LF flow at
+        #     CAP pixels, gated to year >= CAP_OPERATIONAL_START.
+        #   * CO watershed — per-watershed LF-share × LF flow /
+        #     ws_area_m2 at pixels in LF-derived watersheds, applied
+        #     for all years (with backfill).
+        ens_m3s = lees_ens_mean_m3s.get(year, 0.0)
+        n_valid = int(valid_mask.sum())
+        co_flow_mm_per_pixel = np.zeros(n_valid, dtype=np.float32)
+
+        # CAP overlay contribution.
+        if year >= partops.CAP_OPERATIONAL_START and cap_area_m2 > 0:
+            cap_overlay_mm = ens_m3s * m3s_to_mm_yr / cap_area_m2
+            co_flow_mm_per_pixel[cap_pixel_mask] += cap_overlay_mm
+
+        # CO watershed contribution (LF-share-weighted per watershed).
+        if co_watershed_active:
+            ws_co_mm = (
+                co_lf_share * ens_m3s * m3s_to_mm_yr / co_ws_area
+            ).astype(np.float32)
+            co_flow_mm_per_pixel += ws_co_mm
+
+        # Pixels with non-zero co_flow get the additive ML-feature
+        # perturbation.  Pixels in cap_pixel_mask additionally get
+        # the multiplicative partition-stage perturbation.
+        perturb_mask = co_flow_mm_per_pixel > 0
+        perturb_idx = year_df.index[perturb_mask]
+        cap_idx = year_df.index[cap_pixel_mask]
+        sf_central = (
+            year_df.loc[perturb_idx, 'streamflow_mm'].values
+            if 'streamflow_mm' in year_df.columns else None
+        )
 
         member_preds = []
         member_cats = []
@@ -1875,13 +2075,35 @@ def compute_sigma_usbr(
             ratio = lees_ratios.get(m, {}).get(year, 1.0)
             if not np.isfinite(ratio) or ratio <= 0:
                 ratio = 1.0
-            sc_year_df = year_df.copy()
-            cap_idx = sc_year_df.index[cap_pixel_mask]
-            for col in sw_cols:
-                if col in sc_year_df.columns:
-                    sc_year_df.loc[cap_idx, col] = (
-                        sc_year_df.loc[cap_idx, col].values * ratio
-                    )
+
+            # ML-feature perturbation: rebuild prediction features
+            # with streamflow_mm shifted by the member's per-pixel
+            # Upper-Basin delta.  Re-predict per member because
+            # streamflow_mm IS an ML feature (unlike cw_streamflow,
+            # which is in DROP_ATTRS).
+            ml_year_df = year_df.copy()
+            if sf_central is not None and perturb_mask.any():
+                delta_mm = (
+                    (ratio - 1.0) * co_flow_mm_per_pixel[perturb_mask]
+                )
+                ml_year_df.loc[perturb_idx, 'streamflow_mm'] = (
+                    sf_central + delta_mm
+                )
+            pf_member = _build_pred_features(
+                ml_year_df, feature_cols, drop_attrs,
+            )
+            raw = np.abs(model.predict(pf_member))
+
+            # Partition-stage perturbation: multiplicative on
+            # cw_streamflow + sw_rights at CAP pixels only (gated to
+            # year >= 1985 by the same CAP-operational reasoning).
+            sc_year_df = ml_year_df  # streamflow_mm already updated
+            if year >= partops.CAP_OPERATIONAL_START:
+                for col in sw_cols:
+                    if col in sc_year_df.columns:
+                        sc_year_df.loc[cap_idx, col] = (
+                            sc_year_df.loc[cap_idx, col].values * ratio
+                        )
             cats = _partition_with_ctx(
                 partops, raw, sc_year_df, raster_shape, valid_mask,
                 year=year, skip_cap_perturbation=True,
@@ -4067,11 +4289,19 @@ def run_uncertainty_quantification(
     if 'sigma-usbr' not in skip:
         usbr_dir = os.path.join(input_dir, 'GW_Data', 'USBR')
         if os.path.isdir(usbr_dir):
+            sites_csv = os.path.join(
+                input_dir, 'GW_Data', 'Streamflow', 'sites.csv',
+            )
+            watershed_geojson = os.path.join(
+                input_dir, 'GW_Data', 'Surface_Watershed.geojson',
+            )
             sigma_usbr, cat_sigma_usbr = compute_sigma_usbr(
                 model, feature_cols, az_df, drop_attrs,
                 pred_data_dir, unc_dir, usbr_dir,
                 start_year, end_year, year_list, mosaic_res,
                 vector_dir=vector_dir,
+                sites_csv=sites_csv,
+                watershed_geojson=watershed_geojson,
             )
         else:
             logger.warning(
