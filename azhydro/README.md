@@ -4306,32 +4306,32 @@ USGS NHM basin-level irrigation efficiency (million acre-feet):
 
 | Year | Irrigation | Irrigation CU | Irrigation GW CU | Irrigation SW CU | IE |
 |------|------------|---------------|-------------------|------------------|----|
-| 1900 | 0.11 | 0.06 | 0.06 | 0.01 | 60 % |
+| 1900 | 0.11 | 0.06 | 0.06 | 0.01 | 61 % |
 | 1910 | 0.13 | 0.08 | 0.07 | 0.01 | 61 % |
-| 1920 | 0.23 | 0.14 | 0.10 | 0.03 | 61 % |
+| 1920 | 0.23 | 0.14 | 0.10 | 0.04 | 61 % |
 | 1930 | 0.94 | 0.57 | 0.41 | 0.17 | 61 % |
 | 1940 | 2.36 | 1.42 | 0.86 | 0.56 | 60 % |
-| 1950 | 4.89 | 2.93 | 1.62 | 1.32 | 60 % |
-| 1960 | 5.10 | 3.06 | 1.80 | 1.25 | 60 % |
-| 1970 | 6.39 | 3.84 | 2.30 | 1.54 | 60 % |
-| 1980 | 6.71 | 4.02 | 2.07 | 1.95 | 60 % |
-| 1985 | 5.94 | 3.55 | 1.68 | 1.87 | 60 % |
-| 1990 | 5.66 | 3.39 | 1.19 | 2.20 | 60 % |
-| 2000 | 5.59 | 3.31 | 1.25 | 2.06 | 59 % |
-| 2010 | 5.02 | 2.99 | 1.07 | 1.92 | 60 % |
-| 2015 | 5.08 | 3.04 | 1.08 | 1.96 | 60 % |
-| 2017 | 5.18 | 3.11 | 1.10 | 2.01 | 60 % |
-| 2019 | 4.82 | 2.89 | 1.03 | 1.86 | 60 % |
-| 2020 | 5.03 | 3.00 | 1.07 | 1.93 | 60 % |
-| 2024 | 5.07 | 3.04 | 1.24 | 1.80 | 60 % |
-| 2030 | 4.90 | 2.93 | 1.07 | 1.86 | 60 % |
-| 2040 | 4.94 | 2.96 | 1.08 | 1.88 | 60 % |
-| 2050 | 5.08 | 3.05 | 1.11 | 1.93 | 60 % |
-| 2060 | 5.20 | 3.11 | 1.14 | 1.97 | 60 % |
-| 2070 | 5.30 | 3.18 | 1.17 | 2.01 | 60 % |
-| 2080 | 5.34 | 3.21 | 1.19 | 2.02 | 60 % |
-| 2090 | 5.40 | 3.24 | 1.20 | 2.04 | 60 % |
-| 2099 | 5.48 | 3.29 | 1.24 | 2.05 | 60 % |
+| 1950 | 4.89 | 2.94 | 1.62 | 1.32 | 60 % |
+| 1960 | 5.10 | 3.06 | 1.80 | 1.26 | 60 % |
+| 1970 | 6.39 | 3.85 | 2.30 | 1.55 | 60 % |
+| 1980 | 6.71 | 4.03 | 2.08 | 1.96 | 60 % |
+| 1985 | 5.94 | 3.56 | 1.68 | 1.87 | 60 % |
+| 1990 | 5.66 | 3.39 | 1.19 | 2.21 | 60 % |
+| 2000 | 5.59 | 3.33 | 1.25 | 2.08 | 60 % |
+| 2010 | 5.02 | 3.00 | 1.07 | 1.93 | 60 % |
+| 2015 | 5.08 | 3.05 | 1.08 | 1.97 | 60 % |
+| 2017 | 5.18 | 3.12 | 1.10 | 2.02 | 60 % |
+| 2019 | 4.82 | 2.90 | 1.03 | 1.87 | 60 % |
+| 2020 | 5.03 | 3.01 | 1.07 | 1.93 | 60 % |
+| 2024 | 5.07 | 3.05 | 1.24 | 1.81 | 60 % |
+| 2030 | 4.90 | 2.94 | 1.07 | 1.87 | 60 % |
+| 2040 | 4.94 | 2.97 | 1.08 | 1.89 | 60 % |
+| 2050 | 5.08 | 3.05 | 1.11 | 1.94 | 60 % |
+| 2060 | 5.20 | 3.12 | 1.14 | 1.98 | 60 % |
+| 2070 | 5.30 | 3.19 | 1.17 | 2.02 | 60 % |
+| 2080 | 5.34 | 3.21 | 1.19 | 2.03 | 60 % |
+| 2090 | 5.40 | 3.25 | 1.20 | 2.05 | 60 % |
+| 2099 | 5.48 | 3.30 | 1.24 | 2.06 | 60 % |
 
 The statewide mean IE is ~60 %, meaning roughly 40 % of applied irrigation
 water returns to aquifers as deep percolation or runs off as return flow.
@@ -4407,9 +4407,9 @@ Key trends (post-fix):
   hold exactly for all years.
 - **Consumptive use** (CU = IE × Irrigation Withdrawal, with IE the
   USGS NHM HUC12 irrigation efficiency map): irrigation CU rises from
-  0.06 MAF in 1900 to a 4.02 MAF peak in 1980 (the partition's
+  0.06 MAF in 1900 to a 4.03 MAF peak in 1980 (the partition's
   peak-pumping era) and stabilizes at 2.9–3.1 MAF in the modern era
-  (3.11 MAF in 2017, 3.04 MAF in 2024).  The statewide IE is stable
+  (3.12 MAF in 2017, 3.05 MAF in 2024).  The statewide IE is stable
   at ~60 % across all years (60 % in 1980, 60 % in 2017, 60 % in
   2024).  The roughly 40 % of applied irrigation water that is *not*
   consumed returns to the aquifer as deep percolation or runs off as
@@ -4418,10 +4418,10 @@ Key trends (post-fix):
   The GW share of irrigation CU follows the parent GW share of
   irrigation withdrawal — and after the partition-side calibration
   is now lower than the pre-fix figures (e.g. 2017 Irr_GW_CU /
-  Irr_CU = 1.10 / 3.11 = 35 %, reflecting the per-basin SW caps at
+  Irr_CU = 1.10 / 3.12 = 35 %, reflecting the per-basin SW caps at
   CO-direct basins folding more deliveries into Irr_SW).  In the
   projection (2026–2099) irrigation CU is flat to slightly rising
-  (2.93 → 3.29 MAF, +12 %) because the parent irrigation withdrawal
+  (2.94 → 3.30 MAF, +12 %) because the parent irrigation withdrawal
   — which is driven by the LULC-projection-derived
   `annual_irr_fraction` and `annual_crop_fraction` features — grows
   modestly in the USGS scenarios used here. Crop-area expansion or contraction *is*
@@ -5046,7 +5046,7 @@ from the methods.
    they were coupled to a crop-mix shift toward shallow-rooted,
    short-season vegetables rather than to acreage expansion or
    higher-water-demand crops. The flat-to-slightly-rising projected CU
-   (3.04 → 3.29 MAF, +8 % over 2024 → 2099) should therefore be read
+   (3.05 → 3.30 MAF, +8 % over 2024 → 2099) should therefore be read
    as a *mechanistic projection under the assumption that IE and the
    IE → behavior coupling do not change*, not as a forecast of actual
    2099 CU under all plausible technology trajectories.

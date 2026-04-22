@@ -6814,6 +6814,29 @@ def plot_intercomp_stacked_bars(
 
     n_sources = len(source_order)
 
+    # ── Per-source color palette for the per-year grouped bars ──
+    # Annual plot shows 3 sources × 2 categories side-by-side at every
+    # year — using a single colour per category with alpha-shifts per
+    # source makes the bars visually indistinguishable.  Use a 3-hue ×
+    # 2-lightness palette (one hue family per source, dark = first cat,
+    # light = second cat) so all source × cat combinations are clearly
+    # separable.  Falls back to ``stack_colors`` (cat-only) for sources
+    # beyond 3 or when stack_cats != 2.
+    _SOURCE_PALETTES = {
+        'ML':    ('#1B2631', '#5DADE2'),  # dark navy / light blue
+        'NHM':   ('#1B4F2E', '#58D68D'),  # dark green / light green
+        'Reitz': ('#7C3F00', '#F5B041'),  # dark orange / light orange
+        'PS':    ('#641E16', '#EC7063'),  # dark red / light red
+        'CAP_SRP': ('#4A235A', '#A569BD'), # dark purple / light purple
+    }
+
+    def _bar_color(src: str, cat_idx: int) -> tuple[str, float]:
+        """Return (color, alpha) for a (source, category-index) bar."""
+        if src in _SOURCE_PALETTES and len(stack_cats) == 2:
+            return _SOURCE_PALETTES[src][cat_idx], 1.0
+        # Fallback to the legacy cat-color + alpha-shift scheme.
+        return stack_colors[stack_cats[cat_idx]], 0.7 + 0.15 * source_order.index(src)
+
     # ── Figure 1: Per-year grouped stacked bars ──────────────────────
     fig, ax = plt.subplots(figsize=(max(12, len(common_years) * 0.6), 6),
                             constrained_layout=True)
@@ -6822,18 +6845,18 @@ def plot_intercomp_stacked_bars(
 
     for si, src in enumerate(source_order):
         bottoms = np.zeros(len(common_years))
-        for cat in stack_cats:
+        for ci, cat in enumerate(stack_cats):
             vals = np.array([
                 src_cat_yearly[src][cat].get(yr, 0.0) / af_divisor
                 for yr in common_years
             ])
+            color, alpha = _bar_color(src, ci)
             ax.bar(
                 x + si * bar_width, vals, bar_width,
                 bottom=bottoms,
-                label=f'{src} — {stack_labels[cat]}' if si == 0 or cat == stack_cats[0] else '',
-                color=stack_colors[cat],
+                color=color,
                 edgecolor='white', linewidth=0.3,
-                alpha=0.7 + 0.15 * si,
+                alpha=alpha,
             )
             bottoms += vals
 
@@ -6848,13 +6871,15 @@ def plot_intercomp_stacked_bars(
                   fontweight='bold', fontsize=13)
     ax.grid(axis='y', alpha=0.2, linestyle='--')
 
-    # Build legend: one entry per source × category
+    # Build legend: one entry per source × category, ordered source-major
+    # so each source's pair of colours appears together in the legend.
     handles = []
-    for cat in stack_cats:
-        for si, src in enumerate(source_order):
+    for src in source_order:
+        for ci, cat in enumerate(stack_cats):
+            color, alpha = _bar_color(src, ci)
             handles.append(mpatches.Patch(
-                facecolor=stack_colors[cat],
-                alpha=0.7 + 0.15 * si,
+                facecolor=color,
+                alpha=alpha,
                 edgecolor='white',
                 label=f'{src} — {stack_labels[cat]}',
             ))

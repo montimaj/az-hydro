@@ -82,16 +82,26 @@ _filter_huc12_cache: dict[str, set[str]] | None = None
 def _filter_huc12_within_az(
     huc_gdf: gpd.GeoDataFrame,
     basin_gdf: gpd.GeoDataFrame,
-    threshold: float = 0.95,
+    threshold: float = 0.10,
 ) -> gpd.GeoDataFrame:
-    """Keep only HUC12 polygons that fall (almost) entirely within AZ.
+    """Keep HUC12 polygons with at least ``threshold`` of their area in AZ.
 
-    A HUC12 is kept if at least ``threshold`` (default 95 %) of its
-    area overlaps the union of AZ basin polygons. This removes
-    cross-border HUC12s whose NHM values represent irrigated area
-    partially outside Arizona, which would otherwise create spurious
-    differences in the spatial-diff maps and inflate the basin-level
-    volume aggregation for border basins.
+    A HUC12 is kept if at least ``threshold`` (default 10 %) of its
+    area overlaps the union of AZ basin polygons.  The default was
+    relaxed from 95 % → 10 % to retain Yuma- and Mexico-border HUC12s
+    that have substantive AZ-interior cropland.  The earlier tight
+    threshold dropped ~270 HUC12s with 10–95 % AZ-interior fraction,
+    biasing the NHM-derived per-basin withdrawal, IE, and CU at Yuma
+    / Lower Gila / Western Mexican Drainage / Sacramento Valley.
+
+    Mass conservation at cross-border HUC12s is handled by the
+    downstream ``_get_huc_basin_overlay`` which weights every HUC12's
+    value by ``area_frac = overlap_area / huc_area`` — a HUC12 that is
+    60 % in AZ contributes 60 % of its reported NHM value to the AZ
+    basin, never 100 %.  The 10 % threshold only drops polygons where
+    the AZ sliver is too small (<10 %) to be a physically meaningful
+    contribution and where the ``area_frac`` weighting would be
+    dominated by boundary geometry noise.
 
     The result is cached at module level keyed by the number of input
     HUC12s so the expensive ``union_all`` + ``intersection`` geometry
@@ -99,7 +109,7 @@ def _filter_huc12_within_az(
     the function is called.
     """
     global _filter_huc12_cache
-    cache_key = str(len(huc_gdf))
+    cache_key = f'{len(huc_gdf)}_{threshold:.4f}'
     if _filter_huc12_cache is not None and cache_key in _filter_huc12_cache:
         kept_ids = _filter_huc12_cache[cache_key]
         huc_ids = huc_gdf['huc12'].astype(str)
@@ -154,13 +164,21 @@ def _get_huc_basin_overlay(
     caching it to a GeoParquet file avoids recomputing on every Step 4
     rerun.
 
-    The cache is keyed by ``{cache_dir}/huc_basin_overlay.parquet``.
+    The cache is keyed by ``{cache_dir}/huc_basin_overlay_n{N}.parquet``
+    where ``N`` is the count of input HUC12s — this prevents stale
+    caches from being reused if the upstream HUC12 filter threshold
+    changes (different threshold → different N → different cache file).
     If the file exists it is loaded; otherwise the overlay is computed
-    and saved.
+    and saved.  Legacy caches at the old unversioned path
+    (``huc_basin_overlay.parquet``) are ignored to force a rebuild
+    after the 2026-04-22 threshold change (0.95 → 0.10).
     """
     cache_path = None
     if cache_dir:
-        cache_path = os.path.join(cache_dir, 'huc_basin_overlay.parquet')
+        cache_path = os.path.join(
+            cache_dir,
+            f'huc_basin_overlay_n{len(huc_reproj)}.parquet',
+        )
         if os.path.isfile(cache_path):
             logger.info(f'  Loading cached HUC12→basin overlay from {cache_path}')
             return gpd.read_parquet(cache_path)
@@ -2056,7 +2074,38 @@ def run_intercomparison(
     }
     af_to_m3 = 1.0 / M3_TO_AF
 
-    for cat in ('GW', 'SW'):
+    # Synthesize a 'Total' irrigation category per source = GW + SW
+    # (per-basin and per-year-per-basin) so the intercomparison can
+    # report a Total_Irrigation row alongside the GW / SW rows.  This
+    # is useful because the per-basin GW caps at CO-direct basins
+    # (Parker / Yuma / Lake Mohave) reshuffle volume between GW and
+    # SW relative to off-the-shelf attribution products like Reitz —
+    # the Total_Irrigation comparison cancels that reshuffle and
+    # surfaces the underlying agreement on irrigation volume per basin.
+    def _add_total_irrigation(vols: dict) -> None:
+        gw_mean = vols.get('GW', {}).get('mean', {})
+        sw_mean = vols.get('SW', {}).get('mean', {})
+        gw_yearly = vols.get('GW', {}).get('yearly', {})
+        sw_yearly = vols.get('SW', {}).get('yearly', {})
+        total_mean = {
+            b: gw_mean.get(b, 0.0) + sw_mean.get(b, 0.0)
+            for b in basin_names
+        }
+        years_union = set(gw_yearly.keys()) | set(sw_yearly.keys())
+        total_yearly = {
+            yr: {
+                b: (gw_yearly.get(yr, {}).get(b, 0.0)
+                    + sw_yearly.get(yr, {}).get(b, 0.0))
+                for b in basin_names
+            }
+            for yr in years_union
+        }
+        vols['Total'] = {'mean': total_mean, 'yearly': total_yearly}
+
+    for vols in (ml_vols, nhm_vols, reitz_vols):
+        _add_total_irrigation(vols)
+
+    for cat in ('GW', 'SW', 'Total'):
         logger.info(f'--- Irrigation {cat} metrics ---')
         pairs = [
             ('ML', 'NHM', ml_vols[cat]['mean'], nhm_vols[cat]['mean']),
@@ -2096,7 +2145,7 @@ def run_intercomparison(
     logger.info('--- Interannual variability metrics ---')
     temporal_metrics = []
     temporal_per_basin_rows = []
-    for cat in ('GW', 'SW'):
+    for cat in ('GW', 'SW', 'Total'):
         pairs = [
             ('ML', 'NHM', ml_vols[cat].get('yearly', {}),
              nhm_vols[cat].get('yearly', {})),
@@ -2176,7 +2225,7 @@ def run_intercomparison(
 
     # ── 5. Per-basin comparison table (mm, m³, AF) ──────────────────────
     rows = []
-    for cat in ('GW', 'SW'):
+    for cat in ('GW', 'SW', 'Total'):
         for basin in basin_names:
             ml_af = ml_vols[cat]['mean'].get(basin, 0.0)
             nhm_af = nhm_vols[cat]['mean'].get(basin, 0.0)
@@ -2206,7 +2255,7 @@ def run_intercomparison(
 
     # ── 6. Time series CSV ───────────────────────────────────────────────
     ts_rows = []
-    for cat in ('GW', 'SW'):
+    for cat in ('GW', 'SW', 'Total'):
         for source_name, src_data in all_sources.items():
             yearly = src_data[cat].get('yearly', {})
             for year in sorted(yearly.keys()):
@@ -2233,7 +2282,7 @@ def run_intercomparison(
     _ts_markers = {'ML': 'o', 'NHM': 's', 'Reitz': '^'}
     plot_dir = os.path.join(output_dir, 'Time_Series/')
     plot_intercomp_time_series(
-        all_sources, categories=['GW', 'SW'],
+        all_sources, categories=['GW', 'SW', 'Total'],
         basin_names=basin_names, basin_areas_m2=basin_areas_m2,
         output_dir=plot_dir,
         colors=_ts_colors, markers=_ts_markers,
@@ -2242,7 +2291,7 @@ def run_intercomparison(
 
     # ── 8. Scatter plots ────────────────────────────────────────────────
     scatter_dir = os.path.join(output_dir, 'Scatter/')
-    for cat in ('GW', 'SW'):
+    for cat in ('GW', 'SW', 'Total'):
         scatter_pairs = [
             (sa, sb, all_sources[sa][cat]['mean'], all_sources[sb][cat]['mean'])
             for sa, sb in [('ML', 'NHM'), ('ML', 'Reitz'), ('NHM', 'Reitz')]
