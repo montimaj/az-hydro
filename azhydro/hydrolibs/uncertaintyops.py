@@ -3035,19 +3035,15 @@ def _load_az_sigma_per_category_basin(
         start_year: int,
         end_year: int,
 ) -> dict[str, dict[int, float]]:
-    """Statewide σ (AF/yr) per category per year via basin-level quadrature.
+    """Statewide σ (AF/yr) per category per year.
 
     Reads the per-component per-category per-basin σ CSVs written by
-    ``compute_sigma_{component}`` (5 components × 8 categories ×
-    {Basin, Subbasin}).  Aggregates per basin in quadrature across
-    components (σ_total = √(Σ σ_i²)), then across basins in quadrature
-    (AZ-wide σ = √(Σ basin_σ²)).
-
-    This is the same aggregation used in Basin_Sigma_Total.csv and
-    produces AZ-wide σ values that are ~5× larger than pure pixel-
-    level quadrature, because they respect intra-basin correlation
-    more honestly (basins are aggregated as spatially-coherent units
-    rather than treating every 2 km pixel as independent).
+    ``compute_sigma_{component}`` (6 components × 8 categories ×
+    {Basin, Subbasin}).  Aggregates per basin in QUADRATURE across
+    components (σ_basin = √(Σ σ_i²) — components are independent
+    uncertainty axes), then across basins in LINEAR SUM
+    (AZ-wide σ = Σ basin_σ — components are scenario-driven and
+    correlated across basins, so basin σ values move together).
 
     Returns ``{cat: {year: sigma_af}}``.  Returns an empty dict if
     the per-component CSVs are missing (e.g., Step 3b not run).
@@ -3057,7 +3053,7 @@ def _load_az_sigma_per_category_basin(
         'Irrigation', 'Irrigation_GW', 'Irrigation_SW',
         'Non_Irrigation', 'Non_Irrigation_GW', 'Non_Irrigation_SW',
     )
-    components = ('MACA', 'Model', 'Irr', 'LULC', 'GW')
+    components = ('MACA', 'Model', 'Irr', 'LULC', 'GW', 'USBR')
     out: dict[str, dict[int, float]] = {cat: {} for cat in cats}
 
     for cat in cats:
@@ -3083,10 +3079,9 @@ def _load_az_sigma_per_category_basin(
         merged['basin_sigma'] = np.sqrt(
             (merged[sigma_cols] ** 2).sum(axis=1),
         )
-        # AZ-wide quadrature across basins per year
-        az = merged.groupby('Year')['basin_sigma'].apply(
-            lambda s: float(np.sqrt((s ** 2).sum())),
-        )
+        # AZ-wide LINEAR SUM across basins per year (basin σ are
+        # correlated via shared scenario drivers — see docstring).
+        az = merged.groupby('Year')['basin_sigma'].sum()
         for yr, v in az.items():
             yr_int = int(yr)
             if start_year <= yr_int <= end_year:
@@ -3794,7 +3789,7 @@ def compute_basin_sigma_total(output_dir: str, prediction_dir: str = '') -> None
             the actual prediction volumes are used as the mean (instead of
             averaging per-component ensemble means).
     """
-    component_labels = ('MACA', 'Model', 'Irr', 'LULC', 'GW')
+    component_labels = ('MACA', 'Model', 'Irr', 'LULC', 'GW', 'USBR')
     total_dir = os.path.join(output_dir, 'Sigma_Total')
 
     # Load actual prediction volumes from output rasters if available
@@ -5663,7 +5658,14 @@ def _replot_from_augmented_rasters(
             for year in sorted(basin_yearly.keys()):
                 vol_m3 = 0.0
                 vol_af = 0.0
-                sigma_af_sq = 0.0
+                # AMA-aggregate σ via LINEAR SUM across basins.  All
+                # σ components (MACA / Model / Irr / LULC / GW / USBR)
+                # are scenario-driven via shared drivers (same 5
+                # GCMs / 10 model seeds / 5 USBR members perturb every
+                # basin), so per-basin σ values are correlated and
+                # combine linearly at the AMA aggregate scale.
+                # Quadrature here would under-estimate by ~3-4×.
+                sigma_af_sum = 0.0
                 # Area-weighted depth: total_volume / total_area
                 total_npix = 0.0
                 for bname, metrics in basin_yearly[year].items():
@@ -5677,7 +5679,7 @@ def _replot_from_augmented_rasters(
                     if bd_mm > 0 and _mm_to_m3 > 0:
                         total_npix += bv_m3 / (bd_mm * _mm_to_m3)
                     bsig = sigma_basin_yearly.get(year, {}).get(bname, {})
-                    sigma_af_sq += bsig.get('Sigma_Volume_AF', 0) ** 2
+                    sigma_af_sum += bsig.get('Sigma_Volume_AF', 0)
                 if vol_af == 0 and vol_m3 == 0:
                     continue
                 # Area-weighted mean depth = total_volume / total_area
@@ -5689,7 +5691,7 @@ def _replot_from_augmented_rasters(
                     'Volume_m3': vol_m3,
                     'Volume_AF': vol_af,
                 }
-                s_af = np.sqrt(sigma_af_sq)
+                s_af = sigma_af_sum
                 cv = s_af / abs(vol_af) if vol_af else 0
                 ama_sigma[year] = {
                     'Mean_Depth_mm': cv * abs(mean_depth_mm),
@@ -6165,6 +6167,15 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
         plt.close()
 
     # ── AZ-wide σ_total time series (sum of basin volumes) ──
+    # Aggregation across basins: LINEAR SUM (not quadrature).
+    # All σ components (MACA, Model, Irr, LULC, GW, USBR) are
+    # scenario-driven and CORRELATED across basins (the same 5 GCMs
+    # / 10 model seeds / 5 USBR members perturb every basin), so
+    # basin-σ values move together rather than independently.  Linear
+    # sum is the correct AZ-total under that correlation.
+    # Basin-quadrature (sqrt(Σ σ_basin²)) under-estimates AZ-total σ
+    # by ~3-4× because it assumes basin independence — produced
+    # ribbons that didn't cover USGS at peak years (~8.5 MAF cap).
     basin_csv = os.path.join(unc_dir, 'Sigma_Total', 'Basin_Sigma_Total.csv')
     if os.path.exists(basin_csv):
         bdf = pd.read_csv(basin_csv)
@@ -6172,8 +6183,8 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
             az_df = bdf.groupby('Year').agg(
                 Mean_Volume_m3=('Mean_Volume_m3', 'sum'),
                 Mean_Volume_AF=('Mean_Volume_AF', 'sum'),
-                Sigma_Total_m3=('Sigma_Total_m3', lambda x: np.sqrt((x ** 2).sum())),
-                Sigma_Total_AF=('Sigma_Total_AF', lambda x: np.sqrt((x ** 2).sum())),
+                Sigma_Total_m3=('Sigma_Total_m3', 'sum'),
+                Sigma_Total_AF=('Sigma_Total_AF', 'sum'),
             ).reset_index().sort_values('Year')
 
             # Withdrawal volumes are physically non-negative; clip the

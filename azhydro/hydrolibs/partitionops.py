@@ -385,6 +385,29 @@ CANAL_HEAVY_BASINS = frozenset({
     'GILA BEND', 'HUALAPAI VALLEY INA', 'PRESCOTT AMA', 'PINAL AMA',
 })
 
+# CO_RIVER_DIRECT_BASINS: basins with physical Colorado River
+# mainstem access (direct riverside diversions — CRIT senior rights,
+# Parker City, mainstem towns, Yuma Project, etc.).  Two effects:
+#   1. Bypass basin-level canal-infra gate (their SW supply comes
+#      from mainstem diversions, not canals in canal_density raster).
+#   2. Cap GW share at MAX_GW_SHARE_CO_DIRECT so density-ratio can't
+#      route everything to GW when irr_sw_rights_density is sparse
+#      (CRIT allocations are essentially absent from sw_rights data).
+# Excluded: SACRAMENTO VALLEY (tributary / Bullhead local),
+# BILL WILLIAMS (tributary with local GW-dominant pumping).
+CO_RIVER_DIRECT_BASINS = frozenset({
+    'PARKER', 'YUMA', 'LAKE MOHAVE', 'LAKE HAVASU',
+    'MEADVIEW', 'DETRITAL VALLEY',
+})
+
+# Maximum GW share at CO-river-direct basins.  Caps the density-
+# ratio output when irr_sw_rights_density under-represents mainstem
+# diversions (e.g. Parker has 4/1433 pixels with sw_rights — CRIT
+# allocations missing from the rights raster).  Reality: direct-
+# mainstem basins are 60-95 % SW physically; 0.4 is a conservative
+# upper bound allowing for modest GW/stock/domestic pumping.
+MAX_GW_SHARE_CO_DIRECT = 0.4
+
 # Adaptive irr_frac floor: at every pixel, irrigation share is at
 # least as large as the cropland share at that pixel.  Captures the
 # physical intuition that mapped cropland implies at least that much
@@ -652,13 +675,81 @@ def apply_ml_well_density_override(
     year_wd = np.nan_to_num(pred_features['well_density'].values, nan=0.0)
     effective_wd = year_wd
     if _wd2024_active and wd_2024 is not None:
-        # Peak USGS pumping years (1951–1955, 1970–1980): use the full
-        # 2024 registry (no _wd_2024_scale dampening for drought dip /
-        # ramp).  Outside those windows: use the standard scale-only
-        # multiplier.
+        # Peak USGS pumping years (1951–1955, 1970–1980): pre-GMA
+        # registry is incomplete at agricultural pixels in every
+        # basin — undocumented ag drilling was widespread and
+        # GMA-mandated registration (post-1980) was never
+        # retroactively complete.  At peak years, use **basin-MAX
+        # wd_2024** per pixel at cf > 0 OR uf > 0.2 pixels.  Gate
+        # excludes urban-fringe halo pixels (0 < uf <= 0.2) which
+        # are GEE-smoothing artifacts rather than real developed
+        # pixels, but includes real urban pixels (uf > 0.2).  Real
+        # ag pixels (cf > 0) always qualify.  This middle-ground
+        # gate avoided both the `cf | uf` overshoot (1980 → 12.6
+        # MAF at fringe inflation) and the `cf only` under-shoot
+        # (1980 → 7.08 MAF, too restrictive).  Per-pixel max with
+        # year_wd guarantees we don't lower any year-specific
+        # registered pixel.  Outside those windows: use per-pixel
+        # wd_2024 × _wd_2024_scale(year) (standard behavior).
         wd24_raw = np.nan_to_num(wd_2024, nan=0.0)
-        if 1951 <= year <= 1955 or 1970 <= year <= 1980:
-            wd24 = wd24_raw
+        # Two lifts:
+        #   (A) Peak-year LU lift: basin-MAX at cf>0 | uf>0.2 in
+        #       peak USGS pumping years (1951-55, 1970-80).
+        #       Aggressive lift representing densest plausible peak-
+        #       era well density at developed pixels.
+        #   (B) All-pre-1981 ORPHAN lift: basin-p90 at orphan pixels
+        #       (cf=0, uf=0, year_wd>0) across all pre-1981 years
+        #       (1896-1980).  Pre-GMA registry attrition affects
+        #       orphan / stock / rural domestic wells across the
+        #       whole pre-GMA era, not just peak years.  Basin-p90
+        #       (vs basin-max) gives a realistic "moderately dense
+        #       cluster" target rather than the single densest
+        #       outlier — orphan pixels are typically 1-2 wells, so
+        #       basin-max would be 100-270× the natural value (way
+        #       beyond ML training range, saturates).  has_well
+        #       requirement excludes bare desert.
+        wd24 = np.zeros_like(wd24_raw)
+        if 'GW_Basin' in year_df.columns:
+            _basins = year_df['GW_Basin'].values
+            _cf_peak = np.clip(np.nan_to_num(
+                pred_features['annual_crop_fraction'].values
+                if 'annual_crop_fraction' in pred_features.columns
+                else np.zeros(len(year_wd)), nan=0.0,
+            ), 0, 1)
+            _uf_peak = np.clip(np.nan_to_num(
+                pred_features['annual_urban_fraction'].values
+                if 'annual_urban_fraction' in pred_features.columns
+                else np.zeros(len(year_wd)), nan=0.0,
+            ), 0, 1)
+            _is_peak = (1951 <= year <= 1955) or (1970 <= year <= 1980)
+            _is_pre_1981 = year < 1981
+            _lu_gate_peak = (_cf_peak > 0) | (_uf_peak > 0.2)
+            _orphan_has_well = (
+                (_cf_peak == 0) & (_uf_peak == 0) & (year_wd > 0)
+            )
+            _scale = _wd_2024_scale(year)
+            _basin_series = pd.Series(_basins)
+            for _b in _basin_series.dropna().unique():
+                _b_mask = (_basins == _b)
+                _b_pool = wd24_raw[_b_mask & (wd24_raw > 0)]
+                if _b_pool.size == 0:
+                    continue
+                # (A) Peak-year LU pixels → basin-MAX
+                if _is_peak:
+                    wd24[_b_mask & _lu_gate_peak] = float(np.max(_b_pool))
+                # (B) Pre-1981 orphan pixels → basin-p90 × scale
+                if _is_pre_1981:
+                    _b_p90 = float(np.quantile(_b_pool, 0.9))
+                    _orphan_target = _b_p90 if _is_peak else _b_p90 * _scale
+                    wd24[_b_mask & _orphan_has_well] = np.maximum(
+                        wd24[_b_mask & _orphan_has_well],
+                        _orphan_target,
+                    )
+            # For pixels not covered by either lift, fall back to
+            # standard per-pixel scale (post-1980 era + LU pixels at
+            # non-peak years).
+            _no_lift = wd24 == 0
+            wd24[_no_lift] = wd24_raw[_no_lift] * _scale
         else:
             wd24 = wd24_raw * _wd_2024_scale(year)
         effective_wd = np.maximum(effective_wd, wd24)
@@ -677,24 +768,14 @@ def apply_ml_well_density_override(
 
     # LU-only basin-median fill (ML features ONLY — does NOT affect
     # the partition's lu_only mask).  At pixels where effective_wd is
-    # still 0 (no year_wd, no wd_2024) but the pixel has LULC signal,
-    # fill with the basin's median wd_2024 value × scale.
-    #
-    # Gating logic:
-    #   - AMA/INA pixels (any year): raw per-pixel fractions
-    #     (annual_crop_fraction > 0 OR annual_urban_fraction > 0).
-    #   - Outside-AMA pixels at peak years (1951-1955, 1970-1980):
-    #     SMOOTHED ag (AGRI > 0) OR raw urban_fraction > 0.
-    #   - Outside-AMA pixels at other years: raw per-pixel fractions.
-    # AGRI-extension at outside-AMA: only at peak years (registry
-    # incomplete then).  Post-CAP (1985+) uses raw cf/uf only.
-    #   1951–55, 1975–80: AGRI > 0.02 (loose, peak years)
-    #   1970–74:           AGRI > 0.10 (standard)
-    #   other years:       no AGRI extension (raw cf/uf only)
-    _is_loose_p = (1951 <= year <= 1955 or 1975 <= year <= 1980)
-    _is_std_p   = (1970 <= year <= 1974)
-    _agri_thr_p = 0.02 if _is_loose_p else 0.10
-    _agri_active = _is_loose_p or _is_std_p
+    # still 0 (no year_wd, no wd_2024, no basin-max lift for peak
+    # years) but the pixel has LULC signal, fill with the basin's
+    # median wd_2024 × scale.  Gate uses raw crop/urban fractions
+    # (AGRI-smoothed version dropped to avoid hindcast halos).
+    # At peak years this branch rarely fires because Step 1's
+    # basin-max lift already populates all pixels in developed
+    # basins; it remains useful at non-peak years and in basins
+    # that have year-specific wells but no 2024 wells.
     if (year >= PHANTOM_INFILL_START
             and wd_2024 is not None
             and 'GW_Basin' in year_df.columns):
@@ -710,18 +791,7 @@ def apply_ml_well_density_override(
             if 'annual_urban_fraction' in pred_features.columns
             else np.zeros(len(effective_wd)), nan=0.0,
         ), 0, 1)
-        _raw_gate = (_cf_lu > 0) | (_uf_lu > 0)
-        if _agri_active:
-            _agri_lu = np.clip(np.nan_to_num(
-                pred_features['AGRI'].values
-                if 'AGRI' in pred_features.columns
-                else np.zeros(len(effective_wd)), nan=0.0,
-            ), 0, 1)
-            _outside_gate = (_agri_lu > _agri_thr_p) | (_uf_lu > 0)
-            _is_ama = np.isin(_basins_lu, list(AMA_BASINS))
-            _lulc_gate = np.where(_is_ama, _raw_gate, _outside_gate)
-        else:
-            _lulc_gate = _raw_gate
+        _lulc_gate = (_cf_lu > 0) | (_uf_lu > 0)
         _lu_scale = _phantom_infill_scale(year)
         if _lu_scale > 0.0:
             _basin_series = pd.Series(_basins_lu)
@@ -732,8 +802,9 @@ def apply_ml_well_density_override(
                     continue
                 _b_lu = _b_mask & (effective_wd == 0.0) & _lulc_gate
                 if _b_lu.any():
-                    _basin_med = float(np.median(_b_pool))
-                    effective_wd[_b_lu] = _basin_med * _lu_scale
+                    effective_wd[_b_lu] = (
+                        float(np.median(_b_pool)) * _lu_scale
+                    )
     pred_features['well_density'] = effective_wd
     return pred_features
 
@@ -1194,6 +1265,89 @@ def partition_predictions(
         year, nonirr_wd_yr, nonirr_wd_1981,
         crop_frac_col, urban_frac_col, basin_names, purpose='nonirr',
     )
+
+    # Peak-year basin lift on partition-side well-density columns.
+    # Mirrors the ML-feature basin-max lift in
+    # apply_ml_well_density_override.  Without this, ML sees the
+    # lifted well_density and predicts big peak-year volumes, but
+    # the density-ratio split here would still use sparse year-
+    # specific irr_wd / nonirr_wd → smooth_swd dominates → SW wins
+    # → GW% under-predicted at peak years.
+    #
+    # Split aggregator:
+    #   * well_dens → basin-MAX.  Used for has_well flipping; the
+    #     max ensures all cf | uf>0.2 pixels have registered wells
+    #     so lu_urban_only volume recovery reaches them.
+    #   * irr_wd / nonirr_wd → basin-MEDIAN.  Used in the density-
+    #     ratio GW/SW split: gw_share = (gw_weight × irr_wd) /
+    #     (gw_weight × irr_wd + smooth_swd).  Basin-MAX here
+    #     over-powered smooth_swd, forcing gw_share ≈ 1 and
+    #     over-attributing GW at peak years (1970: 75 % vs USGS 62 %;
+    #     1975: 72 % vs 62 %; 1980: 61 % vs 53 %).  Basin-median
+    #     tempers the ratio so SW (SRP canal deliveries at peak
+    #     pre-CAP years) can still compete with GW in the
+    #     denominator.
+    #
+    # Two lifts (mirror ML-feature lifts in
+    # apply_ml_well_density_override):
+    #   (A) Peak-year LU lift (cf>0|uf>0.2): basin-MAX for
+    #       well_dens, basin-MEDIAN for irr_wd/nonirr_wd, at peak
+    #       years (1951-55, 1970-80).
+    #   (B) All-pre-1981 ORPHAN lift (cf=0, uf=0, year_wd>0):
+    #       basin-p90 for well_dens, basin-p75 for irr_wd/nonirr_wd
+    #       (slightly softer to avoid GW-share over-routing),
+    #       across all pre-1981 years.  Pre-GMA registry attrition
+    #       affects orphans throughout, not just peak years.
+    _is_peak_wd = (1951 <= year <= 1955) or (1970 <= year <= 1980)
+    _is_pre_1981 = year < 1981
+    if ((_is_peak_wd or _is_pre_1981) and basin_names is not None
+            and crop_frac_col is not None
+            and urban_frac_col is not None):
+        cf_peak = np.clip(np.nan_to_num(crop_frac_col, nan=0.0), 0, 1)
+        uf_peak = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
+        lu_gate_peak = (cf_peak > 0) | (uf_peak > 0.2)
+        orphan_has_well = (
+            (cf_peak == 0) & (uf_peak == 0) & (well_dens > 0)
+        )
+        _basin_series_wd = pd.Series(basin_names)
+        _lift_specs = [
+            # (array, snapshot, peak-LU agg, orphan agg)
+            (well_dens, wd_1981, 'max', 'p90'),
+            (irr_wd, irr_wd_1981, 'median', 'p75'),
+            (nonirr_wd, nonirr_wd_1981, 'median', 'p75'),
+        ]
+        for _yr_arr, _snap, _peak_agg, _orph_agg in _lift_specs:
+            if _snap is None:
+                continue
+            _snap_safe = np.nan_to_num(_snap, nan=0.0)
+            for _b in _basin_series_wd.dropna().unique():
+                _b_mask = (basin_names == _b)
+                _b_pool = _snap_safe[_b_mask & (_snap_safe > 0)]
+                if _b_pool.size == 0:
+                    continue
+                # (A) Peak-year LU lift.
+                if _is_peak_wd:
+                    _b_lu_val = (
+                        float(np.max(_b_pool)) if _peak_agg == 'max'
+                        else float(np.median(_b_pool))
+                    )
+                    _b_lu_lift = _b_mask & lu_gate_peak
+                    if _b_lu_lift.any():
+                        _yr_arr[_b_lu_lift] = np.maximum(
+                            _yr_arr[_b_lu_lift], _b_lu_val,
+                        )
+                # (B) Pre-1981 orphan lift.
+                if _is_pre_1981:
+                    if _orph_agg == 'p90':
+                        _b_orph_val = float(np.quantile(_b_pool, 0.9))
+                    else:  # 'p75'
+                        _b_orph_val = float(np.quantile(_b_pool, 0.75))
+                    _b_orph_lift = _b_mask & orphan_has_well
+                    if _b_orph_lift.any():
+                        _yr_arr[_b_orph_lift] = np.maximum(
+                            _yr_arr[_b_orph_lift], _b_orph_val,
+                        )
+
     has_well = well_dens > 0
 
     # ---- Smooth canal-weighted streamflow to identify canal service area ----
@@ -1215,45 +1369,15 @@ def partition_predictions(
         if crop_frac_col is not None else np.zeros(len(predictions), dtype=bool)
     _has_urban_any = (np.nan_to_num(urban_frac_col, nan=0.0) >= 0.2) \
         if urban_frac_col is not None else np.zeros(len(predictions), dtype=bool)
-    # AGRI-extension retention at outside-AMA basins (peak years only).
-    # AGRI extension makes sense when the well registry is incomplete
-    # — peak USGS pumping years (1951–55, 1970–80).  Post-CAP (1985+)
-    # the registry is more or less complete, so we don't extend via
-    # AGRI; instead, use the explicit per-pixel LULC logic below.
-    #   - 1951–55 and 1975–80 (peak USGS pumping):  AGRI > 0.01
-    #   - 1970–74:                                   AGRI > 0.10
-    #   - other years (incl. 1985+):                 no extension
-    _is_loose_agri = (1951 <= year <= 1955 or 1975 <= year <= 1980)
-    # 1956–1959 std_agri extension: 1955→1956 the loose AGRI gate
-    # turned off (loose: AGRI > 0.02), dropping pixels retained via
-    # AGRI extension and producing a 2.2 MAF Total cliff at 1956.
-    # Re-extend with the std threshold (0.10) at 1956–1959 to bridge
-    # the dip toward the ADWR 1957 (7.0 MAF) anchor without dropping
-    # pixels that AGRI smoothing legitimately kept in service area.
-    _is_std_agri   = (1970 <= year <= 1974 or 1956 <= year <= 1959)
-    # 1964–1969 mid_agri extension: USGS 1965 = 7.04 (local peak
-    # between 1960 = 5.62 and 1970 = 7.60).  Model was under-
-    # predicting 1965 by 8.9%.  1970 had 0.10 threshold and matched
-    # USGS; a slightly looser 0.05 threshold at 1964–1969 extends
-    # AGRI retention in the pre-1970 ramp-up without going as wide
-    # as the 0.02 loose window.
-    _is_mid_agri   = (1964 <= year <= 1969)
-    if _is_loose_agri:
-        _agri_threshold_yr = 0.02
-    elif _is_mid_agri:
-        _agri_threshold_yr = 0.10
-    else:
-        _agri_threshold_yr = 0.10
-    _agri_extension_active = _is_loose_agri or _is_std_agri or _is_mid_agri
-    if (_agri_extension_active and 'AGRI' in year_df.columns
-            and basin_names is not None):
-        _agri_retain = np.clip(np.nan_to_num(
-            year_df['AGRI'].values, nan=0.0,
-        ), 0, 1)
-        _is_ama_retain = np.isin(basin_names, list(AMA_BASINS))
-        _has_crop_any = _has_crop_any | (
-            (_agri_retain > _agri_threshold_yr) & ~_is_ama_retain
-        )
+    # Pre-1985 AGRI retention extension removed — the previous
+    # outside-AMA AGRI > 0.02 / 0.10 gates relied on the smoothed AGRI
+    # density to capture patchy rural ag that CDL's raw crop_frac
+    # misses.  The smoothing created hindcast-era halos that show up
+    # as ring artifacts in the predicted maps.  Reverting to raw
+    # crop_frac-only retention eliminates the halos; expect the 1956
+    # / 1965 / 1975-80 outside-AMA Irr totals to drop by whatever
+    # volume the AGRI extension was propping up.
+    _agri_extension_active = False
     # Pre-1945: retention uses the year-specific registry intersected
     # with the LULC mask (year-specific wells only, AND the pixel must
     # have nearby crop or urban).  LU-only branches are dropped entirely
@@ -1384,27 +1508,77 @@ def partition_predictions(
         cf_floor = np.clip(np.nan_to_num(crop_frac_col, nan=0.0), 0, 1)
         irr_frac = np.maximum(irr_frac, cf_floor)
 
+    # Peak-year basin-MAX irr_capacity lift: same registry-incompleteness
+    # argument as the well_density basin-max lift — pre-GMA irrigation
+    # wells were voluntarily registered, and the 2024 year-specific
+    # irr_capacity_fraction is sparse at 1951-55 / 1970-80 (only ~3-6 %
+    # of valid pixels have irr_cap > 0 vs ~9 % in 2020).  At peak years,
+    # at any cf > 0 pixel in a basin with ANY registered irrigation,
+    # lift irr_frac to the basin's MAX irr_cap_col value.  This routes
+    # volume from NonIrr default back to Irr at halo ag pixels that
+    # were under-attributed.
+    #
+    # Subsequent IRR_OVERRIDE branches still run: pre-1970 overwrites
+    # everything with 0.95 (basin-max has no effect at 1951-55), and
+    # 1970-1985 non-AMA overwrites with 1-uf (basin-max has no effect
+    # at non-AMA in 1970-1985).  The lift is therefore only visible at
+    # 1970-1985 AMA pixels (Phoenix/Pinal/Tucson/etc.) where the
+    # natural irr_capacity_fraction is used — the exact basins where
+    # we saw Irr% under-prediction at 1975/1980.
+    _is_peak_wd = (1951 <= year <= 1955) or (1970 <= year <= 1980)
+    if (_is_peak_wd and irr_cap_col is not None
+            and basin_names is not None
+            and crop_frac_col is not None):
+        cf_peak = np.clip(np.nan_to_num(crop_frac_col, nan=0.0), 0, 1)
+        irr_cap_safe = np.clip(np.nan_to_num(irr_cap_col, nan=0.0), 0, 1)
+        _basin_series_ic = pd.Series(basin_names)
+        for _b in _basin_series_ic.dropna().unique():
+            _b_mask = (basin_names == _b)
+            _b_pool = irr_cap_safe[_b_mask & (irr_cap_safe > 0)]
+            if _b_pool.size == 0:
+                continue
+            _b_lift = _b_mask & (cf_peak > 0)
+            if _b_lift.any():
+                irr_frac[_b_lift] = np.maximum(
+                    irr_frac[_b_lift], float(np.max(_b_pool)),
+                )
+
     # Irr-fraction overrides:
-    #   (1) Pre-1970 ALL pixels: USGS shows ag was 91–97% of all AZ
-    #       pumping through 1970 (1950=97%, 1960=94%, 1970=91%).  Force
-    #       0.95 across all retained pixels for year < 1970, full volume.
-    #   (2) 1970–1985 NON-AMA: irr_frac = 1 − urban_frac (clipped) so
-    #       Irr% stays high at rural ag basins through the late-pre-GMA
-    #       peak era and the 1985 CAP-startup year; volume is conserved
-    #       (no desert-residual drop).  Extended to include 1985 because
-    #       USGS Irr% at 1985 was 85.5 vs the area-weighted partition's
-    #       77 — the 1970–1984 logic produces ~89 Irr% at 1980 (matching
-    #       USGS 89.1), so applying it at 1985 lands much closer.
-    #   (3) 1986+ NON-AMA: Option C — area-weighted with desert residual
-    #       dropped.  Addresses post-CAP over-prediction at desert-
-    #       fringe pixels without affecting pre-CAP peak years.
-    #   (4) 1970+ AMA (Phoenix, Tucson only): natural year-specific
-    #       irr_capacity_fraction so the registry captures real
-    #       municipal/industrial growth concentrated in those AMAs.
+    #   (1) Through 1980 pixels with uf < 0.3 (rural + suburban
+    #       fringe + LULC halo): force 0.95 flat.  USGS shows ag was
+    #       89-97 % of AZ-total pumping through 1980; the flat 0.95
+    #       is well-calibrated at rural / ag-dominated pixels and
+    #       suburban-fringe pixels.  0.3 is the urban-core threshold
+    #       — below it, pre-1980 M&I per-pixel was small enough to
+    #       treat as ~5 % NonIrr; above it, the urban share is large
+    #       enough to matter.
+    #   (2) Through 1980 pixels with uf >= 0.3 (real urban cores,
+    #       any basin): irr_frac = 1 − urban_frac (clipped
+    #       [0.05, 1]).  Applies regardless of AMA status —
+    #       Flagstaff, Lake Havasu City, Bullhead City, Page,
+    #       Phoenix / Tucson urban cores.  Routes the uf share to
+    #       NonIrr (municipal / industrial), the (1 - uf) share to
+    #       Irr.  The 0.3 threshold (raised from 0.2) recovers the
+    #       peak-year Irr% that over-correction at suburban-fringe
+    #       pixels was dropping.
+    #   (3) 1981–1985 NON-AMA: irr_frac = 1 − urban_frac.
+    #   (4) 1986+ NON-AMA: Option C via post-1985 LU-aware branch.
+    #   (5) 1981+ AMA: natural year-specific irr_capacity_fraction.
     IRR_OVERRIDE_PRE_1970 = 0.95
     IRR_OVERRIDE_FLOOR = 0.05
-    if year < 1970:
+    URBAN_REAL_THRESHOLD = 0.3
+    if year <= 1980:
         irr_frac = np.full_like(irr_frac, IRR_OVERRIDE_PRE_1970)
+        # Real-urban pixels (uf >= 0.3) get 1 - uf routing regardless
+        # of AMA status — M&I pumping at any urban core.
+        if urban_frac_col is not None:
+            uf = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
+            urban_real = uf >= URBAN_REAL_THRESHOLD
+            if urban_real.any():
+                irr_frac[urban_real] = np.clip(
+                    1.0 - uf[urban_real],
+                    IRR_OVERRIDE_FLOOR, 1.0,
+                )
     elif (year < 1986 and basin_names is not None
             and urban_frac_col is not None):
         non_ama = ~np.isin(basin_names, list(AMA_BASINS))
@@ -1412,6 +1586,44 @@ def partition_predictions(
         irr_from_uf = np.clip(1.0 - uf, IRR_OVERRIDE_FLOOR, 1.0)
         irr_frac = irr_frac.copy()
         irr_frac[non_ama] = irr_from_uf[non_ama]
+
+    # Orphan-pixel Irr/NonIrr refinement — PRE-CAP ERA ONLY
+    # (year <= 1985).  ~30 % of every year's registered wells land
+    # on pixels with cf = 0 AND uf = 0 (no raw CDL crop or urban
+    # class).  Pre-CAP: route AGRI-dominated orphans → 0.95 Irr
+    # (CDL-miss ag) and URBAN-dominated orphans via a shallow
+    # 1 − URBAN gradient.  POST-CAP (1986+): fall back to the
+    # previous-commit default-partition behaviour — orphans at
+    # 1-uf = 1 (uf=0) go to 100 % Irr.  Reverted because orphan
+    # URBAN-gradient was shifting volume into NonIrr at 2020 that
+    # then couldn't retain SW (raw-uf excess routing scaled it to 0)
+    # → NonIrr_GW share inflated from ~60 % to 80 %.
+    if (year <= 1985
+            and crop_frac_col is not None and urban_frac_col is not None
+            and 'AGRI' in year_df.columns
+            and 'URBAN' in year_df.columns):
+        cf_arr = np.clip(np.nan_to_num(crop_frac_col, nan=0.0), 0, 1)
+        uf_arr = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
+        orphan = (cf_arr == 0) & (uf_arr == 0) & has_well
+        if orphan.any():
+            agri_smooth = np.nan_to_num(
+                year_df['AGRI'].values, nan=0.0,
+            )
+            urb_smooth = np.clip(np.nan_to_num(
+                year_df['URBAN'].values, nan=0.0,
+            ), 0, 1)
+            orp_agri_dom = orphan & (agri_smooth > urb_smooth)
+            orp_urb_dom = orphan & (urb_smooth >= agri_smooth) & (
+                urb_smooth > 0
+            )
+            irr_frac = irr_frac.copy()
+            # AGRI-dominated orphans → Irr (CDL-miss ag).
+            irr_frac[orp_agri_dom] = IRR_OVERRIDE_PRE_1970  # 0.95
+            # URBAN-dominated orphans → shallow gradient.
+            irr_frac[orp_urb_dom] = np.clip(
+                1.0 - urb_smooth[orp_urb_dom],
+                IRR_OVERRIDE_FLOOR, 1.0,
+            )
     irr = predictions * irr_frac
     nonirr = predictions * (1.0 - irr_frac)
 
@@ -1435,7 +1647,6 @@ def partition_predictions(
     # urban) as Irr rather than NonIrr — addresses the persistent
     # ~5–8 pp Irr% under-attribution at 1985 and 2015+.
     URBAN_HIGH_THRESHOLD = 0.30
-    ONLY_URBAN_AGRI_FLOOR = 0.50
     if (year >= 1986 and basin_names is not None
             and crop_frac_col is not None and urban_frac_col is not None):
         # Apply override outside URBAN_AMA_BASINS (Phoenix, Tucson).
@@ -1450,13 +1661,18 @@ def partition_predictions(
         non_urban = ~np.isin(basin_names, list(URBAN_AMA_BASINS))
         cf = np.clip(np.nan_to_num(crop_frac_col, nan=0.0), 0, 1)
         uf = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
-        # AGRI-halo gate: pixels with cf = 0 but smoothed AGRI > 0.1
-        # are in an ag halo — GEE LULC frequently misses patchy rural
-        # ag (especially in Willcox/Harquahala/Douglas), but AGRI
-        # smoothing captures the ag footprint.  Route these to the
-        # only_crop branch instead of pure_desert so they keep their
-        # full ML pred as Irr rather than falling into the default
-        # partition's NonIrr default or the desert-well scaling.
+        # AGRI-halo gate (post-1985 ONLY): pixels with cf = 0 but
+        # smoothed AGRI > 0.1 are in an ag halo.  CDL at 2000 m
+        # under-maps patchy rural ag (Willcox, Harquahala, Douglas,
+        # Pinal-fringe), but smoothed AGRI captures the footprint.
+        # Route halo pixels into only_crop so they get full Irr —
+        # otherwise they fall into pure_desert_with_well at AMA
+        # basins where irr_cap = 0 → 100 % NonIrr → density-ratio
+        # routes ~85 % to NonIrr_GW, inflating NonIrr by ~0.5-1.0 MAF
+        # at every post-1985 anchor.  Restored at 1986+ only — the
+        # pre-1985 hindcast halo issue was actually from the lu_only
+        # AGRI extension + pre-1985 SW-kernel ramping (still
+        # removed), not from this gate.
         AG_HALO_AGRI = 0.10
         if 'AGRI' in year_df.columns:
             _agri_halo = np.clip(np.nan_to_num(
@@ -1476,16 +1692,6 @@ def partition_predictions(
         nonirr[only_crop] = 0.0
         irr[both_lu] = predictions[both_lu] * (1.0 - uf[both_lu])
         nonirr[both_lu] = predictions[both_lu] * uf[both_lu]
-        # Only-urban: zero out Irr where smoothed AGRI is low (no real
-        # ag activity nearby).  NonIrr stays from default partition
-        # (pred × (1−irr_capacity)).  This drops Irr volume at urban-
-        # only pixels lacking ag context.
-        if 'AGRI' in year_df.columns:
-            _agri_only_urban = np.clip(np.nan_to_num(
-                year_df['AGRI'].values, nan=0.0,
-            ), 0, 1)
-            only_urban_low_agri = only_urban & (_agri_only_urban < ONLY_URBAN_AGRI_FLOOR)
-            irr[only_urban_low_agri] = 0.0
         irr[pure_desert_no_well] = 0.0
         nonirr[pure_desert_no_well] = 0.0
         # 2003–2012: scale pure_desert_with_well volumes by 0.75.
@@ -1530,22 +1736,11 @@ def partition_predictions(
         ), 0, 1)
         lu_scale = _phantom_infill_scale(year)  # 0.10 (1938) → 1.0 (1955+)
         # crop threshold: pixels with cf > 0.05 qualify as lu_crop.
-        # Peak years (1951–55, 1970–80) at outside-AMA also include
-        # AGRI > 0.10 (smoothed ag halo) so the retention extension
-        # routes through lu_crop (volume-conserving), not lu_urban_only
-        # (which would zero them at uf=0 rural-ag-fringe pixels).
+        # Previously the peak-year outside-AMA branch also included
+        # AGRI > threshold — that gate is removed to eliminate the
+        # smoothed-AGRI halo that showed up in hindcast maps.
         LU_CROP_THRESHOLD = 0.05
-        if (_agri_extension_active and 'AGRI' in year_df.columns
-                and basin_names is not None):
-            _agri_lu_branch = np.clip(np.nan_to_num(
-                year_df['AGRI'].values, nan=0.0,
-            ), 0, 1)
-            _is_ama_lu = np.isin(basin_names, list(AMA_BASINS))
-            _crop_gate = (cf_lu > LU_CROP_THRESHOLD) | (
-                (_agri_lu_branch > _agri_threshold_yr) & ~_is_ama_lu
-            )
-        else:
-            _crop_gate = (cf_lu > LU_CROP_THRESHOLD)
+        _crop_gate = (cf_lu > LU_CROP_THRESHOLD)
         lu_crop = lu_only & _crop_gate
         lu_urban_only = lu_only & ~_crop_gate
         # lu_crop: split by urban_frac (volume-conserving) × scale
@@ -1624,6 +1819,17 @@ def partition_predictions(
         SW_SIGMA = float(sw_smooth_sigma)
     gw_weight = _era_gw_weight(year)
 
+    # Cap GW share at CO-river-direct basins so density-ratio can't
+    # route everything to GW when irr_sw_rights_density is under-
+    # represented in the raster (Parker / Lake Havasu have near-zero
+    # sw_rights pixels despite real CRIT / mainstem SW access, so
+    # density ratio naturally produces gw_share = 1 there).
+    is_co_direct = (
+        np.isin(basin_names, list(CO_RIVER_DIRECT_BASINS))
+        if basin_names is not None
+        else np.zeros(len(predictions), dtype=bool)
+    )
+
     if irr_swd is not None:
         irr_swd_smooth = _smooth_sw_density(
             irr_swd, cw_sf_vals, raster_shape, valid_mask, SW_SIGMA,
@@ -1635,6 +1841,12 @@ def partition_predictions(
                 denom_irr > 0, weighted_irr_wd / denom_irr, 1.0,
             )
         irr_gw_share = np.clip(irr_gw_share, 0, 1)
+        if is_co_direct.any():
+            irr_gw_share = np.where(
+                is_co_direct,
+                np.minimum(irr_gw_share, MAX_GW_SHARE_CO_DIRECT),
+                irr_gw_share,
+            )
         irr_gw = irr * irr_gw_share
         irr_sw = irr - irr_gw
     else:
@@ -1652,17 +1864,75 @@ def partition_predictions(
                 denom_ni > 0, weighted_nonirr_wd / denom_ni, 1.0,
             )
         nonirr_gw_share = np.clip(nonirr_gw_share, 0, 1)
+        if is_co_direct.any():
+            nonirr_gw_share = np.where(
+                is_co_direct,
+                np.minimum(nonirr_gw_share, MAX_GW_SHARE_CO_DIRECT),
+                nonirr_gw_share,
+            )
         nonirr_gw = nonirr * nonirr_gw_share
         nonirr_sw = nonirr - nonirr_gw
     else:
         nonirr_gw = nonirr.copy()
         nonirr_sw = np.zeros_like(nonirr)
 
+    # Basin-level canal-infra gate (all eras): collapse SW → GW in
+    # basins that don't have meaningful canal infrastructure.
+    # Gaussian smoothing of sw_rights_density + cw_streamflow bleeds
+    # signals across basin boundaries, producing phantom SW in GW-
+    # only basins like Willcox / Douglas / Joseph City / Lower Gila.
+    #
+    # Two-part gate:
+    #   (a) Require BASIN CANAL COVERAGE >= 1 % of basin pixels.
+    #       Previous `basin_max > 0` rule was defeated by isolated
+    #       outliers (Willcox has 2 canal pixels out of 1,238 = 0.16 %
+    #       → gate didn't fire → ~4 % SW leakage).  Requiring 1 %
+    #       coverage rules out those spurious outliers while still
+    #       allowing any basin with a real canal network (Phoenix ≈
+    #       40 %, Pinal ≈ 30 %, etc.).
+    #   (b) WHITELIST direct-CO-river basins (CO_RIVER_DIRECT_BASINS):
+    #       bypass the gate regardless of canal coverage.  Parker,
+    #       Yuma, Lake Mohave, Lake Havasu, etc. have physical
+    #       mainstem river access via riverside diversions that
+    #       don't register as canal_density pixels — without this
+    #       bypass, pre-CAP Parker shows 100 % GW (wrong — CRIT
+    #       senior rights deliver ~720 kAF/yr from Colorado direct).
+    if canal_dens is not None and basin_names is not None:
+        canal_series = pd.Series(canal_dens)
+        basin_canal_coverage = canal_series.groupby(basin_names).transform(
+            lambda x: (x > 0).mean(),
+        )
+        is_co_direct = np.isin(basin_names, list(CO_RIVER_DIRECT_BASINS))
+        no_canal_basin = (
+            (basin_canal_coverage.values < 0.01)
+            & ~is_co_direct
+        )
+        # Collapse ONLY Irr_SW at no-canal basins.  Agricultural SW
+        # requires canal infrastructure to deliver — without canals,
+        # any irr_sw in the density-ratio output is smoothing
+        # leakage from neighbouring basins.  NonIrr_SW (municipal /
+        # industrial / mining) can come from direct lake/river
+        # intakes that don't show up as canal_density pixels (Page
+        # on Lake Powell at LCR, Bullhead City on Colorado mainstem
+        # at Sacramento Valley, mining at Big Sandy, etc.) — keep
+        # those NonIrr_SW values.  Earlier full SW→GW collapse was
+        # over-aggressive and inflated NonIrr_GW by ~0.5-0.8 MAF at
+        # 2020 across LCR/Big Sandy/Sacramento Valley/Bill Williams.
+        if no_canal_basin.any():
+            irr_gw = np.where(
+                no_canal_basin, irr_gw + irr_sw, irr_gw,
+            )
+            irr_sw = np.where(no_canal_basin, 0.0, irr_sw)
+
     # Pre-1945: USGS shows ~100% GW statewide.  Restrict SW to pixels
     # that actually have direct access to surface water — canal-served
     # (smoothed or direct) or holding SW rights.  Elsewhere, collapse
     # SW back into GW so density-ratio leakage (Gaussian smoothing of
     # sw_rights_density into dry cells) does not produce phantom SW.
+    # This pixel-level gate is retained as a second line of defense
+    # within canal-having basins — pixels in CAP service area that
+    # are far from any actual canal still get phantom SW from
+    # smoothing, and pre-1945 we want no SW without physical access.
     if year < 1945:
         _irr_sw_ok = has_smooth_canal | has_direct_canal | (
             (irr_swd > 0) if irr_swd is not None
