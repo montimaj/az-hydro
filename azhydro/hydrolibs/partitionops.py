@@ -404,9 +404,69 @@ CO_RIVER_DIRECT_BASINS = frozenset({
 # ratio output when irr_sw_rights_density under-represents mainstem
 # diversions (e.g. Parker has 4/1433 pixels with sw_rights — CRIT
 # allocations missing from the rights raster).  Reality: direct-
-# mainstem basins are 60-95 % SW physically; 0.4 is a conservative
-# upper bound allowing for modest GW/stock/domestic pumping.
+# mainstem basins are 60-95 % SW physically; the default 0.4 is a
+# conservative upper bound for M&I-dominant small basins (Lake
+# Havasu, Detrital Valley, Meadview).  Per-basin overrides apply
+# tighter caps to ag-dominant basins where federal/tribal SW
+# deliveries (CRIT, Yuma Project, Bullhead City) push the actual
+# physical SW share to 85-99 %:
+#
+#   PARKER       — CRIT senior rights (~720 kAF/yr Priority-1) drive
+#                  ag SW share to ~85-95 %; cap GW at 15 %.
+#   YUMA         — Yuma Project + Cocopah / Quechan tribal deliveries
+#                  → 90-98 % SW; cap GW at 10 %.
+#   LAKE MOHAVE  — Bullhead City direct mainstem M&I → 95-99 % SW;
+#                  density-ratio already yields low GW%, but cap at
+#                  10 % for consistency with Yuma/Mohave physical reality.
 MAX_GW_SHARE_CO_DIRECT = 0.4
+
+CO_DIRECT_BASIN_GW_CAP = {
+    'PARKER': 0.15,
+    'YUMA': 0.10,
+    'LAKE MOHAVE': 0.10,
+}
+
+
+def _co_direct_gw_cap_array(basin_names: np.ndarray) -> np.ndarray:
+    """Return per-pixel GW-share cap for CO-river-direct basins.
+
+    Default cap is ``MAX_GW_SHARE_CO_DIRECT`` (0.4) for every CO-direct
+    basin not listed in ``CO_DIRECT_BASIN_GW_CAP``.  Per-basin overrides
+    apply at Parker / Yuma / Lake Mohave (ag- or M&I-mainstem-dominant
+    basins where physical SW share is 85-99 %).  Pixels in non-CO-direct
+    basins receive a sentinel of ``np.inf`` (no cap) so callers can
+    apply the cap unconditionally via ``np.minimum``.
+    """
+    cap = np.full(len(basin_names), np.inf, dtype=np.float64)
+    is_co_direct = np.isin(basin_names, list(CO_RIVER_DIRECT_BASINS))
+    cap = np.where(is_co_direct, MAX_GW_SHARE_CO_DIRECT, cap)
+    for name, val in CO_DIRECT_BASIN_GW_CAP.items():
+        cap = np.where(basin_names == name, val, cap)
+    return cap
+
+# Basins where NonIrr_SW should be preserved at the no-canal gate.
+# These have physical NonIrr_SW supply from direct lake / river /
+# tributary intakes that do NOT show up as canal_density pixels:
+#   LCR — Page on Lake Powell intake
+#   SACRAMENTO VALLEY — Bullhead City on Colorado mainstem
+#   BIG SANDY — historical mining diversions
+#   BILL WILLIAMS — Alamo Lake intake serving M&I
+# At no-canal basins NOT on this list, the gate now collapses BOTH
+# Irr_SW and NonIrr_SW (Willcox / Douglas / Joseph City — purely GW
+# basins with no SW supply at all).
+NONIRR_SW_PRESERVE_BASINS = frozenset({
+    'LITTLE COLORADO RIVER PLATEAU',
+    'SACRAMENTO VALLEY',
+    'BIG SANDY',
+    'BILL WILLIAMS',
+})
+
+# Basin canal-coverage threshold for the no-canal gate (fraction of
+# valid pixels with canal_density > 0).  Bumped from 1 % to 2 % so
+# that Douglas (1.12-1.29 % from 7-8 spurious / historical canal
+# pixels) trips the gate.  Phoenix ≈ 40 %, Pinal ≈ 30 %, Yuma > 10 %
+# all stay well above the threshold; Willcox at 0.16 % is also caught.
+CANAL_COVERAGE_GATE_THRESHOLD = 0.02
 
 # Adaptive irr_frac floor: at every pixel, irrigation share is at
 # least as large as the cropland share at that pixel.  Captures the
@@ -1824,11 +1884,13 @@ def partition_predictions(
     # represented in the raster (Parker / Lake Havasu have near-zero
     # sw_rights pixels despite real CRIT / mainstem SW access, so
     # density ratio naturally produces gw_share = 1 there).
-    is_co_direct = (
-        np.isin(basin_names, list(CO_RIVER_DIRECT_BASINS))
-        if basin_names is not None
-        else np.zeros(len(predictions), dtype=bool)
-    )
+    # Cap is per-pixel and per-basin: ag-dominant CRIT (Parker 0.15)
+    # and Yuma Project (Yuma 0.10) basins use tighter caps than the
+    # 0.40 default for M&I-dominant Lake Havasu / Detrital / Meadview.
+    if basin_names is not None:
+        co_gw_cap = _co_direct_gw_cap_array(basin_names)
+    else:
+        co_gw_cap = np.full(len(predictions), np.inf, dtype=np.float64)
 
     if irr_swd is not None:
         irr_swd_smooth = _smooth_sw_density(
@@ -1841,12 +1903,7 @@ def partition_predictions(
                 denom_irr > 0, weighted_irr_wd / denom_irr, 1.0,
             )
         irr_gw_share = np.clip(irr_gw_share, 0, 1)
-        if is_co_direct.any():
-            irr_gw_share = np.where(
-                is_co_direct,
-                np.minimum(irr_gw_share, MAX_GW_SHARE_CO_DIRECT),
-                irr_gw_share,
-            )
+        irr_gw_share = np.minimum(irr_gw_share, co_gw_cap)
         irr_gw = irr * irr_gw_share
         irr_sw = irr - irr_gw
     else:
@@ -1864,12 +1921,7 @@ def partition_predictions(
                 denom_ni > 0, weighted_nonirr_wd / denom_ni, 1.0,
             )
         nonirr_gw_share = np.clip(nonirr_gw_share, 0, 1)
-        if is_co_direct.any():
-            nonirr_gw_share = np.where(
-                is_co_direct,
-                np.minimum(nonirr_gw_share, MAX_GW_SHARE_CO_DIRECT),
-                nonirr_gw_share,
-            )
+        nonirr_gw_share = np.minimum(nonirr_gw_share, co_gw_cap)
         nonirr_gw = nonirr * nonirr_gw_share
         nonirr_sw = nonirr - nonirr_gw
     else:
@@ -1883,13 +1935,12 @@ def partition_predictions(
     # only basins like Willcox / Douglas / Joseph City / Lower Gila.
     #
     # Two-part gate:
-    #   (a) Require BASIN CANAL COVERAGE >= 1 % of basin pixels.
-    #       Previous `basin_max > 0` rule was defeated by isolated
-    #       outliers (Willcox has 2 canal pixels out of 1,238 = 0.16 %
-    #       → gate didn't fire → ~4 % SW leakage).  Requiring 1 %
-    #       coverage rules out those spurious outliers while still
-    #       allowing any basin with a real canal network (Phoenix ≈
-    #       40 %, Pinal ≈ 30 %, etc.).
+    #   (a) Require BASIN CANAL COVERAGE >= CANAL_COVERAGE_GATE_THRESHOLD
+    #       (2 % of basin pixels).  A 1 % threshold previously let
+    #       Douglas (1.12 % coverage from 7-8 spurious historical
+    #       pixels) leak SW; bumping to 2 % catches it without
+    #       affecting any real-canal basin (Phoenix ≈ 40 %, Pinal ≈
+    #       30 %, Yuma > 10 %).  Willcox (0.16 %) was already caught.
     #   (b) WHITELIST direct-CO-river basins (CO_RIVER_DIRECT_BASINS):
     #       bypass the gate regardless of canal coverage.  Parker,
     #       Yuma, Lake Mohave, Lake Havasu, etc. have physical
@@ -1897,6 +1948,13 @@ def partition_predictions(
     #       don't register as canal_density pixels — without this
     #       bypass, pre-CAP Parker shows 100 % GW (wrong — CRIT
     #       senior rights deliver ~720 kAF/yr from Colorado direct).
+    #
+    # NonIrr_SW handling: collapse at no-canal basins UNLESS basin is
+    # in NONIRR_SW_PRESERVE_BASINS (LCR / Sacramento Valley / Big
+    # Sandy / Bill Williams — basins with direct lake/river intakes
+    # serving M&I / mining demand that don't show up as canals).
+    # Willcox / Douglas / Joseph City have no such intakes — they
+    # are purely GW, so both Irr_SW and NonIrr_SW collapse to GW.
     if canal_dens is not None and basin_names is not None:
         canal_series = pd.Series(canal_dens)
         basin_canal_coverage = canal_series.groupby(basin_names).transform(
@@ -1904,25 +1962,25 @@ def partition_predictions(
         )
         is_co_direct = np.isin(basin_names, list(CO_RIVER_DIRECT_BASINS))
         no_canal_basin = (
-            (basin_canal_coverage.values < 0.01)
+            (basin_canal_coverage.values < CANAL_COVERAGE_GATE_THRESHOLD)
             & ~is_co_direct
         )
-        # Collapse ONLY Irr_SW at no-canal basins.  Agricultural SW
-        # requires canal infrastructure to deliver — without canals,
-        # any irr_sw in the density-ratio output is smoothing
-        # leakage from neighbouring basins.  NonIrr_SW (municipal /
-        # industrial / mining) can come from direct lake/river
-        # intakes that don't show up as canal_density pixels (Page
-        # on Lake Powell at LCR, Bullhead City on Colorado mainstem
-        # at Sacramento Valley, mining at Big Sandy, etc.) — keep
-        # those NonIrr_SW values.  Earlier full SW→GW collapse was
-        # over-aggressive and inflated NonIrr_GW by ~0.5-0.8 MAF at
-        # 2020 across LCR/Big Sandy/Sacramento Valley/Bill Williams.
+        preserve_nonirr_sw = np.isin(
+            basin_names, list(NONIRR_SW_PRESERVE_BASINS),
+        )
         if no_canal_basin.any():
             irr_gw = np.where(
                 no_canal_basin, irr_gw + irr_sw, irr_gw,
             )
             irr_sw = np.where(no_canal_basin, 0.0, irr_sw)
+            # Collapse NonIrr_SW at no-canal basins not on the
+            # preserve list.
+            collapse_ni_sw = no_canal_basin & ~preserve_nonirr_sw
+            if collapse_ni_sw.any():
+                nonirr_gw = np.where(
+                    collapse_ni_sw, nonirr_gw + nonirr_sw, nonirr_gw,
+                )
+                nonirr_sw = np.where(collapse_ni_sw, 0.0, nonirr_sw)
 
     # Pre-1945: USGS shows ~100% GW statewide.  Restrict SW to pixels
     # that actually have direct access to surface water — canal-served
@@ -2012,6 +2070,88 @@ def partition_predictions(
         irr = irr_gw + irr_sw
         nonirr = nonirr_gw + nonirr_sw
 
+    # Re-apply no-canal collapse AFTER the post-1985 excess routing.
+    # The (1 − uf) excess pulled NonIrr_SW back into Irr_SW via the
+    # density-ratio share, re-contaminating the Irr_SW that the
+    # earlier gate had zeroed.  Re-running the same gate here
+    # zeroes that re-contamination at no-canal basins.  Also re-
+    # collapses NonIrr_SW at non-preserved no-canal basins (the
+    # post-1985 routing leaves nonirr_sw = nonirr_sw_old × uf —
+    # tiny but nonzero at urban cells).
+    if canal_dens is not None and basin_names is not None:
+        canal_series = pd.Series(canal_dens)
+        basin_canal_coverage = canal_series.groupby(basin_names).transform(
+            lambda x: (x > 0).mean(),
+        )
+        is_co_direct = np.isin(basin_names, list(CO_RIVER_DIRECT_BASINS))
+        no_canal_basin = (
+            (basin_canal_coverage.values < CANAL_COVERAGE_GATE_THRESHOLD)
+            & ~is_co_direct
+        )
+        preserve_nonirr_sw = np.isin(
+            basin_names, list(NONIRR_SW_PRESERVE_BASINS),
+        )
+        if no_canal_basin.any():
+            irr_gw = np.where(
+                no_canal_basin, irr_gw + irr_sw, irr_gw,
+            )
+            irr_sw = np.where(no_canal_basin, 0.0, irr_sw)
+            collapse_ni_sw = no_canal_basin & ~preserve_nonirr_sw
+            if collapse_ni_sw.any():
+                nonirr_gw = np.where(
+                    collapse_ni_sw, nonirr_gw + nonirr_sw, nonirr_gw,
+                )
+                nonirr_sw = np.where(collapse_ni_sw, 0.0, nonirr_sw)
+            irr = irr_gw + irr_sw
+            nonirr = nonirr_gw + nonirr_sw
+
+    # Re-apply per-basin GW-share cap on the FINAL per-pixel result
+    # at CO-river-direct basins.  The cap was applied earlier on the
+    # density-ratio shares BEFORE the post-1985 excess routing — that
+    # routing pushes NonIrr_SW back to Irr_SW (or, post-2010 at non-
+    # canal-heavy basins, disappears excess into desert via cf
+    # weighting), and the net effect at low-cf CO-direct basins
+    # (Meadview / Detrital Valley) is to inflate the GW share back to
+    # ~80-95 % at 2020.  Final cap re-enforces the per-basin floor:
+    # Parker 0.15 GW / 0.85 SW, Yuma 0.10 / 0.90, Lake Mohave 0.10 /
+    # 0.90, Lake Havasu / Detrital / Meadview 0.40 / 0.60.
+    if basin_names is not None:
+        co_gw_cap_final = _co_direct_gw_cap_array(basin_names)
+        is_capped = np.isfinite(co_gw_cap_final)
+        if is_capped.any():
+            # Replace the np.inf sentinel (non-CO-direct pixels) with a
+            # benign finite cap (1.0 = no constraint).  Without this,
+            # `irr * np.inf` produces inf/NaN at non-CO-direct pixels and
+            # `cap_irr & (gw_share > inf)` is always False, but numpy
+            # still evaluates the multiplication and emits a
+            # RuntimeWarning when irr == 0 (0 * inf = NaN).  The masked
+            # np.where below selects the original irr_gw at those pixels
+            # regardless, so the safe-cap substitution is purely cosmetic.
+            safe_cap = np.where(is_capped, co_gw_cap_final, 1.0)
+            with np.errstate(invalid='ignore', divide='ignore'):
+                irr_gw_share_final = np.where(
+                    irr > 0, irr_gw / irr, 0.0,
+                )
+                nonirr_gw_share_final = np.where(
+                    nonirr > 0, nonirr_gw / nonirr, 0.0,
+                )
+            cap_irr = is_capped & (irr_gw_share_final > safe_cap)
+            if cap_irr.any():
+                new_irr_gw = np.where(
+                    cap_irr, irr * safe_cap, irr_gw,
+                )
+                irr_sw = np.where(cap_irr, irr - new_irr_gw, irr_sw)
+                irr_gw = new_irr_gw
+            cap_ni = is_capped & (nonirr_gw_share_final > safe_cap)
+            if cap_ni.any():
+                new_ni_gw = np.where(
+                    cap_ni, nonirr * safe_cap, nonirr_gw,
+                )
+                nonirr_sw = np.where(
+                    cap_ni, nonirr - new_ni_gw, nonirr_sw,
+                )
+                nonirr_gw = new_ni_gw
+
     return {
         'Irrigation':         irr,
         'Non_Irrigation':     nonirr,
@@ -2058,7 +2198,7 @@ def compute_sw_capture_index(
 
     Three λ values (5, 10, 20 m) produce lower/central/upper bounds
     on the connectivity scale.  When ``sigma_gw`` is supplied (the
-    per-pixel σ_total from the 5-component UQ framework, in mm),
+    per-pixel σ_total from the 6-component UQ framework, in mm),
     the volume bounds combine the λ envelope with σ_GW propagation
     via the asymmetric form
 

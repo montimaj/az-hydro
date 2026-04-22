@@ -120,15 +120,26 @@ def _format_volume_axis(ax, unit: str = 'AF', label: str = 'Volume') -> None:
             ``'σ_total'``); the unit suffix is appended automatically.
     """
     if unit == 'AF':
-        ax.yaxis.set_major_formatter(
-            ticker.FuncFormatter(lambda x, _: f'{x / 1e6:,.2f}'),
-        )
-        ax.set_ylabel(f'{label} (MAF)', fontweight='bold')
+        scale = 1e6
+        ylabel = f'{label} (MAF)'
     elif unit in ('m3', 'm³'):
-        ax.yaxis.set_major_formatter(
-            ticker.FuncFormatter(lambda x, _: f'{x / 1e9:,.2f}'),
-        )
-        ax.set_ylabel(rf'{label} (km$^3$)', fontweight='bold')
+        scale = 1e9
+        ylabel = rf'{label} (km$^3$)'
+    else:
+        return
+
+    lo, hi = ax.get_ylim()
+    disp_max = max(abs(lo), abs(hi)) / scale
+    # Switch to scientific notation when fixed-point with 2 decimals
+    # would round most ticks to 0.00 (small basins / small σ).  At
+    # disp_max < 0.05 the auto-locator places ticks at ≤ 0.01 spacing,
+    # which collapses to repeated "0.00"/"0.01" strings under ,.2f.
+    if 0 < disp_max < 0.05:
+        fmt = lambda x, _: '0' if x == 0 else f'{x / scale:.2e}'
+    else:
+        fmt = lambda x, _: f'{x / scale:,.2f}'
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(fmt))
+    ax.set_ylabel(ylabel, fontweight='bold')
 
 
 def _add_dual_volume_axes(ax, label: str = ''):
@@ -3269,26 +3280,28 @@ def create_graphical_abstract(
         )
 
         bullets = [
-            '2 km \u00d7 204-yr coverage \u2014 first statewide annual withdrawals, '
-            'irrigation CU, and SW capture index, 1896\u20132099, in one '
-            'self-consistent framework.',
+            '2 km \u00d7 204-yr coverage \u2014 first statewide annual '
+            'withdrawals, irrigation CU, and SW capture index, 1896\u20132099, '
+            'in one self-consistent framework.',
 
             'First Arizona-wide irrigation CU dataset at 2 km annual '
-            'resolution \u2014 no public alternative exists at this combination '
-            'of resolution and time horizon.',
+            'resolution \u2014 no public alternative at this resolution and '
+            'time horizon.',
 
-            'Out-of-distribution validation \u2014 trained only in the 10 '
-            'metered ADWR AMA/INAs, predicts statewide; matches ADWR and '
-            'USGS within ~1 pp / 0.1 MAF with no calibration to either '
-            'agency.',
+            'Out-of-distribution validation \u2014 trained only in 10 ADWR '
+            'AMA/INAs, predicts statewide; matches ADWR, USGS, and WestWater '
+            '2026 within model \u03c3 \u2014 no per-basin agency calibration.',
+
+            'Statewide shares \u2014 GW/SW within \u00b12 pp of USGS, Irr/'
+            'Non-Irr within \u00b12 pp of ADWR.',
 
             'Novel SW capture index \u2014 apportions GW pumping into '
-            'stream-depletion vs. storage-mining shares at 2 km annual, '
-            'work that normally requires a per-basin MODFLOW\u2013SFR model.',
+            'stream-depletion vs. storage-mining at 2 km annual, work that '
+            'normally requires per-basin MODFLOW\u2013SFR.',
 
-            'Hybrid 5-component \u03c3_total UQ with physics-based CU error '
-            'propagation, producing 6-band augmented rasters (pred, \u03c3, CV, '
-            'SNR, lower/upper CI) for every product.',
+            'Hybrid 6-component \u03c3_total UQ (\u03c3_MACA + \u03c3_Model + '
+            '\u03c3_Irr + \u03c3_LULC + \u03c3_GW + \u03c3_USBR) with physics-'
+            'based CU error propagation; 6-band augmented rasters per product.',
         ]
 
         bullet_top = 0.74

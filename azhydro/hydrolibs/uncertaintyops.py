@@ -1,10 +1,14 @@
 """
 Hybrid Uncertainty Quantification for AZ-Hydro Annual Withdrawal Predictions.
 
-Computes five independent uncertainty components and combines them via
+Computes six independent uncertainty components and combines them via
 quadrature into a total pixel-level uncertainty (σ_total):
 
-    σ_total = √(σ_MACA² + σ_model² + σ_irr² + σ_gw² + σ_LULC²)
+    σ_total = √(σ_MACA² + σ_model² + σ_irr² + σ_gw² + σ_LULC² + σ_USBR²)
+
+σ_USBR captures Upper-Basin Colorado River streamflow uncertainty
+(5 USBR CMIP3 ensemble members) — the climate axis σ_MACA cannot
+reach, since MACA only downscales to AZ-local domain.
 
 Each component is computed at both the **total** pumping level and for
 each of the 8 **withdrawal categories** (Irrigation, Non_Irrigation,
@@ -3143,19 +3147,25 @@ def _plot_cap_scenarios(
 ) -> None:
     """Render CAP scenario time-series plots.
 
-    If ``az_sigma_per_cat`` is provided (statewide σ AF/yr per category
-    per year, from ``Uncertainty/Sigma_Total/Rasters``), each scenario
-    line is drawn with a ±σ ribbon at α=0.15.  Scenarios are
-    deterministic re-partitions of fixed central-ML predictions, so the
-    σ source is the same as for the central pipeline; the ribbon
-    represents prediction uncertainty (climate / model / irr / lulc / gw)
-    rather than scenario uncertainty.
+    Scenario lines are drawn without ±σ shading.  Each scenario is a
+    deterministic re-partition of the same central ML prediction with
+    only the CAP-pixel multiplicative perturbation differing across
+    scenarios, so per-year σ_total values are *identical* across
+    scenarios (they reflect the central pipeline's prediction
+    uncertainty, not scenario uncertainty).  Plotting them as ribbons
+    behind every scenario produced heavy overlap that obscured the
+    inter-scenario separation, which is the actual signal of interest
+    for a tier comparison.  ``az_sigma_per_cat`` is retained in the
+    signature for backwards compatibility but is no longer plotted.
     """
     import matplotlib.pyplot as plt
     from hydrolibs.visualops import apply_journal_style
 
     apply_journal_style()
-    sigma_lookup = az_sigma_per_cat or {}
+    # σ ribbons intentionally suppressed (see docstring) — sigma_lookup
+    # retained only for the cumulative-drawdown σ accumulation, which
+    # also remains suppressed for visual clarity.
+    sigma_lookup = az_sigma_per_cat or {}  # noqa: F841
 
     cat_pairs = [
         ('Total_GW_AF', 'Total_SW_AF', 'Total', 'Total_GW', 'Total_SW'),
@@ -3186,19 +3196,13 @@ def _plot_cap_scenarios(
     dcp_markers = {k: v[1] for k, v in dcp_styles.items()}
 
     def _ribbon(ax, years, values, sigma_cat, color):
-        """Overlay ±σ ribbon when σ data is available."""
-        if not sigma_cat:
-            return
-        sig = np.array(
-            [sigma_cat.get(int(y), 0.0) / 1e6 for y in years]
-        )
-        if not np.any(sig > 0):
-            return
-        v = np.asarray(values, dtype=float)
-        ax.fill_between(
-            years, np.clip(v - sig, 0, None), v + sig,
-            color=color, alpha=0.15, linewidth=0,
-        )
+        """No-op: σ ribbons suppressed for CAP scenario plots.
+
+        Kept as a stub so the call sites below do not need to change
+        and so reintroducing per-scenario ribbons (e.g. with a different
+        opacity scheme) is a one-function edit.
+        """
+        return
 
     # --- WestWater scenarios (3 main) ---
     westwater = ['Baseline_900kAF', 'Basic_Coordination_237kAF',
@@ -3232,8 +3236,7 @@ def _plot_cap_scenarios(
     axes[-1, 0].set_xlabel('Year', fontweight='bold')
     axes[-1, 1].set_xlabel('Year', fontweight='bold')
     fig.suptitle(
-        'CAP Delivery Reduction Scenarios — GW/SW Partition Shift '
-        '(±1σ shading)',
+        'CAP Delivery Reduction Scenarios — GW/SW Partition Shift',
         fontweight='bold', fontsize=14,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -3282,8 +3285,7 @@ def _plot_cap_scenarios(
         axes[-1, 0].set_xlabel('Year', fontweight='bold')
         axes[-1, 1].set_xlabel('Year', fontweight='bold')
         fig.suptitle(
-            'DCP Shortage Tier Scenarios — GW/SW Partition Shift '
-            '(±1σ shading)',
+            'DCP Shortage Tier Scenarios — GW/SW Partition Shift',
             fontweight='bold', fontsize=14,
         )
         fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -3343,15 +3345,12 @@ def _plot_cap_scenarios(
         )['Cumulative_Delta_GW_AF'].sum()
 
         fig, ax = plt.subplots(figsize=(12, 6))
-        # σ for cumulative ΔGW: *linear* temporal accumulation of
-        # per-year σ_Total_GW (basin-aggregated).  Linear rather than
-        # quadrature because year-to-year σ values share common drivers
-        # (GCM climate ensemble, XGBRF seed, IrrMapper vs regression,
-        # LULC scenario, well-density reference year) — they are
-        # temporally correlated, so errors accumulate coherently.
-        # Quadrature accumulation (√N dampening) would underestimate
-        # the cumulative uncertainty.
-        sigma_total_gw = sigma_lookup.get('Total_GW', {})
+        # σ ribbons are intentionally suppressed here — cumulative σ
+        # values overlap heavily across scenarios (since each scenario
+        # uses the same per-year σ_Total_GW from the central pipeline,
+        # accumulated linearly), which obscured the inter-scenario
+        # separation that is the actual signal.  See module docstring
+        # for the reintroduction recipe if needed.
         # WestWater-named scenarios (Basic_Coordination, Extreme_Shortage)
         # often produce drawdowns nearly identical to mid-band DCP Tier
         # scenarios because they share boost-factor era mappings.  Use
@@ -3389,15 +3388,6 @@ def _plot_cap_scenarios(
             lbl = sc.replace('_', ' ')
             years = sdf['Year'].values
             values = sdf['Cumulative_Delta_GW_AF'].values / 1e6
-            if sigma_total_gw:
-                sig_cum = np.cumsum(np.array([
-                    sigma_total_gw.get(int(y), 0.0) / 1e6 for y in years
-                ]))
-                if np.any(sig_cum > 0):
-                    ax.fill_between(
-                        years, values - sig_cum, values + sig_cum,
-                        color=color, alpha=0.15, linewidth=0,
-                    )
             zorder = 5 if sc in westwater_scenarios else 3
             ax.plot(
                 years, values,
@@ -3410,7 +3400,7 @@ def _plot_cap_scenarios(
         ax.set_ylabel('Cumulative Additional GW (MAF)', fontweight='bold')
         ax.set_title(
             'Cumulative Additional Groundwater Drawdown Under CAP '
-            'Reduction (±1σ shading)',
+            'Reduction',
             fontweight='bold',
         )
         ax.legend(fontsize=8)
@@ -4762,7 +4752,7 @@ def compute_sw_capture_with_sigma(
 
     Runs *after* ``augment_category_rasters`` so that the per-category
     augmented rasters contain band-1 prediction and band-2 σ_total
-    (from the 5-component UQ framework) in matching depth units.  For
+    (from the 6-component UQ framework) in matching depth units.  For
     each year and each of the three GW pumping pools (Total_GW,
     Irrigation_GW, Non_Irrigation_GW), this function:
 

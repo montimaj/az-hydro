@@ -2183,7 +2183,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         # SW Capture Index is now computed downstream in Step 3b's
         # run_uncertainty_quantification → compute_sw_capture_with_sigma
         # (gated on --skip-uq sw-capture-sigma) so that the per-pixel
-        # σ_total from the 5-component UQ framework can be propagated
+        # σ_total from the 6-component UQ framework can be propagated
         # through the capture volume bounds.  That step reads the
         # augmented per-category GW rasters (band 1 = pred, band 2 = σ)
         # and writes 6-band augmented SW capture rasters in place, plus
@@ -2600,7 +2600,7 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
     unc_dir = os.path.join(prediction_dir, 'Uncertainty')
     sigma_components = [
         'Sigma_Total', 'Sigma_MACA', 'Sigma_Model',
-        'Sigma_Irr', 'Sigma_LULC', 'Sigma_GW',
+        'Sigma_Irr', 'Sigma_LULC', 'Sigma_GW', 'Sigma_USBR',
     ]
     for comp in sigma_components:
         raster_dir = os.path.join(unc_dir, comp, 'Rasters')
@@ -3488,6 +3488,7 @@ UQ sub-steps (use with --skip-uq to skip individual σ components):
   sigma-irr        Skip σ_irr (irrigation fraction uncertainty)
   sigma-lulc       Skip σ_LULC (LULC projection spread)
   sigma-gw         Skip σ_gw (GW fraction snapshot spread)
+  sigma-usbr       Skip σ_USBR (Upper-Basin CO River streamflow ensemble; 5 USBR CMIP3 members)
   density-sensitivity   Skip density-ratio partitioning sensitivity (±20%)
   cap-scenario     Skip CAP delivery reduction scenario analysis (WestWater/DCP)
   sigma-total      Skip σ_total quadrature, basin σ, visualizations, and raster augmentation
@@ -3585,7 +3586,7 @@ def main() -> None:
         help=(
             'Comma-separated UQ sub-steps to skip: '
             'sigma-maca, sigma-model, sigma-irr, sigma-lulc, '
-            'sigma-gw, density-sensitivity, cap-scenario, '
+            'sigma-gw, sigma-usbr, density-sensitivity, cap-scenario, '
             'sigma-total, sigma-cu, sw-capture-sigma.'
         ),
     )
