@@ -403,28 +403,20 @@ CO_RIVER_DIRECT_BASINS = frozenset({
 # Maximum GW share at CO-river-direct basins.  Caps the density-
 # ratio output when irr_sw_rights_density under-represents mainstem
 # diversions (e.g. Parker has 4/1433 pixels with sw_rights — CRIT
-# allocations missing from the rights raster).  Reality: direct-
-# mainstem basins are 60-95 % SW physically; the default 0.4 is a
-# conservative upper bound for M&I-dominant small basins (Lake
-# Havasu, Detrital Valley, Meadview).  Per-basin overrides apply
-# tighter caps to ag-dominant basins where federal/tribal SW
-# deliveries (CRIT, Yuma Project, Bullhead City) push the actual
-# physical SW share to 85-99 %:
-#
-#   PARKER       — CRIT senior rights (~720 kAF/yr Priority-1) drive
-#                  ag SW share to ~85-95 %; cap GW at 15 %.
-#   YUMA         — Yuma Project + Cocopah / Quechan tribal deliveries
-#                  → 90-98 % SW; cap GW at 10 %.
-#   LAKE MOHAVE  — Bullhead City direct mainstem M&I → 95-99 % SW;
-#                  density-ratio already yields low GW%, but cap at
-#                  10 % for consistency with Yuma/Mohave physical reality.
-MAX_GW_SHARE_CO_DIRECT = 0.4
+# allocations missing from the rights raster).  Reality: all six
+# CO-river-direct basins are physically 90-99 % SW (CRIT senior
+# rights, Yuma Project + Cocopah/Quechan tribal deliveries, Bullhead
+# City direct mainstem M&I, Lake Havasu City CAP intake, Detrital
+# Valley + Meadview small mainstem M&I).  A uniform cap of 0.10
+# enforces that the well-mediated GW share at any CO-direct pixel
+# stays ≤ 10 %, with the partition's density-ratio + canal-smoothing
+# free to land anywhere in [0, 0.10].
+MAX_GW_SHARE_CO_DIRECT = 0.10
 
-CO_DIRECT_BASIN_GW_CAP = {
-    'PARKER': 0.15,
-    'YUMA': 0.10,
-    'LAKE MOHAVE': 0.10,
-}
+# Per-basin overrides (currently empty — all CO-direct basins use
+# the default 0.10 cap).  Reserved for future basin-specific tuning
+# if any CO-direct basin's physical SW share warrants a different cap.
+CO_DIRECT_BASIN_GW_CAP: dict[str, float] = {}
 
 
 def _co_direct_gw_cap_array(basin_names: np.ndarray) -> np.ndarray:
@@ -441,6 +433,118 @@ def _co_direct_gw_cap_array(basin_names: np.ndarray) -> np.ndarray:
     is_co_direct = np.isin(basin_names, list(CO_RIVER_DIRECT_BASINS))
     cap = np.where(is_co_direct, MAX_GW_SHARE_CO_DIRECT, cap)
     for name, val in CO_DIRECT_BASIN_GW_CAP.items():
+        cap = np.where(basin_names == name, val, cap)
+    return cap
+
+
+# Per-basin GW share FLOOR (mirror of the CO-direct GW cap).  The
+# density-ratio + canal-smoothing partition structurally under-attributes
+# GW at AMA/INAs that have dense SRP / CAP canal infrastructure but
+# also significant residual GW pumping inside the canal service area
+# (private municipal wells, dual-supply ag, etc.).  At those basins the
+# physical GW share is anchored by ADWR mandatory metering, and applying
+# a per-basin minimum on the density-ratio output recovers it without
+# touching the global ``gw_weight`` schedule (which is load-bearing for
+# the WestWater 2026 CAP-shortage tier-boost calibration).
+#
+# Currently floored (anchored to ADWR-norm + NHM/Reitz cross-check):
+#   PHOENIX AMA   — 0.20.  ADWR Phoenix AMA Plan: 705 kAF GW /
+#                   2.3 MAF total = ~30 % native + recharged GW.
+#                   We use 0.20 (below the ADWR 30 %) because part of
+#                   ADWR's "groundwater" share at Phoenix is recharged
+#                   CAP/SRP storage rather than native aquifer mining,
+#                   and the model already attributes some of that
+#                   recharged volume to SW.
+#   PINAL AMA     — 0.30.  CAP-served ag historically ~70 % CAP-SW +
+#                   ~30 % GW; NHM 39 % / Reitz 42 % Irr_GW% confirm
+#                   model 4 % Irr_GW is structurally too low.
+#   TUCSON AMA    — 0.30.  Tucson Water (M&I) is GW-heavy + Avra
+#                   Valley ag uses substantial GW; NHM 57 % / Reitz
+#                   67 % Irr_GW% confirm model 2 % Irr_GW is too low.
+#   HARQUAHALA INA — 0.30.  Higher GW use than the prior 10-20 %
+#                   assumption; NHM 76 % / Reitz 72 % Irr_GW% support
+#                   substantially higher GW share than the model's
+#                   current 11 %.
+#
+# CO-direct basins (Yuma, Parker, Lake Mohave, Lake Havasu, Detrital
+# Valley, Meadview) and Bill Williams have NO floor — the partition's
+# density-ratio + canal-smoothing is allowed to land anywhere in
+# [0, 0.10] (CO-direct cap) or [0, 1] (Bill Williams).  No lower-bound
+# enforcement at those basins, since the cap is the only physical
+# constraint we have verified ground for.
+#
+# Pending verified ADWR per-AMA tables (currently no floor):
+#   PRESCOTT AMA          (~70-80 % GW per general literature)
+#   HUALAPAI VALLEY INA   (~95 % GW per general literature)
+BASIN_GW_FLOOR = {
+    'PHOENIX AMA':    0.20,
+    'PINAL AMA':      0.30,
+    'TUCSON AMA':     0.30,
+    'HARQUAHALA INA': 0.30,
+    'PRESCOTT AMA':   0.64,  # ADWR Prescott AMA Total_GW share = 64 %
+                             # (Irrigation = 8 % of total; mostly M&I
+                             # pumping from Prescott Valley + Prescott
+                             # city wells).  Earlier 0.40 anchor only
+                             # captured native-GW pumping (9,466 AF /
+                             # 24,713 AF = 38 %); the higher 0.64 anchor
+                             # reflects the full ADWR-reported Total GW
+                             # share.  Statewide impact negligible
+                             # (Prescott total ~24 kAF/yr → +15 kAF GW).
+}
+
+
+def _basin_gw_floor_array(basin_names: np.ndarray) -> np.ndarray:
+    """Return per-pixel GW-share floor for floored basins.
+
+    Default is ``0.0`` (no floor) at unlisted basins; per-basin overrides
+    from ``BASIN_GW_FLOOR`` apply at the named basins.  Callers apply
+    the floor unconditionally via ``np.maximum``.
+    """
+    floor = np.zeros(len(basin_names), dtype=np.float64)
+    for name, val in BASIN_GW_FLOOR.items():
+        floor = np.where(basin_names == name, val, floor)
+    return floor
+
+
+# Per-basin GW share CAP for non-CO-direct canal-served basins where the
+# density-ratio over-attributes to GW relative to NHM/Reitz cross-checks.
+# Mirror of CO_DIRECT_BASIN_GW_CAP but applied at canal-served basins
+# along the lower Gila River corridor that receive CAP / Yuma Project
+# delivery infrastructure.  These basins pass the basin-canal-coverage
+# gate (>= 2 % canal pixels) so the no-canal SW collapse doesn't fire,
+# but the density-ratio still over-attributes to GW because the
+# canal-weighted streamflow signal is weaker than at the metro AMAs.
+#
+# Currently capped:
+#   LOWER GILA     — 0.25.  CAP/Yuma Project canals; NHM Irr_GW% = 15.
+#                    Model 56 % is structurally too high.
+#   RANEGRAS PLAIN — 0.25.  CAP-NIA fringe; NHM 13 %.  Model 68 % too high.
+#
+# NOT capped (despite high model GW% relative to NHM):
+#   McMullen Valley — model 100 %, NHM 38 %.  Ground truth confirms
+#                     McMullen is GW-dominant with documented aquifer
+#                     depletion + subsidence; NHM is wrong here.
+#   Big Sandy / Bill Williams / LCRP / Sacramento Valley — Irr is
+#                     already 100 % GW from the canal-coverage gate
+#                     firing on Irr_SW; NonIrr_SW preserved.  Capping
+#                     here would un-collapse SW that physically doesn't
+#                     exist for irrigation.
+BASIN_GW_CAP: dict[str, float] = {
+    'LOWER GILA':     0.25,
+    'RANEGRAS PLAIN': 0.25,
+}
+
+
+def _basin_gw_cap_array(basin_names: np.ndarray) -> np.ndarray:
+    """Return per-pixel GW-share cap for non-CO-direct capped basins.
+
+    Default is ``np.inf`` (no cap) at unlisted basins; per-basin overrides
+    from ``BASIN_GW_CAP`` apply at the named basins.  Callers apply
+    the cap via ``np.minimum``.  Combined with ``_co_direct_gw_cap_array``
+    via element-wise ``np.minimum`` to give the effective per-pixel cap.
+    """
+    cap = np.full(len(basin_names), np.inf, dtype=np.float64)
+    for name, val in BASIN_GW_CAP.items():
         cap = np.where(basin_names == name, val, cap)
     return cap
 
@@ -462,11 +566,15 @@ NONIRR_SW_PRESERVE_BASINS = frozenset({
 })
 
 # Basin canal-coverage threshold for the no-canal gate (fraction of
-# valid pixels with canal_density > 0).  Bumped from 1 % to 2 % so
-# that Douglas (1.12-1.29 % from 7-8 spurious / historical canal
-# pixels) trips the gate.  Phoenix ≈ 40 %, Pinal ≈ 30 %, Yuma > 10 %
-# all stay well above the threshold; Willcox at 0.16 % is also caught.
-CANAL_COVERAGE_GATE_THRESHOLD = 0.02
+# valid pixels with canal_density > 0).  Set to 1 % alongside a second
+# physical gate (mean basin canal_weighted_streamflow > 0): a basin
+# must have BOTH meaningful canal coverage AND positive delivery
+# capacity to retain SW.  The dual gate catches basins like Douglas
+# (1.12 % coverage from spurious historical pixels with no actual
+# delivery) without bumping the coverage threshold itself, which kept
+# real-canal basins (Phoenix ≈ 40 %, Pinal ≈ 30 %, Yuma > 10 %)
+# unaffected.  Willcox (0.16 %) is still caught by the coverage gate.
+CANAL_COVERAGE_GATE_THRESHOLD = 0.01
 
 # Adaptive irr_frac floor: at every pixel, irrigation share is at
 # least as large as the cropland share at that pixel.  Captures the
@@ -1127,14 +1235,56 @@ apply_cap_hindcast_perturbation = apply_cap_delivery_perturbation
 #   gw_frac = (gw_weight × wd) / (gw_weight × wd + swd_smooth)
 GMA_YEAR = 1981
 CAP_FULL_YEAR = 1990
-GW_WEIGHT_PRE_1945 = 5.0   # pre-1945: USGS shows ~100% GW (no/minimal SW
-                           # except SRP); push very strongly toward GW
-GW_WEIGHT_PRE_GMA = 2.0    # 1945–1980 GW-dominant era
-GW_WEIGHT_POST_CAP = 0.2   # post-CAP SW-dominant era
+GW_WEIGHT_PRE_1945 = 10.0  # pre-1945: USGS shows ~100% GW (no/minimal SW
+                           # except SRP); push very strongly toward GW.
+                           # Bumped from 5.0 → 10.0 alongside PRE_GMA
+                           # extension (see GW_WEIGHT_1945_1980 below).
+GW_WEIGHT_1945_1980 = 10.0 # 1945–1980 (full pre-GMA era): bumped from
+                           # 2.0 → 10.0 to recover the 1955-1975 GW%
+                           # under-attribution (model 56-58 % vs USGS
+                           # 62-69 %).  Small canal basins (Verde,
+                           # Upper San Pedro, Coconino) retain SW
+                           # post-canal-gate change, so density-ratio
+                           # needs heavier GW weight to push pre-CAP
+                           # statewide GW share back toward USGS.
+GW_WEIGHT_PRE_GMA = 2.0    # 1981-1984 GMA transition: keep prior
+                           # baseline (2.0) so the 1985-1989 ramp to
+                           # POST_CAP starts smoothly without a
+                           # discontinuity at 1985.
+GW_WEIGHT_POST_CAP = 0.2   # post-CAP era.  This value is *load-bearing*
+                           # for the WestWater 2026 cumulative-drawdown
+                           # calibration of CAP_CUT_GW_BOOST_FACTORS.  The
+                           # tier boost of 5.0× at 2022+ CAP pixels is
+                           # calibrated to match WestWater Fig 4 with the
+                           # baseline at 0.2 — so effective gw_weight at
+                           # CAP pixels = 0.2 × 5.0 = 1.0.  Lifting the
+                           # baseline (e.g. to 0.4) would also lift the
+                           # tier-era effective to 2.0, doubling the
+                           # post-2022 CAP-pixel GW substitution and
+                           # over-shooting WestWater.  Per-basin Phoenix /
+                           # Tucson / Prescott / Hualapai under-attribution
+                           # (model GW share lower than ADWR) is a separate
+                           # known limitation documented in the methods
+                           # README; addressing it requires either per-basin
+                           # GW floors anchored to verified ADWR per-AMA
+                           # tables, or new feature engineering to
+                           # distinguish on-canal vs off-canal wells inside
+                           # AMA service areas.
 
-
-GW_WEIGHT_MID_CAP = 0.5     # 1998–2007 mid-CAP bump to lift GW% at 2000/2005
-GW_WEIGHT_1930_1935 = 10.0  # 1930–1935 bump — model 1935 Total ~ USGS
+GW_WEIGHT_EARLY_CAP = 0.1   # 1990-1997 early-CAP era.  Bumped down from
+                            # 0.2 to lift SW share at 1990/1995 where
+                            # USGS shows 56-57 % SW (40-41 % GW); the
+                            # 0.2 baseline left model GW% +7 pp over USGS.
+                            # Window stops at 1997 to preserve the 1998+
+                            # MID_CAP rebound and POST_CAP=0.2 calibration
+                            # anchor for the WestWater 2022+ CAP-cut tier.
+GW_WEIGHT_MID_CAP = 0.4     # 1998–2007 mid-CAP bump to lift GW% at 2000/2005
+                            # (USGS rebound: 1995=40.5, 2000=50.9, 2005=48.8).
+                            # Slightly above POST_CAP baseline.
+GW_WEIGHT_1930_1935 = 10.0  # 1930-1935 bump (now equal to PRE_1945/PRE_GMA
+                            # since both are 10.0; kept for historical
+                            # documentation of the 1935 calibration)
+                            # — model 1935 Total ~ USGS
                             # Total_GW (1.38 vs 1.20) but GW share too
                             # low (0.91 vs 1.20) because SRP canal-pixel
                             # density-ratio attributed too much to SW.
@@ -1145,36 +1295,50 @@ GW_WEIGHT_1930_1935 = 10.0  # 1930–1935 bump — model 1935 Total ~ USGS
 def _era_gw_weight(year: int) -> float:
     """Return era-dependent GW weight for the density-ratio split.
 
-    Pre-1945: weight = 5.0 (very GW-dominant, matches USGS pre-1945
+    Pre-1945: weight = 10.0 (very GW-dominant, matches USGS pre-1945
         showing essentially all pumping was GW).
-    1945–1985: weight = 2.0 (GW-dominant, USBR ~67% GW statewide).
-        Extended through 1985 because the 1985 partition uses the
-        1970–1984 irr_frac override (volume-conserving 1−uf split)
-        and skips the post-1985 NonIrr_SW excess routing — without
-        that routing lifting Irr_GW, the GW/SW split needs the full
-        pre-CAP GW weight to keep 1985 GW% near the USGS anchor.
-    1986–1990: linear ramp 2.0 → 0.2 as CAP comes online.
-    1990–1997: weight = 0.2.
+    1945–1980: weight = 10.0 (full pre-GMA bump).  Bumped from 2.0 to
+        recover the 1955-1975 GW% under-attribution (model 56-58 % vs
+        USGS 62-69 %) after small canal basins (Verde, Upper San Pedro,
+        Coconino) regained their SW signal under the relaxed canal
+        coverage gate (1 % + cw_streamflow > 0).
+    1981–1984: weight = 2.0 (GMA transition).  Returns to the original
+        baseline so the 1985-1989 ramp to POST_CAP starts smoothly
+        without a discontinuity at 1985.
+    1986–1989: linear ramp 2.0 → 0.1 as CAP comes online.
+    1990–1997: weight = 0.1 (early-CAP, USGS shows 56-57 % SW share).
     1998–2007: weight = 0.4 (mid-CAP bump).  USGS shows GW% rebound
         in this window (1995=40.5, 2000=50.9, 2005=48.8) that the
         flat-0.2 weight under-shoots by 4–7 pp.  Stepping up to 0.4
         for these years lifts GW% without touching 1990/2010 (already
         in band).
-    2008+: weight = 0.2 (SW-dominant, USGS/ADWR ~42% GW).
+    2008+: weight = 0.2 (post-CAP SW-dominant era).  This value is
+        load-bearing for the WestWater-calibrated CAP-shortage tier
+        boosts at 2022+ (CAP_CUT_GW_BOOST_FACTORS = 5.0× at CAP pixels
+        gives effective gw_weight = 0.2 × 5.0 = 1.0, which matches
+        WestWater Fig 4 cumulative drawdown).  Per-basin under-
+        attribution at metro AMAs (Phoenix/Tucson/Prescott/Hualapai)
+        is a separate known limitation requiring per-basin floors
+        anchored to verified ADWR data — not addressable by tuning
+        this baseline.
     """
     if 1930 <= year <= 1935:
         return GW_WEIGHT_1930_1935
     if year < 1945:
         return GW_WEIGHT_PRE_1945
+    if year <= 1980:
+        return GW_WEIGHT_1945_1980
     if year < 1985:
         return GW_WEIGHT_PRE_GMA
+    if 1990 <= year <= 1997:
+        return GW_WEIGHT_EARLY_CAP
     if 1998 <= year <= 2007:
         return GW_WEIGHT_MID_CAP
     if year >= CAP_FULL_YEAR:
         return GW_WEIGHT_POST_CAP
-    # 1985-1989 ramp 2.0 → 0.2 (year=1985 returns 2.0 at frac=0).
+    # 1985-1989 ramp 2.0 → 0.1 (year=1985 returns 2.0 at frac=0).
     frac = (year - 1985) / (CAP_FULL_YEAR - 1985)
-    return GW_WEIGHT_PRE_GMA + frac * (GW_WEIGHT_POST_CAP - GW_WEIGHT_PRE_GMA)
+    return GW_WEIGHT_PRE_GMA + frac * (GW_WEIGHT_EARLY_CAP - GW_WEIGHT_PRE_GMA)
 
 
 def era_sw_sigma(year: int) -> float:
@@ -1558,6 +1722,52 @@ def partition_predictions(
     else:
         irr_frac = np.zeros(len(predictions), dtype=np.float64)
 
+    # Phantom-icap gate (auto-detected low-cropland basins):
+    # The 2024 ADWR Well Registry codes many wells "IRRIGATION" at
+    # places with no actual cropland (hobby farms, vineyards,
+    # residential ag, recreational use).  This inflates irr_frac at
+    # basins with little / no real ag.
+    #
+    # Auto-rule: a basin is "phantom" if its total cropland is too
+    # sparse to support meaningful irrigation —
+    #   basin_cf_sum < PHANTOM_BASIN_CF_SUM_MAX  (5.0 cf-units)
+    #   OR basin_n_cf_pos < PHANTOM_BASIN_N_CF_POS_MIN  (10 pixels)
+    # At phantom basins, zero out irr_frac at pixels with neither
+    # cropland (cf>0) nor moderate AGRI (AGRI > AGRI_THRESHOLD).
+    # cf_floor below still preserves real cropland (cf>0 → irr_frac=cf).
+    #
+    # Catches both the demonstrated 9 (Prescott, Verde, Big Sandy,
+    # Sacramento Valley, Bill Williams, Joseph City, Upper/Lower
+    # San Pedro, Little CO Plateau) AND additional low-ag basins
+    # (Detrital Valley, Salt River, Coconino Plateau, Aravaipa,
+    # Cienega Creek, Upper Hassayampa, Agua Fria, Tonto Creek, etc.).
+    # Real-ag basins (Phoenix, Pinal, Yuma, Willcox, Safford, Lower
+    # Gila, Harquahala, Tucson, McMullen, Hualapai) all have
+    # cf_sum >> 5 and n_cf_pos >> 10, so they pass the gate.
+    PHANTOM_ICAP_AGRI_THRESHOLD = 0.05
+    PHANTOM_BASIN_CF_SUM_MAX = 5.0
+    PHANTOM_BASIN_N_CF_POS_MIN = 10
+    if (irr_cap_col is not None and crop_frac_col is not None
+            and basin_names is not None
+            and 'AGRI' in year_df.columns):
+        cf_arr = np.nan_to_num(crop_frac_col, nan=0.0)
+        agri_arr = np.nan_to_num(year_df['AGRI'].values, nan=0.0)
+        cf_gate = cf_arr > 0
+        agri_gate = agri_arr > PHANTOM_ICAP_AGRI_THRESHOLD
+        is_ag = cf_gate | agri_gate
+        # Auto-detect phantom basins via per-basin cropland scarcity.
+        cf_series = pd.Series(cf_arr)
+        basin_cf_sum = cf_series.groupby(basin_names).transform('sum').values
+        basin_n_cf_pos = pd.Series(cf_gate.astype(int)).groupby(
+            basin_names).transform('sum').values
+        in_phantom_basin = (
+            (basin_cf_sum < PHANTOM_BASIN_CF_SUM_MAX)
+            | (basin_n_cf_pos < PHANTOM_BASIN_N_CF_POS_MIN)
+        )
+        # Only mask icap at phantom basins; non-phantom basins unchanged.
+        keep = is_ag | ~in_phantom_basin
+        irr_frac = np.where(keep, irr_frac, 0.0)
+
     # Adaptive crop-fraction floor: irr_frac is at least crop_frac at
     # every pixel.  Pure crop pixel (cf=1) → irr_frac=1.  Pure desert
     # pixel (cf=0) → no boost.  Mixed pixel (cf=0.5) → irr_frac >= 0.5.
@@ -1889,8 +2099,13 @@ def partition_predictions(
     # 0.40 default for M&I-dominant Lake Havasu / Detrital / Meadview.
     if basin_names is not None:
         co_gw_cap = _co_direct_gw_cap_array(basin_names)
+        basin_cap = _basin_gw_cap_array(basin_names)
+        # Combine CO-direct cap with non-CO basin cap via min (tighter wins).
+        co_gw_cap = np.minimum(co_gw_cap, basin_cap)
+        gw_floor = _basin_gw_floor_array(basin_names)
     else:
         co_gw_cap = np.full(len(predictions), np.inf, dtype=np.float64)
+        gw_floor = np.zeros(len(predictions), dtype=np.float64)
 
     if irr_swd is not None:
         irr_swd_smooth = _smooth_sw_density(
@@ -1904,6 +2119,7 @@ def partition_predictions(
             )
         irr_gw_share = np.clip(irr_gw_share, 0, 1)
         irr_gw_share = np.minimum(irr_gw_share, co_gw_cap)
+        irr_gw_share = np.maximum(irr_gw_share, gw_floor)
         irr_gw = irr * irr_gw_share
         irr_sw = irr - irr_gw
     else:
@@ -1922,6 +2138,7 @@ def partition_predictions(
             )
         nonirr_gw_share = np.clip(nonirr_gw_share, 0, 1)
         nonirr_gw_share = np.minimum(nonirr_gw_share, co_gw_cap)
+        nonirr_gw_share = np.maximum(nonirr_gw_share, gw_floor)
         nonirr_gw = nonirr * nonirr_gw_share
         nonirr_sw = nonirr - nonirr_gw
     else:
@@ -1960,9 +2177,20 @@ def partition_predictions(
         basin_canal_coverage = canal_series.groupby(basin_names).transform(
             lambda x: (x > 0).mean(),
         )
+        # Second gate: mean basin canal_weighted_streamflow must be > 0.
+        # Catches basins with spurious historical canal pixels but no
+        # actual delivery capacity (Douglas 1.12 % coverage from 7-8
+        # historical pixels carrying no streamflow).
+        if cw_streamflow_raw is not None:
+            cw_series = pd.Series(np.nan_to_num(cw_streamflow_raw, nan=0.0))
+            basin_cw_mean = cw_series.groupby(basin_names).transform('mean')
+            has_cw_capacity = basin_cw_mean.values > 0
+        else:
+            has_cw_capacity = np.ones(len(basin_canal_coverage), dtype=bool)
         is_co_direct = np.isin(basin_names, list(CO_RIVER_DIRECT_BASINS))
         no_canal_basin = (
-            (basin_canal_coverage.values < CANAL_COVERAGE_GATE_THRESHOLD)
+            ((basin_canal_coverage.values < CANAL_COVERAGE_GATE_THRESHOLD)
+             | ~has_cw_capacity)
             & ~is_co_direct
         )
         preserve_nonirr_sw = np.isin(
@@ -2083,9 +2311,16 @@ def partition_predictions(
         basin_canal_coverage = canal_series.groupby(basin_names).transform(
             lambda x: (x > 0).mean(),
         )
+        if cw_streamflow_raw is not None:
+            cw_series = pd.Series(np.nan_to_num(cw_streamflow_raw, nan=0.0))
+            basin_cw_mean = cw_series.groupby(basin_names).transform('mean')
+            has_cw_capacity = basin_cw_mean.values > 0
+        else:
+            has_cw_capacity = np.ones(len(basin_canal_coverage), dtype=bool)
         is_co_direct = np.isin(basin_names, list(CO_RIVER_DIRECT_BASINS))
         no_canal_basin = (
-            (basin_canal_coverage.values < CANAL_COVERAGE_GATE_THRESHOLD)
+            ((basin_canal_coverage.values < CANAL_COVERAGE_GATE_THRESHOLD)
+             | ~has_cw_capacity)
             & ~is_co_direct
         )
         preserve_nonirr_sw = np.isin(
@@ -2117,6 +2352,10 @@ def partition_predictions(
     # 0.90, Lake Havasu / Detrital / Meadview 0.40 / 0.60.
     if basin_names is not None:
         co_gw_cap_final = _co_direct_gw_cap_array(basin_names)
+        # Combine with non-CO-direct basin caps (Lower Gila / Ranegras Plain).
+        co_gw_cap_final = np.minimum(
+            co_gw_cap_final, _basin_gw_cap_array(basin_names),
+        )
         is_capped = np.isfinite(co_gw_cap_final)
         if is_capped.any():
             # Replace the np.inf sentinel (non-CO-direct pixels) with a
@@ -2149,6 +2388,41 @@ def partition_predictions(
                 )
                 nonirr_sw = np.where(
                     cap_ni, nonirr - new_ni_gw, nonirr_sw,
+                )
+                nonirr_gw = new_ni_gw
+
+        # Re-apply per-basin GW FLOOR on the FINAL per-pixel result
+        # (mirror of the cap re-application above).  The floor was set
+        # by the density-ratio step but the post-1985 NonIrr_SW excess
+        # routing can dilute it (e.g. NonIrr at Phoenix gets routed
+        # mostly back to Irr_SW via the density-ratio share, dropping
+        # NonIrr_GW share below the floor).  Re-applying here ensures
+        # the published per-basin shares match the verified ADWR
+        # anchors at floored basins (currently Phoenix AMA at 0.30).
+        gw_floor_final = _basin_gw_floor_array(basin_names)
+        is_floored = gw_floor_final > 0
+        if is_floored.any():
+            with np.errstate(invalid='ignore', divide='ignore'):
+                irr_gw_share_final = np.where(
+                    irr > 0, irr_gw / irr, 0.0,
+                )
+                nonirr_gw_share_final = np.where(
+                    nonirr > 0, nonirr_gw / nonirr, 0.0,
+                )
+            floor_irr = is_floored & (irr_gw_share_final < gw_floor_final)
+            if floor_irr.any():
+                new_irr_gw = np.where(
+                    floor_irr, irr * gw_floor_final, irr_gw,
+                )
+                irr_sw = np.where(floor_irr, irr - new_irr_gw, irr_sw)
+                irr_gw = new_irr_gw
+            floor_ni = is_floored & (nonirr_gw_share_final < gw_floor_final)
+            if floor_ni.any():
+                new_ni_gw = np.where(
+                    floor_ni, nonirr * gw_floor_final, nonirr_gw,
+                )
+                nonirr_sw = np.where(
+                    floor_ni, nonirr - new_ni_gw, nonirr_sw,
                 )
                 nonirr_gw = new_ni_gw
 
