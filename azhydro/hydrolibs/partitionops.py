@@ -889,7 +889,7 @@ def apply_ml_well_density_override(
                 if 'annual_urban_fraction' in pred_features.columns
                 else np.zeros(len(year_wd)), nan=0.0,
             ), 0, 1)
-            _is_peak = (1951 <= year <= 1955) or (1970 <= year <= 1980)
+            _is_peak = (1951 <= year <= 1957) or (1970 <= year <= 1980)
             _is_pre_1981 = year < 1981
             _lu_gate_peak = (_cf_peak > 0) | (_uf_peak > 0.2)
             _orphan_has_well = (
@@ -1239,14 +1239,25 @@ GW_WEIGHT_PRE_1945 = 10.0  # pre-1945: USGS shows ~100% GW (no/minimal SW
                            # except SRP); push very strongly toward GW.
                            # Bumped from 5.0 → 10.0 alongside PRE_GMA
                            # extension (see GW_WEIGHT_1945_1980 below).
-GW_WEIGHT_1945_1980 = 10.0 # 1945–1980 (full pre-GMA era): bumped from
-                           # 2.0 → 10.0 to recover the 1955-1975 GW%
-                           # under-attribution (model 56-58 % vs USGS
-                           # 62-69 %).  Small canal basins (Verde,
-                           # Upper San Pedro, Coconino) retain SW
-                           # post-canal-gate change, so density-ratio
+GW_WEIGHT_1945_1970 = 10.0 # 1945-1970 (pre-GMA, non-peak years): bumped
+                           # from 2.0 → 10.0 to recover the 1955-1965
+                           # GW% under-attribution.  Small canal basins
+                           # (Verde, Upper San Pedro, Coconino) retain
+                           # SW post-canal-gate change, so density-ratio
                            # needs heavier GW weight to push pre-CAP
                            # statewide GW share back toward USGS.
+GW_WEIGHT_PEAK = 15.0      # Peak sub-era 1971-1979: extra GW push to
+                           # close the IrrGW residual at 1975 (USGS
+                           # 5.01 MAF, model under by ~0.9 MAF).
+                           # 1980 dropped back to GW_WEIGHT_1945_1970
+                           # (10.0) since +15 pushed GW% to +2.5 pp
+                           # over USGS at 1980.
+GW_WEIGHT_PEAK_HIGH = 30.0 # Sub-era 1950-1965: very strong GW push
+                           # to close persistent GW% under-attribution
+                           # (model -5 to -7 pp under USGS at 1950,
+                           # 1955, 1960, 1965).  Bumped from 20 → 30 to
+                           # cover the wider 1950-1965 window (was just
+                           # 1951-1957).
 GW_WEIGHT_PRE_GMA = 2.0    # 1981-1984 GMA transition: keep prior
                            # baseline (2.0) so the 1985-1989 ramp to
                            # POST_CAP starts smoothly without a
@@ -1326,8 +1337,12 @@ def _era_gw_weight(year: int) -> float:
         return GW_WEIGHT_1930_1935
     if year < 1945:
         return GW_WEIGHT_PRE_1945
-    if year <= 1980:
-        return GW_WEIGHT_1945_1980
+    if 1950 <= year <= 1965:
+        return GW_WEIGHT_PEAK_HIGH
+    if 1971 <= year <= 1979:
+        return GW_WEIGHT_PEAK
+    if year <= 1970 or year == 1980:
+        return GW_WEIGHT_1945_1970
     if year < 1985:
         return GW_WEIGHT_PRE_GMA
     if 1990 <= year <= 1997:
@@ -1522,14 +1537,73 @@ def partition_predictions(
     #       (slightly softer to avoid GW-share over-routing),
     #       across all pre-1981 years.  Pre-GMA registry attrition
     #       affects orphans throughout, not just peak years.
-    _is_peak_wd = (1951 <= year <= 1955) or (1970 <= year <= 1980)
+    _is_peak_wd = (1951 <= year <= 1957) or (1970 <= year <= 1980)
     _is_pre_1981 = year < 1981
+
+    # Peak-year crop-edge halo (1951-1955, 1970-1980): pixels NOT in
+    # cf>0 but IMMEDIATELY ADJACENT (1-cell dilation) to a cf>0 pixel,
+    # AND with AGRI > PEAK_HALO_AGRI.  CDL/IrrMapper at peak years
+    # under-maps real ag at field-edge pixels — extending the
+    # effective cropland mask there:
+    #   (1) Retains those pixels' ML predictions (added to _has_crop_any
+    #       in the retention block below) → pre-1980 IRR_OVERRIDE routes
+    #       95 % to Irr.
+    #   (2) Lifts their well_density to basin-MAX in the peak-year wd
+    #       lift below, treating them as basin-typical ag wells (so the
+    #       density-ratio split routes them GW-favored, matching the
+    #       ag-well regime).
+    # Urban-edge halo (same construction for uf>0.2 → URBAN>0.01
+    # adjacency) captures field-fringe suburbia that GEE-LULC misses
+    # at coarse resolution — these pixels route via the URBAN_REAL
+    # 1-uf branch or the pre-1980 0.95 IRR_OVERRIDE.
+    PEAK_HALO_AGRI = 0.10
+    PEAK_HALO_URBAN = 0.30
+    # Year-conditional crop core threshold:
+    #   1951-1955 + 1971-1980: looser cf>0.1 core so more pixels seed
+    #     the 2-cell dilation halo (these years are most under USGS).
+    #   1956-1957: tighter cf>0.2 core to soften the 1957→1958 cliff
+    #     (1957 ADWR overshoot was driven by combined 0.1 core + 20.0
+    #     gw_weight + halo activation).
+    #   1970: kept at 0.2 to preserve its ΔT +0.24 calibration.
+    if (1951 <= year <= 1955) or (1971 <= year <= 1980):
+        PEAK_HALO_CF_CORE = 0.10
+    else:
+        PEAK_HALO_CF_CORE = 0.20
+    PEAK_HALO_UF_CORE = 0.30
+    crop_edge_halo = np.zeros(len(predictions), dtype=bool)
+    urban_edge_halo = np.zeros(len(predictions), dtype=bool)
+    if _is_peak_wd:
+        from scipy.ndimage import binary_dilation
+        if crop_frac_col is not None and 'AGRI' in year_df.columns:
+            _cf_arr = np.nan_to_num(crop_frac_col, nan=0.0)
+            _agri_arr = np.nan_to_num(year_df['AGRI'].values, nan=0.0)
+            _crop_grid = np.zeros(raster_shape, dtype=bool)
+            _crop_grid.ravel()[valid_mask] = (_cf_arr > PEAK_HALO_CF_CORE)
+            # 2-cell dilation (4 km reach at 2 km pixel) — real cotton /
+            # alfalfa fields commonly span several pixels at coarse
+            # resolution, so 2-cell adjacency is physical.
+            _dilated = binary_dilation(_crop_grid, iterations=2)
+            _halo_flat = (_dilated & ~_crop_grid).ravel()[valid_mask]
+            crop_edge_halo = _halo_flat & (_agri_arr > PEAK_HALO_AGRI)
+        if urban_frac_col is not None and 'URBAN' in year_df.columns:
+            _uf_arr = np.nan_to_num(urban_frac_col, nan=0.0)
+            _urb_arr = np.nan_to_num(year_df['URBAN'].values, nan=0.0)
+            _urban_grid = np.zeros(raster_shape, dtype=bool)
+            _urban_grid.ravel()[valid_mask] = (_uf_arr > PEAK_HALO_UF_CORE)
+            _dilated_u = binary_dilation(_urban_grid, iterations=1)
+            _halo_flat_u = (_dilated_u & ~_urban_grid).ravel()[valid_mask]
+            urban_edge_halo = _halo_flat_u & (_urb_arr > PEAK_HALO_URBAN)
+
     if ((_is_peak_wd or _is_pre_1981) and basin_names is not None
             and crop_frac_col is not None
             and urban_frac_col is not None):
         cf_peak = np.clip(np.nan_to_num(crop_frac_col, nan=0.0), 0, 1)
         uf_peak = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
-        lu_gate_peak = (cf_peak > 0) | (uf_peak > 0.2)
+        # lu_gate_peak now also includes crop-edge and urban-edge halo
+        # pixels so the peak-year basin-MAX wd lift extends to them.
+        lu_gate_peak = (
+            (cf_peak > 0) | (uf_peak > 0.2) | crop_edge_halo | urban_edge_halo
+        )
         orphan_has_well = (
             (cf_peak == 0) & (uf_peak == 0) & (well_dens > 0)
         )
@@ -1593,6 +1667,11 @@ def partition_predictions(
         if crop_frac_col is not None else np.zeros(len(predictions), dtype=bool)
     _has_urban_any = (np.nan_to_num(urban_frac_col, nan=0.0) >= 0.2) \
         if urban_frac_col is not None else np.zeros(len(predictions), dtype=bool)
+    # Peak-year crop-edge and urban-edge halos: extend retention to
+    # cropland-adjacent AGRI-rich pixels and urban-adjacent URBAN-rich
+    # pixels (computed above before the peak-year wd lift).
+    _has_crop_any = _has_crop_any | crop_edge_halo
+    _has_urban_any = _has_urban_any | urban_edge_halo
     # Pre-1985 AGRI retention extension removed — the previous
     # outside-AMA AGRI > 0.02 / 0.10 gates relied on the smoothed AGRI
     # density to capture patchy rural ag that CDL's raw crop_frac
@@ -1795,7 +1874,7 @@ def partition_predictions(
     # 1970-1985 AMA pixels (Phoenix/Pinal/Tucson/etc.) where the
     # natural irr_capacity_fraction is used — the exact basins where
     # we saw Irr% under-prediction at 1975/1980.
-    _is_peak_wd = (1951 <= year <= 1955) or (1970 <= year <= 1980)
+    _is_peak_wd = (1951 <= year <= 1957) or (1970 <= year <= 1980)
     if (_is_peak_wd and irr_cap_col is not None
             and basin_names is not None
             and crop_frac_col is not None):
