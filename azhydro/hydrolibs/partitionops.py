@@ -504,10 +504,33 @@ def _co_direct_gw_cap_array(basin_names: np.ndarray) -> np.ndarray:
 #   PRESCOTT AMA          (~70-80 % GW per general literature)
 #   HUALAPAI VALLEY INA   (~95 % GW per general literature)
 BASIN_GW_FLOOR = {
-    'PHOENIX AMA':    0.20,
-    'PINAL AMA':      0.30,
-    'TUCSON AMA':     0.30,
-    'HARQUAHALA INA': 0.30,
+    'PHOENIX AMA':    0.30,  # ADWR: 0.705 MAF GW / 2.3 MAF total ≈ 31 %.
+                             # Raised from 0.20 alongside the new 1990+
+                             # CAP_NONIRR_SW_BOOST that lowers modern
+                             # Phoenix NIGW; the 0.30 floor anchors
+                             # the basin to its documented 30 % GW
+                             # share under the NIGW-reduced regime.
+    'PINAL AMA':      0.50,  # CAP-fed cotton + continued GW ag pumping.
+                             # Raised from 0.30 to ~50 %, the mid-
+                             # point of the documented 50-60 % GW
+                             # regime at Pinal AMA post-CAP.  Without
+                             # this floor the NIGW boost pushes model
+                             # Pinal GW% below the physical range.
+    'TUCSON AMA':     0.60,  # Avra Valley pump-and-treat + continued
+                             # municipal GW pumping give Tucson AMA a
+                             # documented ~70 % GW share (CAP direct
+                             # delivery ~40 kAF + recharge ~145 kAF
+                             # = 184 kAF SW vs ~400 kAF GW) for the
+                             # post-CAP era (1993+).  Raised from
+                             # 0.30 to 0.60 (conservative mid).
+                             # Pre-1993 Tucson had NO CAP delivery —
+                             # see ``BASIN_GW_FLOOR_PRE_CAP`` below
+                             # for the higher pre-CAP-Tucson floor.
+    'HARQUAHALA INA': 0.70,  # Small CAP allocation (~78 kAF) vs large
+                             # GW ag pumping; ADWR documents Harquahala
+                             # as heavily GW-dependent with subsidence
+                             # concerns.  Raised from 0.30 to 0.70 to
+                             # anchor the physical regime.
     'PRESCOTT AMA':   0.64,  # ADWR Prescott AMA Total_GW share = 64 %
                              # (Irrigation = 8 % of total; mostly M&I
                              # pumping from Prescott Valley + Prescott
@@ -546,6 +569,22 @@ BASIN_GW_FLOOR = {
 # applies year-round.
 BASIN_GW_FLOOR_HISTORICAL_ONLY: frozenset = frozenset()
 
+# Pre-CAP-era (year < CAP arrival at the basin) per-basin GW floor
+# overrides.  These are higher than the post-CAP floors in
+# ``BASIN_GW_FLOOR`` because CAP delivery was zero before the basin's
+# CAP reach completion year — the basin was effectively all-GW.
+# Mapping: ``basin_name → (cap_arrival_year, pre_cap_floor)``.
+# At ``year < cap_arrival_year`` the pre-CAP floor takes precedence
+# over the post-CAP ``BASIN_GW_FLOOR`` value.
+BASIN_GW_FLOOR_PRE_CAP: dict[str, tuple[int, float]] = {
+    # Tucson reach completed 1993; pre-1993 Tucson AMA had no CAP
+    # delivery, so the basin operated as essentially all-GW (~95 %).
+    # The 0.85 pre-CAP floor reflects the small Avra Valley
+    # reclaimed-water + minor riparian SW that did exist locally,
+    # without the post-CAP 30-40 % CAP-derived SW share.
+    'TUCSON AMA': (1993, 0.85),
+}
+
 
 def _basin_gw_floor_array(
         basin_names: np.ndarray,
@@ -562,12 +601,22 @@ def _basin_gw_floor_array(
     onward their floor is dropped to ``0.0``, letting the density-ratio
     decide the GW share naturally (e.g. Ranegras Plain is expected to
     tap into CAP after its 2026 AMA designation).
+
+    Basins in ``BASIN_GW_FLOOR_PRE_CAP`` use a higher floor at years
+    before the basin's CAP-reach completion (e.g. Tucson AMA pre-1993
+    used 0.85 instead of the post-CAP 0.60).
     """
     floor = np.zeros(len(basin_names), dtype=np.float64)
     for name, val in BASIN_GW_FLOOR.items():
         if (year >= FUTURE_AMA_START_YEAR
                 and name in BASIN_GW_FLOOR_HISTORICAL_ONLY):
             continue
+        # Pre-CAP override: use the higher pre-CAP floor at the basin
+        # if the year predates the basin's CAP-reach arrival year.
+        if name in BASIN_GW_FLOOR_PRE_CAP:
+            cap_arrival, pre_cap_floor = BASIN_GW_FLOOR_PRE_CAP[name]
+            if year < cap_arrival:
+                val = pre_cap_floor
         floor = np.where(basin_names == name, val, floor)
     return floor
 
@@ -1209,6 +1258,34 @@ CAP_CUT_GW_BOOST_FACTORS: dict[int, float] = {
 }
 
 
+# Persistent boost applied to nonirr_sw_rights_density at CAP-service-area
+# pixels for ALL post-CAP years (1985+).  HarDWR's NonIrr SW rights
+# catalog under-represents CAP M&I subcontractor allocations as
+# point-of-diversion records — the regulatory water moves from CAP via
+# subcontractor pipes to provider service areas without registering as
+# a point-of-diversion, so the raw nonirr_sw_rights_density raster is
+# sparse at CAP M&I pixels even though CAP delivers ~600-700 kAF/yr of
+# M&I water.  Without this boost, the density-ratio routes most NonIrr
+# volume at CAP M&I pixels to NonIrr_GW (because gw_weight × nonirr_wd
+# >> smooth_nonirr_swd at sparse-NIRSWD pixels), inflating modern
+# NonIrr_GW by ~0.6-1.0 MAF/yr (USGS 1990/1995/2010 GW% over by +7-8 pp).
+# Boost factor 5.0 calibrated to bring 1990/2010 GW% from +7-8 pp down
+# to ±2 pp.  Applied symmetrically to the CAP_CUT_GW_BOOST_FACTORS
+# (which boost GW share during shortage); this constant boosts the SW
+# share at CAP M&I service areas as a baseline correction.
+CAP_NONIRR_SW_BOOST = 5.0
+CAP_NONIRR_SW_BOOST_START_YEAR = 1985  # CAP Phoenix reach completion
+                                        # (1985); boost active across
+                                        # all post-CAP years for
+                                        # consistency.  1985 itself is
+                                        # already well-calibrated by
+                                        # the partition (USGS GW% +1.8
+                                        # pp) but the boost is symmetric
+                                        # with CAP_OPERATIONAL_START so
+                                        # pre/post-CAP behavior is
+                                        # cleanly demarcated.
+
+
 def apply_cap_delivery_perturbation(
         year_df: pd.DataFrame,
         year: int,
@@ -1265,7 +1342,9 @@ def apply_cap_delivery_perturbation(
         return year_df
     sw_factor = CAP_DELIVERY_FACTORS.get(year)
     gw_boost = CAP_CUT_GW_BOOST_FACTORS.get(year)
-    if sw_factor is None and (gw_boost is None or gw_boost == 1.0):
+    apply_nirswd_boost = year >= CAP_NONIRR_SW_BOOST_START_YEAR
+    if (sw_factor is None and (gw_boost is None or gw_boost == 1.0)
+            and not apply_nirswd_boost):
         return year_df
 
     sw_cols = [
@@ -1288,6 +1367,14 @@ def apply_cap_delivery_perturbation(
 
     year_df_p = year_df.copy()
     idx = year_df_p.index[cap_pixel_mask]
+    # Apply persistent NonIrr SW boost FIRST (1985+, all CAP-service
+    # pixels, regardless of shortage) so any subsequent shortage
+    # reduction (sw_factor) acts on the boosted value.  Order matters:
+    # boosted_value × sw_factor preserves the relative shortage signal
+    # at CAP M&I pixels.
+    if (apply_nirswd_boost
+            and 'nonirr_sw_rights_density' in year_df_p.columns):
+        year_df_p.loc[idx, 'nonirr_sw_rights_density'] *= CAP_NONIRR_SW_BOOST
     if sw_factor is not None:
         for col in sw_cols:
             year_df_p.loc[idx, col] *= sw_factor
