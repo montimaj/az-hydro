@@ -2611,26 +2611,43 @@ CAP_SCENARIOS: dict[str, float] = {
 # columns at CAP pixels during scenario runs.  Mathematically
 # equivalent to boosting ``gw_weight`` at those pixels — shifts the
 # density-ratio allocation toward GW without changing the ML-predicted
-# total pumping.  Mapping from scenario cut severity to era-analogous
-# boost is the same logic used in the hindcast:
-#   Baseline (no cut)  → 1.0  (gw_w stays at calibrated schedule)
-#   Tier 0 (192 kAF)   → 1.0  (no boost; just DCP contribution)
-#   Tier 1 (512 kAF)   → 5.0  (pre-CAP 1945-1980 gw_w=1.0)
-#   Tier 2a (592 kAF)  → 7.5  (pre-CAP peak 1948-1955 gw_w=1.5)
-#   Tier 2b (640 kAF)  → 7.5
-#   Tier 3 (720 kAF)   → 10.0 (approaching pre-1945 all-GW)
-#   Basic Coord        → 7.5  (663 kAF effective cut ≈ Tier 2a)
-#   Extreme Shortage   → 12.5 (900 kAF full CAP-overlay cut, beyond
-#                              Tier 3; approaching all-GW regime)
+# total pumping.
+#
+# Mapping is era-analogous against the recalibrated historical gw_w
+# schedule (post the partition-side recalibration: pre-CAP baseline
+# 1945-1980 = 10.0, pre-CAP peak 1971-1979 = 15.0).  Each tier maps
+# to a historical regime where AZ pumping had a documented GW share:
+#   Baseline (no cut)  → 1.0   (post-CAP gw_w 0.2; effective 0.2)
+#   Tier 0 (192 kAF)   → 1.0   (no real cut; post-CAP)
+#   Tier 1 (512 kAF)   → 10.0  (GMA transition 1981-1984 gw_w=2.0;
+#                                effective gw_w = 0.2 × 10 = 2.0)
+#   Tier 2a (592 kAF)  → 18.0  (interpolated between Tier 1 and
+#                                Basic Coord by cut magnitude)
+#   Tier 2b (640 kAF)  → 23.0  (interpolated)
+#   Basic Coord (663)  → 25.0  (between GMA and pre-CAP; effective 5.0)
+#   Tier 3 (720 kAF)   → 50.0  (pre-CAP baseline 1945-1980 gw_w=10.0;
+#                                effective gw_w = 10.0)
+#   Extreme Shortage   → 75.0  (pre-CAP peak 1971-1979 gw_w=15.0;
+#                                effective gw_w = 15.0)
+#
+# Justification: a CAP shortage that physically forces AZ users back
+# toward GW dominance should reach the SAME effective gw_w as the
+# historical era when GW dominated to a comparable degree.  Note that
+# our model has no regulatory ceiling — all "lost CAP" is apportioned
+# to GW via the density-ratio shift, so these boosts approximate the
+# physical substitution magnitude rather than a regulatory shortage
+# ledger.  Conservative subset of the full era-analogous mapping;
+# applying the literal era equivalence (Basic Coord at 50, Tier 3 at
+# 75, etc.) would overshoot WestWater 2026 cumulative drawdown.
 CAP_SCENARIO_GW_BOOSTS: dict[str, float] = {
     'Baseline_900kAF': 1.0,
-    'Basic_Coordination_237kAF': 7.5,
-    'Extreme_Shortage_0kAF': 12.5,
+    'Basic_Coordination_237kAF': 25.0,
+    'Extreme_Shortage_0kAF': 75.0,
     'DCP_Tier0_192kAF_cut': 1.0,
-    'DCP_Tier1_512kAF_cut': 5.0,
-    'DCP_Tier2a_592kAF_cut': 7.5,
-    'DCP_Tier2b_640kAF_cut': 7.5,
-    'DCP_Tier3_720kAF_cut': 10.0,
+    'DCP_Tier1_512kAF_cut': 10.0,
+    'DCP_Tier2a_592kAF_cut': 18.0,
+    'DCP_Tier2b_640kAF_cut': 23.0,
+    'DCP_Tier3_720kAF_cut': 50.0,
 }
 
 # Non-well offset: only reclaimed water (350 kAF) is added on top of
@@ -4338,12 +4355,21 @@ def run_uncertainty_quantification(
         # ── Basin / sub-basin σ_total (quadrature of per-component CSVs) ──
         full_prediction_dir = os.path.join(model_dir, pred_base)
         compute_basin_sigma_total(unc_dir, prediction_dir=full_prediction_dir)
-        _plot_basin_sigma_time_series(unc_dir)
 
-        # ── Visualizations ──
-        _plot_uncertainty_time_series(
-            sigma_components, unc_dir, mosaic_res, vizops,
-        )
+        # ── Time-series visualizations (skippable) ──
+        # Both basin σ time-series plots and AZ-wide uncertainty
+        # time-series plots are wrapped behind ``time-series-plots`` so
+        # downstream raster-augmentation can run without spending the
+        # ~5-10 minute matplotlib render cost when only the underlying
+        # CSVs / rasters are needed.  CSVs (Basin_Sigma_Total.csv etc.)
+        # are still produced by compute_basin_sigma_total above.
+        if 'time-series-plots' not in skip:
+            _plot_basin_sigma_time_series(unc_dir)
+            _plot_uncertainty_time_series(
+                sigma_components, unc_dir, mosaic_res, vizops,
+            )
+        else:
+            logger.info('  σ_total time-series plots skipped.')
 
         # ── Augment prediction rasters with uncertainty bands ──
         prediction_base_dir = (

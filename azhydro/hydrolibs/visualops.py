@@ -6569,33 +6569,41 @@ def plot_intercomp_time_series(
             # ── Axis formatting ──
             # Force integer-only year ticks on every x-axis to prevent
             # matplotlib from rendering "2000.0" or cluttering the axis
-            # with sub-year gridlines.
+            # with sub-year gridlines.  Tick labelsize fixed at 11 and
+            # axis labels bold across mm/ft/m³/MAF panels for visual
+            # consistency with the volume-axis formatter.
             from matplotlib.ticker import MaxNLocator
+            tick_fontsize = 11
             if mode == 'volume':
-                axes[0].set_ylabel('Depth (mm)')
+                axes[0].set_ylabel('Depth (mm)', fontweight='bold')
                 axes[0].grid(True, alpha=0.3, linestyle='--')
                 axes[0].legend(fontsize=9)
                 axes[0].xaxis.set_major_locator(MaxNLocator(integer=True))
+                axes[0].tick_params(axis='both', labelsize=tick_fontsize)
                 ax_ft = axes[0].twinx()
-                ax_ft.set_ylabel('Depth (ft)')
+                ax_ft.set_ylabel('Depth (ft)', fontweight='bold')
                 lo, hi = axes[0].get_ylim()
                 ax_ft.set_ylim(lo * mm_to_ft, hi * mm_to_ft)
+                ax_ft.tick_params(axis='both', labelsize=tick_fontsize)
 
                 _format_volume_axis(axes[1], unit='m3', label='Volume')
-                axes[1].set_xlabel('Year')
+                axes[1].set_xlabel('Year', fontweight='bold')
                 axes[1].grid(True, alpha=0.3, linestyle='--')
                 axes[1].legend(fontsize=9)
                 axes[1].xaxis.set_major_locator(MaxNLocator(integer=True))
+                axes[1].tick_params(axis='both', labelsize=tick_fontsize)
                 ax_af = axes[1].twinx()
                 lo, hi = axes[1].get_ylim()
                 ax_af.set_ylim(lo * m3_to_af, hi * m3_to_af)
                 _format_volume_axis(ax_af, unit='AF', label='Volume')
+                ax_af.tick_params(axis='both', labelsize=tick_fontsize)
             else:
-                axes[0].set_ylabel(cat_title)
-                axes[0].set_xlabel('Year')
+                axes[0].set_ylabel(cat_title, fontweight='bold')
+                axes[0].set_xlabel('Year', fontweight='bold')
                 axes[0].grid(True, alpha=0.3, linestyle='--')
                 axes[0].legend(fontsize=9)
                 axes[0].xaxis.set_major_locator(MaxNLocator(integer=True))
+                axes[0].tick_params(axis='both', labelsize=tick_fontsize)
 
             clean = basin.replace(' ', '_').replace('/', '_').replace('.', '')
             out_path = os.path.join(output_dir,
@@ -6761,6 +6769,8 @@ def plot_intercomp_stacked_bars(
     file_prefix: str = 'Stacked_Bar',
     af_divisor: float = 1e6,
     af_unit_label: str = 'MAF',
+    mean_year_range: tuple[int, int] | None = None,
+    source_colors: dict[str, str] | None = None,
 ) -> None:
     """Statewide stacked bar plots for intercomparison sources.
 
@@ -6782,6 +6792,20 @@ def plot_intercomp_stacked_bars(
         file_prefix: Prepended to filenames.
         af_divisor: Divide AF values by this for axis labels.
         af_unit_label: Unit label for y-axis (e.g. 'MAF').
+        mean_year_range: Optional ``(start, end)`` (inclusive) restricting
+            the **mean-annual summary bar** (Figure 2) to a common
+            period across all sources, so different-coverage datasets
+            (e.g. ML 2000-2020 vs Reitz 1980-2018) are averaged
+            apples-to-apples.  If ``None`` (default), each source's
+            mean uses its own native year range.  Per-year grouped
+            bars (Figure 1) always show every available year.
+        source_colors: Optional ``{source: color}`` mapping that
+            overrides both the per-source palette (``_SOURCE_PALETTES``)
+            and the per-category ``stack_colors`` for the per-year
+            grouped bars.  Useful for single-category stacks where
+            distinct source-level colours are more legible than the
+            cat-color + alpha-shift fallback (e.g. CU intercomparison
+            with one bar per source, no GW/SW split).
     """
     makedirs(output_dir)
     if stack_labels is None:
@@ -6832,6 +6856,8 @@ def plot_intercomp_stacked_bars(
 
     def _bar_color(src: str, cat_idx: int) -> tuple[str, float]:
         """Return (color, alpha) for a (source, category-index) bar."""
+        if source_colors and src in source_colors:
+            return source_colors[src], 1.0
         if src in _SOURCE_PALETTES and len(stack_cats) == 2:
             return _SOURCE_PALETTES[src][cat_idx], 1.0
         # Fallback to the legacy cat-color + alpha-shift scheme.
@@ -6901,12 +6927,25 @@ def plot_intercomp_stacked_bars(
     for src_i, src in enumerate(source_order):
         bottom = 0.0
         for cat in stack_cats:
-            cat_vals = list(src_cat_yearly[src][cat].values())
+            yr_to_val = src_cat_yearly[src][cat]
+            if mean_year_range is not None:
+                cat_vals = [
+                    v for y, v in yr_to_val.items()
+                    if mean_year_range[0] <= y <= mean_year_range[1]
+                ]
+            else:
+                cat_vals = list(yr_to_val.values())
             mean_val = float(np.mean(cat_vals)) / af_divisor if cat_vals else 0.0
+            # Per-source override takes precedence (single-cat case);
+            # otherwise stack colour by category.
+            if source_colors and src in source_colors:
+                bar_color = source_colors[src]
+            else:
+                bar_color = stack_colors[cat]
             ax.bar(
                 x[src_i], mean_val, bar_width,
                 bottom=bottom,
-                color=stack_colors[cat],
+                color=bar_color,
                 edgecolor='black', linewidth=0.5,
                 label=stack_labels[cat] if src_i == 0 else '',
             )
@@ -6918,7 +6957,11 @@ def plot_intercomp_stacked_bars(
     ax.set_xticks(x)
     ax.set_xticklabels(source_order, fontsize=10)
     ax.set_ylabel(f'Mean Annual Total ({af_unit_label})', fontweight='bold')
-    ax.set_title(f'{title_prefix}Mean-Annual Statewide Totals',
+    title_yr = (
+        f' ({mean_year_range[0]}–{mean_year_range[1]})'
+        if mean_year_range is not None else ''
+    )
+    ax.set_title(f'{title_prefix}Mean-Annual Statewide Totals{title_yr}',
                   fontweight='bold', fontsize=13)
     ax.legend(fontsize=9, loc='upper right', framealpha=0.7)
     ax.grid(axis='y', alpha=0.2, linestyle='--')

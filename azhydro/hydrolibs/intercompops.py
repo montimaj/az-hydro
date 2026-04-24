@@ -401,6 +401,7 @@ def load_nhm_basin_volumes(
     for category, csv_name in [
         ('GW', 'IR_HUC12_GW_WD_monthly_2000_2020.csv'),
         ('SW', 'IR_HUC12_SW_WD_monthly_2000_2020.csv'),
+        ('Total', 'IR_HUC12_Tot_WD_monthly_2000_2020.csv'),
     ]:
         csv_path = os.path.join(nhm_dir, csv_name)
         logger.info(f'Reading NHM {category}: {csv_path}')
@@ -1971,16 +1972,27 @@ def run_intercomparison(
     irr_sw_dir: str | None = None,
     predictor_dir: str | None = None,
     ml_year_range: tuple[int, int] = (1980, 2020),
-    nhm_year_range: tuple[int, int] = (1980, 2020),
-    reitz_year_range: tuple[int, int] = (1980, 2020),
+    nhm_year_range: tuple[int, int] = (2000, 2020),
+    reitz_year_range: tuple[int, int] = (1980, 2018),
 ) -> pd.DataFrame:
     """
-    Run the full three-way intercomparison for Irrigation GW and Irrigation
-    SW withdrawals across Arizona groundwater basins.
+    Run the full three-way intercomparison for Irrigation GW, Irrigation
+    SW, and Irrigation Total withdrawals across Arizona groundwater basins.
 
-    Year ranges default to 1980-2020 to cover the full span of all three
-    datasets (ML: 2002-2020, NHM: 2000-2020, Reitz: 1980-2018).  Years
-    without data for a given USGS dataset will appear as blank/zero.
+    Year ranges default to each dataset's actual coverage:
+        ML: 1980-2020 (predictions available 1896-2099; 1980 chosen to
+            give full historical context in time-series plots while
+            keeping mean computations bounded)
+        NHM: 2000-2020 (CSV native coverage)
+        Reitz: 1980-2018 (Reitz native coverage)
+    Per-basin means use **pairwise common-year windows** (intersection
+    of each pair's coverage), so different-coverage datasets are
+    averaged apples-to-apples in the metrics CSV and Stacked_Bar_Mean.
+    Time-series plots use each source's full native range so the
+    visual context is preserved (gaps appear where a dataset has no
+    data for a given year).  Previously defaulted to 1980-2020 across
+    all three, which diluted NHM means by including 20 zero-padded
+    years 1980-1999.
 
     Args:
         ml_pred_dir (str): Directory with ``pred_YYYY.tif`` (or use *irr_gw_dir*/*irr_sw_dir*).
@@ -2083,6 +2095,11 @@ def run_intercomparison(
     # the Total_Irrigation comparison cancels that reshuffle and
     # surfaces the underlying agreement on irrigation volume per basin.
     def _add_total_irrigation(vols: dict) -> None:
+        # If the loader already produced a 'Total' entry (e.g. NHM
+        # explicit monthly-Total CSV), keep it as the authoritative
+        # source rather than overwriting with GW + SW synthesis.
+        if 'Total' in vols and vols['Total'].get('mean'):
+            return
         gw_mean = vols.get('GW', {}).get('mean', {})
         sw_mean = vols.get('SW', {}).get('mean', {})
         gw_yearly = vols.get('GW', {}).get('yearly', {})
@@ -2105,25 +2122,87 @@ def run_intercomparison(
     for vols in (ml_vols, nhm_vols, reitz_vols):
         _add_total_irrigation(vols)
 
+    # Pairwise common-year ranges (intersect each pair's native coverage):
+    #   ML vs NHM   = (2000, 2020)
+    #   ML vs Reitz = (1980, 2018)
+    #   NHM vs Reitz = (2000, 2018)
+    # Plus a three-way "Common" intersection (2000, 2018) so all three
+    # are compared on the same axis for ribbon / overlap plots.
+    def _intersect_yr_range(r_a, r_b):
+        return (max(r_a[0], r_b[0]), min(r_a[1], r_b[1]))
+
+    pair_yr_ranges = {
+        ('ML', 'NHM'): _intersect_yr_range(ml_year_range, nhm_year_range),
+        ('ML', 'Reitz'): _intersect_yr_range(ml_year_range, reitz_year_range),
+        ('NHM', 'Reitz'): _intersect_yr_range(nhm_year_range, reitz_year_range),
+    }
+    common_yr_range = (
+        max(ml_year_range[0], nhm_year_range[0], reitz_year_range[0]),
+        min(ml_year_range[1], nhm_year_range[1], reitz_year_range[1]),
+    )
+    logger.info(
+        f'Pairwise year ranges: ML-NHM={pair_yr_ranges[("ML", "NHM")]}, '
+        f'ML-Reitz={pair_yr_ranges[("ML", "Reitz")]}, '
+        f'NHM-Reitz={pair_yr_ranges[("NHM", "Reitz")]}; '
+        f'Common (3-way)={common_yr_range}'
+    )
+
+    def _mean_over_years(vols_cat: dict, basin_names_local, yr_range) -> dict:
+        """Recompute per-basin mean restricted to the given year range."""
+        yearly = vols_cat.get('yearly', {})
+        if not yearly:
+            return vols_cat.get('mean', {})
+        years_in_range = [y for y in yearly if yr_range[0] <= y <= yr_range[1]]
+        if not years_in_range:
+            return {b: 0.0 for b in basin_names_local}
+        return {
+            b: float(np.mean([
+                yearly[y].get(b, 0.0) for y in years_in_range
+            ])) for b in basin_names_local
+        }
+
     for cat in ('GW', 'SW', 'Total'):
         logger.info(f'--- Irrigation {cat} metrics ---')
         pairs = [
-            ('ML', 'NHM', ml_vols[cat]['mean'], nhm_vols[cat]['mean']),
-            ('ML', 'Reitz', ml_vols[cat]['mean'], reitz_vols[cat]['mean']),
-            ('NHM', 'Reitz', nhm_vols[cat]['mean'], reitz_vols[cat]['mean']),
+            ('ML', 'NHM', ml_vols[cat], nhm_vols[cat]),
+            ('ML', 'Reitz', ml_vols[cat], reitz_vols[cat]),
+            ('NHM', 'Reitz', nhm_vols[cat], reitz_vols[cat]),
         ]
-        for label_a, label_b, data_a, data_b in pairs:
+        for label_a, label_b, vols_a, vols_b in pairs:
+            yr_range = pair_yr_ranges[(label_a, label_b)]
+            data_a = _mean_over_years(vols_a, basin_names, yr_range)
+            data_b = _mean_over_years(vols_b, basin_names, yr_range)
             m = _compute_metrics(
                 basin_names, data_a, data_b, label_a, label_b,
                 basin_areas_m2=basin_areas_m2,
             )
             m['Category'] = f'Irrigation_{cat}'
+            m['Year_Range'] = f'{yr_range[0]}-{yr_range[1]}'
             all_metrics.append(m)
             logger.info(
-                f'  {m["Pair"]}: RMSD={m["RMSD_AF"]:.2f} AF '
+                f'  {m["Pair"]} ({m["Year_Range"]}): '
+                f'RMSD={m["RMSD_AF"]:.2f} AF '
                 f'({m["RMSD_m3"]:.2f} m³), '
                 f'MAD={m["MAD_AF"]:.2f} AF, PctDiff={m["Pct_Diff"]:.2f}%'
             )
+
+        # Common 3-way intersection — same year range for all three datasets
+        if common_yr_range[0] <= common_yr_range[1]:
+            data_ml = _mean_over_years(ml_vols[cat], basin_names, common_yr_range)
+            data_nhm = _mean_over_years(nhm_vols[cat], basin_names, common_yr_range)
+            data_reitz = _mean_over_years(reitz_vols[cat], basin_names, common_yr_range)
+            for la, lb, da, db in [
+                ('ML', 'NHM', data_ml, data_nhm),
+                ('ML', 'Reitz', data_ml, data_reitz),
+                ('NHM', 'Reitz', data_nhm, data_reitz),
+            ]:
+                m = _compute_metrics(
+                    basin_names, da, db, la, lb,
+                    basin_areas_m2=basin_areas_m2,
+                )
+                m['Category'] = f'Irrigation_{cat}'
+                m['Year_Range'] = f'Common_{common_yr_range[0]}-{common_yr_range[1]}'
+                all_metrics.append(m)
 
     metrics_df = pd.DataFrame(all_metrics)
     col_order = [
@@ -2224,12 +2303,25 @@ def run_intercomparison(
         )
 
     # ── 5. Per-basin comparison table (mm, m³, AF) ──────────────────────
+    # Native columns (ML_AF / NHM_AF / Reitz_AF) report each dataset
+    # over its OWN year range.  Common columns (suffix _Common_AF)
+    # report each dataset over the 3-way intersection year range so
+    # ML / NHM / Reitz can be compared apples-to-apples on the same
+    # axis.  Pairwise common-range deltas are in intercomparison_metrics.csv.
     rows = []
     for cat in ('GW', 'SW', 'Total'):
+        ml_common = _mean_over_years(ml_vols[cat], basin_names, common_yr_range)
+        nhm_common = _mean_over_years(nhm_vols[cat], basin_names, common_yr_range)
+        reitz_common = _mean_over_years(
+            reitz_vols[cat], basin_names, common_yr_range,
+        )
         for basin in basin_names:
             ml_af = ml_vols[cat]['mean'].get(basin, 0.0)
             nhm_af = nhm_vols[cat]['mean'].get(basin, 0.0)
             reitz_af = reitz_vols[cat]['mean'].get(basin, 0.0)
+            ml_c_af = ml_common.get(basin, 0.0)
+            nhm_c_af = nhm_common.get(basin, 0.0)
+            reitz_c_af = reitz_common.get(basin, 0.0)
             area = basin_areas_m2.get(basin, 1.0)
 
             rows.append({
@@ -2247,11 +2339,17 @@ def run_intercomparison(
                 'Reitz_ft': round(reitz_af * af_to_m3 / area * M_TO_MM * MM_TO_FT, 6),
                 'Reitz_m3': round(reitz_af * af_to_m3, 2),
                 'Reitz_AF': round(reitz_af, 2),
+                'ML_Common_AF': round(ml_c_af, 2),
+                'NHM_Common_AF': round(nhm_c_af, 2),
+                'Reitz_Common_AF': round(reitz_c_af, 2),
             })
     basin_df = pd.DataFrame(rows)
     basin_csv = os.path.join(output_dir, 'per_basin_volumes.csv')
     basin_df.to_csv(basin_csv, index=False)
-    logger.info(f'Per-basin volumes saved to {basin_csv}')
+    logger.info(
+        f'Per-basin volumes saved to {basin_csv} '
+        f'(native + Common {common_yr_range[0]}-{common_yr_range[1]})'
+    )
 
     # ── 6. Time series CSV ───────────────────────────────────────────────
     ts_rows = []
@@ -2303,6 +2401,10 @@ def run_intercomparison(
         )
 
     # ── 8b. Statewide stacked bar plots ────────────────────────────────
+    # Mean-annual summary bar uses the 3-way Common year range so
+    # ML / NHM / Reitz are averaged over the same 19-year window
+    # (otherwise Reitz's 1980-2018 range would inflate its mean
+    # relative to ML / NHM averaged over 2000-2020).
     bar_dir = os.path.join(output_dir, 'Stacked_Bar/')
     plot_intercomp_stacked_bars(
         all_sources, source_order=['ML', 'NHM', 'Reitz'],
@@ -2311,6 +2413,7 @@ def run_intercomparison(
         stack_labels={'GW': 'Groundwater', 'SW': 'Surface Water'},
         stack_colors={'GW': '#2C3E50', 'SW': '#3498DB'},
         title_prefix='Irrigation Withdrawal — ',
+        mean_year_range=common_yr_range,
     )
 
     # ── 9. Spatial difference maps ───────────────────────────────────────
@@ -2950,7 +3053,10 @@ def run_cu_intercomparison(
         filename='Scatter_CU.png',
     )
 
-    # Statewide stacked bar (CU is a single category, no GW/SW split)
+    # Statewide stacked bar (CU is a single category, no GW/SW split).
+    # Use distinct per-source colours (ML blue, NHM black) since the
+    # default cat-color + alpha-shift fallback is hard to read with a
+    # single category.
     bar_dir = os.path.join(output_dir, 'Stacked_Bar/')
     plot_intercomp_stacked_bars(
         {'ML': {'CU': ml_cu}, 'NHM': {'CU': nhm_cu}},
@@ -2960,6 +3066,7 @@ def run_cu_intercomparison(
         stack_labels={'CU': 'Irrigation CU'},
         stack_colors={'CU': '#27AE60'},
         title_prefix='Irrigation CU — ',
+        source_colors={'ML': '#1F77B4', 'NHM': '#000000'},
     )
 
     # ── HUC12-level comparison (ML aggregated to NHM's native unit) ────
@@ -3394,6 +3501,37 @@ def run_peff_intercomparison(
         'ML_Peff_PCML': 'ML_Peff_PCML',
         'NHM_Peff': 'NHM_Peff',
     }
+    src_yr_ranges = {
+        'ML_Peff': ml_year_range,
+        'ML_Peff_PCML': ml_pcml_year_range,
+        'NHM_Peff': nhm_year_range,
+    }
+
+    def _intersect_yr_range(r_a, r_b):
+        return (max(r_a[0], r_b[0]), min(r_a[1], r_b[1]))
+
+    def _peff_mean_over_years(src_data, basins, yr_range):
+        yearly = src_data.get('yearly', {})
+        if not yearly:
+            return src_data.get('mean', {})
+        years_in = [y for y in yearly if yr_range[0] <= y <= yr_range[1]]
+        if not years_in:
+            return {b: 0.0 for b in basins}
+        return {
+            b: float(np.mean([yearly[y].get(b, 0.0) for y in years_in]))
+            for b in basins
+        }
+
+    common_yr = (
+        max(src_yr_ranges[k][0] for k in src_yr_ranges),
+        min(src_yr_ranges[k][1] for k in src_yr_ranges),
+    )
+    logger.info(
+        f'  Pairwise + Common year ranges: '
+        f'ML_Peff={ml_year_range}, ML_Peff_PCML={ml_pcml_year_range}, '
+        f'NHM_Peff={nhm_year_range}, Common={common_yr}'
+    )
+
     all_metrics = []
     pairs = [
         ('ML_Peff', 'NHM_Peff'),
@@ -3401,21 +3539,45 @@ def run_peff_intercomparison(
         ('ML_Peff', 'ML_Peff_PCML'),
     ]
     for label_a, label_b in pairs:
+        yr_range = _intersect_yr_range(
+            src_yr_ranges[label_a], src_yr_ranges[label_b],
+        )
+        data_a = _peff_mean_over_years(
+            all_sources[label_a], basin_names, yr_range,
+        )
+        data_b = _peff_mean_over_years(
+            all_sources[label_b], basin_names, yr_range,
+        )
         m = _compute_metrics(
-            basin_names,
-            all_sources[label_a]['mean'],
-            all_sources[label_b]['mean'],
-            _peff_display_name[label_a],
-            _peff_display_name[label_b],
+            basin_names, data_a, data_b,
+            _peff_display_name[label_a], _peff_display_name[label_b],
             basin_areas_m2=basin_areas_m2,
         )
         m['Category'] = 'Effective_Precipitation'
+        m['Year_Range'] = f'{yr_range[0]}-{yr_range[1]}'
         all_metrics.append(m)
         logger.info(
-            f'  {m["Pair"]}: RMSD={m["RMSD_AF"]:.2f} AF '
+            f'  {m["Pair"]} ({m["Year_Range"]}): '
+            f'RMSD={m["RMSD_AF"]:.2f} AF '
             f'({m["RMSD_m3"]:.2f} m³), '
             f'MAD={m["MAD_AF"]:.2f} AF, PctDiff={m["Pct_Diff"]:.2f}%'
         )
+
+    # Common 3-way intersection
+    if common_yr[0] <= common_yr[1]:
+        common_means = {
+            k: _peff_mean_over_years(all_sources[k], basin_names, common_yr)
+            for k in all_sources
+        }
+        for label_a, label_b in pairs:
+            m = _compute_metrics(
+                basin_names, common_means[label_a], common_means[label_b],
+                _peff_display_name[label_a], _peff_display_name[label_b],
+                basin_areas_m2=basin_areas_m2,
+            )
+            m['Category'] = 'Effective_Precipitation'
+            m['Year_Range'] = f'Common_{common_yr[0]}-{common_yr[1]}'
+            all_metrics.append(m)
 
     metrics_df = pd.DataFrame(all_metrics)
     metrics_csv = os.path.join(output_dir, 'peff_intercomparison_metrics.csv')
@@ -3423,7 +3585,14 @@ def run_peff_intercomparison(
     logger.info(f'Peff metrics saved to {metrics_csv}')
 
     # ── 5. Per-basin comparison table ────────────────────────────────────
+    # Native columns use each source's own year range; Common columns
+    # use the 3-way intersection year range so sources are directly
+    # comparable on the same axis.
     rows = []
+    common_means_for_csv = (
+        common_means if common_yr[0] <= common_yr[1]
+        else {k: {b: 0.0 for b in basin_names} for k in all_sources}
+    )
     for basin in basin_names:
         area = basin_areas_m2.get(basin, 1.0)
         row = {'Basin': basin}
@@ -3432,11 +3601,16 @@ def run_peff_intercomparison(
             af_val = all_sources[src_key]['mean'].get(basin, 0.0)
             row[f'{display}_mm'] = round(af_val * af_to_m3 / area * M_TO_MM, 4)
             row[f'{display}_AF'] = round(af_val, 2)
+            af_common = common_means_for_csv[src_key].get(basin, 0.0)
+            row[f'{display}_Common_AF'] = round(af_common, 2)
         rows.append(row)
     basin_df = pd.DataFrame(rows)
     basin_csv = os.path.join(output_dir, 'peff_per_basin.csv')
     basin_df.to_csv(basin_csv, index=False)
-    logger.info(f'Per-basin Peff saved to {basin_csv}')
+    logger.info(
+        f'Per-basin Peff saved to {basin_csv} '
+        f'(native + Common {common_yr[0]}-{common_yr[1]})'
+    )
 
     # ── 6. Time series CSV ───────────────────────────────────────────────
     ts_rows = []
@@ -3818,30 +3992,37 @@ _CAP_AMA_TO_BASIN = {
 
 def load_cap_srp_annual_sw(
     cap_xlsx: str,
-    srp_xlsx: str,
+    srp_xlsx: str | None = None,
     include_spill_water: bool = False,
 ) -> dict[str, dict[int, float]]:
-    """Load CAP and SRP delivery data and return annual total surface-water
-    deliveries (AF) per basin.
+    """Load CAP (and optionally SRP) delivery data and return annual
+    total surface-water deliveries (AF) per basin.
 
     CAP: keeps only rows where ``Recharge Facility`` is null (direct use).
     Rows with ``AMA == 'Multiple'`` or ``NaN`` are excluded because they
     cannot be assigned to a single basin (25 records / ~15,600 AF total;
     16 NaN-AMA records / ~86,300 AF total).
 
-    SRP: keeps rows where ``Parent Water Type == 'SURFACE WATER'``.
-    When *include_spill_water* is True, ``SPILL WATER`` records are also
-    included as a sensitivity test; spill water ranges from ~19 AF/yr
-    (2016) to ~366,000 AF/yr (1993) in Phoenix AMA.
+    SRP: only loaded when ``srp_xlsx`` is provided (and not None).  If
+    omitted, validation uses CAP-only data — recommended because the
+    SRP service area boundary is not publicly mapped, so attributing
+    SRP deliveries to a single GW basin (currently Phoenix AMA) is
+    ambiguous.  When loaded, keeps rows where
+    ``Parent Water Type == 'SURFACE WATER'``; when *include_spill_water*
+    is True, ``SPILL WATER`` records are also included as a sensitivity
+    test (spill water ranges from ~19 AF/yr at 2016 to ~366,000 AF/yr
+    at 1993 in Phoenix AMA).
 
-    For Phoenix AMA the two sources are summed.  Both datasets use
-    calendar-year columns (CAP ``Year``; SRP ``Water Move Year``).
+    Both datasets use calendar-year columns (CAP ``Year``; SRP
+    ``Water Move Year``).
 
     Args:
         cap_xlsx (str): Path to CAP delivery Excel file.
-        srp_xlsx (str): Path to SRP delivery Excel file.
+        srp_xlsx (str or None): Path to SRP delivery Excel file.  If
+            None (default), SRP is skipped — CAP-only validation.
         include_spill_water (bool): If True, include SRP ``SPILL WATER`` records in addition to
-            ``SURFACE WATER``.  Default False (baseline).
+            ``SURFACE WATER``.  Default False (baseline).  Ignored when
+            ``srp_xlsx`` is None.
 
     Returns:
         dict[str, dict[int, float]]: ``{basin_name: {year: delivery_AF}}``.
@@ -3885,7 +4066,22 @@ def load_cap_srp_annual_sw(
         .rename(columns={'Delivery AF': 'CAP_AF'})
     )
 
-    # ── SRP ──────────────────────────────────────────────────────────────
+    # ── Build CAP-only basin/year dict ───────────────────────────────────
+    basin_year = {}
+    for _, row in cap_annual.iterrows():
+        basin_year.setdefault(row['Basin'], {})[int(row['Year'])] = float(row['CAP_AF'])
+
+    # ── SRP (optional) ───────────────────────────────────────────────────
+    # SRP service area boundary is not publicly mapped, so attributing
+    # SRP deliveries to a single AZ GW basin (Phoenix AMA) is ambiguous.
+    # Skip unless caller explicitly provides srp_xlsx.
+    if srp_xlsx is None:
+        logger.info(
+            'CAP/SRP loader: srp_xlsx not provided — using CAP-only data '
+            '(SRP service area is not unambiguously mappable to AZ basins).'
+        )
+        return basin_year
+
     srp_df = pd.read_excel(srp_xlsx)
     srp_types = ['SURFACE WATER']
     if include_spill_water:
@@ -3897,13 +4093,6 @@ def load_cap_srp_annual_sw(
         .reset_index()
         .rename(columns={'Water Move Year': 'Year', 'SUM_WATER_QTY': 'SRP_AF'})
     )
-    srp_annual['Basin'] = 'PHOENIX AMA'
-
-    # ── Merge ────────────────────────────────────────────────────────────
-    # Start with CAP totals per basin per year
-    basin_year = {}
-    for _, row in cap_annual.iterrows():
-        basin_year.setdefault(row['Basin'], {})[int(row['Year'])] = float(row['CAP_AF'])
 
     # Add SRP surface water to Phoenix AMA
     phx = basin_year.setdefault('PHOENIX AMA', {})
@@ -4077,21 +4266,24 @@ def _compute_cap_srp_metrics(
 
 def run_cap_srp_validation(
     cap_xlsx: str,
-    srp_xlsx: str,
-    total_sw_dir: str,
-    basin_shp: str,
-    basin_col: str,
-    output_dir: str,
+    srp_xlsx: str | None = None,
+    total_sw_dir: str = '',
+    basin_shp: str = '',
+    basin_col: str = '',
+    output_dir: str = '',
     year_range: tuple[int, int] = (1985, 2023),
 ) -> pd.DataFrame:
     """
-    Validate ML Total_SW predictions against observed CAP and SRP
-    surface-water delivery records.
+    Validate ML Total_SW predictions against observed CAP (and optionally
+    SRP) surface-water delivery records.
 
-    CAP deliveries are filtered to exclude recharge-facility records (keeping
-    only direct-use deliveries).  SRP deliveries are filtered to ``Parent
-    Water Type == 'SURFACE WATER'`` only.  For Phoenix AMA the two sources
-    are summed; all other AMAs use CAP data only.
+    CAP deliveries are filtered to exclude recharge-facility records
+    (keeping only direct-use deliveries).  SRP deliveries are skipped
+    by default because the SRP service-area boundary is not publicly
+    mapped — attributing its deliveries to a single GW basin (currently
+    Phoenix AMA) is ambiguous.  When ``srp_xlsx`` is provided, SRP
+    ``SURFACE WATER`` rows are summed into Phoenix AMA alongside CAP;
+    otherwise the validation uses CAP data only (recommended default).
 
     Produces per-basin time series plots, a statistics CSV, and a time
     series CSV.
@@ -4110,18 +4302,23 @@ def run_cap_srp_validation(
     """
     makedirs(output_dir)
     logger.info('=' * 60)
-    logger.info('CAP/SRP Total Surface Water Validation')
+    if srp_xlsx is None:
+        logger.info('CAP Total Surface Water Validation (CAP-only)')
+    else:
+        logger.info('CAP/SRP Total Surface Water Validation')
     logger.info('=' * 60)
 
     # ── Load basin polygons ──────────────────────────────────────────────
     basin_gdf = gpd.read_file(basin_shp)
     logger.info(f'Loaded {len(basin_gdf)} basins from {basin_shp}')
 
-    # ── Load observed CAP + SRP deliveries ───────────────────────────────
-    logger.info('Loading CAP/SRP delivery data...')
+    # ── Load observed CAP (+ optionally SRP) deliveries ──────────────────
+    logger.info('Loading CAP delivery data...')
     obs_basin_yearly = load_cap_srp_annual_sw(cap_xlsx, srp_xlsx)
-    obs_spill_basin_yearly = load_cap_srp_annual_sw(
-        cap_xlsx, srp_xlsx, include_spill_water=True,
+    # Spill-water sensitivity test is only meaningful when SRP is loaded.
+    obs_spill_basin_yearly = (
+        load_cap_srp_annual_sw(cap_xlsx, srp_xlsx, include_spill_water=True)
+        if srp_xlsx is not None else obs_basin_yearly
     )
     obs_basins = sorted(obs_basin_yearly.keys())
     logger.info(f'  Basins with observed SW data: {obs_basins}')
