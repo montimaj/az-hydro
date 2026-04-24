@@ -354,6 +354,33 @@ AMA_BASINS = frozenset({
     'HARQUAHALA INA', 'HUALAPAI VALLEY INA', 'JOSEPH CITY INA',
 })
 
+# Future AMA basins added to AMA_BASINS only for projection years.
+# Ranegras Plain was designated an AMA in January 2026 (ADWR);
+# pre-2026 the basin was unregulated and behaves identically to
+# non-AMA in our partition.  From 2026+ the regulatory designation
+# applies but the documented behavioural effect (CAP build-out +
+# pumping caps) lags by years; we use the AMA-class flag for the
+# partition path (1981+ AMA uses natural irr_capacity_fraction
+# instead of the 1−uf override) without yet altering the GW/SW
+# allocation otherwise.
+FUTURE_AMA_BASINS = frozenset({
+    'RANEGRAS PLAIN',
+})
+FUTURE_AMA_START_YEAR = 2026
+
+
+def get_ama_basins(year: int) -> frozenset:
+    """Return the AMA/INA basin set for *year*.
+
+    For years ``< FUTURE_AMA_START_YEAR``, returns the historical
+    ``AMA_BASINS``.  From ``FUTURE_AMA_START_YEAR`` onward, also
+    includes ``FUTURE_AMA_BASINS`` (e.g. Ranegras Plain, AMA-
+    designated 2026).
+    """
+    if year >= FUTURE_AMA_START_YEAR:
+        return AMA_BASINS | FUTURE_AMA_BASINS
+    return AMA_BASINS
+
 # URBAN_AMA_BASINS: AMAs where the default partition (nonirr =
 # pred × (1 − irr_capacity)) is appropriate — large municipal
 # footprints where most non-ag pumping is genuinely M&I.  Limited
@@ -490,18 +517,57 @@ BASIN_GW_FLOOR = {
                              # reflects the full ADWR-reported Total GW
                              # share.  Statewide impact negligible
                              # (Prescott total ~24 kAF/yr → +15 kAF GW).
+    'RANEGRAS PLAIN': 0.95,  # Documented ~100 % GW basin.  CAP
+                             # delivers ~1.2 kAF/yr (essentially zero)
+                             # and is unlikely to expand even under
+                             # the Jan-2026 AMA designation because
+                             # CAP allocations are reserved for the
+                             # three central counties (Maricopa, Pinal,
+                             # Pima — i.e. Phoenix / Pinal / Tucson
+                             # AMAs).  The basin's apparent ~4.5 %
+                             # canal coverage is the CAP-NIA pipeline
+                             # passing through to those AMAs, not
+                             # local delivery.  Canal seepage from the
+                             # pass-through pipeline can incidentally
+                             # recharge the aquifer (small effect)
+                             # which justifies a non-zero SW share in
+                             # the partition; 0.95 floor leaves a 5 %
+                             # SW slack for that seepage component +
+                             # any smoothing leakage from neighbouring
+                             # Harquahala SCIDD pixels.  Floor applies
+                             # at all years (1896-2099).
 }
 
+# Subset of BASIN_GW_FLOOR keys that should NOT apply at projection
+# years (>= FUTURE_AMA_START_YEAR).  Used by ``_basin_gw_floor_array``.
+# Currently empty — Ranegras was a candidate but is documented to
+# stay ~100 % GW even post-2026 AMA designation (CAP allocations
+# reserved for the three central counties), so its 0.95 floor
+# applies year-round.
+BASIN_GW_FLOOR_HISTORICAL_ONLY: frozenset = frozenset()
 
-def _basin_gw_floor_array(basin_names: np.ndarray) -> np.ndarray:
+
+def _basin_gw_floor_array(
+        basin_names: np.ndarray,
+        year: int = 0,
+) -> np.ndarray:
     """Return per-pixel GW-share floor for floored basins.
 
     Default is ``0.0`` (no floor) at unlisted basins; per-basin overrides
     from ``BASIN_GW_FLOOR`` apply at the named basins.  Callers apply
     the floor unconditionally via ``np.maximum``.
+
+    Basins in ``BASIN_GW_FLOOR_HISTORICAL_ONLY`` are floored only for
+    years ``< FUTURE_AMA_START_YEAR`` (2026); from the projection era
+    onward their floor is dropped to ``0.0``, letting the density-ratio
+    decide the GW share naturally (e.g. Ranegras Plain is expected to
+    tap into CAP after its 2026 AMA designation).
     """
     floor = np.zeros(len(basin_names), dtype=np.float64)
     for name, val in BASIN_GW_FLOOR.items():
+        if (year >= FUTURE_AMA_START_YEAR
+                and name in BASIN_GW_FLOOR_HISTORICAL_ONLY):
+            continue
         floor = np.where(basin_names == name, val, floor)
     return floor
 
@@ -516,9 +582,10 @@ def _basin_gw_floor_array(basin_names: np.ndarray) -> np.ndarray:
 # canal-weighted streamflow signal is weaker than at the metro AMAs.
 #
 # Currently capped:
-#   LOWER GILA     — 0.25.  CAP/Yuma Project canals; NHM Irr_GW% = 15.
-#                    Model 56 % is structurally too high.
-#   RANEGRAS PLAIN — 0.25.  CAP-NIA fringe; NHM 13 %.  Model 68 % too high.
+#   LOWER GILA — 0.25.  Yuma Project + Gila River Indian Community
+#                canals deliver substantial SW; cap holds the
+#                density-ratio output to the documented SW-dominant
+#                regime even when irr_swd density is sparse.
 #
 # NOT capped (despite high model GW% relative to NHM):
 #   McMullen Valley — model 100 %, NHM 38 %.  Ground truth confirms
@@ -529,9 +596,18 @@ def _basin_gw_floor_array(basin_names: np.ndarray) -> np.ndarray:
 #                     firing on Irr_SW; NonIrr_SW preserved.  Capping
 #                     here would un-collapse SW that physically doesn't
 #                     exist for irrigation.
+#   RANEGRAS PLAIN — previously capped at 0.25 against NHM Irr_GW% = 13.
+#                    Removed: that NHM target was a year-range bug
+#                    artifact (NHM was averaged over 1980-2020 with
+#                    20 zero-padded years, under-counting by ~50 %).
+#                    CAP delivers ~1 kAF/yr to Ranegras (essentially
+#                    zero); the basin's apparent canal coverage is
+#                    the CAP-NIA pipeline passing through en route to
+#                    Harquahala/Phoenix, not local delivery
+#                    infrastructure.  Density-ratio naturally gives
+#                    ~70 % GW which matches the GW-dominant ag regime.
 BASIN_GW_CAP: dict[str, float] = {
-    'LOWER GILA':     0.25,
-    'RANEGRAS PLAIN': 0.25,
+    'LOWER GILA': 0.25,
 }
 
 
@@ -1930,7 +2006,7 @@ def partition_predictions(
                 )
     elif (year < 1986 and basin_names is not None
             and urban_frac_col is not None):
-        non_ama = ~np.isin(basin_names, list(AMA_BASINS))
+        non_ama = ~np.isin(basin_names, list(get_ama_basins(year)))
         uf = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
         irr_from_uf = np.clip(1.0 - uf, IRR_OVERRIDE_FLOOR, 1.0)
         irr_frac = irr_frac.copy()
@@ -2181,7 +2257,7 @@ def partition_predictions(
         basin_cap = _basin_gw_cap_array(basin_names)
         # Combine CO-direct cap with non-CO basin cap via min (tighter wins).
         co_gw_cap = np.minimum(co_gw_cap, basin_cap)
-        gw_floor = _basin_gw_floor_array(basin_names)
+        gw_floor = _basin_gw_floor_array(basin_names, year=year)
     else:
         co_gw_cap = np.full(len(predictions), np.inf, dtype=np.float64)
         gw_floor = np.zeros(len(predictions), dtype=np.float64)
@@ -2478,7 +2554,7 @@ def partition_predictions(
         # NonIrr_GW share below the floor).  Re-applying here ensures
         # the published per-basin shares match the verified ADWR
         # anchors at floored basins (currently Phoenix AMA at 0.30).
-        gw_floor_final = _basin_gw_floor_array(basin_names)
+        gw_floor_final = _basin_gw_floor_array(basin_names, year=year)
         is_floored = gw_floor_final > 0
         if is_floored.any():
             with np.errstate(invalid='ignore', divide='ignore'):

@@ -1338,7 +1338,6 @@ def create_az_data_parquet(
         # the irr-fraction regression consumes the corrected crop_fraction).
         gw_basin_gdf = gpd.read_file(gw_basin_vector)
         gw_basin_dict = {}
-        ama_ina_basins = get_ama_ina_basin_names()
         for gw_basin in gw_basin_gdf.OBJECTID:
             gw_basin_name = gw_basin_gdf[gw_basin_gdf.OBJECTID == gw_basin].BASIN_NAME.values[0]
             gw_basin_dict[gw_basin] = gw_basin_name
@@ -1348,11 +1347,16 @@ def create_az_data_parquet(
         data_df.GW_Basin = data_df.GW_Basin.swifter.apply(
             lambda x: gw_basin_dict[x] if not np.isnan(x) else nan_str)
         data_df = data_df[data_df.GW_Basin != nan_str]
-        ama_basins = [b for b in ama_ina_basins if 'AMA' in b]
-        ina_basins = [b for b in ama_ina_basins if b not in ama_basins]
+        # Use explicit classification getter — substring-based
+        # ``'AMA' in name`` would mis-classify Ranegras Plain (AMA-
+        # designated Jan 2026 but basin name in GW shapefile lacks
+        # the AMA suffix).
+        from hydrolibs.visualops import get_ama_ina_classification
+        ama_basins, ina_basins = get_ama_ina_classification()
+        ama_set, ina_set = set(ama_basins), set(ina_basins)
         data_df = data_df.reset_index(drop=True)
         data_df['GW_Basin_Type'] = data_df.GW_Basin.swifter.apply(
-            lambda x: 0 if x in ama_basins else 1 if x in ina_basins else 2
+            lambda x: 0 if x in ama_set else 1 if x in ina_set else 2
         ).reset_index(drop=True)
 
         # Map GW_Subbasin OBJECTID → SUBBASIN_N

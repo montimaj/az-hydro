@@ -176,22 +176,46 @@ def get_ama_ina_basin_names() -> list[str]:
     """
     Get the names of AMA and INA basins.
 
+    Includes Ranegras Plain, designated an AMA in January 2026 (ADWR);
+    its underlying basin name in the GW basin shapefile remains
+    ``'RANEGRAS PLAIN'`` (no ``AMA`` suffix), so callers that classify
+    by substring matching (e.g. ``'AMA' in name``) should use
+    :func:`get_ama_ina_classification` instead.
+
     Returns:
         list: List of AMA and INA basin names.
     """
-    ama_ina_basins = [
+    ama, ina = get_ama_ina_classification()
+    return list(ama) + list(ina)
+
+
+def get_ama_ina_classification() -> tuple[list[str], list[str]]:
+    """Return ``(ama_basins, ina_basins)`` tuples by explicit classification.
+
+    Avoids the ``'AMA' in name`` substring trap for basins whose ADWR
+    designation differs from their shapefile basin name (e.g.
+    ``'RANEGRAS PLAIN'`` was designated an AMA in January 2026 but
+    keeps its bare basin name in the GW basin shapefile).
+
+    Returns:
+        tuple[list[str], list[str]]: ``(ama_basins, ina_basins)``.
+    """
+    ama_basins = [
         'SANTA CRUZ AMA',
         'PRESCOTT AMA',
         'TUCSON AMA',
         'PINAL AMA',
         'PHOENIX AMA',
         'DOUGLAS AMA',
+        'WILLCOX AMA',
+        'RANEGRAS PLAIN',  # designated AMA Jan 2026 (ADWR)
+    ]
+    ina_basins = [
         'JOSEPH CITY INA',
         'HARQUAHALA INA',
         'HUALAPAI VALLEY INA',
-        'WILLCOX AMA'
     ]
-    return ama_ina_basins
+    return ama_basins, ina_basins
 
 
 def apply_journal_style():
@@ -6467,13 +6491,16 @@ def plot_intercomp_time_series(
 
     for cat in categories:
         for basin in targets:
-            if mode == 'volume':
-                fig, axes = plt.subplots(2, 1, figsize=(10, 8),
-                                         constrained_layout=True)
-            else:
-                fig, axes = plt.subplots(1, 1, figsize=(10, 4),
-                                         constrained_layout=True)
-                axes = [axes]
+            # Single-row layout for both volume and ratio modes.
+            # Volume mode shows m³ (left primary) + AF (right twin)
+            # only — the depth (mm) panel was removed because NHM /
+            # Reitz / ML use different irrigated-area definitions, so
+            # depth comparisons are not directly comparable.  Volume
+            # space cancels the area mismatch and is the appropriate
+            # axis for cross-product intercomparison.
+            fig, axes = plt.subplots(1, 1, figsize=(10, 4),
+                                     constrained_layout=True)
+            axes = [axes]
 
             basin_title = basin.replace('_', ' ')
             cat_title = f'{title_prefix}{cat}' if title_prefix else cat
@@ -6526,14 +6553,12 @@ def plot_intercomp_time_series(
                         ])
 
                     m3_vals = af_vals * af_to_m3
-                    mm_vals = (m3_vals / total_area * m_to_mm
-                               if total_area > 0 else m3_vals * 0)
 
                     if np.any(np.isfinite(af_vals) & (af_vals != 0)):
                         has_any_data = True
-                    axes[0].plot(years, mm_vals, label=label, color=color,
-                                 marker=marker, markersize=3, linewidth=1.2)
-                    axes[1].plot(years, m3_vals, label=label, color=color,
+                    # Plot m³ only (single volume panel); AF shown as
+                    # twin right axis via _format_volume_axis below.
+                    axes[0].plot(years, m3_vals, label=label, color=color,
                                  marker=marker, markersize=3, linewidth=1.2)
                 else:
                     # Ratio mode (e.g. IE)
@@ -6575,25 +6600,14 @@ def plot_intercomp_time_series(
             from matplotlib.ticker import MaxNLocator
             tick_fontsize = 11
             if mode == 'volume':
-                axes[0].set_ylabel('Depth (mm)', fontweight='bold')
+                _format_volume_axis(axes[0], unit='m3', label='Volume')
+                axes[0].set_xlabel('Year', fontweight='bold')
                 axes[0].grid(True, alpha=0.3, linestyle='--')
                 axes[0].legend(fontsize=9)
                 axes[0].xaxis.set_major_locator(MaxNLocator(integer=True))
                 axes[0].tick_params(axis='both', labelsize=tick_fontsize)
-                ax_ft = axes[0].twinx()
-                ax_ft.set_ylabel('Depth (ft)', fontweight='bold')
+                ax_af = axes[0].twinx()
                 lo, hi = axes[0].get_ylim()
-                ax_ft.set_ylim(lo * mm_to_ft, hi * mm_to_ft)
-                ax_ft.tick_params(axis='both', labelsize=tick_fontsize)
-
-                _format_volume_axis(axes[1], unit='m3', label='Volume')
-                axes[1].set_xlabel('Year', fontweight='bold')
-                axes[1].grid(True, alpha=0.3, linestyle='--')
-                axes[1].legend(fontsize=9)
-                axes[1].xaxis.set_major_locator(MaxNLocator(integer=True))
-                axes[1].tick_params(axis='both', labelsize=tick_fontsize)
-                ax_af = axes[1].twinx()
-                lo, hi = axes[1].get_ylim()
                 ax_af.set_ylim(lo * m3_to_af, hi * m3_to_af)
                 _format_volume_axis(ax_af, unit='AF', label='Volume')
                 ax_af.tick_params(axis='both', labelsize=tick_fontsize)
@@ -6649,25 +6663,18 @@ def plot_intercomp_scatter(
     """
     makedirs(output_dir)
     n_pairs = len(pairs)
-    n_units = 2 if mode == 'volume' else 1
-
-    # When there are multiple pairs, stack units (AF/mm) in rows and
-    # pairs in columns.  When there's only one pair with two units,
-    # put the two unit panels side-by-side as columns (1×2) so the
-    # figure is landscape rather than a tall 2×1 stack.
-    single_pair_landscape = (n_pairs == 1 and n_units == 2)
-    if single_pair_landscape:
-        fig, _axes_flat = plt.subplots(
-            1, 2, figsize=(14, 5), constrained_layout=True,
-        )
-        # Build a (2, 1) index array so axes[row_i, col_i=0] still
-        # works with the existing loop code.
-        axes = np.array([[_axes_flat[0]], [_axes_flat[1]]])
-    else:
-        fig, axes = plt.subplots(
-            n_units, n_pairs, figsize=(7 * n_pairs, 5 * n_units),
-            constrained_layout=True, squeeze=False,
-        )
+    # Single-row layout for both volume and ratio modes.  Volume mode
+    # plots m³ data (left primary) with AF on the right twin axis —
+    # the depth (mm) row was removed because NHM / Reitz / ML use
+    # different irrigated-area definitions, so depth comparisons are
+    # not directly comparable.  Volume space cancels the area
+    # mismatch and is the appropriate axis for cross-product
+    # intercomparison.
+    n_units = 1
+    fig, axes = plt.subplots(
+        n_units, n_pairs, figsize=(7 * n_pairs, 5),
+        constrained_layout=True, squeeze=False,
+    )
     fig.suptitle(title, fontsize=14, fontweight='bold')
 
     for col_i, (label_a, label_b, mean_a, mean_b) in enumerate(pairs):
@@ -6681,12 +6688,11 @@ def plot_intercomp_scatter(
             vals_b = vals_b[valid]
 
         if mode == 'volume':
-            areas = np.array([basin_areas_m2.get(b, 1.0) for b in basin_names])
-            af_a = vals_a / af_divisor
-            af_b = vals_b / af_divisor
-            mm_a = vals_a * af_to_m3 / areas * m_to_mm
-            mm_b = vals_b * af_to_m3 / areas * m_to_mm
-            row_data = [(af_a, af_b, af_unit_label), (mm_a, mm_b, 'mm')]
+            # Plot in m³ on the primary axis; AF added as a right twin
+            # later.  ``vals_a``/``vals_b`` are in AF; convert to m³.
+            m3_a = vals_a * af_to_m3
+            m3_b = vals_b * af_to_m3
+            row_data = [(m3_a, m3_b, 'm³')]
         else:
             row_data = [(vals_a, vals_b, '')]
 
@@ -6706,6 +6712,7 @@ def plot_intercomp_scatter(
             ax.plot([lo, hi], [lo, hi], 'k--', lw=1, label='1:1')
 
             if len(vx) > 1 and np.std(vx) > 0:
+                from scipy.stats import pearsonr
                 from sklearn.metrics import r2_score as _r2_score
                 from hydrolibs.mlops import (
                     normalized_rmse, normalized_mae, normalized_mbe,
@@ -6715,18 +6722,31 @@ def plot_intercomp_scatter(
                 sign = '\u2212' if z[1] < 0 else '+'
                 ax.plot(x_fit, np.polyval(z, x_fit), 'r-', lw=1.2,
                         label=f'y={z[0]:.2f}x {sign} {abs(z[1]):.1f}')
-                r2 = _r2_score(vy, vx)
+                # Validation (is_validation=True) vs observed data:
+                # R² (Nash-Sutcliffe form) is appropriate because a
+                # single ground-truth reference exists and we want to
+                # know how much of the observed variance the model
+                # explains — including bias.
+                # Intercomparison (is_validation=False) between
+                # competing model estimates: Pearson's r isolates the
+                # linear association without penalising a constant
+                # bias, which is what we want when no source is a
+                # "truth" reference.
                 rmse_pct = normalized_rmse(vy, vx)
                 mae_pct = normalized_mae(vy, vx)
                 mbe_pct = normalized_mbe(vy, vx)
                 mbe_sign = '\u2212' if mbe_pct < 0 else ''
-                # Validation (vs observed data): RMSE/MAE/MBE
-                # Intercomparison (model vs model): RMSD/MAD/MBD
                 if is_validation:
+                    r2 = _r2_score(vy, vx)
+                    fit_label = 'R²'
+                    fit_val = r2
                     e_labels = ('RMSE', 'MAE', 'MBE')
                 else:
+                    r_val, _ = pearsonr(vx, vy)
+                    fit_label = 'r'
+                    fit_val = r_val
                     e_labels = ('RMSD', 'MAD', 'MBD')
-                metrics_text = (f'R²={r2:.3f}\n'
+                metrics_text = (f'{fit_label}={fit_val:.3f}\n'
                                 f'{e_labels[0]}={rmse_pct:.1f}%\n'
                                 f'{e_labels[1]}={mae_pct:.1f}%\n'
                                 f'{e_labels[2]}={mbe_sign}{abs(mbe_pct):.1f}%')
@@ -6743,13 +6763,37 @@ def plot_intercomp_scatter(
                 ax.set_title(f'{label_a} vs {label_b}', fontsize=11)
 
             unit_suffix = f' ({unit})' if unit else ''
-            ax.set_xlabel(f'{label_a}{unit_suffix}')
-            ax.set_ylabel(f'{label_b}{unit_suffix}')
+            ax.set_xlabel(f'{label_a}{unit_suffix}', fontweight='bold')
+            ax.set_ylabel(f'{label_b}{unit_suffix}', fontweight='bold')
             ax.legend(fontsize=8, loc='upper left')
             ax.grid(True, alpha=0.3, linestyle='--')
             ax.set_aspect('equal', adjustable='box')
             ax.set_xlim(lo, hi)
             ax.set_ylim(lo, hi)
+            # For volume mode, format primary axes as km³ and add an
+            # AF twin on the right Y only so the same scatter can be
+            # read in both unit systems.  Twiny on the top axis is
+            # avoided because ``set_aspect('equal', adjustable='box')``
+            # is incompatible with both axes shared simultaneously
+            # (matplotlib RuntimeError).  AF reading on X requires
+            # mental conversion (or read directly off Y twin since the
+            # 1:1 line crosses both axes at the same volumes).
+            if mode == 'volume' and unit == 'm³':
+                from matplotlib import ticker as _tk
+                ax.xaxis.set_major_formatter(
+                    _tk.FuncFormatter(lambda x, _: f'{x / 1e9:,.2f}'),
+                )
+                ax.yaxis.set_major_formatter(
+                    _tk.FuncFormatter(lambda x, _: f'{x / 1e9:,.2f}'),
+                )
+                ax.set_xlabel(f'{label_a} (km³)', fontweight='bold')
+                ax.set_ylabel(f'{label_b} (km³)', fontweight='bold')
+                ax_right = ax.twinx()
+                ax_right.set_ylim(lo / af_to_m3, hi / af_to_m3)
+                ax_right.yaxis.set_major_formatter(
+                    _tk.FuncFormatter(lambda x, _: f'{x / 1e6:,.2f}'),
+                )
+                ax_right.set_ylabel(f'{label_b} (MAF)', fontweight='bold')
 
     out_path = os.path.join(output_dir, filename)
     fig.savefig(out_path, dpi=300, bbox_inches='tight')

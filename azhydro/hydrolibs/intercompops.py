@@ -1027,17 +1027,9 @@ def _huc12_temporal_diagnostics(
         ta_dir = os.path.join(output_dir, 'Temporal_Agreement/')
         plot_temporal_box_violin(per_huc_df, ta_dir)
 
-    # Taylor diagram
-    taylor_sources = {}
-    for src_label, yearly in huc12_yearly_sources.items():
-        taylor_sources[src_label] = {
-            category: {'yearly': yearly},
-        }
-    taylor_dir = os.path.join(output_dir, 'Taylor/')
-    plot_intercomp_taylor(
-        taylor_sources, pairs, [category], huc12_ids, taylor_dir,
-        title_prefix='HUC12-Level ', file_prefix='Taylor_HUC12',
-    )
+    # Taylor diagrams removed (model-vs-model intercomparison has no
+    # "true" reference; bundling correlation/std/RMSD onto one panel
+    # was hard to interpret).  Box-violin + r-vs-NSE plots remain.
     logger.info(f'  HUC12 temporal diagnostics saved to {output_dir}')
 
 
@@ -2288,15 +2280,10 @@ def run_intercomparison(
             'ML vs NHM': '#2C3E50', 'ML vs Reitz': '#E67E22',
             'NHM vs Reitz': '#27AE60',
         }
-        plot_intercomp_taylor(
-            all_sources,
-            pairs=[('ML', 'NHM'), ('ML', 'Reitz'), ('NHM', 'Reitz')],
-            categories=['GW', 'SW'],
-            basin_names=basin_names,
-            output_dir=temporal_plot_dir,
-            pair_colors=pair_colors_4a,
-            title_prefix='Irrigation ',
-        )
+        # Taylor diagrams removed — they bundle correlation, normalised
+        # std, and centred RMSD onto a single panel that's hard to
+        # interpret for model-vs-model intercomparisons (no "true"
+        # reference exists; all three sources are estimates).
         plot_temporal_r_vs_nse(
             temporal_basin_df, temporal_plot_dir,
             pair_colors=pair_colors_4a,
@@ -2457,11 +2444,30 @@ def run_intercomparison(
     nhm_cats = {
         'GW': os.path.join(nhm_dir, 'IR_HUC12_GW_WD_monthly_2000_2020.csv'),
         'SW': os.path.join(nhm_dir, 'IR_HUC12_SW_WD_monthly_2000_2020.csv'),
+        'Total': os.path.join(nhm_dir, 'IR_HUC12_Tot_WD_monthly_2000_2020.csv'),
+    }
+    # Per-cat ML raster directory and prefix (Total uses the
+    # Irrigation_*_mm.tif rasters; Reitz uses the All_irr_YYYY.tif
+    # rasters in the Irrigation_all_1980-2018 subdir).
+    irr_total_dir = (
+        os.path.join(os.path.dirname(irr_gw_dir.rstrip('/')),
+                     'Irrigation_Rasters', 'Depth_mm')
+        if irr_gw_dir else None
+    )
+    ml_cat_dirs = {
+        'GW': (irr_gw_dir, 'Irrigation_GW'),
+        'SW': (irr_sw_dir, 'Irrigation_SW'),
+        'Total': (irr_total_dir, 'Irrigation'),
+    }
+    reitz_cat_specs = {
+        'GW': ('Irrigation_groundwater_1980-2018', 'GW_irr'),
+        'SW': ('Irrigation_surfacewater_1980-2018', 'SW_irr'),
+        'Total': ('Irrigation_all_1980-2018', 'All_irr'),
     }
     days_in_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     nhm_start, nhm_end = nhm_year_range
 
-    for cat in ('GW', 'SW'):
+    for cat in ('GW', 'SW', 'Total'):
         logger.info(f'  HUC12-level comparison for Irrigation {cat}...')
 
         # ── NHM per-HUC12 mean-annual volume (AF) ──
@@ -2503,14 +2509,13 @@ def run_intercomparison(
         }
 
         # ── ML per-HUC12 mean-annual volume (AF) via zonal stats ──
-        ml_cat_dir = irr_gw_dir if cat == 'GW' else irr_sw_dir
+        ml_cat_dir, cat_prefix = ml_cat_dirs[cat]
         if ml_cat_dir is None:
             logger.warning(f'  ML {cat} raster dir not provided')
             continue
         ml_huc_accum: dict[str, list[float]] = {h: [] for h in az_huc12_ids}
         ml_start, ml_end = ml_year_range
         for year in range(max(ml_start, nhm_start), min(ml_end, nhm_end) + 1):
-            cat_prefix = 'Irrigation_GW' if cat == 'GW' else 'Irrigation_SW'
             raster_path = os.path.join(
                 ml_cat_dir, f'{cat_prefix}_{year}_mm.tif',
             )
@@ -2530,11 +2535,7 @@ def run_intercomparison(
 
         # ── Reitz per-HUC12 mean-annual volume (AF) via zonal stats ──
         reitz_huc_mean: dict[str, float] = {}
-        reitz_cat_subdir = (
-            'Irrigation_groundwater_1980-2018' if cat == 'GW'
-            else 'Irrigation_surfacewater_1980-2018'
-        )
-        reitz_prefix = 'GW_irr' if cat == 'GW' else 'SW_irr'
+        reitz_cat_subdir, reitz_prefix = reitz_cat_specs[cat]
         reitz_huc_accum: dict[str, list[float]] = {
             h: [] for h in az_huc12_ids
         }
@@ -2813,7 +2814,6 @@ def run_intercomparison(
         # ML yearly: {year: {huc12: AF}}
         ml_yearly_huc: dict[int, dict[str, float]] = {}
         for year in range(max(ml_start, nhm_start), min(ml_end, nhm_end) + 1):
-            cat_prefix = 'Irrigation_GW' if cat == 'GW' else 'Irrigation_SW'
             raster_path = os.path.join(
                 ml_cat_dir, f'{cat_prefix}_{year}_mm.tif',
             )
@@ -3979,14 +3979,20 @@ def run_peff_intercomparison(
 # CAP/SRP Surface Water Validation
 # ═════════════════════════════════════════════════════════════════════════════
 
-# Mapping from CAP Excel AMA names to ADWR GW basin names
+# Mapping from CAP Excel AMA names to ADWR GW basin names.
+# Parker is intentionally excluded — CAP delivers ~4 AF/yr to Parker
+# (essentially zero), and the basin's actual SW supply is dominated
+# by CRIT senior Priority-1 mainstem rights (~720 kAF/yr) which the
+# CAP delivery file does not track.  Validating ML Total_SW against
+# CAP-only data at Parker compares apples-to-CRIT-oranges and produces
+# a misleading "ML grossly overestimates" signal that is really just
+# the model correctly capturing CRIT deliveries the CAP file omits.
 _CAP_AMA_TO_BASIN = {
     'Phoenix AMA':     'PHOENIX AMA',
     'Tucson AMA':      'TUCSON AMA',
     'Pinal AMA':       'PINAL AMA',
     'Harquahala INA':  'HARQUAHALA INA',
     'Ranegras Plain':  'RANEGRAS PLAIN',
-    'Parker':          'PARKER',
 }
 
 
@@ -4443,7 +4449,10 @@ def run_cap_srp_validation(
                 obs_basin_yearly[basin][yr] for yr in common_years
             ]))
     plot_intercomp_scatter(
-        [('Observed CAP + SRP', 'ML Total SW', obs_mean_vals, ml_mean_vals)],
+        # Convention: X = predicted (ML), Y = observed (CAP+SRP) — the
+        # validation orientation where the regression slope quantifies
+        # bias of the model relative to the observation reference.
+        [('ML Total SW', 'Observed CAP + SRP', ml_mean_vals, obs_mean_vals)],
         list(ml_mean_vals.keys()), basin_areas_m2, scatter_dir,
         title='ML Total SW vs CAP + SRP — Per Basin',
         filename='Scatter_ML_vs_CAP_SRP.png',
@@ -4832,21 +4841,9 @@ def run_ps_intercomparison(
         plot_temporal_box_violin(tb_df, temporal_plot_dir)
         plot_temporal_r_vs_nse(tb_df, temporal_plot_dir)
 
-        # Taylor diagram
-        taylor_sources = {}
-        cat_name_list = []
-        for cat_key, cat_name in cat_labels.items():
-            taylor_sources.setdefault('ML', {})[cat_name] = ml_vols[cat_key]
-            taylor_sources.setdefault('PS', {})[cat_name] = ps_vols[cat_key]
-            cat_name_list.append(cat_name)
-        plot_intercomp_taylor(
-            taylor_sources,
-            pairs=[('ML', 'PS')],
-            categories=cat_name_list,
-            basin_names=basin_names,
-            output_dir=temporal_plot_dir,
-            pair_colors={'ML vs PS': '#E74C3C'},
-        )
+        # Taylor diagram removed — see docstring at withdrawal
+        # intercomparison for the rationale (model-vs-model has no
+        # "true" reference, hard to interpret).
 
     # ── 5. Per-basin comparison table ─────────────────────────────────
     af_to_m3 = 1.0 / M3_TO_AF

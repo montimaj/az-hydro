@@ -3307,28 +3307,31 @@ def run_cu_usgs_intercomparison() -> pd.DataFrame:
 
 def run_cap_srp_sw_validation() -> pd.DataFrame:
     """
-    Validate ML Total_SW predictions against observed CAP surface-water
-    delivery records across Arizona groundwater basins.  SRP is
-    excluded because its service-area boundary is not publicly mapped
-    and cannot be unambiguously attributed to a single GW basin.
+    Validate ML Total_SW predictions against observed CAP and SRP
+    surface-water delivery records across Arizona groundwater basins.
+    SRP deliveries are added to Phoenix AMA on top of CAP — its
+    service-area boundary is not publicly mapped, so the Phoenix AMA
+    attribution is approximate but is the best available proxy for
+    Salt-River-derived SW in that basin.
 
     Returns:
         pd.DataFrame: Per-basin statistics (RMSD, MAD, Pct Diff, Pearson R).
     """
     logger.info('=' * 60)
-    logger.info('Step 4c: CAP Total SW Validation')
+    logger.info('Step 4c: CAP/SRP Total SW Validation')
     logger.info('=' * 60)
 
     prediction_dir = os.path.join(MODEL_DIR, f'Full_Prediction_{PREDICTION_MODEL}')
     total_sw_dir = os.path.join(prediction_dir, 'Total_SW_Rasters/Depth_mm')
 
     cap_xlsx = os.path.join(VECTOR_DIR, 'CAP', 'CAP Delivery Data DRI Request.xlsx')
+    srp_xlsx = os.path.join(VECTOR_DIR, 'SRP', 'SRP WATER DELVS HISTORY.xlsx')
 
     output_dir = os.path.join(prediction_dir, 'CAP_SRP_Validation')
 
     return intercompops.run_cap_srp_validation(
         cap_xlsx=cap_xlsx,
-        srp_xlsx=None,  # SRP service area not publicly mapped — CAP only
+        srp_xlsx=srp_xlsx,
         total_sw_dir=total_sw_dir,
         basin_shp=AZ_GW_BASIN,
         basin_col='BASIN_NAME',
