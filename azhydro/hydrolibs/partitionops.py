@@ -1641,43 +1641,30 @@ def apply_cap_delivery_perturbation(
         year_df: pd.DataFrame,
         year: int,
         cap_pixel_mask: np.ndarray | None,
-        cap_delivery_lookup: dict | None = None,
-        pre_cap_sw_baseline: dict[str, np.ndarray] | None = None,
 ) -> pd.DataFrame:
-    """Scale CAP-pixel SW signal + boost GW weight based on delivery.
+    """Scale CAP-pixel SW signal + boost GW weight during CAP cuts.
 
     Two complementary effects on the density-ratio partition at CAP-
-    served pixels:
+    served pixels (active only at years in ``CAP_DELIVERY_FACTORS`` /
+    ``CAP_CUT_GW_BOOST_FACTORS``, i.e. 2020-2099 Tier shortage era):
 
-    1. **SW-signal scaling** — scales ``canal_weighted_streamflow_mm``
-       AND the SW rights density columns by a delivery-derived factor
-       (the smoothed SW kernel ``smooth_swd = gaussian(swd × cw_sf)``
-       then drops by factor² because both inputs are scaled).  Two
-       sources of the factor, in priority order:
-
-       (a) **Per-basin per-year scaling** (NEW, when
-           ``cap_delivery_lookup`` is provided): at pixels in
-           ``CAP_BASIN_NI_PEAK_SW_FRACTION`` basins (Phoenix, Tucson,
-           Pinal, Harquahala), use the basin's actual delivery ratio
-           ``direct+recharge[year] / baseline``.  Pre-arrival ratio = 0
-           → SW signal = 0 → density-ratio gives all-GW (matches pre-
-           CAP reality).  Tracks each basin's CAP utilization curve
-           year-by-year, replacing the older basin-wide ``cap`` on
-           NonIrr GW share.
-
-       (b) **Statewide Tier multiplier** (legacy, for non-CAP-basin
-           pixels in ``cap_pixel_mask`` and as projection-era
-           fallback when basin not in lookup): uses
-           ``CAP_DELIVERY_FACTORS[year]`` (Tier 0/1/2a hindcast 2020-
-           2026 + Tier 1 sustained 2027-2099).
+    1. **SW-signal reduction** — scales ``canal_weighted_streamflow_mm``
+       AND the SW rights density columns by ``CAP_DELIVERY_FACTORS[year]``
+       (Tier 0 = 0.87, Tier 1 = 0.66, Tier 2a = 0.61).  The smoothed
+       SW kernel ``smooth_swd = gaussian(swd × cw_sf)`` drops by
+       factor² because both inputs are scaled.
 
     2. **GW-weight boost** — multiplies ``well_density`` columns by
-       ``CAP_CUT_GW_BOOST_FACTORS[year]`` at CAP-pixel-mask pixels
-       during shortage years.  Mathematically equivalent to boosting
-       ``gw_weight`` at CAP pixels — captures the regulatory Assured
-       Water Supply shift to groundwater that the post-CAP
-       gw_weight = 0.2 schedule otherwise under-predicts.  Unchanged
-       from prior implementation.
+       ``CAP_CUT_GW_BOOST_FACTORS[year]`` (Tier 1 = 5.0, Tier 2a = 7.5).
+       Mathematically equivalent to boosting ``gw_weight`` at CAP
+       pixels — captures the regulatory Assured Water Supply shift
+       to groundwater during shortage that the post-CAP
+       gw_weight = 0.2 schedule otherwise under-predicts.
+
+    Pre-2020 years are no-ops (neither dict has entries).  Per-basin
+    per-year tuning of the CAP M&I share is handled separately via
+    the dynamic ``CAP_BASIN_NI_PEAK_SW_FRACTION`` cap inside
+    ``partition_predictions``.
 
     Args:
         year_df: Per-pixel-per-year DataFrame.
@@ -1685,10 +1672,6 @@ def apply_cap_delivery_perturbation(
         cap_pixel_mask: Boolean mask of CAP-service-area pixels
             aligned with year_df row order, or None to skip
             perturbation entirely.
-        cap_delivery_lookup: Optional dict from
-            ``load_cap_basin_delivery`` that drives the per-basin
-            per-year SW scaling for CAP basins.  When None, falls back
-            to the statewide Tier multiplier behaviour.
 
     Returns:
         year_df (perturbed copy when any effect fires, same object
@@ -1698,42 +1681,7 @@ def apply_cap_delivery_perturbation(
         return year_df
     sw_factor = CAP_DELIVERY_FACTORS.get(year)
     gw_boost = CAP_CUT_GW_BOOST_FACTORS.get(year)
-    basin_names = (
-        year_df['GW_Basin'].values if 'GW_Basin' in year_df.columns
-        else None
-    )
-    # Build per-basin SW factors for CAP basins (NEW per-year-per-basin
-    # mechanism).  basin_factors[basin] = delivery_ratio (linear; gets
-    # applied to both cw_sf and sw_rights so smooth_swd scales by ratio²).
-    # Pre-arrival years are SKIPPED (factor not added) so the
-    # ``sw_rights_density`` / ``canal_weighted_streamflow_mm`` retain
-    # their pre-CAP signal — Phoenix had SRP delivering ~1 MAF/yr SW
-    # from 1911 onward, completely independent of CAP.  Scaling pre-
-    # arrival would wipe that out.
-    basin_factors: dict[str, float] = {}
-    if cap_delivery_lookup is not None and basin_names is not None:
-        for _b in CAP_BASIN_NI_PEAK_SW_FRACTION:
-            basin_data = cap_delivery_lookup.get(_b)
-            if basin_data is None:
-                continue
-            arrival = basin_data.get(
-                'arrival_year', _CAP_BASIN_FALLBACK_ARRIVAL.get(_b),
-            )
-            if arrival is None or year < arrival:
-                continue  # pre-arrival: leave SW signal unscaled
-            baseline = basin_data.get('baseline_af', 0.0)
-            yearly = basin_data.get('yearly_af', {})
-            if year in yearly and baseline > 0:
-                ratio = yearly[year] / baseline
-            else:
-                ratio = CAP_DELIVERY_FACTORS.get(year, 1.0)
-            basin_factors[_b] = max(0.0, min(ratio, 1.0))
-    has_basin_scaling = bool(basin_factors)
-    has_statewide_perturb = (
-        sw_factor is not None
-        or (gw_boost is not None and gw_boost != 1.0)
-    )
-    if not has_basin_scaling and not has_statewide_perturb:
+    if sw_factor is None and (gw_boost is None or gw_boost == 1.0):
         return year_df
 
     sw_cols = [
@@ -1756,53 +1704,9 @@ def apply_cap_delivery_perturbation(
 
     year_df_p = year_df.copy()
     cap_idx = year_df_p.index[cap_pixel_mask]
-
-    if has_basin_scaling:
-        # Per-basin ADDITIVE SW scaling at (basin & cap_mask) pixels.
-        # Decompose current SW signal as
-        #   current = pre_cap_baseline + cap_excess
-        # then scale only the CAP excess by the per-basin per-year
-        # delivery_ratio:
-        #   new = pre_cap_baseline + max(0, cap_excess) * ratio
-        # When a pre-CAP baseline is provided (``pre_cap_sw_baseline``
-        # dict from ``load_pre_cap_sw_baseline``), this preserves
-        # non-CAP SW infrastructure at Phoenix (SRP), Pinal (San
-        # Carlos ID) and Tucson (Avra Valley local) regardless of CAP
-        # delivery.  When no baseline is provided, falls back to a
-        # zero baseline (multiplicative scaling — equivalent to the
-        # pre-additive behaviour).  Other cap_mask pixels (non-CAP-
-        # basin) get statewide sw_factor below.
-        handled_mask = np.zeros(len(year_df_p), dtype=bool)
-        for _b, _factor in basin_factors.items():
-            _b_pos_mask = (basin_names == _b) & cap_pixel_mask
-            if not _b_pos_mask.any():
-                continue
-            handled_mask |= _b_pos_mask
-            _b_idx = year_df_p.index[_b_pos_mask]
-            for col in sw_cols:
-                _baseline = (
-                    pre_cap_sw_baseline.get(col)
-                    if pre_cap_sw_baseline is not None else None
-                )
-                if _baseline is not None:
-                    _b_baseline = _baseline[_b_pos_mask]
-                    _b_current = year_df_p.loc[_b_idx, col].values
-                    _excess = np.maximum(_b_current - _b_baseline, 0.0)
-                    year_df_p.loc[_b_idx, col] = (
-                        _b_baseline + _excess * _factor
-                    )
-                else:
-                    year_df_p.loc[_b_idx, col] *= _factor
-        if sw_factor is not None:
-            _unhandled_pos = cap_pixel_mask & ~handled_mask
-            if _unhandled_pos.any():
-                _unhandled_idx = year_df_p.index[_unhandled_pos]
-                for col in sw_cols:
-                    year_df_p.loc[_unhandled_idx, col] *= sw_factor
-    elif sw_factor is not None:
+    if sw_factor is not None:
         for col in sw_cols:
             year_df_p.loc[cap_idx, col] *= sw_factor
-
     if gw_boost is not None and gw_boost != 1.0:
         for col in wd_cols:
             year_df_p.loc[cap_idx, col] *= gw_boost

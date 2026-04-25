@@ -4002,6 +4002,67 @@ _CAP_AMA_TO_BASIN = {
 }
 
 
+def _compute_ml_cap_approximation(
+        ml_basin_yearly: dict[str, dict[int, float]],
+        cap_xlsx: str,
+        baseline_year: int = 1984,
+        baseline_period: tuple[int, int] = (2000, 2009),
+) -> dict[str, dict[int, float]]:
+    """Approximate the CAP contribution to model Total_SW per basin per year.
+
+    Returns ``{basin: {year: AF}}`` where each entry is::
+
+        approx_CAP[year] = max(0, ML_Total_SW[year] − ML_Total_SW[baseline_year])
+                         × delivery_ratio[year]
+
+    where ``delivery_ratio[year] = direct_CAP_delivery[year] /
+    mean_direct_delivery_over_baseline_period``, clamped to [0, 1].
+
+    The subtraction of ``ML_Total_SW[baseline_year]`` (default 1984,
+    last full pre-CAP year) isolates the post-CAP increment in the
+    model's Total_SW.  Multiplying by the per-basin per-year delivery
+    ratio scales that increment to track each basin's CAP utilization
+    curve.  Pre-arrival years yield 0 (no CAP signal in delivery
+    records → ratio = 0).
+
+    Designed for visualisation in the CAP+SRP validation time series
+    only — not used by the partition itself.  Returns ``{}`` if the
+    CAP Excel cannot be loaded.
+    """
+    try:
+        from hydrolibs import partitionops as _partops
+        lookup = _partops.load_cap_basin_delivery(
+            cap_xlsx, baseline_period=baseline_period,
+        )
+    except Exception:
+        return {}
+    if not lookup:
+        return {}
+    out: dict[str, dict[int, float]] = {}
+    for basin, ml_yearly in ml_basin_yearly.items():
+        if basin not in lookup:
+            continue
+        basin_data = lookup[basin]
+        baseline_af = basin_data.get('baseline_af', 0.0)
+        if baseline_af <= 0:
+            continue
+        ml_baseline = ml_yearly.get(baseline_year)
+        if ml_baseline is None:
+            continue
+        delivery = basin_data.get('yearly_af', {})
+        approx = {}
+        for yr, ml_total in ml_yearly.items():
+            d = delivery.get(yr)
+            if d is None:
+                continue
+            ratio = max(0.0, min(d / baseline_af, 1.0))
+            increment = max(0.0, ml_total - ml_baseline)
+            approx[yr] = increment * ratio
+        if approx:
+            out[basin] = approx
+    return out
+
+
 def load_cap_srp_annual_sw(
     cap_xlsx: str,
     srp_xlsx: str | None = None,
@@ -4424,11 +4485,18 @@ def run_cap_srp_validation(
 
     # ── Time series plots ────────────────────────────────────────────────
     _cap_colors = {
-        'ML': '#2C3E50', 'CAP_SRP': '#E74C3C', 'CAP_SRP_spill': '#3498DB',
+        'ML': '#2C3E50',
+        'ML_CAP_approx': '#9B59B6',
+        'CAP_SRP': '#E74C3C',
+        'CAP_SRP_spill': '#3498DB',
     }
-    _cap_markers = {'ML': 'o', 'CAP_SRP': 's', 'CAP_SRP_spill': '^'}
+    _cap_markers = {
+        'ML': 'o', 'ML_CAP_approx': 'x', 'CAP_SRP': 's', 'CAP_SRP_spill': '^',
+    }
     _cap_labels = {
-        'ML': 'ML (Total SW)', 'CAP_SRP': 'CAP + SRP',
+        'ML': 'ML (Total SW)',
+        'ML_CAP_approx': 'ML (approx CAP contribution)',
+        'CAP_SRP': 'CAP + SRP',
         'CAP_SRP_spill': 'CAP + SRP (+ Spill)',
     }
     # Transpose {basin: {year: AF}} → {year: {basin: AF}} for the
@@ -4440,10 +4508,26 @@ def run_cap_srp_validation(
                 out.setdefault(yr, {})[basin] = val
         return out
 
+    # ML approximate CAP contribution: at each CAP basin per year,
+    # take the model's Total_SW above its pre-CAP baseline (1984)
+    # and scale by the basin's actual CAP delivery_ratio.  This
+    # isolates the CAP-driven SW increment from local infrastructure
+    # (Phoenix SRP, Pinal San Carlos ID, Tucson Avra Valley) and
+    # tracks the observation curve shape (CAP delivery + recharge)
+    # without requiring partition-level changes.  Visualisation only —
+    # not fed back into the model.
+    ml_cap_approx_basin_yearly = _compute_ml_cap_approximation(
+        ml_basin_yearly, cap_xlsx,
+    )
+
     cap_ts_sources = {
         'ML': {'SW': {'yearly': _transpose_basin_yearly(ml_basin_yearly)}},
         'CAP_SRP': {'SW': {'yearly': _transpose_basin_yearly(obs_basin_yearly)}},
     }
+    if ml_cap_approx_basin_yearly:
+        cap_ts_sources['ML_CAP_approx'] = {
+            'SW': {'yearly': _transpose_basin_yearly(ml_cap_approx_basin_yearly)},
+        }
     if obs_spill_basin_yearly:
         cap_ts_sources['CAP_SRP_spill'] = {
             'SW': {'yearly': _transpose_basin_yearly(obs_spill_basin_yearly)},

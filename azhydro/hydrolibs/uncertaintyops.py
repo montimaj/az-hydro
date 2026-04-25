@@ -573,8 +573,6 @@ def _partition_with_ctx(partops, predictions, year_df, raster_shape,
     if not skip_cap_perturbation:
         year_df = partops.apply_cap_delivery_perturbation(
             year_df, year, _CAP_PIXEL_MASK_CTX.get('mask'),
-            cap_delivery_lookup=_CAP_DELIVERY_CTX.get('lookup'),
-            pre_cap_sw_baseline=_PRE_CAP_SW_BASELINE_CTX.get('baseline'),
         )
     return partops.partition_predictions(
         predictions, year_df, raster_shape, valid_mask,
@@ -4277,18 +4275,6 @@ def run_uncertainty_quantification(
                 'NonIrr GW share cap will fall back to peak-baseline.',
                 _cap_xlsx_uq, _e,
             )
-
-    # Pre-CAP SW baseline (1984) for additive CAP-pixel SW scaling.
-    try:
-        _set_pre_cap_sw_baseline_context(
-            partops.load_pre_cap_sw_baseline(az_df),
-        )
-    except Exception as _e:
-        logger.warning(
-            'UQ could not load pre-CAP SW baseline from az_df: %s — '
-            'apply_cap_delivery_perturbation will fall back to '
-            'multiplicative scaling at CAP basins.', _e,
-        )
 
     skip = skip_uq_steps or set()
     if skip:

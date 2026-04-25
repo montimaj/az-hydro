@@ -1863,27 +1863,6 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             'peak-baseline fallback.', _cap_xlsx_path,
         )
 
-    # Pre-CAP SW baseline (1984 cw_sf + sw_rights per pixel) for
-    # additive CAP-pixel SW scaling in apply_cap_delivery_perturbation.
-    # Preserves Phoenix SRP, Pinal San Carlos ID, Tucson Avra Valley
-    # local SW signals when the per-basin per-year delivery scaling
-    # tightens at low-CAP-delivery years.
-    _pre_cap_sw_baseline = partops.load_pre_cap_sw_baseline(az_df)
-    if _pre_cap_sw_baseline is not None:
-        logger.info(
-            'Pre-CAP SW baseline (year %d): %d pixels, columns %s',
-            partops.CAP_PRE_BASELINE_YEAR,
-            len(next(iter(_pre_cap_sw_baseline.values()))),
-            list(_pre_cap_sw_baseline.keys()),
-        )
-    else:
-        logger.warning(
-            'Pre-CAP SW baseline (year %d) unavailable — additive CAP '
-            'scaling will fall back to multiplicative (may damage '
-            'non-CAP SW signals at Phoenix/Pinal).',
-            partops.CAP_PRE_BASELINE_YEAR,
-        )
-
     def _pixel_stats(pred_vals, min_depth_threshold=5.0):
         """Compute depth and volume stats in multiple units.
 
@@ -2173,8 +2152,6 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         # 1896-2021 and 2025 (no scheduled cut).
         year_df_partition = partops.apply_cap_delivery_perturbation(
             year_df, year, _cap_pixel_mask,
-            cap_delivery_lookup=_cap_delivery_lookup,
-            pre_cap_sw_baseline=_pre_cap_sw_baseline,
         )
         cat_predictions = partops.partition_predictions(
             predictions, year_df_partition, raster_shape, valid_mask, year=year,
