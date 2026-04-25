@@ -932,6 +932,19 @@ def _cap_basin_irr_floor(
     yearly = basin_data.get('yearly_af', {})
     if year in yearly:
         delivery_ratio = yearly[year] / baseline
+    elif yearly:
+        # Projection-era fall-back: CARRY-FORWARD the last actual
+        # year's delivery instead of using the statewide
+        # CAP_DELIVERY_FACTORS Tier multiplier.  CAP-NIA at Pinal /
+        # Harquahala was permanently cancelled in 2011 — there's no
+        # "Tier 1 sustained" ag delivery to revert to.  The actual
+        # delivery records trail toward zero through 2022, so
+        # carry-forward correctly extends that into projection years.
+        # (NonIrr M&I cap continues to use the Tier fall-back via
+        # ``_cap_basin_ni_cap`` because Phoenix/Tucson M&I keep
+        # delivering through Tier 1.)
+        last_yr = max(yearly.keys())
+        delivery_ratio = yearly[last_yr] / baseline
     else:
         delivery_ratio = CAP_DELIVERY_FACTORS.get(year, 1.0)
     delivery_ratio = max(0.0, min(delivery_ratio, 1.0))
@@ -2874,6 +2887,27 @@ def partition_predictions(
         uf_sw = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
         excess_sw = nonirr_sw * (1.0 - uf_sw)
         nonirr_sw = nonirr_sw * uf_sw
+        # CAP-basin override: instead of routing the (1 − uf) excess
+        # to Irr_SW (next blocks), give it BACK to NonIrr_SW.  Reason:
+        # at CAP-served basins the density-ratio attributes SW to
+        # NonIrr to capture M&I subcontractor delivery — Phoenix has
+        # had SRP M&I deliveries since 1911 (CAP-independent), and CAP
+        # M&I subcontractors layer on top from the basin's CAP
+        # arrival onward.  HarDWR sw_rights_density misses both
+        # signals.  The default routing strips the (1 − uf) portion at
+        # mixed-LU metro-fringe pixels, eroding both pre-CAP SRP and
+        # post-CAP CAP M&I.  Applied basin-wide regardless of CAP
+        # arrival year (the outer ``year >= 1986`` gate is the only
+        # year condition).  Pre-1986 era doesn't run this routing at
+        # all, so the change is no-op in deep history.
+        if basin_names is not None:
+            for _b in CAP_BASIN_NI_PEAK_SW_FRACTION:
+                _b_mask = (basin_names == _b)
+                if _b_mask.any():
+                    nonirr_sw = np.where(
+                        _b_mask, nonirr_sw + excess_sw, nonirr_sw,
+                    )
+                    excess_sw = np.where(_b_mask, 0.0, excess_sw)
         if year <= 2010:
             if irr_swd is not None:
                 excess_to_gw = excess_sw * irr_gw_share

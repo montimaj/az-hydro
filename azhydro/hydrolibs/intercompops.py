@@ -4640,12 +4640,15 @@ def run_cap_srp_validation(
         cat_metrics.to_csv(cat_metrics_csv, index=False)
         metrics_dfs[cat_name] = cat_metrics
 
-        # ML approximate-CAP-contribution series — only meaningful for
-        # Total_SW (Total × delivery_ratio).  Per-category Irr/NIr SW
-        # don't get an approx line; they are themselves sub-components.
-        approx_yearly = (
-            _compute_ml_cap_approximation(ml_cat_yearly, cap_xlsx)
-            if cat_name == 'Total_SW' else {}
+        # ML approximate-CAP-contribution series for THIS category:
+        #   approx[year] = ML_{cat}_SW[year] × delivery_ratio[year]
+        # Total_SW × ratio  → approx total CAP contribution
+        # Irr_SW × ratio    → approx ag CAP-NIA contribution
+        # NIr_SW × ratio    → approx M&I CAP contribution
+        # Each tracks the basin's CAP delivery curve relative to the
+        # corresponding model SW component.
+        approx_yearly = _compute_ml_cap_approximation(
+            ml_cat_yearly, cap_xlsx,
         )
 
         # Per-category time series CSV
@@ -4662,20 +4665,20 @@ def run_cap_srp_validation(
                 obs_af = cat_obs_yearly.get(basin, {}).get(yr, np.nan)
                 approx_af = approx_yearly.get(basin, {}).get(yr, np.nan)
                 area = basin_areas_m2.get(basin, 1.0)
+                approx_col = f'ML_{cat_name}_CAP_approx'
                 row = {
                     'Basin': basin,
                     'Year': yr,
                     f'{ml_col}_AF': round(ml_af, 2) if np.isfinite(ml_af) else np.nan,
+                    f'{approx_col}_AF': round(approx_af, 2) if np.isfinite(approx_af) else np.nan,
                     f'{obs_col}_AF': round(obs_af, 2) if np.isfinite(obs_af) else np.nan,
                     f'{ml_col}_m3': round(ml_af * af_to_m3, 2) if np.isfinite(ml_af) else np.nan,
+                    f'{approx_col}_m3': round(approx_af * af_to_m3, 2) if np.isfinite(approx_af) else np.nan,
                     f'{obs_col}_m3': round(obs_af * af_to_m3, 2) if np.isfinite(obs_af) else np.nan,
                     f'{ml_col}_mm': round(ml_af * af_to_m3 / area * M_TO_MM, 4) if np.isfinite(ml_af) and area > 0 else np.nan,
+                    f'{approx_col}_mm': round(approx_af * af_to_m3 / area * M_TO_MM, 4) if np.isfinite(approx_af) and area > 0 else np.nan,
                     f'{obs_col}_mm': round(obs_af * af_to_m3 / area * M_TO_MM, 4) if np.isfinite(obs_af) and area > 0 else np.nan,
                 }
-                if cat_name == 'Total_SW':
-                    row['ML_CAP_approx_AF'] = round(approx_af, 2) if np.isfinite(approx_af) else np.nan
-                    row['ML_CAP_approx_m3'] = round(approx_af * af_to_m3, 2) if np.isfinite(approx_af) else np.nan
-                    row['ML_CAP_approx_mm'] = round(approx_af * af_to_m3 / area * M_TO_MM, 4) if np.isfinite(approx_af) and area > 0 else np.nan
                 ts_rows.append(row)
         ts_df = pd.DataFrame(ts_rows)
         ts_csv = os.path.join(output_dir, f'{csv_prefix}_time_series.csv')
@@ -4686,7 +4689,7 @@ def run_cap_srp_validation(
             'ML': {'SW': {'yearly': _transpose_basin_yearly(ml_cat_yearly)}},
             'CAP_SRP': {'SW': {'yearly': _transpose_basin_yearly(cat_obs_yearly)}},
         }
-        if cat_name == 'Total_SW' and approx_yearly:
+        if approx_yearly:
             cat_ts_sources['ML_CAP_approx'] = {
                 'SW': {'yearly': _transpose_basin_yearly(approx_yearly)},
             }
@@ -4700,7 +4703,7 @@ def run_cap_srp_validation(
             }
         cat_labels = {
             'ML': f'ML ({ml_label})',
-            'ML_CAP_approx': 'ML (approx CAP contribution)',
+            'ML_CAP_approx': f'ML approx CAP × {ml_label}',
             'CAP_SRP': cat_obs_label,
             'CAP_SRP_spill': 'CAP + SRP (+ Spill)',
         }
@@ -4741,8 +4744,8 @@ def run_cap_srp_validation(
                 af_unit_label='1000 AF',
             )
 
-        # ML approx CAP scatter — only for Total_SW
-        if cat_name == 'Total_SW' and approx_yearly:
+        # ML approx CAP scatter — one per category
+        if approx_yearly:
             approx_mean_vals = {}
             for basin in obs_basins:
                 common_years = sorted(
@@ -4753,13 +4756,19 @@ def run_cap_srp_validation(
                 if vals:
                     approx_mean_vals[basin] = float(np.mean(vals))
             if approx_mean_vals:
+                # Filename mirrors the per-category scatter:
+                # Scatter_ML_<cat>_CAP_approx_vs_CAP_SRP.png
+                approx_fname = scatter_fname.replace(
+                    '_vs_CAP_SRP.png', '_CAP_approx_vs_CAP_SRP.png',
+                )
                 plot_intercomp_scatter(
-                    [('ML approx CAP contribution', 'Observed CAP + SRP',
+                    [(f'ML approx CAP × {ml_label}',
+                      f'Observed {cat_obs_label}',
                       approx_mean_vals, obs_mean_vals)],
                     list(approx_mean_vals.keys()),
                     basin_areas_m2, scatter_dir,
-                    title='ML approx CAP contribution vs CAP + SRP — Per Basin',
-                    filename='Scatter_ML_CAP_approx_vs_CAP_SRP.png',
+                    title=f'ML approx CAP × {ml_label} vs {cat_obs_label} — Per Basin',
+                    filename=approx_fname,
                     is_validation=True,
                     annotate_basins=True,
                     log_scale=True,
