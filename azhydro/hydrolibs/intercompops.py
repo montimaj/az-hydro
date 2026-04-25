@@ -4002,32 +4002,89 @@ _CAP_AMA_TO_BASIN = {
 }
 
 
+# CAP customer → sector classification ('mi' = municipal & industrial,
+# 'ag' = irrigation/agricultural, 'tribal_ag' = tribal communities
+# treated as ag for SW-validation purposes).  Used to split the CAP
+# observation into M&I and Ag components so the model's NonIrr_SW can
+# be compared against CAP M&I (apples-to-apples) and Irr_SW against
+# CAP Ag.  Hardcoded based on the top customers (covering >95 % of
+# total CAP delivery); unknown customers fall through to 'mi' as a
+# conservative default (most small CAP customers are M&I providers).
+_CAP_CUSTOMER_AG_PATTERNS = (
+    'MSIDD', 'CAIDD', 'HVID', 'NMIDD', 'HIDD', 'QCID',
+    'Maricopa Stanfield', 'Maricopa-Stanfield',
+    'Central Arizona Irrigation',
+    'Harquahala Valley',
+    'New Magma', 'Hohokam', 'Queen Creek',
+    'Cortaro-Marana', 'Cortaro Marana',
+    'Roosevelt', 'San Tan',
+    'Irrigation', 'IDD', 'ID ',  # ID followed by space (district)
+)
+_CAP_CUSTOMER_TRIBAL_AG_PATTERNS = (
+    'Ak-Chin', 'Ak Chin',
+    'GRIC', 'Gila River Indian',
+    'San Carlos Apache', 'San Carlos',
+    'Tohono', 'Pascua', 'Yavapai-Prescott',
+    'Indian Community', 'Tribe',
+)
+_CAP_CUSTOMER_MI_PATTERNS = (
+    'Phoenix', 'Tucson', 'Mesa', 'Scottsdale', 'Gilbert',
+    'Chandler', 'Glendale', 'Peoria', 'Tempe', 'Goodyear',
+    'Avondale', 'Buckeye', 'Surprise', 'Litchfield',
+    'Cave Creek', 'Carefree', 'Fountain Hills', 'Sun City',
+    'Marana', 'Oro Valley', 'Sahuarita',
+    'AWBA', 'CAGRD', 'CAWCD',
+    'Water Co', 'Water Company', 'Water Utility',
+    'City of', 'Town of', 'Metro Water',
+)
+
+
+def _classify_cap_customer(customer: str) -> str:
+    """Return 'ag' or 'mi' for a CAP customer name."""
+    if not isinstance(customer, str) or not customer:
+        return 'mi'
+    s = customer.strip()
+    for pat in _CAP_CUSTOMER_TRIBAL_AG_PATTERNS:
+        if pat in s:
+            return 'ag'
+    for pat in _CAP_CUSTOMER_AG_PATTERNS:
+        if pat in s:
+            return 'ag'
+    for pat in _CAP_CUSTOMER_MI_PATTERNS:
+        if pat in s:
+            return 'mi'
+    return 'mi'  # default (most unknown small customers are M&I)
+
+
 def _compute_ml_cap_approximation(
         ml_basin_yearly: dict[str, dict[int, float]],
         cap_xlsx: str,
-        baseline_year: int = 1984,
         baseline_period: tuple[int, int] = (2000, 2009),
 ) -> dict[str, dict[int, float]]:
     """Approximate the CAP contribution to model Total_SW per basin per year.
 
     Returns ``{basin: {year: AF}}`` where each entry is::
 
-        approx_CAP[year] = max(0, ML_Total_SW[year] − ML_Total_SW[baseline_year])
-                         × delivery_ratio[year]
+        approx_CAP[year] = ML_Total_SW[year] × delivery_ratio[year]
+        delivery_ratio[year] = direct_CAP_delivery[year] / baseline_period_mean
 
-    where ``delivery_ratio[year] = direct_CAP_delivery[year] /
-    mean_direct_delivery_over_baseline_period``, clamped to [0, 1].
+    Multiplies the model's per-basin Total_SW by the basin's CAP
+    delivery ratio for that year.  Pre-arrival years yield 0 (no CAP
+    delivery record → ratio = 0).  Designed as a coarse visualisation
+    only — at SRP-dominant Phoenix the formula over-attributes some
+    SRP-derived SW to "CAP" (since the model can't separate SRP from
+    CAP cleanly), but it tracks the observation curve shape at all
+    four CAP basins.
 
-    The subtraction of ``ML_Total_SW[baseline_year]`` (default 1984,
-    last full pre-CAP year) isolates the post-CAP increment in the
-    model's Total_SW.  Multiplying by the per-basin per-year delivery
-    ratio scales that increment to track each basin's CAP utilization
-    curve.  Pre-arrival years yield 0 (no CAP signal in delivery
-    records → ratio = 0).
+    A pre-CAP-baseline subtraction was tried earlier but failed at
+    Phoenix and Pinal because the model's Total_SW DROPS with CAP
+    arrival there (the dynamic NonIrr cap shifts SW → GW at CAP-served
+    pixels), making ``max(0, current − baseline_1985)`` clip to zero
+    at all years.  The simpler ``Total_SW × ratio`` formula avoids
+    that pitfall.
 
-    Designed for visualisation in the CAP+SRP validation time series
-    only — not used by the partition itself.  Returns ``{}`` if the
-    CAP Excel cannot be loaded.
+    Visualisation only — not used by the partition itself.  Returns
+    ``{}`` if the CAP Excel cannot be loaded.
     """
     try:
         from hydrolibs import partitionops as _partops
@@ -4040,24 +4097,21 @@ def _compute_ml_cap_approximation(
         return {}
     out: dict[str, dict[int, float]] = {}
     for basin, ml_yearly in ml_basin_yearly.items():
-        if basin not in lookup:
+        if basin not in lookup or not ml_yearly:
             continue
         basin_data = lookup[basin]
         baseline_af = basin_data.get('baseline_af', 0.0)
         if baseline_af <= 0:
-            continue
-        ml_baseline = ml_yearly.get(baseline_year)
-        if ml_baseline is None:
             continue
         delivery = basin_data.get('yearly_af', {})
         approx = {}
         for yr, ml_total in ml_yearly.items():
             d = delivery.get(yr)
             if d is None:
+                approx[yr] = 0.0  # no CAP delivery → no CAP contribution
                 continue
             ratio = max(0.0, min(d / baseline_af, 1.0))
-            increment = max(0.0, ml_total - ml_baseline)
-            approx[yr] = increment * ratio
+            approx[yr] = float(ml_total) * ratio
         if approx:
             out[basin] = approx
     return out
@@ -4068,6 +4122,7 @@ def load_cap_srp_annual_sw(
     srp_xlsx: str | None = None,
     include_spill_water: bool = False,
     include_recharge: bool = True,
+    sector: str | None = None,
 ) -> dict[str, dict[int, float]]:
     """Load CAP (and optionally SRP) delivery data and return annual
     total surface-water deliveries (AF) per basin.
@@ -4110,6 +4165,15 @@ def load_cap_srp_annual_sw(
             facility deliveries (USF, GSF, ASR) — the full CAP supply
             footprint per basin.  If False, restrict to direct-use
             deliveries only.
+        sector (str or None): Filter CAP deliveries by customer sector.
+            ``'mi'`` keeps only municipal & industrial customers
+            (Phoenix, Tucson, AWBA, CAGRD, etc.) — apples-to-apples
+            comparison with model NonIrr_SW.  ``'ag'`` keeps only
+            irrigation/tribal-ag customers (MSIDD, CAIDD, GRIC, etc.)
+            — comparison with model Irr_SW.  ``None`` (default) keeps
+            all customers.  SRP is added unfiltered when ``srp_xlsx``
+            is provided AND sector is not 'mi' (SRP deliveries to
+            Phoenix AMA are predominantly ag-side).
 
     Returns:
         dict[str, dict[int, float]]: ``{basin_name: {year: delivery_AF}}``.
@@ -4121,6 +4185,9 @@ def load_cap_srp_annual_sw(
         cap_df = cap_df[cap_df['Recharge Facility'].isna()].copy()
     else:
         cap_df = cap_df.copy()
+    if sector in ('mi', 'ag'):
+        cap_df['_sector'] = cap_df['Customer'].apply(_classify_cap_customer)
+        cap_df = cap_df[cap_df['_sector'] == sector].copy()
     # Log excluded volume from unmappable AMA records
     mappable_mask = cap_df['AMA'].isin(_CAP_AMA_TO_BASIN)
     excluded = cap_df[~mappable_mask]
@@ -4171,6 +4238,11 @@ def load_cap_srp_annual_sw(
             '(SRP service area is not unambiguously mappable to AZ basins).'
         )
         return basin_year
+    # Skip SRP entirely when filtering for M&I — SRP deliveries are
+    # predominantly ag-side (irrigation districts within Salt River
+    # Valley); adding them would inflate the M&I observation.
+    if sector == 'mi':
+        return basin_year
 
     srp_df = pd.read_excel(srp_xlsx)
     srp_types = ['SURFACE WATER']
@@ -4198,9 +4270,16 @@ def load_ml_total_sw_basin_volumes(
     basin_gdf: gpd.GeoDataFrame,
     basin_col: str,
     year_range: tuple[int, int],
+    file_prefix: str = 'Total_SW',
 ) -> dict[str, dict[int, float]]:
-    """Aggregate ML ``Total_SW_YYYY_mm.tif`` rasters to annual basin
-    volumes (AF).
+    """Aggregate ML ``{file_prefix}_YYYY_mm.tif`` rasters to annual
+    basin volumes (AF).
+
+    Default ``file_prefix='Total_SW'`` reads ``Total_SW_YYYY_mm.tif``.
+    Pass ``file_prefix='Irrigation_SW'`` or ``'Non_Irrigation_SW'`` to
+    read the per-category SW depth rasters from the corresponding
+    ``Irrigation_SW_Rasters/Depth_mm/`` or
+    ``Non_Irrigation_SW_Rasters/Depth_mm/`` directory.
 
     Returns:
         dict[str, dict[int, float]]: ``{basin_name: {year: volume_AF}}``.
@@ -4208,12 +4287,12 @@ def load_ml_total_sw_basin_volumes(
     start_yr, end_yr = year_range
     ref_raster = None
     for yr in range(start_yr, end_yr + 1):
-        candidate = os.path.join(total_sw_dir, f'Total_SW_{yr}_mm.tif')
+        candidate = os.path.join(total_sw_dir, f'{file_prefix}_{yr}_mm.tif')
         if os.path.isfile(candidate):
             ref_raster = candidate
             break
     if ref_raster is None:
-        logger.warning(f'No Total_SW rasters found in {total_sw_dir}')
+        logger.warning(f'No {file_prefix} rasters found in {total_sw_dir}')
         return {}
 
     with rio.open(ref_raster) as src:
@@ -4226,7 +4305,7 @@ def load_ml_total_sw_basin_volumes(
 
     result = {}  # basin → {year → AF}
     for yr in range(start_yr, end_yr + 1):
-        raster_path = os.path.join(total_sw_dir, f'Total_SW_{yr}_mm.tif')
+        raster_path = os.path.join(total_sw_dir, f'{file_prefix}_{yr}_mm.tif')
         if not os.path.isfile(raster_path):
             continue
         yearly_vols = _raster_basin_volumes(
@@ -4407,8 +4486,22 @@ def run_cap_srp_validation(
     logger.info(f'Loaded {len(basin_gdf)} basins from {basin_shp}')
 
     # ── Load observed CAP (+ optionally SRP) deliveries ──────────────────
-    logger.info('Loading CAP delivery data...')
+    # Three observation series, all using the same CAP delivery file:
+    #   - obs_basin_yearly_total: full CAP+SRP (compared to model Total_SW)
+    #   - obs_basin_yearly_mi:    CAP M&I customers only
+    #                             (compared to model Non_Irrigation_SW)
+    #   - obs_basin_yearly_ag:    CAP irrigation/tribal-ag customers + SRP
+    #                             (compared to model Irrigation_SW)
+    # Sector classifier in ``_classify_cap_customer`` distinguishes
+    # cities/AWBA/CAGRD (M&I) from MSIDD/CAIDD/HVID/GRIC/Ak-Chin (ag).
+    logger.info('Loading CAP delivery data (per-sector splits)...')
     obs_basin_yearly = load_cap_srp_annual_sw(cap_xlsx, srp_xlsx)
+    obs_basin_yearly_mi = load_cap_srp_annual_sw(
+        cap_xlsx, srp_xlsx, sector='mi',
+    )
+    obs_basin_yearly_ag = load_cap_srp_annual_sw(
+        cap_xlsx, srp_xlsx, sector='ag',
+    )
     # Spill-water sensitivity test is only meaningful when SRP is loaded.
     obs_spill_basin_yearly = (
         load_cap_srp_annual_sw(cap_xlsx, srp_xlsx, include_spill_water=True)
@@ -4420,14 +4513,36 @@ def run_cap_srp_validation(
         yrs = sorted(obs_basin_yearly[b].keys())
         logger.info(f'    {b}: {yrs[0]}-{yrs[-1]} ({len(yrs)} years)')
 
-    # ── Load ML Total_SW rasters → basin volumes ────────────────────────
-    logger.info('Loading ML Total_SW rasters...')
-    ml_basin_yearly = load_ml_total_sw_basin_volumes(
-        total_sw_dir, basin_gdf, basin_col, year_range,
-    )
-    if not ml_basin_yearly:
+    # ── Load ML SW rasters per category → basin volumes ─────────────────
+    # Total_SW + Irrigation_SW + Non_Irrigation_SW each compared
+    # separately against the same observed CAP+SRP delivery.  The
+    # per-category dirs are derived from total_sw_dir's prediction-
+    # root parent (...Full_Prediction_XGBRF/<cat>_Rasters/Depth_mm/).
+    _prediction_root = os.path.dirname(os.path.dirname(total_sw_dir))
+    ml_category_dirs = {
+        'Total_SW': total_sw_dir,
+        'Irrigation_SW': os.path.join(
+            _prediction_root, 'Irrigation_SW_Rasters', 'Depth_mm',
+        ),
+        'Non_Irrigation_SW': os.path.join(
+            _prediction_root, 'Non_Irrigation_SW_Rasters', 'Depth_mm',
+        ),
+    }
+    ml_basin_yearly_by_cat: dict[str, dict] = {}
+    for _cat, _cat_dir in ml_category_dirs.items():
+        logger.info(f'Loading ML {_cat} rasters from {_cat_dir}...')
+        _basin_yearly = load_ml_total_sw_basin_volumes(
+            _cat_dir, basin_gdf, basin_col, year_range,
+            file_prefix=_cat,
+        )
+        if _basin_yearly:
+            ml_basin_yearly_by_cat[_cat] = _basin_yearly
+        else:
+            logger.warning(f'No ML {_cat} rasters found in {_cat_dir}')
+    if 'Total_SW' not in ml_basin_yearly_by_cat:
         logger.warning('No ML Total_SW rasters found; skipping validation.')
         return pd.DataFrame()
+    ml_basin_yearly = ml_basin_yearly_by_cat['Total_SW']  # backward compat
 
     # ── Basin areas for depth conversion ─────────────────────────────────
     # Find ref CRS from first available raster
@@ -4447,58 +4562,15 @@ def run_cap_srp_validation(
         for _, row in basin_reproj.iterrows()
     }
 
-    # ── Compute statistics ───────────────────────────────────────────────
-    logger.info('Computing per-basin statistics...')
-    metrics_df = _compute_cap_srp_metrics(
-        ml_basin_yearly, obs_basin_yearly, basin_areas_m2,
-    )
-    metrics_csv = os.path.join(output_dir, 'cap_srp_sw_validation_metrics.csv')
-    metrics_df.to_csv(metrics_csv, index=False)
-    logger.info(f'Metrics saved to {metrics_csv}')
-
-    # ── Time series CSV ──────────────────────────────────────────────────
+    # ── Per-category metrics + CSV + time-series plots + scatter ────────
+    # Each ML category (Total_SW, Irrigation_SW, Non_Irrigation_SW) is
+    # compared against the same observed CAP+SRP delivery.  Total_SW
+    # additionally gets the ML approximate CAP contribution
+    # (Total_SW × delivery_ratio) shown alongside.
     af_to_m3 = 1.0 / M3_TO_AF
-    ts_rows = []
-    for basin in obs_basins:
-        all_years = sorted(
-            set(ml_basin_yearly.get(basin, {}).keys())
-            | set(obs_basin_yearly.get(basin, {}).keys())
-        )
-        for yr in all_years:
-            ml_af = ml_basin_yearly.get(basin, {}).get(yr, np.nan)
-            obs_af = obs_basin_yearly.get(basin, {}).get(yr, np.nan)
-            area = basin_areas_m2.get(basin, 1.0)
-            ts_rows.append({
-                'Basin': basin,
-                'Year': yr,
-                'ML_Total_SW_AF': round(ml_af, 2) if np.isfinite(ml_af) else np.nan,
-                'CAP_SRP_AF': round(obs_af, 2) if np.isfinite(obs_af) else np.nan,
-                'ML_Total_SW_m3': round(ml_af * af_to_m3, 2) if np.isfinite(ml_af) else np.nan,
-                'CAP_SRP_m3': round(obs_af * af_to_m3, 2) if np.isfinite(obs_af) else np.nan,
-                'ML_Total_SW_mm': round(ml_af * af_to_m3 / area * M_TO_MM, 4) if np.isfinite(ml_af) and area > 0 else np.nan,
-                'CAP_SRP_mm': round(obs_af * af_to_m3 / area * M_TO_MM, 4) if np.isfinite(obs_af) and area > 0 else np.nan,
-            })
-    ts_df = pd.DataFrame(ts_rows)
-    ts_csv = os.path.join(output_dir, 'cap_srp_sw_time_series.csv')
-    ts_df.to_csv(ts_csv, index=False)
-    logger.info(f'Time series saved to {ts_csv}')
+    plot_dir = os.path.join(output_dir, 'Time_Series/')
+    scatter_dir = os.path.join(output_dir, 'Scatter/')
 
-    # ── Time series plots ────────────────────────────────────────────────
-    _cap_colors = {
-        'ML': '#2C3E50',
-        'ML_CAP_approx': '#9B59B6',
-        'CAP_SRP': '#E74C3C',
-        'CAP_SRP_spill': '#3498DB',
-    }
-    _cap_markers = {
-        'ML': 'o', 'ML_CAP_approx': 'x', 'CAP_SRP': 's', 'CAP_SRP_spill': '^',
-    }
-    _cap_labels = {
-        'ML': 'ML (Total SW)',
-        'ML_CAP_approx': 'ML (approx CAP contribution)',
-        'CAP_SRP': 'CAP + SRP',
-        'CAP_SRP_spill': 'CAP + SRP (+ Spill)',
-    }
     # Transpose {basin: {year: AF}} → {year: {basin: AF}} for the
     # time-series plotter which expects the year-keyed format.
     def _transpose_basin_yearly(d):
@@ -4508,71 +4580,194 @@ def run_cap_srp_validation(
                 out.setdefault(yr, {})[basin] = val
         return out
 
-    # ML approximate CAP contribution: at each CAP basin per year,
-    # take the model's Total_SW above its pre-CAP baseline (1984)
-    # and scale by the basin's actual CAP delivery_ratio.  This
-    # isolates the CAP-driven SW increment from local infrastructure
-    # (Phoenix SRP, Pinal San Carlos ID, Tucson Avra Valley) and
-    # tracks the observation curve shape (CAP delivery + recharge)
-    # without requiring partition-level changes.  Visualisation only —
-    # not fed back into the model.
-    ml_cap_approx_basin_yearly = _compute_ml_cap_approximation(
-        ml_basin_yearly, cap_xlsx,
-    )
-
-    cap_ts_sources = {
-        'ML': {'SW': {'yearly': _transpose_basin_yearly(ml_basin_yearly)}},
-        'CAP_SRP': {'SW': {'yearly': _transpose_basin_yearly(obs_basin_yearly)}},
+    _cap_colors = {
+        'ML': '#2C3E50',
+        'ML_CAP_approx': '#9B59B6',
+        'CAP_SRP': '#E74C3C',
+        'CAP_SRP_spill': '#3498DB',
     }
-    if ml_cap_approx_basin_yearly:
-        cap_ts_sources['ML_CAP_approx'] = {
-            'SW': {'yearly': _transpose_basin_yearly(ml_cap_approx_basin_yearly)},
-        }
-    if obs_spill_basin_yearly:
-        cap_ts_sources['CAP_SRP_spill'] = {
-            'SW': {'yearly': _transpose_basin_yearly(obs_spill_basin_yearly)},
-        }
-    plot_dir = os.path.join(output_dir, 'Time_Series/')
-    plot_intercomp_time_series(
-        cap_ts_sources, categories=['SW'],
-        basin_names=sorted(obs_basin_yearly.keys()),
-        basin_areas_m2=basin_areas_m2,
-        output_dir=plot_dir,
-        colors=_cap_colors, markers=_cap_markers, labels=_cap_labels,
-        title_prefix='Total Surface Water — ', file_prefix='TS_Total_SW',
-    )
+    _cap_markers = {
+        'ML': 'o', 'ML_CAP_approx': 'x', 'CAP_SRP': 's', 'CAP_SRP_spill': '^',
+    }
 
-    # ── Scatter plot ─────────────────────────────────────────────────────
-    scatter_dir = os.path.join(output_dir, 'Scatter/')
-    # Build per-basin-year scatter (mean values from yearly overlap)
-    obs_basins = sorted(obs_basin_yearly.keys())
-    ml_mean_vals, obs_mean_vals = {}, {}
-    for basin in obs_basins:
-        common_years = sorted(
-            set(ml_basin_yearly.get(basin, {}).keys())
-            & set(obs_basin_yearly[basin].keys())
+    # Per-category labels for plot legends, file names, and titles.
+    # ``plot_intercomp_time_series`` appends ``_{cat}_{basin}`` to the
+    # file_prefix.  With cat='SW', file_prefix='TS_Total' produces
+    # ``TS_Total_SW_<basin>.png`` (single trailing SW segment).
+    _cat_meta = {
+        'Total_SW':         ('Total SW',       'TS_Total',
+                             'Scatter_ML_Total_SW_vs_CAP_SRP.png',
+                             'cap_srp_total_sw'),
+        'Irrigation_SW':    ('Irrigation SW',  'TS_Irr',
+                             'Scatter_ML_Irr_SW_vs_CAP_SRP.png',
+                             'cap_srp_irr_sw'),
+        'Non_Irrigation_SW': ('NonIrr SW',      'TS_NIr',
+                              'Scatter_ML_NIr_SW_vs_CAP_SRP.png',
+                              'cap_srp_nonirr_sw'),
+    }
+
+    # Per-category observation pairing:
+    #   Total_SW         ↔  CAP+SRP total (all customers + SRP)
+    #   Irrigation_SW    ↔  CAP ag (MSIDD/CAIDD/HVID/tribal) + SRP
+    #   Non_Irrigation_SW ↔ CAP M&I (cities/AWBA/CAGRD), SRP excluded
+    _cat_obs = {
+        'Total_SW': obs_basin_yearly,
+        'Irrigation_SW': obs_basin_yearly_ag,
+        'Non_Irrigation_SW': obs_basin_yearly_mi,
+    }
+    _cat_obs_label = {
+        'Total_SW': 'CAP + SRP (all)',
+        'Irrigation_SW': 'CAP Ag + SRP',
+        'Non_Irrigation_SW': 'CAP M&I',
+    }
+
+    metrics_dfs: dict[str, pd.DataFrame] = {}
+    for cat_name, ml_cat_yearly in ml_basin_yearly_by_cat.items():
+        ml_label, plot_prefix, scatter_fname, csv_prefix = _cat_meta[cat_name]
+        cat_obs_yearly = _cat_obs[cat_name]
+        cat_obs_label = _cat_obs_label[cat_name]
+        logger.info(
+            f'  Processing category: {ml_label} (vs {cat_obs_label})'
         )
-        if common_years:
-            ml_mean_vals[basin] = float(np.mean([
-                ml_basin_yearly[basin][yr] for yr in common_years
-            ]))
-            obs_mean_vals[basin] = float(np.mean([
-                obs_basin_yearly[basin][yr] for yr in common_years
-            ]))
-    plot_intercomp_scatter(
-        # Convention: X = predicted (ML), Y = observed (CAP+SRP) — the
-        # validation orientation where the regression slope quantifies
-        # bias of the model relative to the observation reference.
-        [('ML Total SW', 'Observed CAP + SRP', ml_mean_vals, obs_mean_vals)],
-        list(ml_mean_vals.keys()), basin_areas_m2, scatter_dir,
-        title='ML Total SW vs CAP + SRP — Per Basin',
-        filename='Scatter_ML_vs_CAP_SRP.png',
-        is_validation=True,
-        annotate_basins=True,
-        log_scale=True,
-        af_divisor=1000.0,
-        af_unit_label='1000 AF',
-    )
+
+        # Per-basin metrics
+        cat_metrics = _compute_cap_srp_metrics(
+            ml_cat_yearly, cat_obs_yearly, basin_areas_m2,
+        )
+        cat_metrics_csv = os.path.join(
+            output_dir, f'{csv_prefix}_validation_metrics.csv',
+        )
+        cat_metrics.to_csv(cat_metrics_csv, index=False)
+        metrics_dfs[cat_name] = cat_metrics
+
+        # ML approximate-CAP-contribution series — only meaningful for
+        # Total_SW (Total × delivery_ratio).  Per-category Irr/NIr SW
+        # don't get an approx line; they are themselves sub-components.
+        approx_yearly = (
+            _compute_ml_cap_approximation(ml_cat_yearly, cap_xlsx)
+            if cat_name == 'Total_SW' else {}
+        )
+
+        # Per-category time series CSV
+        ml_col = f'ML_{cat_name}'
+        obs_col = f'CAP_SRP_{cat_name}'
+        ts_rows = []
+        for basin in obs_basins:
+            all_years = sorted(
+                set(ml_cat_yearly.get(basin, {}).keys())
+                | set(cat_obs_yearly.get(basin, {}).keys())
+            )
+            for yr in all_years:
+                ml_af = ml_cat_yearly.get(basin, {}).get(yr, np.nan)
+                obs_af = cat_obs_yearly.get(basin, {}).get(yr, np.nan)
+                approx_af = approx_yearly.get(basin, {}).get(yr, np.nan)
+                area = basin_areas_m2.get(basin, 1.0)
+                row = {
+                    'Basin': basin,
+                    'Year': yr,
+                    f'{ml_col}_AF': round(ml_af, 2) if np.isfinite(ml_af) else np.nan,
+                    f'{obs_col}_AF': round(obs_af, 2) if np.isfinite(obs_af) else np.nan,
+                    f'{ml_col}_m3': round(ml_af * af_to_m3, 2) if np.isfinite(ml_af) else np.nan,
+                    f'{obs_col}_m3': round(obs_af * af_to_m3, 2) if np.isfinite(obs_af) else np.nan,
+                    f'{ml_col}_mm': round(ml_af * af_to_m3 / area * M_TO_MM, 4) if np.isfinite(ml_af) and area > 0 else np.nan,
+                    f'{obs_col}_mm': round(obs_af * af_to_m3 / area * M_TO_MM, 4) if np.isfinite(obs_af) and area > 0 else np.nan,
+                }
+                if cat_name == 'Total_SW':
+                    row['ML_CAP_approx_AF'] = round(approx_af, 2) if np.isfinite(approx_af) else np.nan
+                    row['ML_CAP_approx_m3'] = round(approx_af * af_to_m3, 2) if np.isfinite(approx_af) else np.nan
+                    row['ML_CAP_approx_mm'] = round(approx_af * af_to_m3 / area * M_TO_MM, 4) if np.isfinite(approx_af) and area > 0 else np.nan
+                ts_rows.append(row)
+        ts_df = pd.DataFrame(ts_rows)
+        ts_csv = os.path.join(output_dir, f'{csv_prefix}_time_series.csv')
+        ts_df.to_csv(ts_csv, index=False)
+
+        # Per-category time-series plots
+        cat_ts_sources = {
+            'ML': {'SW': {'yearly': _transpose_basin_yearly(ml_cat_yearly)}},
+            'CAP_SRP': {'SW': {'yearly': _transpose_basin_yearly(cat_obs_yearly)}},
+        }
+        if cat_name == 'Total_SW' and approx_yearly:
+            cat_ts_sources['ML_CAP_approx'] = {
+                'SW': {'yearly': _transpose_basin_yearly(approx_yearly)},
+            }
+        # CAP+SRP+Spill series only for Total_SW (full-CAP context).
+        # Per-sector observations don't have a separate "+ Spill"
+        # variant — spill water is a CAP delivery anomaly, not a
+        # customer-sector attribute.
+        if cat_name == 'Total_SW' and obs_spill_basin_yearly:
+            cat_ts_sources['CAP_SRP_spill'] = {
+                'SW': {'yearly': _transpose_basin_yearly(obs_spill_basin_yearly)},
+            }
+        cat_labels = {
+            'ML': f'ML ({ml_label})',
+            'ML_CAP_approx': 'ML (approx CAP contribution)',
+            'CAP_SRP': cat_obs_label,
+            'CAP_SRP_spill': 'CAP + SRP (+ Spill)',
+        }
+        plot_intercomp_time_series(
+            cat_ts_sources, categories=['SW'],
+            basin_names=sorted(cat_obs_yearly.keys()),
+            basin_areas_m2=basin_areas_m2,
+            output_dir=plot_dir,
+            colors=_cap_colors, markers=_cap_markers, labels=cat_labels,
+            title_prefix=f'{ml_label} — ', file_prefix=plot_prefix,
+        )
+
+        # Per-category scatter (mean over common years)
+        ml_mean_vals, obs_mean_vals = {}, {}
+        for basin in obs_basins:
+            common_years = sorted(
+                set(ml_cat_yearly.get(basin, {}).keys())
+                & set(cat_obs_yearly.get(basin, {}).keys())
+            )
+            if common_years:
+                ml_mean_vals[basin] = float(np.mean([
+                    ml_cat_yearly[basin][yr] for yr in common_years
+                ]))
+                obs_mean_vals[basin] = float(np.mean([
+                    cat_obs_yearly[basin][yr] for yr in common_years
+                ]))
+        if ml_mean_vals:
+            plot_intercomp_scatter(
+                [(f'ML {ml_label}', f'Observed {cat_obs_label}',
+                  ml_mean_vals, obs_mean_vals)],
+                list(ml_mean_vals.keys()), basin_areas_m2, scatter_dir,
+                title=f'ML {ml_label} vs {cat_obs_label} — Per Basin',
+                filename=scatter_fname,
+                is_validation=True,
+                annotate_basins=True,
+                log_scale=True,
+                af_divisor=1000.0,
+                af_unit_label='1000 AF',
+            )
+
+        # ML approx CAP scatter — only for Total_SW
+        if cat_name == 'Total_SW' and approx_yearly:
+            approx_mean_vals = {}
+            for basin in obs_basins:
+                common_years = sorted(
+                    set(approx_yearly.get(basin, {}).keys())
+                    & set(cat_obs_yearly.get(basin, {}).keys())
+                )
+                vals = [approx_yearly[basin][yr] for yr in common_years]
+                if vals:
+                    approx_mean_vals[basin] = float(np.mean(vals))
+            if approx_mean_vals:
+                plot_intercomp_scatter(
+                    [('ML approx CAP contribution', 'Observed CAP + SRP',
+                      approx_mean_vals, obs_mean_vals)],
+                    list(approx_mean_vals.keys()),
+                    basin_areas_m2, scatter_dir,
+                    title='ML approx CAP contribution vs CAP + SRP — Per Basin',
+                    filename='Scatter_ML_CAP_approx_vs_CAP_SRP.png',
+                    is_validation=True,
+                    annotate_basins=True,
+                    log_scale=True,
+                    af_divisor=1000.0,
+                    af_unit_label='1000 AF',
+                )
+
+    metrics_df = metrics_dfs.get('Total_SW', pd.DataFrame())
 
     # ── Summary ──────────────────────────────────────────────────────────
     logger.info('\n' + '=' * 60)

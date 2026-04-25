@@ -823,9 +823,20 @@ CAP_BASIN_IRR_PEAK_SW_FRACTION: dict[str, float] = {
     'PINAL AMA':      0.50,  # CAP-NIA at peak ≈ 50 % of Pinal ag SW
     'HARQUAHALA INA': 0.50,  # CAP-NIA at peak ≈ 50 % of Harquahala ag SW
 }
-CAP_BASIN_IRR_FLOOR_MAX: float = 0.70  # leaves 30 % SW slack for
-                                       # local/tribal/residual ag SW
-                                       # at zero-CAP-delivery years
+# Per-basin maximum Irr GW floor at zero CAP delivery.  Captures
+# whether the basin has any non-CAP SW infrastructure to fall back on:
+#   - Pinal (0.70): San Carlos Irrigation District (Coolidge Dam →
+#     SCIDD) provides ~30 % of Pinal ag SW independent of CAP, so
+#     even at zero CAP-NIA the basin still has real local SW.
+#   - Harquahala (0.95): no non-CAP SW infrastructure — CAP-NIA was
+#     the only ag SW source.  Post-cancellation the basin should be
+#     ~100 % GW; 0.95 leaves a tiny 5 % slack for incidental canal
+#     seepage / residual deliveries.
+CAP_BASIN_IRR_FLOOR_MAX_PER_BASIN: dict[str, float] = {
+    'PINAL AMA':      0.70,
+    'HARQUAHALA INA': 0.95,
+}
+CAP_BASIN_IRR_FLOOR_MAX_DEFAULT: float = 0.70
 
 # Post-1985 NonIrr floor override at CAP basins.  Lowered from the
 # pre-1985 BASIN_GW_FLOOR (0.20/0.30) to give the
@@ -924,9 +935,12 @@ def _cap_basin_irr_floor(
     else:
         delivery_ratio = CAP_DELIVERY_FACTORS.get(year, 1.0)
     delivery_ratio = max(0.0, min(delivery_ratio, 1.0))
-    headroom = max(0.0, CAP_BASIN_IRR_FLOOR_MAX - static_floor)
+    floor_max = CAP_BASIN_IRR_FLOOR_MAX_PER_BASIN.get(
+        basin, CAP_BASIN_IRR_FLOOR_MAX_DEFAULT,
+    )
+    headroom = max(0.0, floor_max - static_floor)
     floor = static_floor + headroom * (1.0 - delivery_ratio ** 2)
-    return min(floor, CAP_BASIN_IRR_FLOOR_MAX)
+    return min(floor, floor_max)
 
 
 def _basin_gw_floor_array(
