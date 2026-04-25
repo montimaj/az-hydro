@@ -177,6 +177,17 @@ _PRE_GMA_CTX: dict[str, np.ndarray | None] = {
 # Coordination" baseline.
 _CAP_PIXEL_MASK_CTX: dict[str, np.ndarray | None] = {'mask': None}
 
+# Module-level CAP delivery lookup context for UQ (mirrors the central
+# pipeline's per-basin per-year CAP delivery, used by the dynamic
+# NonIrr GW share cap inside ``partition_predictions``).
+_CAP_DELIVERY_CTX: dict[str, dict | None] = {'lookup': None}
+
+# Module-level pre-CAP SW baseline context for UQ (mirrors the central
+# pipeline's 1984 reference cw_sf / sw_rights per pixel, used by
+# ``apply_cap_delivery_perturbation`` for additive CAP-pixel SW
+# scaling).
+_PRE_CAP_SW_BASELINE_CTX: dict[str, dict | None] = {'baseline': None}
+
 
 def _set_cap_pixel_mask_context(cap_pixel_mask: np.ndarray | None) -> None:
     """Populate the module-level CAP-pixel mask context for UQ.
@@ -190,6 +201,40 @@ def _set_cap_pixel_mask_context(cap_pixel_mask: np.ndarray | None) -> None:
         logger.info(
             'UQ CAP-cut hindcast context loaded: %d pixels',
             int(cap_pixel_mask.sum()),
+        )
+
+
+def _set_cap_delivery_context(cap_delivery_lookup: dict | None) -> None:
+    """Populate the module-level CAP delivery lookup context for UQ.
+
+    Used by ``partition_predictions`` to drive the per-year per-basin
+    NonIrr GW share cap.  Loaded once at pipeline startup and shared
+    by all UQ ensemble members so they see the same dynamic cap as
+    the central pipeline.
+    """
+    _CAP_DELIVERY_CTX['lookup'] = cap_delivery_lookup
+    if cap_delivery_lookup is not None:
+        logger.info(
+            'UQ CAP delivery context loaded: %d basins',
+            len(cap_delivery_lookup),
+        )
+
+
+def _set_pre_cap_sw_baseline_context(
+        pre_cap_sw_baseline: dict | None,
+) -> None:
+    """Populate the module-level pre-CAP SW baseline context for UQ.
+
+    Used by ``apply_cap_delivery_perturbation`` for additive CAP-pixel
+    SW scaling that preserves non-CAP infrastructure (Phoenix SRP /
+    Pinal San Carlos / Tucson Avra Valley).  Loaded once at pipeline
+    startup so UQ ensemble members use the same baseline as central.
+    """
+    _PRE_CAP_SW_BASELINE_CTX['baseline'] = pre_cap_sw_baseline
+    if pre_cap_sw_baseline is not None:
+        logger.info(
+            'UQ pre-CAP SW baseline context loaded: %d columns',
+            len(pre_cap_sw_baseline),
         )
 
 
@@ -528,6 +573,8 @@ def _partition_with_ctx(partops, predictions, year_df, raster_shape,
     if not skip_cap_perturbation:
         year_df = partops.apply_cap_delivery_perturbation(
             year_df, year, _CAP_PIXEL_MASK_CTX.get('mask'),
+            cap_delivery_lookup=_CAP_DELIVERY_CTX.get('lookup'),
+            pre_cap_sw_baseline=_PRE_CAP_SW_BASELINE_CTX.get('baseline'),
         )
     return partops.partition_predictions(
         predictions, year_df, raster_shape, valid_mask,
@@ -536,6 +583,8 @@ def _partition_with_ctx(partops, predictions, year_df, raster_shape,
         irr_wd_1981=_PRE_GMA_CTX.get('irr_wd_1981'),
         nonirr_wd_1981=_PRE_GMA_CTX.get('nonirr_wd_1981'),
         irr_cap_1981=_PRE_GMA_CTX.get('irr_cap_1981'),
+        cap_delivery_lookup=_CAP_DELIVERY_CTX.get('lookup'),
+        cap_pixel_mask=_CAP_PIXEL_MASK_CTX.get('mask'),
     )
 
 
@@ -4210,6 +4259,36 @@ def run_uncertainty_quantification(
     )
     if _cap_pixel_mask_uq is not None:
         _set_cap_pixel_mask_context(_cap_pixel_mask_uq)
+
+    # Initialise CAP per-basin per-year delivery lookup so UQ ensemble
+    # members apply the same dynamic NonIrr GW share cap as the central
+    # pipeline (partops.CAP_BASIN_NI_CAP_CONFIG / _cap_basin_ni_cap).
+    _cap_xlsx_uq = os.path.join(
+        vector_dir, 'CAP', 'CAP Delivery Data DRI Request.xlsx',
+    )
+    if os.path.isfile(_cap_xlsx_uq):
+        try:
+            _set_cap_delivery_context(
+                partops.load_cap_basin_delivery(_cap_xlsx_uq),
+            )
+        except Exception as _e:
+            logger.warning(
+                'UQ could not load CAP delivery lookup from %s: %s — '
+                'NonIrr GW share cap will fall back to peak-baseline.',
+                _cap_xlsx_uq, _e,
+            )
+
+    # Pre-CAP SW baseline (1984) for additive CAP-pixel SW scaling.
+    try:
+        _set_pre_cap_sw_baseline_context(
+            partops.load_pre_cap_sw_baseline(az_df),
+        )
+    except Exception as _e:
+        logger.warning(
+            'UQ could not load pre-CAP SW baseline from az_df: %s — '
+            'apply_cap_delivery_perturbation will fall back to '
+            'multiplicative scaling at CAP basins.', _e,
+        )
 
     skip = skip_uq_steps or set()
     if skip:

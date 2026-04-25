@@ -396,6 +396,249 @@ URBAN_AMA_BASINS = frozenset({
     'PHOENIX AMA', 'TUCSON AMA',
 })
 
+
+# Basin-wide NonIrr_GW share CAP at CAP-served AMAs, from each basin's
+# CAP-reach arrival year onward.  Applied ONLY to the NonIrr density
+# ratio (Irr unaffected).
+#
+# The CAP subcontractor allocation footprint is basin-wide by design:
+# each AMA's CAP M&I subcontractors (Phoenix Water, Tucson Water,
+# CAGRD, Harquahala Valley WD, etc.) serve the entire basin service
+# area with wholesale CAP supply, not just the urban-fraction-dense
+# pixels.  Restricting the cap to ``annual_urban_fraction >= 0.20``
+# under-catches the subcontractor footprint (Phoenix AMA has ~2500
+# pixels below that threshold still inside Phoenix Water service
+# area).  A plain basin-wide cap on NonIrr_GW share mirrors the
+# physical allocation mechanism.
+#
+# Bypasses the sparsity of ``nonirr_sw_rights_density`` at CAP M&I
+# subcontractor pixels where HarDWR catalogs the wholesale right but
+# not the distribution network — a pure gw_weight or smooth-swd
+# modification can't move the density ratio when
+# ``smooth_nonirr_swd ≈ 0``.  A direct cap on ``nonirr_gw_share``
+# deterministically shifts NonIrr_GW → NonIrr_SW.
+#
+# Per-basin peak NonIrr SW fraction at baseline-period CAP delivery.
+# Cap is computed dynamically as ``1 − peak_sw_fraction × delivery_ratio``
+# where ``delivery_ratio = direct_delivery[year] / baseline_direct_delivery``
+# (hindcast, from CAP Excel) or ``CAP_DELIVERY_FACTORS[year]`` (projection
+# 2027+).  Baseline is the mean direct delivery over
+# ``CAP_BASIN_NI_BASELINE_PERIOD`` (default 2000-2009, peak-CAP era).
+#
+# Cap arrival year is auto-inferred from the lookup as the first year
+# with delivery >= ``CAP_BASIN_FIRST_DELIVERY_THRESHOLD × baseline``.
+# Pre-arrival years return ``None`` (cap not active).  When no lookup
+# is provided, falls back to ``_CAP_BASIN_FALLBACK_ARRIVAL`` for the
+# arrival year.
+#
+# When delivery drops (e.g. Harquahala post-2010 CAP-NIA cancellation),
+# the cap rises proportionally — fewer pixels get the SW displacement.
+# When delivery is at or above baseline, the cap clamps at
+# ``1 − peak_sw_fraction``.
+CAP_BASIN_NI_PEAK_SW_FRACTION: dict[str, float] = {
+    'PHOENIX AMA':    0.70,  # CAP M&I + SRP at peak
+    'PINAL AMA':      0.65,  # CAGRD M&I + (legacy) CAP-NIA ag
+    'HARQUAHALA INA': 0.50,  # CAP-NIA ag delivery (shrunk post-2010)
+    'TUCSON AMA':     0.70,  # Tucson Water M&I (mostly direct)
+}
+CAP_BASIN_NI_BASELINE_PERIOD: tuple[int, int] = (2000, 2009)
+CAP_BASIN_FIRST_DELIVERY_THRESHOLD: float = 0.05  # 5 % of baseline
+
+# Reference year for the pre-CAP SW baseline used by
+# ``apply_cap_delivery_perturbation`` additive scaling.  At CAP basin
+# pixels the SW signal is decomposed as
+#   current = pre_cap_baseline + cap_excess
+#   new = pre_cap_baseline + cap_excess × delivery_ratio
+# The pre_cap_baseline preserves non-CAP SW infrastructure (Phoenix
+# SRP canals, Pinal San Carlos ID canals, Tucson Avra Valley local)
+# regardless of CAP delivery; only the CAP increment is scaled with
+# delivery.  ``CAP_PRE_BASELINE_YEAR = 1984`` is the last full year
+# before CAP Phoenix reach completion — captures SRP / San Carlos
+# at full strength with no CAP signal.
+CAP_PRE_BASELINE_YEAR: int = 1984
+
+# Fallback arrival years used only when the delivery lookup is
+# unavailable (e.g. CAP Excel missing).  Set to actual first-delivery
+# years observed in the Excel (Tucson 1990 from interim wheeling
+# pre-1993 reach completion; Harquahala 1985 from CAP-NIA early
+# pipeline pre-1991 turn-out).  Phoenix/Pinal match canal-reach years.
+_CAP_BASIN_FALLBACK_ARRIVAL: dict[str, int] = {
+    'PHOENIX AMA':    1985,
+    'PINAL AMA':      1987,
+    'HARQUAHALA INA': 1985,
+    'TUCSON AMA':     1990,
+}
+
+
+def _cap_basin_ni_cap(
+        basin: str,
+        year: int,
+        delivery_lookup: dict | None = None,
+) -> float | None:
+    """Per-basin per-year NonIrr GW share cap for CAP-served basins.
+
+    Returns the maximum allowed NonIrr_GW share (a value in [0, 1]) at
+    pixels of ``basin`` for prediction year ``year``, or ``None`` if no
+    cap applies (basin not in config, or year is pre-CAP-arrival).
+
+    Arrival year is auto-inferred from ``delivery_lookup`` as the first
+    year with delivery >= ``CAP_BASIN_FIRST_DELIVERY_THRESHOLD ×
+    baseline``.  When ``delivery_lookup`` is None, falls back to
+    ``_CAP_BASIN_FALLBACK_ARRIVAL`` for the arrival year and a
+    constant peak-baseline cap.
+
+    Hindcast (year in lookup): cap = 1 − peak_sw_frac × ratio²
+    (where ratio = direct_delivery[year] / baseline, clamped to
+    [0, 1]).  Quadratic scaling in ratio produces a gradual ramp at
+    low delivery (cap stays loose for early-CAP years near arrival)
+    and reaches the calibrated `1 − peak_sw_frac` value at peak
+    delivery.  Linear scaling tightened the cap too fast at low
+    delivery (e.g. Tucson 1990 ratio=0.39 → linear cap=0.73 forces
+    27 % NISW vs observation showing CAP delivery = ~10 % of basin
+    NonIrr at that year).
+
+    Projection (year >= arrival but not in lookup): cap = 1 −
+    peak_sw_frac × CAP_DELIVERY_FACTORS[year]² (Tier multiplier
+    squared, defaults to 1.0 if year is not in factors — i.e. peak
+    behaviour).
+    """
+    peak_sw_frac = CAP_BASIN_NI_PEAK_SW_FRACTION.get(basin)
+    if peak_sw_frac is None:
+        return None
+    if delivery_lookup is None:
+        arrival_year = _CAP_BASIN_FALLBACK_ARRIVAL.get(basin)
+        if arrival_year is None or year < arrival_year:
+            return None
+        return 1.0 - peak_sw_frac
+    basin_data = delivery_lookup.get(basin)
+    if basin_data is None or basin_data.get('baseline_af', 0.0) <= 0:
+        arrival_year = _CAP_BASIN_FALLBACK_ARRIVAL.get(basin)
+        if arrival_year is None or year < arrival_year:
+            return None
+        return 1.0 - peak_sw_frac
+    arrival_year = basin_data.get(
+        'arrival_year', _CAP_BASIN_FALLBACK_ARRIVAL.get(basin),
+    )
+    if arrival_year is None or year < arrival_year:
+        return None
+    baseline = basin_data['baseline_af']
+    yearly = basin_data.get('yearly_af', {})
+    if year in yearly:
+        delivery_ratio = yearly[year] / baseline
+    else:
+        delivery_ratio = CAP_DELIVERY_FACTORS.get(year, 1.0)
+    delivery_ratio = max(0.0, min(delivery_ratio, 1.0))
+    return 1.0 - peak_sw_frac * (delivery_ratio ** 2)
+
+
+def load_cap_basin_delivery(
+        cap_xlsx: str,
+        baseline_period: tuple[int, int] = CAP_BASIN_NI_BASELINE_PERIOD,
+        include_recharge: bool = True,
+) -> dict[str, dict]:
+    """Load CAP delivery per basin per year and pre-compute the baseline
+    mean over ``baseline_period``.
+
+    By default includes ALL CAP deliveries (direct use + recharge
+    facility deliveries: USF / GSF / ASR) — the basin's full CAP
+    utilization footprint.  This matches the validation observation
+    convention (``intercompops.load_cap_srp_annual_sw`` default
+    ``include_recharge=True``) and produces delivery_ratio values
+    consistent with the apparent CAP volume entering each basin
+    (which is what drives the partition's SW signal magnitude).
+    Set ``include_recharge=False`` to restrict to direct-use only
+    (smaller baselines, more aggressive cap binding).
+
+    Returns ``{basin: {'yearly_af': {year: AF}, 'baseline_af': mean_AF,
+    'arrival_year': int|None}}``.
+    """
+    _ama_to_basin = {
+        'Phoenix AMA':     'PHOENIX AMA',
+        'Tucson AMA':      'TUCSON AMA',
+        'Pinal AMA':       'PINAL AMA',
+        'Harquahala INA':  'HARQUAHALA INA',
+    }
+    cap_df = pd.read_excel(cap_xlsx)
+    if not include_recharge:
+        cap_df = cap_df[cap_df['Recharge Facility'].isna()].copy()
+    else:
+        cap_df = cap_df.copy()
+    cap_df = cap_df[cap_df['AMA'].isin(_ama_to_basin)].copy()
+    cap_df['Basin'] = cap_df['AMA'].map(_ama_to_basin)
+    # Drop the most recent year if record count looks like a partial-
+    # year report (CAP fiscal-year reporting lags into the next
+    # calendar year).  Heuristic: if the max-year record count is
+    # < 75 % of the median of the prior 5 years, treat as partial.
+    yr_counts = cap_df.groupby('Year').size()
+    if len(yr_counts) >= 6:
+        max_year = int(yr_counts.index.max())
+        recent_median = float(yr_counts.iloc[-6:-1].median())
+        if yr_counts.loc[max_year] < 0.75 * recent_median:
+            cap_df = cap_df[cap_df['Year'] != max_year].copy()
+    annual = (
+        cap_df.groupby(['Basin', 'Year'])['Delivery AF']
+        .sum().reset_index()
+    )
+    out: dict[str, dict] = {}
+    y0, y1 = baseline_period
+    for basin in _ama_to_basin.values():
+        sub = annual[annual['Basin'] == basin]
+        yearly = dict(zip(sub['Year'].astype(int), sub['Delivery AF'].astype(float)))
+        baseline_vals = [v for y, v in yearly.items() if y0 <= y <= y1]
+        baseline = float(np.mean(baseline_vals)) if baseline_vals else 0.0
+        # Auto-infer arrival year as first year with delivery >=
+        # CAP_BASIN_FIRST_DELIVERY_THRESHOLD * baseline.  This adapts
+        # to the actual data instead of canal-completion year guesses.
+        arrival_year = None
+        if baseline > 0 and yearly:
+            threshold = CAP_BASIN_FIRST_DELIVERY_THRESHOLD * baseline
+            ramp_yrs = sorted(y for y, v in yearly.items() if v >= threshold)
+            if ramp_yrs:
+                arrival_year = ramp_yrs[0]
+        out[basin] = {
+            'yearly_af': yearly,
+            'baseline_af': baseline,
+            'arrival_year': arrival_year,
+        }
+    return out
+
+
+def load_pre_cap_sw_baseline(
+        az_df: pd.DataFrame,
+        ref_year: int = CAP_PRE_BASELINE_YEAR,
+        cols: tuple[str, ...] = (
+            'canal_weighted_streamflow_mm',
+            'sw_rights_density',
+            'irr_sw_rights_density',
+            'nonirr_sw_rights_density',
+        ),
+) -> dict[str, np.ndarray] | None:
+    """Extract per-pixel SW signal at the pre-CAP reference year.
+
+    Used by ``apply_cap_delivery_perturbation`` for additive scaling
+    that preserves non-CAP SW infrastructure (Phoenix SRP, Pinal San
+    Carlos ID, Tucson Avra Valley) at CAP basin pixels regardless of
+    CAP delivery.  The returned arrays are sized one element per
+    valid pixel, in the same row order as ``year_df`` for any year
+    (az_df stores one row per (pixel, year) with pixels in a
+    consistent order — slicing on Year preserves that order).
+
+    Returns ``{column_name: array_per_pixel}`` or None if the
+    reference year is missing or required columns are absent.
+    """
+    sub = az_df[az_df['Year'] == ref_year]
+    if len(sub) == 0:
+        return None
+    out = {}
+    for col in cols:
+        if col not in sub.columns:
+            continue
+        out[col] = np.nan_to_num(
+            sub[col].values.astype(np.float64), nan=0.0,
+        )
+    return out if out else None
+
+
 # CANAL_HEAVY_BASINS: rural basins with substantial canal infrastructure
 # or canal-weighted streamflow (canal_dens_mean > 0.15 OR
 # cw_streamflow_mean > 100, sampled at year 2020).  In these basins,
@@ -504,33 +747,10 @@ def _co_direct_gw_cap_array(basin_names: np.ndarray) -> np.ndarray:
 #   PRESCOTT AMA          (~70-80 % GW per general literature)
 #   HUALAPAI VALLEY INA   (~95 % GW per general literature)
 BASIN_GW_FLOOR = {
-    'PHOENIX AMA':    0.30,  # ADWR: 0.705 MAF GW / 2.3 MAF total ≈ 31 %.
-                             # Raised from 0.20 alongside the new 1990+
-                             # CAP_NONIRR_SW_BOOST that lowers modern
-                             # Phoenix NIGW; the 0.30 floor anchors
-                             # the basin to its documented 30 % GW
-                             # share under the NIGW-reduced regime.
-    'PINAL AMA':      0.50,  # CAP-fed cotton + continued GW ag pumping.
-                             # Raised from 0.30 to ~50 %, the mid-
-                             # point of the documented 50-60 % GW
-                             # regime at Pinal AMA post-CAP.  Without
-                             # this floor the NIGW boost pushes model
-                             # Pinal GW% below the physical range.
-    'TUCSON AMA':     0.60,  # Avra Valley pump-and-treat + continued
-                             # municipal GW pumping give Tucson AMA a
-                             # documented ~70 % GW share (CAP direct
-                             # delivery ~40 kAF + recharge ~145 kAF
-                             # = 184 kAF SW vs ~400 kAF GW) for the
-                             # post-CAP era (1993+).  Raised from
-                             # 0.30 to 0.60 (conservative mid).
-                             # Pre-1993 Tucson had NO CAP delivery —
-                             # see ``BASIN_GW_FLOOR_PRE_CAP`` below
-                             # for the higher pre-CAP-Tucson floor.
-    'HARQUAHALA INA': 0.70,  # Small CAP allocation (~78 kAF) vs large
-                             # GW ag pumping; ADWR documents Harquahala
-                             # as heavily GW-dependent with subsidence
-                             # concerns.  Raised from 0.30 to 0.70 to
-                             # anchor the physical regime.
+    'PHOENIX AMA':    0.20,
+    'PINAL AMA':      0.30,
+    'TUCSON AMA':     0.30,
+    'HARQUAHALA INA': 0.30,
     'PRESCOTT AMA':   0.64,  # ADWR Prescott AMA Total_GW share = 64 %
                              # (Irrigation = 8 % of total; mostly M&I
                              # pumping from Prescott Valley + Prescott
@@ -561,6 +781,68 @@ BASIN_GW_FLOOR = {
                              # at all years (1896-2099).
 }
 
+# Post-CAP-era (year >= 1985) per-category floor overrides at CAP-
+# served basins.  Pre-1985 falls back to BASIN_GW_FLOOR (applies to
+# both Irr and NonIrr); post-1985 the floors decouple:
+#   - Irr: BASIN_IRR_GW_FLOOR_POST_CAP (higher — ag mostly GW post-CAP)
+#   - NonIrr: BASIN_NI_GW_FLOOR_POST_CAP (lower — M&I CAP-SW dominant)
+#
+# Rationale: at CAP basins the NonIrr M&I sector is majority CAP-SW
+# (subcontractor deliveries) while the Irr ag sector is majority GW
+# (SRP delivers only to specific areas; CAP-NIA ag retired mid-2010s).
+# ADWR anchors: Phoenix ag ~40–50 % GW (after SRP SW), Tucson ag ~50–
+# 70 % GW, Pinal ag ~50 % GW (post CAP-NIA cancellation), Harquahala
+# ag ~50–60 % GW.  Floors set conservatively below ADWR mid-points to
+# avoid over-correcting Total GW% at modern anchors.
+BASIN_IRR_GW_FLOOR_POST_CAP: dict[str, float] = {
+    'PHOENIX AMA':    0.30,  # SRP-fed ag — static (CAP-independent)
+    'PINAL AMA':      0.30,  # baseline floor; dynamic override below
+                             # raises this when CAP-NIA delivery drops
+    'TUCSON AMA':     0.40,  # local Avra Valley canals — static
+    'HARQUAHALA INA': 0.40,  # baseline floor; dynamic override below
+}
+
+# Per-basin peak Irr SW fraction used for the dynamic Irr GW floor at
+# basins where CAP delivery directly controls ag SW availability.
+# Floor is ``1 − peak_irr_sw_frac × delivery_ratio``, clamped at
+# ``CAP_BASIN_IRR_FLOOR_MAX`` (a small SW slack for incidental local
+# canal seepage / wheeling deliveries).
+#
+# Only Pinal and Harquahala — the two CAP-NIA basins — are listed:
+# Phoenix ag is fed by SRP (1908 priority, CAP-independent watershed),
+# Tucson ag is fed by Avra Valley local canals + minor CAP-NIA
+# (Cortaro-Marana, ended early).  CAP delivery does not drive ag SW
+# at Phoenix or Tucson, so they keep the static
+# ``BASIN_IRR_GW_FLOOR_POST_CAP`` value.
+#
+# When the CAP-NIA contracts were cancelled (~2011), Pinal and
+# Harquahala ag had to switch back to GW pumping.  The dynamic floor
+# captures this transition automatically — as direct CAP delivery to
+# those basins falls, the Irr GW floor rises proportionally.
+CAP_BASIN_IRR_PEAK_SW_FRACTION: dict[str, float] = {
+    'PINAL AMA':      0.50,  # CAP-NIA at peak ≈ 50 % of Pinal ag SW
+    'HARQUAHALA INA': 0.50,  # CAP-NIA at peak ≈ 50 % of Harquahala ag SW
+}
+CAP_BASIN_IRR_FLOOR_MAX: float = 0.70  # leaves 30 % SW slack for
+                                       # local/tribal/residual ag SW
+                                       # at zero-CAP-delivery years
+
+# Post-1985 NonIrr floor override at CAP basins.  Lowered from the
+# pre-1985 BASIN_GW_FLOOR (0.20/0.30) to give the
+# CAP_BASIN_NI_GW_SHARE_CAP (Phoenix 0.30 / Tucson 0.30 / Pinal 0.35 /
+# Harquahala 0.50) room to push NonIrr toward SW; without lowering the
+# floor, the cap and floor squeeze NonIrr GW share into a narrow band
+# that fails to capture the full CAP M&I displacement.
+BASIN_NI_GW_FLOOR_POST_CAP: dict[str, float] = {
+    'PHOENIX AMA':    0.10,
+    'PINAL AMA':      0.10,
+    'TUCSON AMA':     0.10,
+    'HARQUAHALA INA': 0.15,
+}
+
+BASIN_GW_FLOOR_OVERRIDE_START_YEAR = 1985
+
+
 # Subset of BASIN_GW_FLOOR keys that should NOT apply at projection
 # years (>= FUTURE_AMA_START_YEAR).  Used by ``_basin_gw_floor_array``.
 # Currently empty — Ranegras was a candidate but is documented to
@@ -576,25 +858,99 @@ BASIN_GW_FLOOR_HISTORICAL_ONLY: frozenset = frozenset()
 # Mapping: ``basin_name → (cap_arrival_year, pre_cap_floor)``.
 # At ``year < cap_arrival_year`` the pre-CAP floor takes precedence
 # over the post-CAP ``BASIN_GW_FLOOR`` value.
-BASIN_GW_FLOOR_PRE_CAP: dict[str, tuple[int, float]] = {
-    # Tucson reach completed 1993; pre-1993 Tucson AMA had no CAP
-    # delivery, so the basin operated as essentially all-GW (~95 %).
-    # The 0.85 pre-CAP floor reflects the small Avra Valley
-    # reclaimed-water + minor riparian SW that did exist locally,
-    # without the post-CAP 30-40 % CAP-derived SW share.
-    'TUCSON AMA': (1993, 0.85),
-}
+# Currently empty — Tucson's pre-1993 0.85 floor was tested but
+# created a +2 pp statewide GW% lift at 1990 that worsened the
+# anchor calibration without commensurate per-basin benefit.
+# Mechanism kept in place for future use if needed.
+BASIN_GW_FLOOR_PRE_CAP: dict[str, tuple[int, float]] = {}
+
+
+def _cap_basin_irr_floor(
+        basin: str,
+        year: int,
+        delivery_lookup: dict | None = None,
+) -> float | None:
+    """Per-basin per-year Irr GW share floor for CAP-NIA basins.
+
+    Returns the minimum Irr_GW share at pixels of ``basin`` for
+    prediction year ``year``, or ``None`` if no dynamic floor applies
+    (basin not in ``CAP_BASIN_IRR_PEAK_SW_FRACTION``, or year is
+    pre-CAP-arrival).  Mirror of ``_cap_basin_ni_cap`` for the Irr
+    side, but rebased to the calibrated static floor at peak delivery
+    so the dynamic mechanism only LIFTS the floor when delivery falls
+    below baseline (it never tightens past the static calibration).
+
+    Only Pinal and Harquahala — the two CAP-NIA basins — get a dynamic
+    Irr floor.  Phoenix (SRP-fed ag) and Tucson (local canals) keep
+    the static floor in ``BASIN_IRR_GW_FLOOR_POST_CAP``.
+
+    Floor formula::
+
+        floor = static_floor
+              + (FLOOR_MAX − static_floor) × (1 − delivery_ratio²)
+
+    Quadratic scaling in delivery_ratio produces a gradual ramp at
+    low delivery (floor stays close to static for early-CAP years
+    near arrival) and reaches FLOOR_MAX only when CAP-NIA delivery
+    drops to near zero.  At ``delivery_ratio = 1`` (baseline / peak):
+    floor = static_floor (preserves USGS-anchored calibration).
+    At ``delivery_ratio = 0`` (CAP-NIA fully cancelled): floor =
+    ``CAP_BASIN_IRR_FLOOR_MAX`` (max GW share, leaves SW slack for
+    local/tribal/residual ag SW).
+    """
+    if basin not in CAP_BASIN_IRR_PEAK_SW_FRACTION:
+        return None
+    static_floor = BASIN_IRR_GW_FLOOR_POST_CAP.get(basin, 0.0)
+    if delivery_lookup is None:
+        arrival_year = _CAP_BASIN_FALLBACK_ARRIVAL.get(basin)
+        if arrival_year is None or year < arrival_year:
+            return None
+        return static_floor
+    basin_data = delivery_lookup.get(basin)
+    if basin_data is None or basin_data.get('baseline_af', 0.0) <= 0:
+        arrival_year = _CAP_BASIN_FALLBACK_ARRIVAL.get(basin)
+        if arrival_year is None or year < arrival_year:
+            return None
+        return static_floor
+    arrival_year = basin_data.get(
+        'arrival_year', _CAP_BASIN_FALLBACK_ARRIVAL.get(basin),
+    )
+    if arrival_year is None or year < arrival_year:
+        return None
+    baseline = basin_data['baseline_af']
+    yearly = basin_data.get('yearly_af', {})
+    if year in yearly:
+        delivery_ratio = yearly[year] / baseline
+    else:
+        delivery_ratio = CAP_DELIVERY_FACTORS.get(year, 1.0)
+    delivery_ratio = max(0.0, min(delivery_ratio, 1.0))
+    headroom = max(0.0, CAP_BASIN_IRR_FLOOR_MAX - static_floor)
+    floor = static_floor + headroom * (1.0 - delivery_ratio ** 2)
+    return min(floor, CAP_BASIN_IRR_FLOOR_MAX)
 
 
 def _basin_gw_floor_array(
         basin_names: np.ndarray,
         year: int = 0,
+        category: str = 'nonirr',
+        cap_delivery_lookup: dict | None = None,
+        cap_pixel_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """Return per-pixel GW-share floor for floored basins.
 
     Default is ``0.0`` (no floor) at unlisted basins; per-basin overrides
     from ``BASIN_GW_FLOOR`` apply at the named basins.  Callers apply
     the floor unconditionally via ``np.maximum``.
+
+    When ``category='irr'``, the basin's entry in
+    ``BASIN_IRR_GW_FLOOR_POST_CAP`` (if present) overrides
+    ``BASIN_GW_FLOOR`` — CAP basins use a higher floor for the Irr
+    partition (ag physically mostly-GW) than for the NonIrr partition
+    (M&I CAP-SW dominant).  When ``cap_delivery_lookup`` is provided,
+    CAP-NIA basins (Pinal, Harquahala — see
+    ``CAP_BASIN_IRR_PEAK_SW_FRACTION``) further override the static
+    Irr floor with a delivery-driven dynamic floor that rises as CAP
+    delivery falls (post-2011 CAP-NIA cancellation behavior).
 
     Basins in ``BASIN_GW_FLOOR_HISTORICAL_ONLY`` are floored only for
     years ``< FUTURE_AMA_START_YEAR`` (2026); from the projection era
@@ -607,7 +963,16 @@ def _basin_gw_floor_array(
     used 0.85 instead of the post-CAP 0.60).
     """
     floor = np.zeros(len(basin_names), dtype=np.float64)
-    for name, val in BASIN_GW_FLOOR.items():
+    # Build the per-basin dict for this category.  Pre-1985: use
+    # BASIN_GW_FLOOR for both categories.  Post-1985: override with
+    # category-specific dict at CAP basins (Irr higher, NonIrr lower).
+    base = dict(BASIN_GW_FLOOR)
+    if year >= BASIN_GW_FLOOR_OVERRIDE_START_YEAR:
+        if category == 'irr':
+            base.update(BASIN_IRR_GW_FLOOR_POST_CAP)
+        else:
+            base.update(BASIN_NI_GW_FLOOR_POST_CAP)
+    for name, val in base.items():
         if (year >= FUTURE_AMA_START_YEAR
                 and name in BASIN_GW_FLOOR_HISTORICAL_ONLY):
             continue
@@ -618,6 +983,20 @@ def _basin_gw_floor_array(
             if year < cap_arrival:
                 val = pre_cap_floor
         floor = np.where(basin_names == name, val, floor)
+    # Dynamic Irr floor at CAP-NIA basins (Pinal, Harquahala) —
+    # overrides the static BASIN_IRR_GW_FLOOR_POST_CAP value applied
+    # above.  Applied basin-wide because the CAP_Service_Area mask
+    # covers ~100 % of Phoenix/Tucson and most of Pinal/Harquahala —
+    # spatial restriction adds complexity without functional benefit.
+    if (category == 'irr'
+            and year >= BASIN_GW_FLOOR_OVERRIDE_START_YEAR):
+        for _b in CAP_BASIN_IRR_PEAK_SW_FRACTION:
+            _dyn = _cap_basin_irr_floor(_b, year, cap_delivery_lookup)
+            if _dyn is None:
+                continue
+            _b_mask = (basin_names == _b)
+            if _b_mask.any():
+                floor = np.where(_b_mask, _dyn, floor)
     return floor
 
 
@@ -1258,73 +1637,47 @@ CAP_CUT_GW_BOOST_FACTORS: dict[int, float] = {
 }
 
 
-# Persistent boost applied to nonirr_sw_rights_density at CAP-service-area
-# pixels for ALL post-CAP years (1985+).  HarDWR's NonIrr SW rights
-# catalog under-represents CAP M&I subcontractor allocations as
-# point-of-diversion records — the regulatory water moves from CAP via
-# subcontractor pipes to provider service areas without registering as
-# a point-of-diversion, so the raw nonirr_sw_rights_density raster is
-# sparse at CAP M&I pixels even though CAP delivers ~600-700 kAF/yr of
-# M&I water.  Without this boost, the density-ratio routes most NonIrr
-# volume at CAP M&I pixels to NonIrr_GW (because gw_weight × nonirr_wd
-# >> smooth_nonirr_swd at sparse-NIRSWD pixels), inflating modern
-# NonIrr_GW by ~0.6-1.0 MAF/yr (USGS 1990/1995/2010 GW% over by +7-8 pp).
-# Boost factor 5.0 calibrated to bring 1990/2010 GW% from +7-8 pp down
-# to ±2 pp.  Applied symmetrically to the CAP_CUT_GW_BOOST_FACTORS
-# (which boost GW share during shortage); this constant boosts the SW
-# share at CAP M&I service areas as a baseline correction.
-CAP_NONIRR_SW_BOOST = 5.0
-CAP_NONIRR_SW_BOOST_START_YEAR = 1985  # CAP Phoenix reach completion
-                                        # (1985); boost active across
-                                        # all post-CAP years for
-                                        # consistency.  1985 itself is
-                                        # already well-calibrated by
-                                        # the partition (USGS GW% +1.8
-                                        # pp) but the boost is symmetric
-                                        # with CAP_OPERATIONAL_START so
-                                        # pre/post-CAP behavior is
-                                        # cleanly demarcated.
-
-
 def apply_cap_delivery_perturbation(
         year_df: pd.DataFrame,
         year: int,
         cap_pixel_mask: np.ndarray | None,
+        cap_delivery_lookup: dict | None = None,
+        pre_cap_sw_baseline: dict[str, np.ndarray] | None = None,
 ) -> pd.DataFrame:
-    """Scale CAP-pixel SW signal + boost GW weight during CAP cuts.
-
-    Applies to both observed hindcast cuts (2020-2026 Tier 0/1/2a
-    declarations per ADWR/USBR/AWBA 2026 Plan) and the projection-era
-    central baseline (2027-2099 = WestWater "Basic Coordination"
-    sustained cut).
+    """Scale CAP-pixel SW signal + boost GW weight based on delivery.
 
     Two complementary effects on the density-ratio partition at CAP-
     served pixels:
 
-    1. **SW-signal reduction** — scales BOTH
-       ``canal_weighted_streamflow_mm`` AND the SW rights density
-       columns (``irr_sw_rights_density`` / ``nonirr_sw_rights_density``
-       / ``sw_rights_density``) by ``CAP_DELIVERY_FACTORS[year]``.
-       Scaling both is physically defensible — Tier shortage cuts
-       reduce both deliverable canal flow AND the effective SW rights
-       honored.  The smoothed SW kernel
-       ``smooth_swd = gaussian_filter(swd × cw_sf)`` then drops
-       proportionally to the product (factor² at perturbed pixels).
+    1. **SW-signal scaling** — scales ``canal_weighted_streamflow_mm``
+       AND the SW rights density columns by a delivery-derived factor
+       (the smoothed SW kernel ``smooth_swd = gaussian(swd × cw_sf)``
+       then drops by factor² because both inputs are scaled).  Two
+       sources of the factor, in priority order:
 
-    2. **GW-weight boost** — multiplies ``well_density`` columns
-       (``well_density`` / ``irr_well_density`` /
-       ``nonirr_well_density``) by ``CAP_CUT_GW_BOOST_FACTORS[year]``.
-       Because the density ratio is
-       ``gw_share = (gw_w × wd) / (gw_w × wd + smooth_swd)``, this is
-       mathematically equivalent to boosting ``gw_weight`` at CAP
-       pixels — it shifts the GW/SW allocation toward GW during
-       shortage years without changing the ML-predicted total
-       pumping (ML runs before this perturbation).  This captures
-       the regulatory Assured Water Supply shift to groundwater that
-       the post-CAP gw_weight = 0.2 schedule otherwise under-predicts.
+       (a) **Per-basin per-year scaling** (NEW, when
+           ``cap_delivery_lookup`` is provided): at pixels in
+           ``CAP_BASIN_NI_PEAK_SW_FRACTION`` basins (Phoenix, Tucson,
+           Pinal, Harquahala), use the basin's actual delivery ratio
+           ``direct+recharge[year] / baseline``.  Pre-arrival ratio = 0
+           → SW signal = 0 → density-ratio gives all-GW (matches pre-
+           CAP reality).  Tracks each basin's CAP utilization curve
+           year-by-year, replacing the older basin-wide ``cap`` on
+           NonIrr GW share.
 
-    Both effects are applied in the same copy operation; if either
-    dict lacks the year the corresponding effect is skipped.
+       (b) **Statewide Tier multiplier** (legacy, for non-CAP-basin
+           pixels in ``cap_pixel_mask`` and as projection-era
+           fallback when basin not in lookup): uses
+           ``CAP_DELIVERY_FACTORS[year]`` (Tier 0/1/2a hindcast 2020-
+           2026 + Tier 1 sustained 2027-2099).
+
+    2. **GW-weight boost** — multiplies ``well_density`` columns by
+       ``CAP_CUT_GW_BOOST_FACTORS[year]`` at CAP-pixel-mask pixels
+       during shortage years.  Mathematically equivalent to boosting
+       ``gw_weight`` at CAP pixels — captures the regulatory Assured
+       Water Supply shift to groundwater that the post-CAP
+       gw_weight = 0.2 schedule otherwise under-predicts.  Unchanged
+       from prior implementation.
 
     Args:
         year_df: Per-pixel-per-year DataFrame.
@@ -1332,19 +1685,55 @@ def apply_cap_delivery_perturbation(
         cap_pixel_mask: Boolean mask of CAP-service-area pixels
             aligned with year_df row order, or None to skip
             perturbation entirely.
+        cap_delivery_lookup: Optional dict from
+            ``load_cap_basin_delivery`` that drives the per-basin
+            per-year SW scaling for CAP basins.  When None, falls back
+            to the statewide Tier multiplier behaviour.
 
     Returns:
-        year_df (perturbed copy if year is in CAP_DELIVERY_FACTORS
-        or CAP_CUT_GW_BOOST_FACTORS, and cap_pixel_mask is not None;
-        same object otherwise).
+        year_df (perturbed copy when any effect fires, same object
+        otherwise).
     """
     if cap_pixel_mask is None:
         return year_df
     sw_factor = CAP_DELIVERY_FACTORS.get(year)
     gw_boost = CAP_CUT_GW_BOOST_FACTORS.get(year)
-    apply_nirswd_boost = year >= CAP_NONIRR_SW_BOOST_START_YEAR
-    if (sw_factor is None and (gw_boost is None or gw_boost == 1.0)
-            and not apply_nirswd_boost):
+    basin_names = (
+        year_df['GW_Basin'].values if 'GW_Basin' in year_df.columns
+        else None
+    )
+    # Build per-basin SW factors for CAP basins (NEW per-year-per-basin
+    # mechanism).  basin_factors[basin] = delivery_ratio (linear; gets
+    # applied to both cw_sf and sw_rights so smooth_swd scales by ratio²).
+    # Pre-arrival years are SKIPPED (factor not added) so the
+    # ``sw_rights_density`` / ``canal_weighted_streamflow_mm`` retain
+    # their pre-CAP signal — Phoenix had SRP delivering ~1 MAF/yr SW
+    # from 1911 onward, completely independent of CAP.  Scaling pre-
+    # arrival would wipe that out.
+    basin_factors: dict[str, float] = {}
+    if cap_delivery_lookup is not None and basin_names is not None:
+        for _b in CAP_BASIN_NI_PEAK_SW_FRACTION:
+            basin_data = cap_delivery_lookup.get(_b)
+            if basin_data is None:
+                continue
+            arrival = basin_data.get(
+                'arrival_year', _CAP_BASIN_FALLBACK_ARRIVAL.get(_b),
+            )
+            if arrival is None or year < arrival:
+                continue  # pre-arrival: leave SW signal unscaled
+            baseline = basin_data.get('baseline_af', 0.0)
+            yearly = basin_data.get('yearly_af', {})
+            if year in yearly and baseline > 0:
+                ratio = yearly[year] / baseline
+            else:
+                ratio = CAP_DELIVERY_FACTORS.get(year, 1.0)
+            basin_factors[_b] = max(0.0, min(ratio, 1.0))
+    has_basin_scaling = bool(basin_factors)
+    has_statewide_perturb = (
+        sw_factor is not None
+        or (gw_boost is not None and gw_boost != 1.0)
+    )
+    if not has_basin_scaling and not has_statewide_perturb:
         return year_df
 
     sw_cols = [
@@ -1366,21 +1755,57 @@ def apply_cap_delivery_perturbation(
         return year_df
 
     year_df_p = year_df.copy()
-    idx = year_df_p.index[cap_pixel_mask]
-    # Apply persistent NonIrr SW boost FIRST (1985+, all CAP-service
-    # pixels, regardless of shortage) so any subsequent shortage
-    # reduction (sw_factor) acts on the boosted value.  Order matters:
-    # boosted_value × sw_factor preserves the relative shortage signal
-    # at CAP M&I pixels.
-    if (apply_nirswd_boost
-            and 'nonirr_sw_rights_density' in year_df_p.columns):
-        year_df_p.loc[idx, 'nonirr_sw_rights_density'] *= CAP_NONIRR_SW_BOOST
-    if sw_factor is not None:
+    cap_idx = year_df_p.index[cap_pixel_mask]
+
+    if has_basin_scaling:
+        # Per-basin ADDITIVE SW scaling at (basin & cap_mask) pixels.
+        # Decompose current SW signal as
+        #   current = pre_cap_baseline + cap_excess
+        # then scale only the CAP excess by the per-basin per-year
+        # delivery_ratio:
+        #   new = pre_cap_baseline + max(0, cap_excess) * ratio
+        # When a pre-CAP baseline is provided (``pre_cap_sw_baseline``
+        # dict from ``load_pre_cap_sw_baseline``), this preserves
+        # non-CAP SW infrastructure at Phoenix (SRP), Pinal (San
+        # Carlos ID) and Tucson (Avra Valley local) regardless of CAP
+        # delivery.  When no baseline is provided, falls back to a
+        # zero baseline (multiplicative scaling — equivalent to the
+        # pre-additive behaviour).  Other cap_mask pixels (non-CAP-
+        # basin) get statewide sw_factor below.
+        handled_mask = np.zeros(len(year_df_p), dtype=bool)
+        for _b, _factor in basin_factors.items():
+            _b_pos_mask = (basin_names == _b) & cap_pixel_mask
+            if not _b_pos_mask.any():
+                continue
+            handled_mask |= _b_pos_mask
+            _b_idx = year_df_p.index[_b_pos_mask]
+            for col in sw_cols:
+                _baseline = (
+                    pre_cap_sw_baseline.get(col)
+                    if pre_cap_sw_baseline is not None else None
+                )
+                if _baseline is not None:
+                    _b_baseline = _baseline[_b_pos_mask]
+                    _b_current = year_df_p.loc[_b_idx, col].values
+                    _excess = np.maximum(_b_current - _b_baseline, 0.0)
+                    year_df_p.loc[_b_idx, col] = (
+                        _b_baseline + _excess * _factor
+                    )
+                else:
+                    year_df_p.loc[_b_idx, col] *= _factor
+        if sw_factor is not None:
+            _unhandled_pos = cap_pixel_mask & ~handled_mask
+            if _unhandled_pos.any():
+                _unhandled_idx = year_df_p.index[_unhandled_pos]
+                for col in sw_cols:
+                    year_df_p.loc[_unhandled_idx, col] *= sw_factor
+    elif sw_factor is not None:
         for col in sw_cols:
-            year_df_p.loc[idx, col] *= sw_factor
+            year_df_p.loc[cap_idx, col] *= sw_factor
+
     if gw_boost is not None and gw_boost != 1.0:
         for col in wd_cols:
-            year_df_p.loc[idx, col] *= gw_boost
+            year_df_p.loc[cap_idx, col] *= gw_boost
     return year_df_p
 
 
@@ -1537,12 +1962,9 @@ def era_sw_sigma(year: int) -> float:
     | 1912–1948          | piecewise-linear through anchors  |
     | 1948–1955          | 1.5                               |
     | 1956–1964          | 1.0                               |
-    | 1965–1984          | linear ramp 1.0 → 4.0             |
+    | 1965–1984          | linear ramp 1.0 → 6.0             |
     | 1973–1977 override | 2.0 (drought)                     |
-    | 1985–2002          | 4.0                               |
-    | 2003–2010 override | 3.0 (CAP-era ag retirement)       |
-    | 2008–2021          | linear ramp 4.0 → 6.0             |
-    | 2022+              | 6.0                               |
+    | 1985+              | 6.0                               |
 
     Anchor points for 1912–1948 (year, σ):
     (1912, 0.0), (1915, 1.5), (1917, 0.3), (1929, 0.3),
@@ -1568,20 +1990,13 @@ def era_sw_sigma(year: int) -> float:
         return 1.5
     if year < 1965:
         return 1.0
-    if year >= 2022:
-        return 6.0
-    if 2003 <= year <= 2010:
-        return 3.0
-    if year >= 2008:
-        frac = (year - 2008) / (2022 - 2008)
-        return 4.0 + frac * (6.0 - 4.0)
     if year >= 1985:
-        return 4.0
+        return 6.0
     if 1973 <= year <= 1977:
         return 2.0
-    # 1965-1984 ramp (20 years)
+    # 1965-1984 ramp (20 years): 1.0 → 6.0
     frac = (year - 1965) / (1985 - 1965)
-    return 1.0 + frac * (4.0 - 1.0)
+    return 1.0 + frac * (6.0 - 1.0)
 
 
 def partition_predictions(
@@ -1595,6 +2010,8 @@ def partition_predictions(
         irr_wd_1981: np.ndarray | None = None,
         nonirr_wd_1981: np.ndarray | None = None,
         irr_cap_1981: np.ndarray | None = None,
+        cap_delivery_lookup: dict | None = None,
+        cap_pixel_mask: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """
     Partition total pumping predictions into 8 withdrawal categories.
@@ -2344,10 +2761,20 @@ def partition_predictions(
         basin_cap = _basin_gw_cap_array(basin_names)
         # Combine CO-direct cap with non-CO basin cap via min (tighter wins).
         co_gw_cap = np.minimum(co_gw_cap, basin_cap)
-        gw_floor = _basin_gw_floor_array(basin_names, year=year)
+        gw_floor = _basin_gw_floor_array(
+            basin_names, year=year, category='nonirr',
+            cap_delivery_lookup=cap_delivery_lookup,
+            cap_pixel_mask=cap_pixel_mask,
+        )
+        gw_floor_irr = _basin_gw_floor_array(
+            basin_names, year=year, category='irr',
+            cap_delivery_lookup=cap_delivery_lookup,
+            cap_pixel_mask=cap_pixel_mask,
+        )
     else:
         co_gw_cap = np.full(len(predictions), np.inf, dtype=np.float64)
         gw_floor = np.zeros(len(predictions), dtype=np.float64)
+        gw_floor_irr = np.zeros(len(predictions), dtype=np.float64)
 
     if irr_swd is not None:
         irr_swd_smooth = _smooth_sw_density(
@@ -2361,7 +2788,7 @@ def partition_predictions(
             )
         irr_gw_share = np.clip(irr_gw_share, 0, 1)
         irr_gw_share = np.minimum(irr_gw_share, co_gw_cap)
-        irr_gw_share = np.maximum(irr_gw_share, gw_floor)
+        irr_gw_share = np.maximum(irr_gw_share, gw_floor_irr)
         irr_gw = irr * irr_gw_share
         irr_sw = irr - irr_gw
     else:
@@ -2380,6 +2807,25 @@ def partition_predictions(
             )
         nonirr_gw_share = np.clip(nonirr_gw_share, 0, 1)
         nonirr_gw_share = np.minimum(nonirr_gw_share, co_gw_cap)
+        # CAP M&I basin-wide cap on NonIrr_GW share — downstream
+        # calibration anchor that complements the upstream
+        # ``apply_cap_delivery_perturbation`` SW signal scaling.
+        # The upstream scaling smooths the input cw_sf / sw_rights
+        # step at CAP arrival; this cap locks the NonIrr GW share at
+        # the calibrated USGS/ADWR target at peak-delivery years.
+        # See ``_cap_basin_ni_cap`` for the per-year quadratic ramp.
+        if basin_names is not None:
+            for _b in CAP_BASIN_NI_PEAK_SW_FRACTION:
+                _cap = _cap_basin_ni_cap(_b, year, cap_delivery_lookup)
+                if _cap is None or _cap >= 1.0:
+                    continue
+                _mask = (basin_names == _b)
+                if _mask.any():
+                    nonirr_gw_share = np.where(
+                        _mask,
+                        np.minimum(nonirr_gw_share, _cap),
+                        nonirr_gw_share,
+                    )
         nonirr_gw_share = np.maximum(nonirr_gw_share, gw_floor)
         nonirr_gw = nonirr * nonirr_gw_share
         nonirr_sw = nonirr - nonirr_gw
@@ -2633,40 +3079,72 @@ def partition_predictions(
                 )
                 nonirr_gw = new_ni_gw
 
-        # Re-apply per-basin GW FLOOR on the FINAL per-pixel result
-        # (mirror of the cap re-application above).  The floor was set
-        # by the density-ratio step but the post-1985 NonIrr_SW excess
-        # routing can dilute it (e.g. NonIrr at Phoenix gets routed
-        # mostly back to Irr_SW via the density-ratio share, dropping
-        # NonIrr_GW share below the floor).  Re-applying here ensures
-        # the published per-basin shares match the verified ADWR
-        # anchors at floored basins (currently Phoenix AMA at 0.30).
-        gw_floor_final = _basin_gw_floor_array(basin_names, year=year)
-        is_floored = gw_floor_final > 0
-        if is_floored.any():
+        # Re-apply CAP-basin NonIrr GW cap on FINAL per-pixel result.
+        # The density-ratio step applied this cap, but the post-1985
+        # NonIrr_SW excess routing scales nonirr_sw down by urban_frac
+        # and redirects the excess to Irr — silently inflating the
+        # NonIrr_GW share at capped basins.  Re-running the per-year
+        # cap here locks the per-basin NonIrr split to the
+        # delivery-driven target.
+        for _b in CAP_BASIN_NI_PEAK_SW_FRACTION:
+            _cap = _cap_basin_ni_cap(_b, year, cap_delivery_lookup)
+            if _cap is None or _cap >= 1.0:
+                continue
+            _b_mask = (basin_names == _b)
+            if not _b_mask.any():
+                continue
             with np.errstate(invalid='ignore', divide='ignore'):
-                irr_gw_share_final = np.where(
-                    irr > 0, irr_gw / irr, 0.0,
-                )
-                nonirr_gw_share_final = np.where(
-                    nonirr > 0, nonirr_gw / nonirr, 0.0,
-                )
-            floor_irr = is_floored & (irr_gw_share_final < gw_floor_final)
-            if floor_irr.any():
-                new_irr_gw = np.where(
-                    floor_irr, irr * gw_floor_final, irr_gw,
-                )
-                irr_sw = np.where(floor_irr, irr - new_irr_gw, irr_sw)
-                irr_gw = new_irr_gw
-            floor_ni = is_floored & (nonirr_gw_share_final < gw_floor_final)
-            if floor_ni.any():
-                new_ni_gw = np.where(
-                    floor_ni, nonirr * gw_floor_final, nonirr_gw,
+                _ni_share = np.where(nonirr > 0, nonirr_gw / nonirr, 0.0)
+            _cap_hit = _b_mask & (_ni_share > _cap)
+            if _cap_hit.any():
+                _new_ni_gw = np.where(
+                    _cap_hit, nonirr * _cap, nonirr_gw,
                 )
                 nonirr_sw = np.where(
-                    floor_ni, nonirr - new_ni_gw, nonirr_sw,
+                    _cap_hit, nonirr - _new_ni_gw, nonirr_sw,
                 )
-                nonirr_gw = new_ni_gw
+                nonirr_gw = _new_ni_gw
+
+        # Re-apply per-basin GW FLOOR on the FINAL per-pixel result
+        # (mirror of the cap re-application above).  Category-specific:
+        # Irr uses BASIN_IRR_GW_FLOOR (higher at CAP basins — ag mostly
+        # GW), NonIrr uses BASIN_GW_FLOOR (lower at CAP basins — M&I
+        # routed toward SW via CAP_BASIN_NI_GW_SHARE_CAP).
+        gw_floor_nonirr_final = _basin_gw_floor_array(
+            basin_names, year=year, category='nonirr',
+            cap_delivery_lookup=cap_delivery_lookup,
+            cap_pixel_mask=cap_pixel_mask,
+        )
+        gw_floor_irr_final = _basin_gw_floor_array(
+            basin_names, year=year, category='irr',
+            cap_delivery_lookup=cap_delivery_lookup,
+            cap_pixel_mask=cap_pixel_mask,
+        )
+        with np.errstate(invalid='ignore', divide='ignore'):
+            irr_gw_share_final = np.where(
+                irr > 0, irr_gw / irr, 0.0,
+            )
+            nonirr_gw_share_final = np.where(
+                nonirr > 0, nonirr_gw / nonirr, 0.0,
+            )
+        is_floored_irr = gw_floor_irr_final > 0
+        floor_irr = is_floored_irr & (irr_gw_share_final < gw_floor_irr_final)
+        if floor_irr.any():
+            new_irr_gw = np.where(
+                floor_irr, irr * gw_floor_irr_final, irr_gw,
+            )
+            irr_sw = np.where(floor_irr, irr - new_irr_gw, irr_sw)
+            irr_gw = new_irr_gw
+        is_floored_ni = gw_floor_nonirr_final > 0
+        floor_ni = is_floored_ni & (nonirr_gw_share_final < gw_floor_nonirr_final)
+        if floor_ni.any():
+            new_ni_gw = np.where(
+                floor_ni, nonirr * gw_floor_nonirr_final, nonirr_gw,
+            )
+            nonirr_sw = np.where(
+                floor_ni, nonirr - new_ni_gw, nonirr_sw,
+            )
+            nonirr_gw = new_ni_gw
 
     return {
         'Irrigation':         irr,

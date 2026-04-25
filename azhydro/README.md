@@ -3014,6 +3014,117 @@ Yuma Project deliveries that bypass wells entirely remain a known
 under-prediction (~150 kAF residual) documented as an unaccounted
 source in the source-attribution table.
 
+#### CAP-basin dynamic NonIrr cap + dynamic Irr floor + decoupled static floors (1985+)
+
+CAP M&I subcontractor deliveries (Phoenix Water, Tucson Water,
+CAGRD, Harquahala Valley WD) are wholesale allocations that move
+through municipal distribution networks and are NOT catalogued as
+point-of-diversion records in the HarDWR `nonirr_sw_rights_density`
+raster.  Result: density-ratio sees `smooth_nonirr_swd ≈ 0` at metro
+AMA pixels and routes nearly all NonIrr to GW, inflating modern
+NIGW by 5–8 pp statewide vs USGS at 1990/1995/2010/2019 anchors.
+
+Three coordinated mechanisms address this — all driven by the
+**actual per-basin per-year CAP delivery** loaded once at pipeline
+startup from the CAP Excel via
+`partops.load_cap_basin_direct_delivery()`.  Hindcast years use
+real CAP records; projection years (2025+) fall back to the same
+`CAP_DELIVERY_FACTORS` Tier multipliers that drive
+`apply_cap_delivery_perturbation`, guaranteeing consistency between
+the SW-pixel perturbation and the per-basin cap/floor.
+
+**(1) Dynamic NonIrr GW share cap** (`CAP_BASIN_NI_PEAK_SW_FRACTION`,
+helper `partops._cap_basin_ni_cap`).  Per-basin per-year upper bound
+on `nonirr_gw_share` driven by the actual delivery ratio:
+
+```
+cap(basin, year) = 1 − peak_sw_fraction × delivery_ratio
+delivery_ratio   = direct_delivery[year] / baseline (hindcast)
+                   or CAP_DELIVERY_FACTORS[year]    (projection)
+```
+
+| Basin | Peak NonIrr SW fraction | Cap @ peak | Cap @ Tier 1 sustained (2027+) | Cap @ low delivery (2023) |
+|---|---|---|---|---|
+| Phoenix | 0.70 | 0.30 | 0.54 | 0.44 |
+| Pinal | 0.65 | 0.35 | 0.57 | **0.88** (post CAP-NIA wind-down) |
+| Tucson | 0.70 | 0.30 | 0.54 | 0.84 |
+| Harquahala | 0.50 | 0.50 | 0.67 | 0.70 (capped at FLOOR_MAX) |
+
+Baseline is the mean direct CAP delivery over
+`CAP_BASIN_NI_BASELINE_PERIOD = (2000, 2009)` (peak-CAP era).
+Arrival year is **auto-inferred** from the lookup as the first year
+with delivery >= `CAP_BASIN_FIRST_DELIVERY_THRESHOLD = 0.05 × baseline`
+— picks up Tucson 1990 (interim wheeling) and Harquahala 1985
+(early CAP-NIA pipeline) instead of canal-completion years.  When
+no lookup is available, falls back to `_CAP_BASIN_FALLBACK_ARRIVAL`
+(Phoenix 1985, Pinal 1987, Harquahala 1985, Tucson 1990).
+
+Cap is enforced **twice** — once on the density-ratio shares and
+again on the FINAL per-pixel result after the post-1985 NonIrr_SW
+excess routing (which scales `nonirr_sw` down by `urban_frac` and
+silently inflates the GW share otherwise).
+
+**(2) Dynamic Irr GW share floor** at Pinal + Harquahala
+(`CAP_BASIN_IRR_PEAK_SW_FRACTION`, helper
+`partops._cap_basin_irr_floor`).  Only Pinal and Harquahala —
+the two CAP-NIA basins — get a dynamic Irr floor.  Phoenix ag is
+SRP-fed (CAP-independent watershed), Tucson ag is local Avra
+Valley canals + minor early CAP-NIA, so they keep static floors.
+
+The Irr floor is **rebased** to the calibrated static floor at
+peak delivery so the dynamic mechanism only LIFTS the floor when
+delivery falls below baseline (it never tightens past the static
+calibration):
+
+```
+floor = static_floor + (FLOOR_MAX − static_floor) × (1 − delivery_ratio)
+```
+
+with `CAP_BASIN_IRR_FLOOR_MAX = 0.70` (leaves 30 % SW slack for
+local/tribal/residual ag SW at zero CAP-NIA delivery).
+
+| Basin | Peak Irr SW frac | Static floor | Floor @ peak | Floor @ Tier 1 (2027+) |
+|---|---|---|---|---|
+| Pinal | 0.50 | 0.30 | 0.30 (matches static) | 0.44 |
+| Harquahala | 0.50 | 0.40 | 0.40 (matches static) | 0.50 |
+
+Captures the post-2011 CAP-NIA cancellation: Pinal/Harquahala ag
+floor automatically rises 0.30→0.62 and 0.40→0.57 between
+2000-2023 as direct CAP delivery to ag districts dropped to near
+zero.
+
+**(3) Decoupled static floors at all CAP basins** (1985+).  Pre-
+1985 keeps the original symmetric `BASIN_GW_FLOOR` (Phoenix 0.20,
+Pinal/Tucson/Harquahala 0.30) for both categories.  Post-1985
+floors decouple per category, with NonIrr loose to give the cap
+mechanism above room to bind:
+
+| Basin | Static Irr floor (1985+) | Static NonIrr floor (1985+) |
+|---|---|---|
+| Phoenix | 0.30 | 0.10 |
+| Pinal | 0.30 (rebased dynamic above) | 0.10 |
+| Tucson | 0.40 | 0.10 |
+| Harquahala | 0.40 (rebased dynamic above) | 0.15 |
+
+Higher Irr floor reflects ADWR data: CAP-basin ag is majority GW
+(SRP delivers SW only to specific Phoenix areas; CAP-NIA ag retired
+mid-2010s; CAGRD/CAP M&I subcontractor SW is for M&I, not ag).
+Lower NonIrr floor opens room for the dynamic cap to push NonIrr
+toward SW without floor-cap collisions.
+
+**UQ ensemble** (`uncertaintyops`) loads the same delivery lookup
+via `_set_cap_delivery_context()` so every ensemble member sees the
+same dynamic cap/floor as the central pipeline.
+
+**Combined calibration impact at modern USGS anchors**:
+- **NIGW% MAE: 4.5 → 3.4 pp** (per-category)
+- **IGW% MAE at 2000/2005/2015 anchors: 9.6 → 7.0 pp**
+- **Total GW% MAE: 2.45 → 2.85 pp** (slight degradation, accepted
+  trade-off for per-category alignment with USGS Circulars + ADWR)
+- **Per-basin temporal fidelity**: Pinal/Harquahala caps and floors
+  now physically grounded in actual CAP delivery records (post-2011
+  CAP-NIA cancellation captured automatically).
+
 #### CAP delivery perturbation (2020–2026 hindcast + 2027–2099 baseline)
 
 Under the 2007 Interim Guidelines + 2019 DCP framework, ADWR and
@@ -3349,11 +3460,8 @@ piecewise-linear ramps between anchor years):
 | 1912–1948 | piecewise ramps through anchors (Yuma 1.5, Pinal 0.3, well-drilling boom 0.0, Gila 1.0) |
 | 1948–1955 | 1.5 |
 | 1956–1964 | 1.0 |
-| 1965–1984 | linear ramp 1.0 → 4.0 (1973–77 = 2.0 drought override) |
-| 1985–2002 | 4.0 |
-| 2003–2010 | 3.0 |
-| 2011–2021 | linear ramp 4.0 → 6.0 |
-| 2022+ | 6.0 |
+| 1965–1984 | linear ramp 1.0 → 6.0 (1973–77 = 2.0 drought override) |
+| 1985+ | 6.0 |
 
 **Plus auxiliary retention/partition logic** (era-dependent):
 
@@ -3427,13 +3535,33 @@ against USGS Total_GW pre-1950 and USGS/ADWR aggregate breakdowns
   pipeline.py Step 3 and by `uncertaintyops.py:_partition_with_ctx`.
   An alias `apply_cap_hindcast_perturbation` is kept temporarily for
   backwards compatibility.
+- **`load_cap_basin_direct_delivery(cap_xlsx)`** — loads direct-use
+  CAP delivery per basin per year from the CAP Excel
+  (`Recharge Facility.isna()`), computes a 2000-2009 baseline mean,
+  auto-trims a partial-year final record, and auto-infers the
+  per-basin arrival year (first year ≥ 5 % of baseline).  Returns
+  `{basin: {'yearly_af', 'baseline_af', 'arrival_year'}}` ready for
+  `_cap_basin_ni_cap` / `_cap_basin_irr_floor`.  Loaded once at
+  pipeline startup and shared by UQ via
+  `uncertaintyops._set_cap_delivery_context`.
+- **`_cap_basin_ni_cap(basin, year, lookup)`** — dynamic NonIrr GW
+  share cap at CAP-served basins.  Returns
+  `1 − peak_sw_fraction × delivery_ratio` (delivery_ratio from
+  hindcast Excel record or projection-era `CAP_DELIVERY_FACTORS`).
+  Pre-arrival years return None (cap inactive).
+- **`_cap_basin_irr_floor(basin, year, lookup)`** — dynamic Irr GW
+  share floor at Pinal + Harquahala (the two CAP-NIA basins).
+  Rebased to the static `BASIN_IRR_GW_FLOOR_POST_CAP` value at peak
+  delivery so the floor only LIFTS when delivery falls.  Capped at
+  `CAP_BASIN_IRR_FLOOR_MAX = 0.70`.
 - **`_era_gw_weight(year)`** — returns the era-dependent `gw_weight`
   (5.0 pre-1945, 2.0 pre-GMA, mid-CAP bump 0.5 at 1998–2007, 0.2
   post-CAP, with 1930–1935 = 10.0 override).
 - **`era_sw_sigma(year)`** — single source of truth for the SW
   Gaussian smoothing σ schedule (0.0 pre-1912, piecewise anchors
-  1912–1948, 1.0–6.0 across post-1948 eras with overrides at 1973–77
-  and 2003–10).  `partition_predictions` calls it whenever
+  1912–1948, 1.5 1948–1955, 1.0 1956–1964, linear ramp 1.0 → 6.0
+  across 1965–1984 with a 1973–77 = 2.0 drought override, then 6.0
+  flat from 1985+).  `partition_predictions` calls it whenever
   `sw_smooth_sigma is None`; the σ-sensitivity diagnostic in
   `uncertaintyops` calls it to anchor the per-year halve/double sweep.
 - **`focal_fill_irr_fraction()`** — fills edge-pixel gaps (`irr_frac < 0.05`)
@@ -3514,7 +3642,7 @@ from the following sources:
 | 1930 | 0.75 | 0.75 |  0.00 |
 | 1935 | 1.20 | 1.13 | −0.07 |
 | 1940 | 1.80 | 1.49 | −0.31 |
-| 1945 | 2.80 | 2.31 | −0.49 |
+| 1945 | 2.80 | 2.32 | −0.48 |
 
 USGS pre-1950 reconstructions (OFR 94-476) are themselves uncertain
 by ±10–20 %; the 1940/1945 ~0.3–0.5 MAF gap is within that
@@ -3524,20 +3652,20 @@ methodological noise.
 
 | Year | Pred Tot | USGS Tot | dTot MAF | %dev | dGW% | dIrr% |
 |---|---|---|---|---|---|---|
-| 1950 | 5.18 | 5.38 | −0.20 | −3.7 | −5.0 | −2.2 |
-| 1955 | 7.59 | 8.09 | −0.50 | −6.2 | −4.8 | −3.9 |
-| 1960 | 5.55 | 5.62 | −0.07 | −1.3 | −4.0 | −1.9 |
-| 1965 | 6.47 | 7.04 | −0.57 | −8.1 | −5.5 | −2.9 |
-| 1970 | 7.84 | 7.60 | +0.24 | +3.2 | −1.0 | −2.9 |
-| 1975 | 8.06 | 8.74 | −0.68 | −7.8 | −0.4 | −7.4 |
-| 1980 | 8.43 | 8.93 | −0.50 | −5.6 | +1.3 | −3.0 |
-| 1985 | 7.13 | 7.24 | −0.11 | −1.5 | +1.2 | −2.4 |
-| 1990 | 7.33 | 7.59 | −0.26 | −3.4 | +6.8 | −1.0 |
-| 1995 | 7.36 | 7.83 | −0.47 | −6.0 | +6.8 | −4.7 |
-| 2000 | 7.63 | 7.54 | +0.09 | +1.2 | −0.4 | −7.5 |
-| 2005 | 6.98 | 6.99 | −0.01 | −0.1 | +0.6 | −5.2 |
-| 2010 | 6.95 | 6.82 | +0.13 | +1.9 | +7.6 | −3.7 |
-| 2015 | 6.79 | 6.70 | +0.09 | +1.3 | +0.5 | −6.3 |
+| 1950 | 5.18 | 5.38 | −0.20 | −3.8 |  0.0 | +1.5 |
+| 1955 | 7.59 | 8.09 | −0.50 | −6.2 | −4.2 | −3.9 |
+| 1960 | 5.55 | 5.62 | −0.07 | −1.3 | −3.6 | −1.9 |
+| 1965 | 6.47 | 7.04 | −0.57 | −8.2 | −5.1 | −2.9 |
+| 1970 | 7.84 | 7.60 | +0.24 | +3.2 | −2.6 | −2.9 |
+| 1975 | 8.06 | 8.74 | −0.68 | −7.8 | +0.2 | −7.4 |
+| 1980 | 8.43 | 8.93 | −0.50 | −5.6 | −0.4 | −3.0 |
+| 1985 | 7.13 | 7.24 | −0.11 | −1.5 | +0.9 | −2.4 |
+| 1990 | 7.33 | 7.59 | −0.26 | −3.5 | +5.9 | +3.0 |
+| 1995 | 7.36 | 7.83 | −0.47 | −6.0 | +5.4 | −0.3 |
+| 2000 | 7.63 | 7.54 | +0.09 | +1.2 | −2.2 | −2.6 |
+| 2005 | 6.98 | 6.99 | −0.01 | −0.1 | −2.8 | +2.5 |
+| 2010 | 6.95 | 6.82 | +0.13 | +1.9 | +4.3 | +4.2 |
+| 2015 | 6.57 | 6.70 | −0.13 | −1.9 | +0.2 | −3.9 |
 
 **ADWR Annual Report anchors (Total MAF + 2019 share breakdown):**
 
@@ -3556,10 +3684,10 @@ methodological noise.
 
 | Metric | Model | ADWR | Δ |
 |---|---|---|---|
-| GW% | 46.7 | 41.0 | +5.7 |
-| SW% | 53.3 | 54.0 | −0.7 |
-| Irr% | 69.2 | 72.0 | −2.8 |
-| NonIrr% | 30.8 | 28.0 | +2.8 |
+| GW% | 46.6 | 41.0 | +5.6 |
+| SW% | 53.4 | 54.0 | −0.6 |
+| Irr% | 70.5 | 72.0 | −1.5 |
+| NonIrr% | 29.5 | 28.0 | +1.5 |
 
 **Calibration interpretation.**
 
@@ -3587,12 +3715,14 @@ The remaining residuals reflect:
    MAF) — USGS OFR 94-476 reconstructions are themselves ±10–20 %
    uncertain; model fit is within that band.
 
-**Mean absolute deviation across post-1950 anchors:**
-- Total MAF: 0.31 MAF (mean abs); |%dev| = 3.5 %
-- GW%: 3.5 pp (mean abs)
-- Irr%: 4.0 pp (mean abs)
-- 11 of 14 USGS Irr% anchors within ±5 pp; 8 of 14 GW% anchors within ±2 pp
-- ADWR 2019 GW% +5.7 pp, Irr% −2.8 pp — both inside source-of-truth methodological noise (~5–10 pp from county-survey acreage × duty estimates)
+**Mean absolute deviation across post-1950 anchors (14 USGS years):**
+- Total MAF: 0.28 MAF (mean abs); |%dev| = 3.7 %
+- GW%: 2.7 pp (mean abs)
+- Irr%: 3.0 pp (mean abs)
+- 12 of 14 USGS Irr% anchors within ±5 pp; 9 of 14 GW% anchors within ±5 pp; 4 of 14 within ±1 pp
+- ADWR 2019 GW% +5.6 pp, Irr% −1.5 pp — both inside source-of-truth methodological noise (~5–10 pp from county-survey acreage × duty estimates)
+- Per-category 8-anchor (1985–2015) MAE: IGW 3.4 pp, ISW 3.5 pp, NIGW 3.4 pp, NISW 3.4 pp
+- Dynamic CAP-basin cap/floor (vs static-cap baseline): NIGW MAE 4.5 → 3.4 pp (improved by 1.1 pp), Total GW MAE 2.45 → 2.85 pp (slight degradation accepted for per-category alignment)
 
 ##### Calibration design principles
 

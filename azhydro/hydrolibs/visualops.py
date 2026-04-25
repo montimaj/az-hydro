@@ -6542,8 +6542,19 @@ def plot_intercomp_time_series(
                         continue
                 if mode == 'volume':
                     if basin == 'AZ_Total':
+                        # Sum across only the basins in ``basin_names``
+                        # (the comparison set), not every basin present
+                        # in ``yearly_int``.  Important when one source
+                        # (e.g. ML) contains all AZ basins while the
+                        # comparison source (e.g. CAP+SRP) only covers
+                        # a subset — without this restriction the AZ_Total
+                        # ML side double-counts basins outside the
+                        # comparison footprint.
                         af_vals = np.array([
-                            sum(yearly_int[yr].values()) for yr in years
+                            sum(yearly_int[yr].get(b, 0.0)
+                                for b in basin_names
+                                if np.isfinite(yearly_int[yr].get(b, np.nan)))
+                            for yr in years
                         ])
                     else:
                         # Use NaN for missing basins so gaps appear
@@ -6642,6 +6653,8 @@ def plot_intercomp_scatter(
     is_validation: bool = False,
     af_divisor: float = 1.0,
     af_unit_label: str = 'AF',
+    annotate_basins: bool = False,
+    log_scale: bool = False,
 ) -> None:
     """Generic intercomparison scatter plots with 1:1 line and linear fit.
 
@@ -6702,14 +6715,40 @@ def plot_intercomp_scatter(
                 ax.set_title(f'{label_a} vs {label_b}')
                 continue
 
-            ax.scatter(vx, vy, s=30, alpha=0.7,
-                       edgecolors='white', linewidths=0.5)
+            scatter_size = 60 if annotate_basins else 30
+            ax.scatter(vx, vy, s=scatter_size, alpha=0.75,
+                       edgecolors='white', linewidths=0.5, zorder=3)
 
-            lo = min(vx.min(), vy.min(), 0) if mode == 'volume' else min(vx.min(), vy.min()) * 0.9
-            hi = max(vx.max(), vy.max()) * 1.05
+            if log_scale:
+                # Log axes need strictly positive bounds; use the smallest
+                # positive value as the floor (1 decade below) and the
+                # largest as the ceiling (1 decade above).
+                pos = np.concatenate([vx[vx > 0], vy[vy > 0]])
+                lo = pos.min() / 3.0 if pos.size else 1.0
+                hi = pos.max() * 3.0 if pos.size else 10.0
+            else:
+                lo = min(vx.min(), vy.min(), 0) if mode == 'volume' else min(vx.min(), vy.min()) * 0.9
+                hi = max(vx.max(), vy.max()) * 1.05
             if hi <= lo:
                 hi = lo + 1
             ax.plot([lo, hi], [lo, hi], 'k--', lw=1, label='1:1')
+
+            if annotate_basins:
+                for bn, bx, by in zip(basin_names, vx, vy):
+                    if not (np.isfinite(bx) and np.isfinite(by)):
+                        continue
+                    if log_scale and (bx <= 0 or by <= 0):
+                        continue
+                    ax.annotate(
+                        bn.replace(' AMA', '').replace(' INA', '')
+                          .replace(' PLAIN', '').title(),
+                        xy=(bx, by), xytext=(5, 5),
+                        textcoords='offset points',
+                        fontsize=8, color='#222',
+                        bbox=dict(boxstyle='round,pad=0.15',
+                                  facecolor='white', alpha=0.7,
+                                  edgecolor='none'),
+                    )
 
             if len(vx) > 1 and np.std(vx) > 0:
                 from scipy.stats import pearsonr
@@ -6718,10 +6757,16 @@ def plot_intercomp_scatter(
                     normalized_rmse, normalized_mae, normalized_mbe,
                 )
                 z = np.polyfit(vx, vy, 1)
-                x_fit = np.linspace(lo, hi, 100)
-                sign = '\u2212' if z[1] < 0 else '+'
-                ax.plot(x_fit, np.polyval(z, x_fit), 'r-', lw=1.2,
-                        label=f'y={z[0]:.2f}x {sign} {abs(z[1]):.1f}')
+                # Skip the linear fit line on log axes — a linear y = a·x+b
+                # with negative intercept renders as a near-vertical drop
+                # near the zero-crossing on log-scale axes, which is
+                # visually confusing.  The fit equation in the legend
+                # plus the metrics box still convey the regression.
+                if not log_scale:
+                    x_fit = np.linspace(lo, hi, 100)
+                    sign = '\u2212' if z[1] < 0 else '+'
+                    ax.plot(x_fit, np.polyval(z, x_fit), 'r-', lw=1.2,
+                            label=f'y={z[0]:.2f}x {sign} {abs(z[1]):.1f}')
                 # Validation (is_validation=True) vs observed data:
                 # R² (Nash-Sutcliffe form) is appropriate because a
                 # single ground-truth reference exists and we want to
@@ -6756,18 +6801,28 @@ def plot_intercomp_scatter(
                         bbox=dict(boxstyle='round,pad=0.3',
                                   facecolor='white', alpha=0.8,
                                   edgecolor='gray'))
-                unit_label = f'  ({unit})' if unit else ''
-                ax.set_title(f'{label_a} vs {label_b}{unit_label}',
-                             fontsize=11, fontweight='bold')
-            else:
-                ax.set_title(f'{label_a} vs {label_b}', fontsize=11)
+            # Per-axes title omitted — fig.suptitle already conveys
+            # the comparison label.
 
             unit_suffix = f' ({unit})' if unit else ''
-            ax.set_xlabel(f'{label_a}{unit_suffix}', fontweight='bold')
-            ax.set_ylabel(f'{label_b}{unit_suffix}', fontweight='bold')
+            scale_suffix = ', log scale' if log_scale else ''
+            ax.set_xlabel(
+                f'{label_a}{unit_suffix.rstrip(")")}{scale_suffix}{")" if unit_suffix else ""}',
+                fontweight='bold',
+            )
+            ax.set_ylabel(
+                f'{label_b}{unit_suffix.rstrip(")")}{scale_suffix}{")" if unit_suffix else ""}',
+                fontweight='bold',
+            )
             ax.legend(fontsize=8, loc='upper left')
-            ax.grid(True, alpha=0.3, linestyle='--')
-            ax.set_aspect('equal', adjustable='box')
+            ax.grid(True, alpha=0.3, linestyle='--', which='both')
+            if log_scale:
+                ax.set_xscale('log')
+                ax.set_yscale('log')
+                # Aspect-equal is meaningless on log axes; let the box
+                # scale to the figsize so all labels are readable.
+            else:
+                ax.set_aspect('equal', adjustable='box')
             ax.set_xlim(lo, hi)
             ax.set_ylim(lo, hi)
             # For volume mode, format primary axes as km³ and add an
@@ -6786,14 +6841,18 @@ def plot_intercomp_scatter(
                 ax.yaxis.set_major_formatter(
                     _tk.FuncFormatter(lambda x, _: f'{x / 1e9:,.2f}'),
                 )
-                ax.set_xlabel(f'{label_a} (km³)', fontweight='bold')
-                ax.set_ylabel(f'{label_b} (km³)', fontweight='bold')
+                _kmcubed_suffix = '(km³, log scale)' if log_scale else '(km³)'
+                ax.set_xlabel(f'{label_a} {_kmcubed_suffix}', fontweight='bold')
+                ax.set_ylabel(f'{label_b} {_kmcubed_suffix}', fontweight='bold')
                 ax_right = ax.twinx()
+                if log_scale:
+                    ax_right.set_yscale('log')
                 ax_right.set_ylim(lo / af_to_m3, hi / af_to_m3)
                 ax_right.yaxis.set_major_formatter(
                     _tk.FuncFormatter(lambda x, _: f'{x / 1e6:,.2f}'),
                 )
-                ax_right.set_ylabel(f'{label_b} (MAF)', fontweight='bold')
+                _maf_suffix = '(MAF, log scale)' if log_scale else '(MAF)'
+                ax_right.set_ylabel(f'{label_b} {_maf_suffix}', fontweight='bold')
 
     out_path = os.path.join(output_dir, filename)
     fig.savefig(out_path, dpi=300, bbox_inches='tight')

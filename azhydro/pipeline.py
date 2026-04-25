@@ -1829,6 +1829,61 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
                        'CAP-cut hindcast perturbation will be skipped',
                        _cap_geojson)
 
+    # Load per-basin per-year CAP direct-use delivery for the dynamic
+    # NonIrr GW share cap (partops.CAP_BASIN_NI_CAP_CONFIG).  Hindcast
+    # years 1985-2024 use actual delivery; projection years fall back
+    # to CAP_DELIVERY_FACTORS (Tier multipliers).  See
+    # partops._cap_basin_ni_cap.
+    _cap_delivery_lookup = None
+    _cap_xlsx_path = os.path.join(
+        VECTOR_DIR, 'CAP', 'CAP Delivery Data DRI Request.xlsx',
+    )
+    if os.path.isfile(_cap_xlsx_path):
+        try:
+            _cap_delivery_lookup = partops.load_cap_basin_delivery(
+                _cap_xlsx_path,
+            )
+            for _b, _d in _cap_delivery_lookup.items():
+                logger.info(
+                    'CAP delivery lookup: %s baseline=%.1f kAF (%d-%d), '
+                    'hindcast years %d',
+                    _b, _d['baseline_af'] / 1000.0,
+                    *partops.CAP_BASIN_NI_BASELINE_PERIOD,
+                    len(_d['yearly_af']),
+                )
+        except Exception as e:
+            logger.warning(
+                'Could not load CAP delivery lookup from %s: %s — '
+                'NonIrr GW share cap will fall back to peak-baseline.',
+                _cap_xlsx_path, e,
+            )
+    else:
+        logger.warning(
+            'CAP Excel not found at %s — NonIrr GW share cap will use '
+            'peak-baseline fallback.', _cap_xlsx_path,
+        )
+
+    # Pre-CAP SW baseline (1984 cw_sf + sw_rights per pixel) for
+    # additive CAP-pixel SW scaling in apply_cap_delivery_perturbation.
+    # Preserves Phoenix SRP, Pinal San Carlos ID, Tucson Avra Valley
+    # local SW signals when the per-basin per-year delivery scaling
+    # tightens at low-CAP-delivery years.
+    _pre_cap_sw_baseline = partops.load_pre_cap_sw_baseline(az_df)
+    if _pre_cap_sw_baseline is not None:
+        logger.info(
+            'Pre-CAP SW baseline (year %d): %d pixels, columns %s',
+            partops.CAP_PRE_BASELINE_YEAR,
+            len(next(iter(_pre_cap_sw_baseline.values()))),
+            list(_pre_cap_sw_baseline.keys()),
+        )
+    else:
+        logger.warning(
+            'Pre-CAP SW baseline (year %d) unavailable — additive CAP '
+            'scaling will fall back to multiplicative (may damage '
+            'non-CAP SW signals at Phoenix/Pinal).',
+            partops.CAP_PRE_BASELINE_YEAR,
+        )
+
     def _pixel_stats(pred_vals, min_depth_threshold=5.0):
         """Compute depth and volume stats in multiple units.
 
@@ -2118,12 +2173,16 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         # 1896-2021 and 2025 (no scheduled cut).
         year_df_partition = partops.apply_cap_delivery_perturbation(
             year_df, year, _cap_pixel_mask,
+            cap_delivery_lookup=_cap_delivery_lookup,
+            pre_cap_sw_baseline=_pre_cap_sw_baseline,
         )
         cat_predictions = partops.partition_predictions(
             predictions, year_df_partition, raster_shape, valid_mask, year=year,
             wd_1981=_wd_1981, irr_wd_1981=_irr_wd_1981,
             nonirr_wd_1981=_nonirr_wd_1981,
             irr_cap_1981=_irr_cap_1981,
+            cap_delivery_lookup=_cap_delivery_lookup,
+            cap_pixel_mask=_cap_pixel_mask,
         )
 
         predictions = cat_predictions['Irrigation'] + cat_predictions['Non_Irrigation']

@@ -3992,7 +3992,13 @@ _CAP_AMA_TO_BASIN = {
     'Tucson AMA':      'TUCSON AMA',
     'Pinal AMA':       'PINAL AMA',
     'Harquahala INA':  'HARQUAHALA INA',
-    'Ranegras Plain':  'RANEGRAS PLAIN',
+    # Ranegras Plain excluded from validation: direct-use CAP
+    # delivery is incidental pipeline pass-through (~1 kAF/yr peak,
+    # essentially zero post-2015), and the basin is documented to
+    # stay ~100 % GW (handled by the 0.95 floor in partitionops, not
+    # the CAP cap mechanism).  Including it added a near-origin
+    # outlier point to the per-basin scatter without contributing
+    # meaningful validation signal.
 }
 
 
@@ -4000,11 +4006,21 @@ def load_cap_srp_annual_sw(
     cap_xlsx: str,
     srp_xlsx: str | None = None,
     include_spill_water: bool = False,
+    include_recharge: bool = True,
 ) -> dict[str, dict[int, float]]:
     """Load CAP (and optionally SRP) delivery data and return annual
     total surface-water deliveries (AF) per basin.
 
-    CAP: keeps only rows where ``Recharge Facility`` is null (direct use).
+    CAP: by default includes ALL CAP deliveries (direct use + recharge
+    facility deliveries: USF, GSF, ASR) for the "full CAP utilization
+    footprint" view at each basin.  Recharge volumes are eventually
+    recovered as GW (Tucson Water CAVSARP/SAVSARP, Phoenix CAGRD,
+    Pinal in-lieu credits), so they are part of the basin's CAP
+    consumptive use even though the partition's Total_SW excludes
+    recovered recharge by construction.  Set ``include_recharge=False``
+    to restrict to direct-use deliveries only (more apples-to-apples
+    with model Total_SW but understates CAP footprint at recharge-
+    heavy basins).
     Rows with ``AMA == 'Multiple'`` or ``NaN`` are excluded because they
     cannot be assigned to a single basin (25 records / ~15,600 AF total;
     16 NaN-AMA records / ~86,300 AF total).
@@ -4029,14 +4045,21 @@ def load_cap_srp_annual_sw(
         include_spill_water (bool): If True, include SRP ``SPILL WATER`` records in addition to
             ``SURFACE WATER``.  Default False (baseline).  Ignored when
             ``srp_xlsx`` is None.
+        include_recharge (bool): If True (default), include recharge
+            facility deliveries (USF, GSF, ASR) — the full CAP supply
+            footprint per basin.  If False, restrict to direct-use
+            deliveries only.
 
     Returns:
         dict[str, dict[int, float]]: ``{basin_name: {year: delivery_AF}}``.
     """
     # ── CAP ──────────────────────────────────────────────────────────────
     cap_df = pd.read_excel(cap_xlsx)
-    # Keep only direct-use deliveries (null recharge facility)
-    cap_df = cap_df[cap_df['Recharge Facility'].isna()].copy()
+    if not include_recharge:
+        # Restrict to direct-use deliveries (null recharge facility).
+        cap_df = cap_df[cap_df['Recharge Facility'].isna()].copy()
+    else:
+        cap_df = cap_df.copy()
     # Log excluded volume from unmappable AMA records
     mappable_mask = cap_df['AMA'].isin(_CAP_AMA_TO_BASIN)
     excluded = cap_df[~mappable_mask]
@@ -4283,13 +4306,17 @@ def run_cap_srp_validation(
     Validate ML Total_SW predictions against observed CAP (and optionally
     SRP) surface-water delivery records.
 
-    CAP deliveries are filtered to exclude recharge-facility records
-    (keeping only direct-use deliveries).  SRP deliveries are skipped
-    by default because the SRP service-area boundary is not publicly
-    mapped — attributing its deliveries to a single GW basin (currently
-    Phoenix AMA) is ambiguous.  When ``srp_xlsx`` is provided, SRP
-    ``SURFACE WATER`` rows are summed into Phoenix AMA alongside CAP;
-    otherwise the validation uses CAP data only (recommended default).
+    CAP deliveries include direct-use AND recharge-facility records by
+    default (USF / GSF / ASR — the full CAP supply footprint per basin)
+    because recharge volumes are part of consumptive use at the basin
+    (later recovered as GW pumping by Tucson Water CAVSARP/SAVSARP,
+    Phoenix CAGRD credits, Pinal in-lieu accounts).  SRP deliveries
+    are skipped by default because the SRP service-area boundary is
+    not publicly mapped — attributing its deliveries to a single GW
+    basin (currently Phoenix AMA) is ambiguous.  When ``srp_xlsx`` is
+    provided, SRP ``SURFACE WATER`` rows are summed into Phoenix AMA
+    alongside CAP; otherwise the validation uses CAP data only
+    (recommended default).
 
     Produces per-basin time series plots, a statistics CSV, and a time
     series CSV.
@@ -4457,6 +4484,8 @@ def run_cap_srp_validation(
         title='ML Total SW vs CAP + SRP — Per Basin',
         filename='Scatter_ML_vs_CAP_SRP.png',
         is_validation=True,
+        annotate_basins=True,
+        log_scale=True,
         af_divisor=1000.0,
         af_unit_label='1000 AF',
     )
