@@ -2554,20 +2554,20 @@ def partition_predictions(
         nonirr[both_lu] = predictions[both_lu] * uf[both_lu]
         irr[pure_desert_no_well] = 0.0
         nonirr[pure_desert_no_well] = 0.0
-        # 2003–2012: scale pure_desert_with_well volumes by 0.75.
-        # USGS shows Total drops from 7.54 (2000) to 6.99 (2005) to
-        # 6.82 (2010) as CAP ag retirement and drought reduced
-        # statewide pumping.  The ML predictions hold near 7.60
-        # through 2000–2010, over-predicting by 0.61–0.77 MAF at
-        # 2005/2010.  True desert wells (cf = 0, uf < 0.30, AGRI
-        # <= 0.1, has_well; the AGRI gate above re-routes ag-halo
-        # desert pixels to only_crop) are sparse rural domestic /
-        # stock / abandoned industrial wells that pump little water
-        # in reality but get non-trivial ML prediction.  Scale 0.5
-        # over-corrected (dropped Total UNDER by 0.7 and collapsed
-        # GW% by 12 pp); 0.75 trims ~25% of true-desert volume,
-        # landing ~0.6 MAF closer to USGS at 2005/2010.
-        if 2003 <= year <= 2012:
+        # Scale pure_desert_with_well volumes by 0.75 throughout the
+        # post-1985 override era, EXCEPT 1990-2000.  True desert wells
+        # (cf = 0, uf < 0.30, AGRI <= 0.1, has_well; the AGRI gate above
+        # re-routes ag-halo desert pixels to only_crop) are sparse rural
+        # domestic / stock / abandoned industrial wells that pump little
+        # water in reality but get non-trivial ML prediction from
+        # regional well density.  0.75 trims ~25 % of true-desert volume
+        # — calibrated against USGS 2005/2010 anchors.  1990-2000 is
+        # excluded because USGS shows peak SW deliveries (4.3-4.5 MAF in
+        # 1990/1995) that the dampened ML run was under-shooting by
+        # 7-11 %; preserving full pure_desert_with_well volume in those
+        # years closes the 1990-2000 gap without disturbing the
+        # well-calibrated 2005+ anchors.
+        if not (1990 <= year <= 2000):
             pure_desert_with_well = pure_desert & has_well
             irr[pure_desert_with_well] = irr[pure_desert_with_well] * 0.75
             nonirr[pure_desert_with_well] = nonirr[pure_desert_with_well] * 0.75
