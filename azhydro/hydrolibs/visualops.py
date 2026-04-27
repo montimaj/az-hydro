@@ -3369,23 +3369,45 @@ def _overlay_boundaries(
     *,
     label_fontsize: float = 5.5,
     label_all: bool = False,
+    show_legend: bool = True,
 ) -> None:
     """Draw basin boundaries and label basins on a map axis.
+
+    AMAs and INAs are drawn with distinct colors (AMA = black,
+    INA = dark red) and a small legend in the upper-right corner
+    distinguishes the three boundary classes (Basin / AMA / INA).
+    The ``ama_ina_names`` argument is kept for backward compatibility
+    but the actual AMA/INA split is sourced from
+    :func:`get_ama_ina_classification` so the colors stay correct
+    even if callers pass the combined list.
 
     Args:
         label_all: If True, label all basins (small font for non-AMA/INA).
             If False (default), label only AMA/INA basins.
+        show_legend: If True (default), add a small AMA/INA legend.
     """
-    basins_gdf.boundary.plot(ax=ax, color='#555555', linewidth=0.4)
-    ama_ina_gdf = basins_gdf[basins_gdf[name_col].isin(ama_ina_names)]
-    ama_ina_gdf.boundary.plot(ax=ax, color='black', linewidth=1.2)
-    for _, row in ama_ina_gdf.iterrows():
+    AMA_COLOR = 'black'
+    INA_COLOR = '#B71C1C'   # dark red
+    BASE_COLOR = '#555555'
+
+    ama_basins, ina_basins = get_ama_ina_classification()
+
+    basins_gdf.boundary.plot(ax=ax, color=BASE_COLOR, linewidth=0.4)
+    ama_gdf = basins_gdf[basins_gdf[name_col].isin(ama_basins)]
+    ina_gdf = basins_gdf[basins_gdf[name_col].isin(ina_basins)]
+    if not ama_gdf.empty:
+        ama_gdf.boundary.plot(ax=ax, color=AMA_COLOR, linewidth=1.2)
+    if not ina_gdf.empty:
+        ina_gdf.boundary.plot(ax=ax, color=INA_COLOR, linewidth=1.2)
+    for _, row in pd.concat([ama_gdf, ina_gdf], ignore_index=True).iterrows():
         centroid = row.geometry.centroid
         short = row[name_col].replace(' AMA', '').replace(' INA', '')
+        is_ama = row[name_col] in ama_basins
         ax.annotate(
             short, (centroid.x, centroid.y),
             fontsize=label_fontsize, fontweight='bold',
-            ha='center', va='center', color='black',
+            ha='center', va='center',
+            color=AMA_COLOR if is_ama else INA_COLOR,
             bbox=dict(boxstyle='round,pad=0.12', fc='white',
                       alpha=0.8, lw=0),
         )
@@ -3401,6 +3423,26 @@ def _overlay_boundaries(
                 bbox=dict(boxstyle='round,pad=0.08', fc='white',
                           alpha=0.6, lw=0),
             )
+    if show_legend:
+        from matplotlib.lines import Line2D
+        handles = [
+            Line2D([0], [0], color=BASE_COLOR, lw=0.8,
+                   label='GW basin'),
+            Line2D([0], [0], color=AMA_COLOR, lw=1.4, label='AMA'),
+            Line2D([0], [0], color=INA_COLOR, lw=1.4, label='INA'),
+        ]
+        # Preserve any existing legend handles already on the axis
+        # (e.g. choropleth class labels) by prepending our entries.
+        existing = ax.get_legend()
+        if existing is not None:
+            handles = (
+                handles
+                + [h for h in existing.legend_handles]
+            )
+        ax.legend(
+            handles=handles, loc='upper right',
+            fontsize=7, framealpha=0.85,
+        )
     ax.axis('off')
 
 
@@ -6571,6 +6613,44 @@ def plot_intercomp_time_series(
                     # twin right axis via _format_volume_axis below.
                     axes[0].plot(years, m3_vals, label=label, color=color,
                                  marker=marker, markersize=3, linewidth=1.2)
+                    # 95 % CI band when source has 'yearly_sigma' (1σ)
+                    sigma_yearly = src_data.get(cat, {}).get(
+                        'yearly_sigma',
+                    )
+                    if sigma_yearly:
+                        sigma_int = {}
+                        for k, v in sigma_yearly.items():
+                            try:
+                                sigma_int[int(k)] = v
+                            except (ValueError, TypeError):
+                                continue
+                        if basin == 'AZ_Total':
+                            # Spatial quadrature across the basin set
+                            sig_af = np.array([
+                                np.sqrt(sum(
+                                    (sigma_int.get(yr, {}).get(b, 0.0)) ** 2
+                                    for b in basin_names
+                                ))
+                                for yr in years
+                            ])
+                        else:
+                            sig_af = np.array([
+                                sigma_int.get(yr, {}).get(basin, np.nan)
+                                for yr in years
+                            ])
+                        sig_m3 = sig_af * af_to_m3
+                        finite = np.isfinite(sig_m3) & (sig_m3 > 0)
+                        if finite.any():
+                            ci = 1.96 * sig_m3
+                            lo = m3_vals - ci
+                            hi = m3_vals + ci
+                            axes[0].fill_between(
+                                years, lo, hi,
+                                where=finite,
+                                color=color, alpha=0.18,
+                                linewidth=0,
+                                label=f'{label} 95 % CI',
+                            )
                 else:
                     # Ratio mode (e.g. IE)
                     if basin == 'AZ_Total':

@@ -3827,15 +3827,16 @@ def run_peff_intercomparison(
             ('USDA-SCS Peff', 'ML Peff PCML', ml_huc_mean, pcml_huc_mean),
         ]
 
+        # Volume-only diff for Peff HUC12 (depth-mode dropped: per-HUC12
+        # depth differences are dominated by polygon size variation
+        # rather than the precipitation signal we want to compare).
         for unit_mode, unit_label, sec_label, sec_factor, scale_fn, tick_div in [
-            ('depth', '\u0394 Depth (mm)', '\u0394 Depth (ft)', _mm_to_ft,
-             lambda af, area: af * _af_to_m3_local / area * M_TO_MM if area > 0 else 0.0, None),
             ('volume', r'$\Delta$ Volume ($\times$10$^{6}$ m$^3$)', '\u0394 Volume (AF)',
              _m3_to_af_local,
              lambda af, area: af * _af_to_m3_local, 1e6),
         ]:
             fig, axes = plt.subplots(1, 3, figsize=(20, 7), constrained_layout=True)
-            title_u = 'Depth' if unit_mode == 'depth' else 'Volume'
+            title_u = 'Volume'
             fig.suptitle(
                 f'Effective Precipitation \u2014 HUC12-Level {title_u} Difference',
                 fontsize=14, fontweight='bold',
@@ -4265,6 +4266,67 @@ def load_cap_srp_annual_sw(
     return basin_year
 
 
+def _load_basin_sigma_yearly(
+        sigma_raster_dir: str,
+        cat_file_prefix: str,
+        basin_reproj: gpd.GeoDataFrame,
+        basin_col: str,
+        year_range: tuple[int, int],
+) -> dict[str, dict[int, float]]:
+    """Per-basin per-year σ volume (AF) from category σ rasters.
+
+    Reads ``Sigma_Total_{cat_file_prefix}_mm_{year}.tif`` from
+    *sigma_raster_dir* and aggregates per-pixel σ_mm to per-basin σ
+    via spatial quadrature: ``σ_basin = sqrt(Σ σ_pixel²)``.  Treats
+    per-pixel σ as approximately independent — matches the convention
+    used by ``_load_az_sigma_total_for_category`` for AZ-wide rollups.
+
+    Returns ``{basin_name: {year: sigma_AF}}``.  Returns an empty dict
+    silently when the σ raster directory or files don't exist.
+    """
+    out: dict[str, dict[int, float]] = {}
+    if not sigma_raster_dir or not os.path.isdir(sigma_raster_dir):
+        return out
+    start_yr, end_yr = year_range
+    # Load basin geometries once
+    basin_geoms = {
+        row[basin_col]: row.geometry
+        for _, row in basin_reproj.iterrows()
+    }
+    for year in range(start_yr, end_yr + 1):
+        path = os.path.join(
+            sigma_raster_dir,
+            f'Sigma_Total_{cat_file_prefix}_mm_{year}.tif',
+        )
+        if not os.path.isfile(path):
+            continue
+        try:
+            with rio.open(path) as src:
+                pixel_area_m2_ = abs(src.transform.a * src.transform.e)
+                mm_to_m3 = pixel_area_m2_ / 1000.0
+                sig_arr = src.read(1).astype(np.float64)
+                transform = src.transform
+                shape = sig_arr.shape
+            sig_arr = np.where(np.isfinite(sig_arr), sig_arr, 0.0)
+            sig_vol_m3 = sig_arr * mm_to_m3
+            for basin_name, geom in basin_geoms.items():
+                from rasterio.features import geometry_mask
+                mask = geometry_mask(
+                    [geom], transform=transform, invert=True,
+                    out_shape=shape,
+                )
+                # Spatial quadrature within the basin
+                sigma_m3 = float(np.sqrt(np.sum(sig_vol_m3[mask] ** 2)))
+                sigma_af = sigma_m3 * M3_TO_AF
+                out.setdefault(basin_name, {})[year] = sigma_af
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                'Failed to load σ raster %s: %s', path, exc,
+            )
+            continue
+    return out
+
+
 def load_ml_total_sw_basin_volumes(
     total_sw_dir: str,
     basin_gdf: gpd.GeoDataFrame,
@@ -4539,6 +4601,21 @@ def run_cap_srp_validation(
             ml_basin_yearly_by_cat[_cat] = _basin_yearly
         else:
             logger.warning(f'No ML {_cat} rasters found in {_cat_dir}')
+
+    # ── Per-category σ rasters → per-basin σ volumes (AF) ───────────────
+    # Loaded from {prediction_root}/Uncertainty/Sigma_Total/Rasters/
+    # via spatial quadrature (sqrt of sum of squared per-pixel σ).
+    # Returns empty dict when the σ raster directory is absent —
+    # downstream plots silently skip CI bands in that case.
+    sigma_raster_dir = os.path.join(
+        _prediction_root, 'Uncertainty', 'Sigma_Total', 'Rasters',
+    )
+    ml_basin_sigma_by_cat: dict[str, dict] = {}
+    basin_reproj_for_sigma = (
+        basin_gdf.to_crs(ref_crs)
+        if ref_crs and basin_gdf.crs != ref_crs else basin_gdf
+    ) if False else None  # placeholder; ref_crs is set below — defer load
+    # NOTE: σ load happens after ref_crs is established (next block).
     if 'Total_SW' not in ml_basin_yearly_by_cat:
         logger.warning('No ML Total_SW rasters found; skipping validation.')
         return pd.DataFrame()
@@ -4561,6 +4638,21 @@ def run_cap_srp_validation(
         row[basin_col]: row.geometry.area
         for _, row in basin_reproj.iterrows()
     }
+
+    # Now that basin_reproj is set, populate σ load
+    for _cat in ml_category_dirs:
+        ml_basin_sigma_by_cat[_cat] = _load_basin_sigma_yearly(
+            sigma_raster_dir, _cat, basin_reproj, basin_col, year_range,
+        )
+    if any(ml_basin_sigma_by_cat.values()):
+        logger.info(
+            'Loaded σ rasters for CI bands from %s', sigma_raster_dir,
+        )
+    else:
+        logger.info(
+            'No σ rasters found at %s — CI bands skipped.',
+            sigma_raster_dir,
+        )
 
     # ── Per-category metrics + CSV + time-series plots + scatter ────────
     # Each ML category (Total_SW, Irrigation_SW, Non_Irrigation_SW) is
@@ -4684,15 +4776,51 @@ def run_cap_srp_validation(
         ts_csv = os.path.join(output_dir, f'{csv_prefix}_time_series.csv')
         ts_df.to_csv(ts_csv, index=False)
 
-        # Per-category time-series plots
+        # Per-category time-series plots — include σ for ML and approx
+        # CAP (approx σ scales identically to approx mean since
+        # approx = ML × ratio).
+        ml_sigma_yearly = ml_basin_sigma_by_cat.get(cat_name, {})
+        ml_src_dict: dict = {
+            'yearly': _transpose_basin_yearly(ml_cat_yearly),
+        }
+        if ml_sigma_yearly:
+            ml_src_dict['yearly_sigma'] = _transpose_basin_yearly(
+                ml_sigma_yearly,
+            )
         cat_ts_sources = {
-            'ML': {'SW': {'yearly': _transpose_basin_yearly(ml_cat_yearly)}},
-            'CAP_SRP': {'SW': {'yearly': _transpose_basin_yearly(cat_obs_yearly)}},
+            'ML': {'SW': ml_src_dict},
+            'CAP_SRP': {'SW': {
+                'yearly': _transpose_basin_yearly(cat_obs_yearly),
+            }},
         }
         if approx_yearly:
-            cat_ts_sources['ML_CAP_approx'] = {
-                'SW': {'yearly': _transpose_basin_yearly(approx_yearly)},
+            approx_src_dict: dict = {
+                'yearly': _transpose_basin_yearly(approx_yearly),
             }
+            # Compute approx σ per basin per year:
+            # σ_approx = σ_ML × delivery_ratio, where ratio = approx / ML
+            if ml_sigma_yearly:
+                approx_sigma: dict[str, dict[int, float]] = {}
+                for basin, yr_dict in approx_yearly.items():
+                    for yr, approx_val in yr_dict.items():
+                        ml_val = ml_cat_yearly.get(basin, {}).get(yr)
+                        if (ml_val is None or not np.isfinite(ml_val)
+                                or ml_val <= 0):
+                            continue
+                        ratio = approx_val / ml_val
+                        sigma_ml = (
+                            ml_sigma_yearly.get(basin, {}).get(yr)
+                        )
+                        if sigma_ml is None or not np.isfinite(sigma_ml):
+                            continue
+                        approx_sigma.setdefault(basin, {})[yr] = (
+                            sigma_ml * ratio
+                        )
+                if approx_sigma:
+                    approx_src_dict['yearly_sigma'] = (
+                        _transpose_basin_yearly(approx_sigma)
+                    )
+            cat_ts_sources['ML_CAP_approx'] = {'SW': approx_src_dict}
         # CAP+SRP+Spill series only for Total_SW (full-CAP context).
         # Per-sector observations don't have a separate "+ Spill"
         # variant — spill water is a CAP delivery anomaly, not a
@@ -5470,6 +5598,96 @@ def run_ps_intercomparison(
         pd.DataFrame(huc12_ps_metrics).to_csv(
             os.path.join(huc12_dir, 'huc12_ps_metrics.csv'), index=False,
         )
+
+    # ── 9b. Basin-aggregated diff volume choropleth (ML − PS) ─────────
+    # Total + GW + SW Δ volume choropleths at GW basin polygons, mean-
+    # annual over the analysis window.  Volume only (depth-mode is not
+    # informative at this aggregation scale; basin area dominates over
+    # the per-basin depth-difference signal).
+    basin_diff_dir = os.path.join(output_dir, 'Spatial_Diff/')
+    makedirs(basin_diff_dir)
+    basin_b_reproj = (
+        basin_gdf.to_crs(huc_reproj_ps.crs)
+        if basin_gdf.crs != huc_reproj_ps.crs else basin_gdf
+    )
+    basin_name_col = (
+        basin_col if basin_col in basin_b_reproj.columns
+        else basin_b_reproj.columns[0]
+    )
+    ama_ina_basin = get_ama_ina_basin_names()
+    _af_to_m3_basin = 1.0 / M3_TO_AF
+    for cat_key, cat_name in cat_labels.items():
+        ml_basin_mean = ml_vols[cat_key]['mean']
+        ps_basin_mean = ps_vols[cat_key]['mean']
+        diff_vals_basin = []
+        for b in basin_names:
+            ml_v = ml_basin_mean.get(b, 0.0)
+            ps_v = ps_basin_mean.get(b, 0.0)
+            diff_vals_basin.append((ml_v - ps_v) * _af_to_m3_basin)
+        plot_gdf_b = basin_b_reproj.set_index(basin_name_col).loc[
+            [b for b in basin_names if b in basin_b_reproj[basin_name_col].values]
+        ].copy()
+        plot_gdf_b['diff'] = [
+            (ml_basin_mean.get(b, 0.0) - ps_basin_mean.get(b, 0.0))
+            * _af_to_m3_basin
+            for b in plot_gdf_b.index
+        ]
+        plot_gdf_b.loc[plot_gdf_b['diff'].abs() < 1e-3, 'diff'] = np.nan
+        d_arr_b = plot_gdf_b['diff'].dropna().values
+        if d_arr_b.size == 0:
+            continue
+        vmax_b = max(
+            abs(np.nanpercentile(d_arr_b, 2)),
+            abs(np.nanpercentile(d_arr_b, 98)),
+            1e-6,
+        )
+        from matplotlib.cm import ScalarMappable
+        from matplotlib.colors import Normalize
+        import matplotlib.ticker as mticker
+        fig, ax = plt.subplots(1, 1, figsize=(8, 8), constrained_layout=True)
+        fig.suptitle(
+            f'{cat_name} \u2014 Basin-Level Volume Diff (ML \u2212 PS)',
+            fontsize=14, fontweight='bold',
+        )
+        plot_gdf_b.plot(
+            ax=ax, column='diff', cmap='RdBu_r',
+            vmin=-vmax_b, vmax=vmax_b,
+            edgecolor='#666666', linewidth=0.5,
+            legend=False, missing_kwds={'color': '#EEEEEE'},
+        )
+        _overlay_boundaries(
+            ax, basin_b_reproj, ama_ina_basin, basin_name_col,
+            label_fontsize=5.0, label_all=True,
+        )
+        sm = ScalarMappable(cmap='RdBu_r', norm=Normalize(-vmax_b, vmax_b))
+        sm.set_array([])
+        cbar = fig.colorbar(
+            sm, ax=ax, shrink=0.5, pad=0.06,
+            orientation='horizontal', aspect=40, extend='both',
+        )
+        cbar.formatter = mticker.FuncFormatter(lambda x, _: f'{x/1e6:g}')
+        cbar.update_ticks()
+        cbar.set_label(
+            r'$\Delta$ Volume ($\times$10$^{6}$ m$^3$)',
+            fontsize=10, fontweight='bold',
+        )
+        cbar.ax.tick_params(labelsize=10)
+        secax = cbar.ax.secondary_xaxis(
+            'top',
+            functions=(lambda x: x * M3_TO_AF, lambda x: x / M3_TO_AF),
+        )
+        secax.set_xlabel(
+            '\u0394 Volume (AF)', fontsize=10, fontweight='bold',
+        )
+        secax.tick_params(labelsize=10)
+        fig.savefig(
+            os.path.join(
+                basin_diff_dir, f'Spatial_Diff_{cat_name}_Volume.png',
+            ),
+            dpi=600, bbox_inches='tight',
+        )
+        plt.close(fig)
+    logger.info(f'Basin-level Δ volume maps saved to {basin_diff_dir}')
 
     # ── Summary ───────────────────────────────────────────────────────
     logger.info('\n' + '=' * 60)
