@@ -344,6 +344,83 @@ def _compute_huc12_zonal_stats(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Workflow irrigation footprint helper (used to mask intercomp diffs)
+# ═════════════════════════════════════════════════════════════════════════════
+WORKFLOW_IRR_MIN_FRAC: float = 0.05
+
+
+def _build_workflow_irr_mask(
+        predictor_dir: str,
+        year_range: tuple[int, int],
+        irr_fraction_band: int = 15,
+        min_irr_frac: float = WORKFLOW_IRR_MIN_FRAC,
+) -> tuple['np.ndarray', str] | None:
+    """Boolean per-pixel mask of "workflow-irrigated" pixels.
+
+    Reads ``annual_irr_fraction`` (band *irr_fraction_band* of
+    ``Predictor_{year}.tif``) for each year in *year_range*, takes the
+    per-pixel mean across years, and thresholds at *min_irr_frac*
+    (default 0.05 — same threshold used by
+    ``focal_fill_irr_fraction`` to decide which neighbours count).
+
+    Used to constrain pixel-level intercomparison diffs (NHM/Reitz/
+    USDA-SCS Peff/PCML) to the same irrigated footprint the workflow
+    uses, so the diff signal isn't dominated by which source's
+    irrigation mask each product carries internally.
+
+    The focal-fill step that the partition applies to plug edge-pixel
+    gaps requires per-pixel well_density and a 1-D ravel of valid
+    pixels; replicating it raster-side here would add a meaningful
+    amount of plumbing for marginal benefit (the masked-out pixels
+    are typically the same ones focal-fill would leave below
+    threshold anyway since they have no nearby substantial-irr
+    neighbours).  If we ever need it, plug it in here.
+
+    Args:
+        predictor_dir: Directory with ``Predictor_{year}.tif`` rasters.
+        year_range: Inclusive ``(start, end)`` year window over which
+            to average ``annual_irr_fraction``.
+        irr_fraction_band: 1-indexed band number for
+            ``annual_irr_fraction`` (default 15 — the predictor's
+            last band).
+        min_irr_frac: Threshold for binary mask.
+
+    Returns:
+        ``(mask_2d, ref_raster_path)`` — ``mask_2d`` is a boolean
+        ``ndarray`` matching the predictor grid (True = irrigated).
+        Returns ``None`` if no predictor rasters exist in the window.
+    """
+    if not predictor_dir or not os.path.isdir(predictor_dir):
+        return None
+    start_yr, end_yr = year_range
+    accum: 'np.ndarray | None' = None
+    n_years = 0
+    ref_path: str | None = None
+    for year in range(start_yr, end_yr + 1):
+        path = os.path.join(predictor_dir, f'Predictor_{year}.tif')
+        if not os.path.isfile(path):
+            continue
+        with rio.open(path) as src:
+            if irr_fraction_band > src.count:
+                continue
+            arr = src.read(irr_fraction_band).astype(np.float64)
+            if ref_path is None:
+                ref_path = path
+        arr = np.where(np.isfinite(arr), arr, 0.0)
+        arr = np.clip(arr, 0.0, 1.0)
+        if accum is None:
+            accum = arr.copy()
+        else:
+            accum += arr
+        n_years += 1
+    if n_years == 0 or accum is None or ref_path is None:
+        return None
+    mean_frac = accum / float(n_years)
+    mask = mean_frac >= min_irr_frac
+    return mask, ref_path
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # 1. Load USGS NHM HUC12 data → mean-annual basin volumes
 # ═════════════════════════════════════════════════════════════════════════════
 def load_nhm_basin_volumes(
@@ -355,7 +432,7 @@ def load_nhm_basin_volumes(
     year_range: tuple[int, int],
     output_dir: str,
     predictor_dir: str | None = None,
-    irr_fraction_band: int = 14,
+    irr_fraction_band: int = 15,
 ) -> dict[str, dict]:
     """
     Read the NHM monthly GW/SW CSVs, compute annual totals per AZ HUC12,
@@ -1228,7 +1305,7 @@ def _plot_basin_diff_panels(
         )
         _overlay_boundaries(
             ax, basin_gdf, get_ama_ina_basin_names(), name_col,
-            label_fontsize=5.0, label_all=False,
+            label_fontsize=5.0, label_all=True,
         )
         ax.set_title(panel['panel_title'], fontsize=12, fontweight='bold')
         if not shared_colorbar:
@@ -1295,6 +1372,7 @@ def _plot_spatial_diff_maps(
     output_dir: str,
     basin_shp: str | None = None,
     basin_col: str = 'BASIN_NAME',
+    irr_mask: 'np.ndarray | None' = None,
 ) -> None:
     """Create spatial maps of pairwise mean-annual depth differences.
 
@@ -1385,6 +1463,12 @@ def _plot_spatial_diff_maps(
                 arr[np.isnan(arr)] = 0.0
                 if az_mask is not None:
                     arr[~az_mask] = 0.0
+                # Constrain pixel diff to the workflow irrigation
+                # footprint so the signal isn't dominated by which
+                # source's irrigation mask each product carries
+                # internally.
+                if irr_mask is not None and irr_mask.shape == arr.shape:
+                    arr[~irr_mask] = 0.0
                 raster_arrays[source] = arr
 
         for ucfg in unit_configs:
@@ -1510,7 +1594,7 @@ def _load_nhm_annual_csv_to_basins(
     output_dir: str,
     mode: str = 'volume',
     predictor_dir: str | None = None,
-    irr_fraction_band: int = 14,
+    irr_fraction_band: int = 15,
     raster_label: str = 'CU',
 ) -> dict:
     """
@@ -2580,9 +2664,22 @@ def run_intercomparison(
                   for cat in ('GW', 'SW')},
     }
     diff_dir = os.path.join(output_dir, 'Spatial_Diff/')
+    # Build workflow irrigation mask (mean irr_fraction across the
+    # comparison years thresholded at WORKFLOW_IRR_MIN_FRAC) to
+    # constrain the pixel-level GW/SW diff maps to where the workflow
+    # actually predicts irrigation — keeps NHM / Reitz mask differences
+    # from dominating the Δ-Volume signal.
+    _irr_mask_arr = None
+    if predictor_dir:
+        _irr_mask_res = _build_workflow_irr_mask(
+            predictor_dir, ml_year_range,
+        )
+        if _irr_mask_res is not None:
+            _irr_mask_arr, _ = _irr_mask_res
     _plot_spatial_diff_maps(
         mean_raster_paths, ref_raster, diff_dir,
         basin_shp=basin_shp, basin_col=basin_col,
+        irr_mask=_irr_mask_arr,
     )
 
     # ── 9b. Basin-aggregated Δ volume choropleths with pct + 95% CI ───
@@ -3450,6 +3547,18 @@ def run_cu_intercomparison(
                 nhm_arr = src.read(1).astype(np.float64)
             ml_arr[np.isnan(ml_arr)] = 0.0
             nhm_arr[np.isnan(nhm_arr)] = 0.0
+            # Constrain pixel-level diff to the workflow irrigation
+            # footprint so the signal isn't dominated by which source
+            # decided to predict CU on which non-irrigated cells.
+            if predictor_dir:
+                _cu_mask = _build_workflow_irr_mask(
+                    predictor_dir, ml_year_range,
+                )
+                if _cu_mask is not None:
+                    _cu_mask_arr, _ = _cu_mask
+                    if _cu_mask_arr.shape == ml_arr.shape:
+                        ml_arr[~_cu_mask_arr] = 0.0
+                        nhm_arr[~_cu_mask_arr] = 0.0
             pixel_diff_arr = ml_arr - nhm_arr
 
         # Panel 3: Basin Δ depth (AF / m² → mm)
@@ -3660,15 +3769,27 @@ def _load_ml_peff_to_basins(
     year_range: tuple[int, int],
     output_dir: str,
     peff_band: int,
-    irr_fraction_band: int = 14,
+    irr_fraction_band: int = 15,
     label: str = 'Peff',
 ) -> dict:
-    """Extract Peff from predictor rasters, scale by ``irr_fraction``,
-    and aggregate to basin volumes (AF).
+    """Extract Peff from predictor rasters, mask to the workflow's
+    irrigated footprint, and aggregate to basin volumes (AF).
 
-    For each year the irrigated-area effective precipitation depth is
-    ``depth = Peff_mm × irr_fraction``.  The scaled depth is written as
-    a single-band raster, then aggregated to basin volumes.
+    The ``annual_peff_mm`` (USDA-SCS formula) and ``annual_peff_pcml_mm``
+    bands populate every pixel — including desert and urban — so a raw
+    basin sum would lump in non-irrigated land.  To compare cleanly
+    against NHM Peff (HUC12-aggregated to its own irrigated footprint)
+    we apply the workflow's binary irrigation mask
+    (``annual_irr_fraction >= WORKFLOW_IRR_MIN_FRAC``) to the per-year
+    raster before aggregation: pixels below threshold are zeroed.
+    The threshold matches ``focal_fill_irr_fraction`` (0.05).
+
+    Earlier versions used ``Peff × irr_fraction`` (continuous fractional
+    weighting) which was both (a) using the wrong band — the default
+    was 14 = ``annual_urban_fraction``, since corrected to 15 — and
+    (b) under-weighting partial-irrigation pixels in a way the NHM
+    HUC12 totals don't, biasing the comparison.  Binary masking with
+    a low threshold lines the two products' footprints up.
 
     Returns ``{'mean': {basin: AF}, 'yearly': {year: {basin: AF}}}``.
     """
@@ -3694,7 +3815,10 @@ def _load_ml_peff_to_basins(
         irr_arr[np.isnan(irr_arr)] = 0.0
         irr_arr = np.clip(irr_arr, 0, 1)
 
-        scaled = peff_arr * irr_arr
+        # Binary workflow mask: only pixels with substantial
+        # irrigation contribute the full SCS / PCML Peff value.
+        irr_mask = (irr_arr >= WORKFLOW_IRR_MIN_FRAC).astype(np.float64)
+        scaled = peff_arr * irr_mask
 
         # Write per-year raster
         out_tif = os.path.join(output_dir, f'ML_{label}_{year}_mm.tif')
@@ -3767,7 +3891,7 @@ def run_peff_intercomparison(
     ref_raster: str | None = None,
     peff_band: int = 4,
     peff_pcml_band: int = 5,
-    irr_fraction_band: int = 14,
+    irr_fraction_band: int = 15,
     ml_year_range: tuple[int, int] = (2000, 2024),
     ml_pcml_year_range: tuple[int, int] = (2000, 2023),
     nhm_year_range: tuple[int, int] = (2000, 2020),
@@ -4357,6 +4481,29 @@ def run_peff_intercomparison(
                         ]
                 arr[np.isnan(arr)] = 0.0
                 peff_pixel_arrays[src_key] = arr
+
+        # Apply the workflow irrigation mask to all sources so the
+        # pixel-level diff compares like footprints.  USDA-SCS and
+        # PCML rasters are already masked at the source by
+        # _load_ml_peff_to_basins, but NHM is rasterised from HUC12
+        # totals and covers every HUC12 polygon — masking it here
+        # constrains the comparison to the workflow footprint.
+        peff_irr_mask_result = _build_workflow_irr_mask(
+            predictor_dir, ml_year_range,
+            irr_fraction_band=irr_fraction_band,
+        )
+        if peff_irr_mask_result is not None:
+            _peff_mask, _ = peff_irr_mask_result
+            for src_key, arr in peff_pixel_arrays.items():
+                if arr.shape == _peff_mask.shape:
+                    arr_m = arr.copy()
+                    arr_m[~_peff_mask] = 0.0
+                    peff_pixel_arrays[src_key] = arr_m
+            logger.info(
+                '  Applied workflow irrigation mask to Peff pixel '
+                'arrays (%d masked-in pixels)',
+                int(_peff_mask.sum()),
+            )
 
         peff_pixel_pairs = [
             ('USDA-SCS Peff', 'NHM Peff', 'ML_Peff', 'NHM_Peff'),
