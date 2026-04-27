@@ -4397,13 +4397,14 @@ def _draw_sigma_attribution_legend(
                        linewidth=0.6, label=_SIGMA_ATTR_SHARE_LABELS[i])
         for i in range(5)
     ]
-    # σ_Model dominant overlay handle (Projection era only — the
+    # σ_Model dominant edge handle (Projection era only — the
     # Mgmt-vs-Climate axis cannot represent Model-dominated variance,
-    # so those basins get a lavender + xxx-hatch overlay).
+    # so those basins get a thick lime polygon outline that overlays
+    # without hiding the underlying Mgmt/Climate fill color).
     if era == 'Projection':
         model_dom_patch = mpatches.Patch(
-            facecolor='#E8E0FF', edgecolor='#444444',
-            linewidth=0.6, hatch='xxx', label='σ_Model dominated',
+            facecolor='white', edgecolor='#00C853',
+            linewidth=2.0, label='σ_Model dominated',
         )
         handles.append(model_dom_patch)
     na_patch = mpatches.Patch(
@@ -4464,7 +4465,7 @@ def _draw_sigma_attribution_disclosure_box(
         f'({n_model_dom / n_total * 100:.0f}%); median Model share '
         f'{median_model:.0f}%.\n'
         f'Color axis classifies Management vs Climate within the '
-        f'remaining variance; basins with the lavender ×-hatch overlay '
+        f'remaining variance; basins outlined in lime green '
         f'(see legend) are Model-dominated overall.'
     )
     # Make room for the two-line disclosure between the map panels and
@@ -4839,23 +4840,22 @@ def _draw_attribution_basin_panel(
         linewidth=list(linewidths),
     )
 
-    # Overlay σ_Model-dominant basins (Projection only) with a light
-    # lavender fill + cross-hatch pattern, mirroring the N/A overlay
-    # convention but with a distinct color (lavender → purple-family
-    # to suggest "Model" the same way the hindcast/historical palette
-    # uses purple for the Model-Dominated bin) and a distinct hatch
-    # (xxx vs N/A's ///).  Indicates that the Mgmt-vs-Climate
-    # classification at these basins is secondary signal — the
-    # dominant variance is the σ_Model component which the binary
-    # Mgmt/Climate axis cannot represent.
+    # Highlight σ_Model-dominant basins (Projection only) with a thick
+    # bright-lime polygon edge.  Earlier iterations tried a red edge
+    # (which clashed with the INA dark-red border) and a lavender
+    # cross-hatch fill (which COMPLETELY HID the underlying Mgmt-vs-
+    # Climate color, defeating the figure's primary attribution axis).
+    # A bright lime edge stands out against the cool/warm diverging
+    # palette, doesn't conflict with AMA black or INA dark red, and
+    # leaves the choropleth color visible so reviewers can read both
+    # the Model-dominance flag AND the residual Mgmt/Climate balance
+    # at the same time.
     if not ternary and era == 'Projection' and dominant.any():
         dom_gdf = merged[dominant]
-        dom_gdf.plot(
+        dom_gdf.boundary.plot(
             ax=ax,
-            color='#E8E0FF',
-            edgecolor='#888888',
-            linewidth=0.6,
-            hatch='xxx',
+            color='#00C853',
+            linewidth=2.0,
         )
 
     # Overlay N/A basins with a diagonal-hatch pattern on a light
@@ -4870,24 +4870,10 @@ def _draw_attribution_basin_panel(
         na_gdf.plot(
             ax=ax,
             color='#E8E8E8',
-            edgecolor='#999999',
+            edgecolor='#AAAAAA',
             linewidth=0.6,
             hatch='///',
         )
-        # Set the hatch color to a medium gray (matplotlib uses
-        # rcParams for hatch color, but we can override per-patch).
-        # N/A `///` hatches use light gray; σ_Model-dominant `xxx`
-        # hatches keep the darker `#444444` edge for stronger visual
-        # weight (the Model-dom flag is a calibration concern reviewers
-        # should notice immediately).
-        for patch in ax.patches:
-            if not (hasattr(patch, 'get_hatch') and patch.get_hatch()):
-                continue
-            h = patch.get_hatch() or ''
-            if 'x' in h:
-                patch.set_edgecolor('#444444')
-            else:
-                patch.set_edgecolor('#AAAAAA')
 
     # Label every basin
     ama_ina = get_ama_ina_basin_names()

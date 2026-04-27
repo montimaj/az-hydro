@@ -4821,6 +4821,17 @@ def load_cap_srp_annual_sw(
     return basin_year
 
 
+# Independent ensemble components whose per-basin per-year σ contributes
+# to Sigma_Total at the basin level.  Each component is a separately-
+# generated ensemble that perturbs one input class (climate, model
+# seeds, GW wells, etc.) — they're designed to be near-orthogonal so
+# combining via quadrature is correct.  Components without a CSV for a
+# given category are silently skipped.
+_BASIN_SIGMA_COMPONENTS: tuple[str, ...] = (
+    'Irr', 'USBR', 'Model', 'LULC', 'GW', 'MACA', 'CU',
+)
+
+
 def _load_basin_sigma_yearly(
         sigma_raster_dir: str,
         cat_file_prefix: str,
@@ -4828,22 +4839,96 @@ def _load_basin_sigma_yearly(
         basin_col: str,
         year_range: tuple[int, int],
 ) -> dict[str, dict[int, float]]:
-    """Per-basin per-year σ volume (AF) from category σ rasters.
+    """Per-basin per-year σ volume (AF) for one category, combined from
+    the ensemble-derived component basin σ CSVs.
 
-    Reads ``Sigma_Total_{cat_file_prefix}_mm_{year}.tif`` from
-    *sigma_raster_dir* and aggregates per-pixel σ_mm to per-basin σ
-    via spatial quadrature: ``σ_basin = sqrt(Σ σ_pixel²)``.  Treats
-    per-pixel σ as approximately independent — matches the convention
-    used by ``_load_az_sigma_total_for_category`` for AZ-wide rollups.
+    Reads ``Basin_Sigma_<comp>_<cat_file_prefix>.csv`` from each
+    ``Sigma_<comp>/`` directory beneath the Uncertainty root (derived
+    from the parent of ``sigma_raster_dir``) and combines independent
+    components in quadrature: ``σ_total = sqrt(Σ σ_comp²)``.  This
+    uses the basin-level σ that the uncertainty pipeline already
+    computed from ensemble member spread, instead of re-aggregating
+    per-pixel σ rasters via spatial quadrature (which assumed
+    independent pixel errors and shrank the band by ~sqrt(N_pixels)
+    versus reality, producing visually invisible CI bands at AMA
+    scale).
 
-    Returns ``{basin_name: {year: sigma_AF}}``.  Returns an empty dict
-    silently when the σ raster directory or files don't exist.
+    Falls back to per-pixel raster quadrature ONLY if no component
+    CSVs are found, preserving compatibility with prediction roots
+    that lack the component breakdown.
+
+    Args:
+        sigma_raster_dir: ``.../Uncertainty/Sigma_Total/Rasters/`` —
+            kept for signature compatibility; the Uncertainty root
+            is derived as the parent of this directory's parent.
+        cat_file_prefix: Category tag matching the CSV filename suffix,
+            e.g. ``'Total_SW'``, ``'Irrigation_GW'``,
+            ``'Non_Irrigation'``.
+        basin_reproj: Basin polygon GeoDataFrame (used only for the
+            raster-fallback path).
+        basin_col: Column naming each basin (must match ``Region``
+            column values in the component CSVs).
+        year_range: Inclusive ``(start, end)`` year range.
+
+    Returns:
+        ``{basin_name: {year: sigma_AF}}``.  Empty dict if neither
+        component CSVs nor σ rasters are available.
     """
     out: dict[str, dict[int, float]] = {}
-    if not sigma_raster_dir or not os.path.isdir(sigma_raster_dir):
+    if not sigma_raster_dir:
+        return out
+
+    # Try the component-CSV path first (the preferred ensemble-based
+    # source written by Step 3b uncertainty runs).  Normalise away
+    # any trailing slashes so the dirname walk reaches the
+    # Uncertainty root regardless of how the caller spells the path.
+    _norm_sigma_dir = os.path.normpath(sigma_raster_dir)
+    unc_dir = os.path.dirname(os.path.dirname(_norm_sigma_dir))
+    if os.path.isdir(unc_dir):
+        var_per_basin_yr: dict[str, dict[int, float]] = {}
+        n_comp_loaded = 0
+        for comp in _BASIN_SIGMA_COMPONENTS:
+            csv_path = os.path.join(
+                unc_dir, f'Sigma_{comp}',
+                f'Basin_Sigma_{comp}_{cat_file_prefix}.csv',
+            )
+            if not os.path.isfile(csv_path):
+                continue
+            try:
+                df = pd.read_csv(csv_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    'Failed to read %s: %s', csv_path, exc,
+                )
+                continue
+            req_cols = {'Year', 'Region', 'Sigma_Volume_AF'}
+            if not req_cols.issubset(df.columns):
+                continue
+            df = df.dropna(subset=['Year', 'Region', 'Sigma_Volume_AF'])
+            df = df[
+                (df.Year >= year_range[0])
+                & (df.Year <= year_range[1])
+            ]
+            for _, row in df.iterrows():
+                b = row['Region']
+                yr = int(row['Year'])
+                s = float(row['Sigma_Volume_AF'])
+                if not np.isfinite(s):
+                    continue
+                var_per_basin_yr.setdefault(b, {})[yr] = (
+                    var_per_basin_yr.get(b, {}).get(yr, 0.0) + s ** 2
+                )
+            n_comp_loaded += 1
+        if n_comp_loaded > 0:
+            for b, yr_dict in var_per_basin_yr.items():
+                out[b] = {yr: float(np.sqrt(v)) for yr, v in yr_dict.items()}
+            return out
+
+    # Fallback: per-pixel σ raster quadrature (legacy path, used only
+    # when the per-component CSVs aren't present)
+    if not os.path.isdir(sigma_raster_dir):
         return out
     start_yr, end_yr = year_range
-    # Load basin geometries once
     basin_geoms = {
         row[basin_col]: row.geometry
         for _, row in basin_reproj.iterrows()
@@ -4870,7 +4955,6 @@ def _load_basin_sigma_yearly(
                     [geom], transform=transform, invert=True,
                     out_shape=shape,
                 )
-                # Spatial quadrature within the basin
                 sigma_m3 = float(np.sqrt(np.sum(sig_vol_m3[mask] ** 2)))
                 sigma_af = sigma_m3 * M3_TO_AF
                 out.setdefault(basin_name, {})[year] = sigma_af
