@@ -1899,14 +1899,22 @@ def era_sw_sigma(year: int) -> float:
 
     Anchor points for 1912–1948 (year, σ):
     (1912, 0.0), (1915, 1.5), (1917, 0.3), (1929, 0.3),
-    (1935, 0.0), (1940, 0.3), (1945, 1.0), (1948, 1.5).
+    (1935, 0.0), (1940, 0.10), (1945, 0.30), (1948, 1.5).
+
+    The 1940/1945 anchors were lowered (1940: 0.3→0.10, 1945: 1.0→
+    0.30) to tighten the canal-served SW kernel pre-1948.  ML was
+    over-attributing volume to SW at SRP/Yuma/San Carlos canal pixels
+    (~1.7 MAF SW at 1945) vs USBR-reconciled estimates (~1.0 MAF).
+    A tighter σ keeps the SW signal localized to actual canal pixels
+    instead of bleeding into adjacent ag pixels via Gaussian smoothing,
+    routing the bled volume back to GW via the density-ratio.
     """
     if year < 1912:
         return 0.0
     if year < 1948:
         anchors = [
             (1912, 0.0), (1915, 1.5), (1917, 0.3), (1929, 0.3),
-            (1935, 0.0), (1940, 0.3), (1945, 1.0), (1948, 1.5),
+            (1935, 0.0), (1940, 0.10), (1945, 0.30), (1948, 1.5),
         ]
         for i in range(len(anchors) - 1):
             y0, s0 = anchors[i]
@@ -2222,10 +2230,12 @@ def partition_predictions(
             # mean-depth jump).
             #   1938: 0.95
             #   1939: 0.90
-            #   1940: 0.80 (matches USGS 1940 = 1.80)
-            #   1941: 0.75
-            #   1942-1944: 0.70
-            _ramp_intersect = {1938: 0.95, 1939: 0.90, 1940: 0.80, 1941: 0.75}
+            #   1940-1944: 0.70 (flat — admits more well-LULC intersection
+            #                    pixels at 1940-41 to recover 1940 GW
+            #                    under-attribution toward USGS 1.80 MAF
+            #                    anchor while keeping the post-1939
+            #                    plateau monotonic with WWII drilling)
+            _ramp_intersect = {1938: 0.95, 1939: 0.90}
             _intersect_thresh = _ramp_intersect.get(year, 0.7)
             cf_intersect = np.clip(np.nan_to_num(crop_frac_col, nan=0.0), 0, 1)
             uf_intersect = (
@@ -2404,41 +2414,19 @@ def partition_predictions(
                 )
 
     # Irr-fraction overrides:
-    #   (1) Through 1980 pixels with uf < 0.3 (rural + suburban
-    #       fringe + LULC halo): force 0.95 flat.  USGS shows ag was
-    #       89-97 % of AZ-total pumping through 1980; the flat 0.95
-    #       is well-calibrated at rural / ag-dominated pixels and
-    #       suburban-fringe pixels.  0.3 is the urban-core threshold
-    #       — below it, pre-1980 M&I per-pixel was small enough to
-    #       treat as ~5 % NonIrr; above it, the urban share is large
-    #       enough to matter.
-    #   (2) Through 1980 pixels with uf >= 0.3 (real urban cores,
-    #       any basin): irr_frac = 1 − urban_frac (clipped
-    #       [0.05, 1]).  Applies regardless of AMA status —
-    #       Flagstaff, Lake Havasu City, Bullhead City, Page,
-    #       Phoenix / Tucson urban cores.  Routes the uf share to
-    #       NonIrr (municipal / industrial), the (1 - uf) share to
-    #       Irr.  The 0.3 threshold (raised from 0.2) recovers the
-    #       peak-year Irr% that over-correction at suburban-fringe
-    #       pixels was dropping.
-    #   (3) 1981–1985 NON-AMA: irr_frac = 1 − urban_frac.
+    #   (1) Pre-1970: irr_frac = 0.95 everywhere (USGS shows ag was
+    #       ~95 % of AZ-total pumping pre-1970; flat 0.95 is well-
+    #       calibrated for the pre-GMA rural-dominated era).
+    #   (2) 1970-1985 NON-AMA: irr_frac = 1 − urban_frac (clipped
+    #       [0.05, 1]).  Routes the uf share to NonIrr (municipal /
+    #       industrial), the (1 - uf) share to Irr.
+    #   (3) 1970-1985 AMA: natural year-specific irr_capacity_fraction
+    #       (registry captures real metro Phoenix/Tucson M&I growth).
     #   (4) 1986+ NON-AMA: Option C via post-1985 LU-aware branch.
-    #   (5) 1981+ AMA: natural year-specific irr_capacity_fraction.
     IRR_OVERRIDE_PRE_1970 = 0.95
     IRR_OVERRIDE_FLOOR = 0.05
-    URBAN_REAL_THRESHOLD = 0.3
-    if year <= 1980:
+    if year < 1970:
         irr_frac = np.full_like(irr_frac, IRR_OVERRIDE_PRE_1970)
-        # Real-urban pixels (uf >= 0.3) get 1 - uf routing regardless
-        # of AMA status — M&I pumping at any urban core.
-        if urban_frac_col is not None:
-            uf = np.clip(np.nan_to_num(urban_frac_col, nan=0.0), 0, 1)
-            urban_real = uf >= URBAN_REAL_THRESHOLD
-            if urban_real.any():
-                irr_frac[urban_real] = np.clip(
-                    1.0 - uf[urban_real],
-                    IRR_OVERRIDE_FLOOR, 1.0,
-                )
     elif (year < 1986 and basin_names is not None
             and urban_frac_col is not None):
         non_ama = ~np.isin(basin_names, list(get_ama_basins(year)))
@@ -2554,23 +2542,58 @@ def partition_predictions(
         nonirr[both_lu] = predictions[both_lu] * uf[both_lu]
         irr[pure_desert_no_well] = 0.0
         nonirr[pure_desert_no_well] = 0.0
-        # Scale pure_desert_with_well volumes by 0.75 throughout the
-        # post-1985 override era, EXCEPT 1990-2000.  True desert wells
-        # (cf = 0, uf < 0.30, AGRI <= 0.1, has_well; the AGRI gate above
-        # re-routes ag-halo desert pixels to only_crop) are sparse rural
-        # domestic / stock / abandoned industrial wells that pump little
-        # water in reality but get non-trivial ML prediction from
-        # regional well density.  0.75 trims ~25 % of true-desert volume
-        # — calibrated against USGS 2005/2010 anchors.  1990-2000 is
-        # excluded because USGS shows peak SW deliveries (4.3-4.5 MAF in
-        # 1990/1995) that the dampened ML run was under-shooting by
-        # 7-11 %; preserving full pure_desert_with_well volume in those
-        # years closes the 1990-2000 gap without disturbing the
-        # well-calibrated 2005+ anchors.
-        if not (1990 <= year <= 2000):
-            pure_desert_with_well = pure_desert & has_well
-            irr[pure_desert_with_well] = irr[pure_desert_with_well] * 0.75
-            nonirr[pure_desert_with_well] = nonirr[pure_desert_with_well] * 0.75
+        # At pure_desert_with_well (cf = 0, uf < 0.30, no AGRI halo,
+        # has_well), reassign the Irr / NIR split using the per-pixel
+        # irr_well_density vs nonirr_well_density ratio rather than the
+        # default partition's irr_capacity_fraction.  Rationale: rural
+        # desert wells are predominantly stock (ag-classified by USGS)
+        # or domestic / abandoned industrial (NIR).  AZDWR registry
+        # classifies each well by purpose, so the per-pixel
+        # irr_wd / (irr_wd + nonirr_wd) ratio carries that signal
+        # directly — much more physical than irr_capacity_fraction
+        # which at rural desert is dominated by regional metered M&I /
+        # industrial wells and routes ~70 % to NIR by default.  Falls
+        # back to the existing default partition at pixels where the
+        # well-density features carry no signal (irr_wd + nonirr_wd
+        # == 0, e.g. orphan registry entries).  A symmetric 0.75
+        # dampener trims volume because diffuse rural well predictions
+        # exceed real per-pixel pumping (calibrated against USGS 2005 /
+        # 2010 anchors).
+        pure_desert_with_well = pure_desert & has_well
+        _total_wd = irr_wd + nonirr_wd
+        with np.errstate(invalid='ignore', divide='ignore'):
+            _irr_share_wd = np.where(
+                _total_wd > 0,
+                irr_wd / np.maximum(_total_wd, 1e-12),
+                np.where(
+                    predictions > 0,
+                    irr / np.maximum(predictions, 1e-12),
+                    0.0,
+                ),
+            )
+        # Year-dependent constant Irr-bias.  +0.20 at 1986-2000 (lifts
+        # Irr% to close the 3-4 pp under-attribution at the wet-era /
+        # peak-SW USGS anchors); +0.10 at 2001+ (calibrated against
+        # 2005-2015 anchors which already track within ±2 pp).  Captures
+        # the systemic stock-water tilt across rural desert wells that
+        # the AZDWR irr_well_density ratio under-represents (registry
+        # under-classifies pasture / stock wells as agricultural).
+        _irr_bias = 0.20 if year <= 2000 else 0.10
+        _irr_share_wd = np.clip(_irr_share_wd + _irr_bias, 0.0, 1.0)
+        # Skip the 0.75 dampener for 1990-2000.  USGS shows peak SW
+        # deliveries (4.3-4.5 MAF in 1990/1995) that the dampened ML
+        # under-shoots by 7-11 %; preserving full volume at those wet
+        # years closes the gap while the well-density split keeps
+        # NIGW / Irr% well-aligned.
+        _wd_dampener = 1.0 if 1990 <= year <= 2000 else 0.75
+        irr[pure_desert_with_well] = (
+            predictions[pure_desert_with_well]
+            * _irr_share_wd[pure_desert_with_well] * _wd_dampener
+        )
+        nonirr[pure_desert_with_well] = (
+            predictions[pure_desert_with_well]
+            * (1.0 - _irr_share_wd[pure_desert_with_well]) * _wd_dampener
+        )
 
     # LU-only pixel split: at crop pixels, conserve volume by splitting
     # predictions between Irr (1 - urban_frac) and NonIrr (urban_frac);
@@ -2829,7 +2852,10 @@ def partition_predictions(
                 )
                 nonirr_sw = np.where(collapse_ni_sw, 0.0, nonirr_sw)
 
-    # Pre-1945: USGS shows ~100% GW statewide.  Restrict SW to pixels
+    # Pre-1948: USGS shows ~100% GW statewide pre-1945, with the same
+    # physical reality persisting through 1945-1947 (Gila Project Phase
+    # II SW deliveries had not yet ramped, and canal infrastructure
+    # outside SRP / San Carlos was negligible).  Restrict SW to pixels
     # that actually have direct access to surface water — canal-served
     # (smoothed or direct) or holding SW rights.  Elsewhere, collapse
     # SW back into GW so density-ratio leakage (Gaussian smoothing of
@@ -2837,8 +2863,8 @@ def partition_predictions(
     # This pixel-level gate is retained as a second line of defense
     # within canal-having basins — pixels in CAP service area that
     # are far from any actual canal still get phantom SW from
-    # smoothing, and pre-1945 we want no SW without physical access.
-    if year < 1945:
+    # smoothing, and pre-1948 we want no SW without physical access.
+    if year < 1948:
         _irr_sw_ok = has_smooth_canal | has_direct_canal | (
             (irr_swd > 0) if irr_swd is not None
             else np.zeros(len(predictions), dtype=bool)

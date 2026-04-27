@@ -5580,6 +5580,83 @@ def _load_az_sigma_total_for_category(
     return out
 
 
+def _plot_calibration_bars(
+        years: np.ndarray,
+        model: np.ndarray,
+        sigma: np.ndarray,
+        usgs: np.ndarray,
+        title: str,
+        out_path: str,
+        bar_color: str,
+        anchor_color: str,
+        ylabel: str = 'Withdrawal (MAF)',
+) -> None:
+    """Annual model bars (MAF) with 95% CI caps + USGS anchor overlay bars.
+
+    At each anchor year, an outlined transparent USGS bar is drawn
+    over the model bar with a Δ% annotation above the pair so the
+    calibration gap is visible at a glance.
+
+    Args:
+        years: 1-D int array of years (every annual bar).
+        model: 1-D model values aligned with ``years`` (MAF).
+        sigma: 1-D model 1σ values aligned with ``years`` (MAF).
+            Use NaN at years without σ.  Drawn as ±1.96 × σ (95% CI).
+        usgs: 1-D USGS anchor values aligned with ``years`` (MAF).
+            Use NaN at non-anchor years.
+    """
+    fig, ax = plt.subplots(figsize=(14, 5))
+    ax.bar(
+        years, model, color=bar_color, alpha=0.85,
+        edgecolor='#1B4F72', linewidth=0.4,
+        label='Model annual',
+    )
+    valid_sig = ~np.isnan(sigma) & ~np.isnan(model)
+    if np.any(valid_sig):
+        ci_95 = 1.96 * sigma[valid_sig]
+        ax.errorbar(
+            years[valid_sig], model[valid_sig],
+            yerr=ci_95,
+            fmt='none', ecolor='#1B2631', elinewidth=1.4, capsize=4,
+            capthick=1.4, alpha=0.95, zorder=6,
+            label='Model 95 % CI',
+        )
+    valid_u = ~np.isnan(usgs)
+    if np.any(valid_u):
+        ax.bar(
+            years[valid_u], usgs[valid_u],
+            color='none', edgecolor=anchor_color, linewidth=1.8,
+            alpha=1.0, zorder=4,
+            label='USGS anchor',
+        )
+        for yr, m_v, u_v in zip(years[valid_u], model[valid_u], usgs[valid_u]):
+            if not (np.isfinite(m_v) and np.isfinite(u_v) and u_v > 0):
+                continue
+            d = 100.0 * (m_v - u_v) / u_v
+            top = max(m_v, u_v)
+            mask = years == yr
+            if mask.any():
+                s = sigma[mask][0]
+                if np.isfinite(s):
+                    top = max(top, m_v + 1.96 * s)
+            ax.annotate(
+                f'{d:+.1f}%', xy=(yr, top), xytext=(0, 4),
+                textcoords='offset points', ha='center', va='bottom',
+                fontsize=7, color='#2C3E50', fontweight='bold',
+                rotation=90,
+            )
+    ax.set_xlabel('Year', fontweight='bold')
+    ax.set_ylabel(ylabel, fontweight='bold')
+    ax.set_title(title, fontweight='bold', fontsize=13)
+    ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+    ax.legend(loc='upper left', fontsize=9, framealpha=0.9)
+    ymin, ymax = ax.get_ylim()
+    ax.set_ylim(ymin, ymax * 1.15)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+
+
 def _plot_usgs_calibration_bars(
         df: pd.DataFrame,
         column: str,        # 'GW' or 'SW'
@@ -5588,43 +5665,55 @@ def _plot_usgs_calibration_bars(
         bar_color: str,
         anchor_color: str,
 ) -> None:
-    """Annual model bars (MAF) with ±1σ caps + USGS anchor markers."""
+    """Backward-compatible wrapper around ``_plot_calibration_bars``.
+
+    Reads the legacy column convention ``Model_{column}_kAF``,
+    ``Sigma_Model_{column}_kAF``, ``USGS_{column}_kAF``.
+    """
     years = df['Year'].astype(int).values
     model = df[f'Model_{column}_kAF'].values / 1000.0  # → MAF
     sigma = df[f'Sigma_Model_{column}_kAF'].values / 1000.0  # → MAF
     usgs = df[f'USGS_{column}_kAF'].values / 1000.0  # → MAF
-
-    fig, ax = plt.subplots(figsize=(14, 5))
-    ax.bar(
-        years, model, color=bar_color, alpha=0.85,
-        edgecolor='#1B4F72', linewidth=0.4,
-        label=f'Model annual Total {column}',
+    _plot_calibration_bars(
+        years=years, model=model, sigma=sigma, usgs=usgs,
+        title=title, out_path=out_path,
+        bar_color=bar_color, anchor_color=anchor_color,
+        ylabel=f'Total {column} Withdrawal (MAF)',
     )
-    valid_sig = ~np.isnan(sigma) & ~np.isnan(model)
-    if np.any(valid_sig):
-        ax.errorbar(
-            years[valid_sig], model[valid_sig],
-            yerr=sigma[valid_sig],
-            fmt='none', ecolor='#34495E', elinewidth=0.6, capsize=2,
-            alpha=0.7, label='±1σ',
-        )
-    valid_u = ~np.isnan(usgs)
-    if np.any(valid_u):
-        ax.scatter(
-            years[valid_u], usgs[valid_u],
-            marker='v', color=anchor_color, edgecolor='black',
-            linewidth=0.6, s=80, zorder=5,
-            label='USGS anchor (Circulars / OFR 94-476)',
+
+
+def _load_anchors_from_summary(usgs_summary_csv: str) -> pd.DataFrame:
+    """Load USGS+ADWR anchor totals from AZ_Annual_WU_Summary.csv.
+
+    Returns columns: Year, Source, GW_kAF, SW_kAF, Total_kAF, plus
+    per-category kAF (Irr, NIR, IrrGW, IrrSW, NIGW, NISW).  Pulls
+    every USGS row.  ADWR rows are excluded here (they appear in the
+    category comparison table but do not constitute a USGS anchor for
+    the bar charts).
+    """
+    df = pd.read_csv(usgs_summary_csv)
+    df = df[df['Source'].astype(str).str.startswith('USGS', na=False)].copy()
+    df['Year'] = pd.to_numeric(df['Year'], errors='coerce').astype('Int64')
+    df = df.dropna(subset=['Year']).reset_index(drop=True)
+
+    def _val(col):
+        return df[col].apply(
+            lambda v: float(v) * 1000.0 if pd.notna(v) else float('nan'),
         )
 
-    ax.set_xlabel('Year', fontweight='bold')
-    ax.set_ylabel(f'Total {column} Withdrawal (MAF)', fontweight='bold')
-    ax.set_title(title, fontweight='bold', fontsize=13)
-    ax.grid(True, alpha=0.3, axis='y', linestyle='--')
-    ax.legend(loc='upper left', fontsize=9, framealpha=0.9)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
+    return pd.DataFrame({
+        'Year':       df['Year'].astype(int),
+        'Source':     df['Source'].astype(str),
+        'Total_kAF':  _val('Total_MAF'),
+        'GW_kAF':     _val('Total_GW_MAF'),
+        'SW_kAF':     _val('Total_SW_MAF'),
+        'Irr_kAF':    _val('Total_Irr_MAF'),
+        'NIR_kAF':    _val('Total_NonIrr_MAF'),
+        'IrrGW_kAF':  _val('Irr_GW_MAF'),
+        'IrrSW_kAF':  _val('Irr_SW_MAF'),
+        'NIGW_kAF':   _val('NonIrr_GW_MAF'),
+        'NISW_kAF':   _val('NonIrr_SW_MAF'),
+    })
 
 
 def run_usgs_az_calibration_overview(
@@ -5635,6 +5724,7 @@ def run_usgs_az_calibration_overview(
         pixel_area_m2: float = 4_000_000,
         start_year: int = 1915,
         end_year: int = 2017,
+        usgs_summary_csv: str | None = None,
 ) -> pd.DataFrame:
     """AZ-wide annual Total GW & SW bars with ±1σ caps + USGS anchors.
 
@@ -5704,7 +5794,13 @@ def run_usgs_az_calibration_overview(
         sigma_rasters_dir, 'Total_SW', yrs_in_range, pixel_area_m2,
     )
 
-    if not os.path.isfile(usgs_csv):
+    # Prefer the curated AZ_Annual_WU_Summary.csv when available — it
+    # has clean per-Year totals for every USGS anchor (including 1950
+    # and 1975 which the legacy USGS_AZ_Water_Use_1950_1980.csv mis-
+    # parses due to column shifts).  Fall back to the legacy CSV.
+    if usgs_summary_csv and os.path.isfile(usgs_summary_csv):
+        usgs_df = _load_anchors_from_summary(usgs_summary_csv)
+    elif not os.path.isfile(usgs_csv):
         logger.warning(
             'USGS calibration CSV not found at %s; '
             'skipping anchor overlay',
@@ -5763,7 +5859,7 @@ def run_usgs_az_calibration_overview(
         column='GW',
         title=(
             'Arizona — Annual Total Groundwater Withdrawal\n'
-            '(Model bars ±1σ vs USGS anchors)'
+            '(Model bars with 95 % CI vs USGS anchors)'
         ),
         out_path=os.path.join(output_dir, 'USGS_AZ_Total_GW_Bars.png'),
         bar_color='#3498DB',
@@ -5777,14 +5873,329 @@ def run_usgs_az_calibration_overview(
             column='SW',
             title=(
                 'Arizona — Annual Total Surface-Water Withdrawal\n'
-                '(Model bars ±1σ vs USGS anchors)'
+                '(Model bars with 95 % CI vs USGS anchors)'
             ),
             out_path=os.path.join(output_dir, 'USGS_AZ_Total_SW_Bars.png'),
             bar_color='#16A085',
             anchor_color='#E74C3C',
         )
 
+    # Per-category bar plots (Total / Irr / NIR + IrrGW / IrrSW / NIGW /
+    # NISW).  Same chart format: solid model bars + transparent USGS
+    # overlay + Δ% annotation + 95 % CI caps where σ rasters exist.
+    # USGS anchor data come from AZ_Annual_WU_Summary.csv (only
+    # populated when ``usgs_summary_csv`` is passed); pre-1950 SW
+    # categories will simply have no anchors (USGS untracked SW).
+    if usgs_summary_csv and os.path.isfile(usgs_summary_csv):
+        anchors_full = _load_anchors_from_summary(usgs_summary_csv)
+        category_specs = [
+            ('Total', 'Total_Predicted', 'Total_kAF',
+             'Annual Total Withdrawal', '#7F8C8D'),
+            ('Irrigation', 'Irrigation', 'Irr_kAF',
+             'Annual Irrigation Withdrawal', '#F39C12'),
+            ('Non_Irrigation', 'Non_Irrigation', 'NIR_kAF',
+             'Annual Non-Irrigation Withdrawal', '#9B59B6'),
+            ('Irrigation_GW', 'Irrigation_GW', 'IrrGW_kAF',
+             'Annual Irrigation Groundwater', '#3498DB'),
+            ('Irrigation_SW', 'Irrigation_SW', 'IrrSW_kAF',
+             'Annual Irrigation Surface Water', '#16A085'),
+            ('Non_Irrigation_GW', 'Non_Irrigation_GW', 'NIGW_kAF',
+             'Annual Non-Irrigation Groundwater', '#3498DB'),
+            ('Non_Irrigation_SW', 'Non_Irrigation_SW', 'NISW_kAF',
+             'Annual Non-Irrigation Surface Water', '#16A085'),
+        ]
+        for cat_label, ml_name, anchor_col, subtitle, color in category_specs:
+            ml_csv = os.path.join(annual_summaries_dir, f'{ml_name}.csv')
+            if not os.path.isfile(ml_csv):
+                continue
+            cat_model = (
+                pd.read_csv(ml_csv)[['Year', 'Volume_AF']]
+                .rename(columns={'Volume_AF': 'Model_AF'})
+            )
+            cat_yrs = [
+                int(y) for y in cat_model['Year'].astype(int).values
+                if start_year <= int(y) <= end_year
+            ]
+            cat_sigma_dict = _load_az_sigma_total_for_category(
+                sigma_rasters_dir, ml_name, cat_yrs, pixel_area_m2,
+            )
+            yrs_arr = np.array(cat_yrs)
+            model_arr = np.array([
+                float(cat_model.loc[cat_model['Year'] == y, 'Model_AF']
+                      .iloc[0]) / 1000.0 / 1000.0  # AF → kAF → MAF
+                for y in cat_yrs
+            ])
+            sigma_arr = np.array([
+                cat_sigma_dict.get(y, np.nan) / 1000.0 / 1000.0
+                if cat_sigma_dict.get(y) is not None else np.nan
+                for y in cat_yrs
+            ])
+            usgs_arr = np.full(len(cat_yrs), np.nan)
+            for i, y in enumerate(cat_yrs):
+                row = anchors_full[anchors_full['Year'] == y]
+                if not row.empty and pd.notna(row[anchor_col].iloc[0]):
+                    usgs_arr[i] = float(row[anchor_col].iloc[0]) / 1000.0
+            _plot_calibration_bars(
+                years=yrs_arr,
+                model=model_arr,
+                sigma=sigma_arr,
+                usgs=usgs_arr,
+                title=(
+                    f'Arizona — {subtitle}\n'
+                    '(Model bars with 95 % CI vs USGS anchors)'
+                ),
+                out_path=os.path.join(
+                    output_dir, f'USGS_AZ_{cat_label}_Bars.png',
+                ),
+                bar_color=color,
+                anchor_color='#E74C3C',
+                ylabel=f'{subtitle.replace("Annual ", "")} (MAF)',
+            )
+
     logger.info(
         'USGS calibration overview written to %s', output_dir,
     )
     return out_df
+
+
+def run_usgs_az_category_comparison(
+        annual_summaries_dir: str,
+        usgs_summary_csv: str,
+        output_dir: str,
+        gw_only_cutoff: int = 1950,
+) -> pd.DataFrame:
+    """Per-category AZ-wide ML vs USGS comparison at anchor years.
+
+    Loads ``AZ_Annual_WU_Summary.csv`` (the curated USGS/ADWR rollup
+    with per-category MAF columns) and the model's
+    ``Annual_Summaries/`` CSVs, then for each USGS-anchor year produces:
+
+      - Pre-``gw_only_cutoff`` (default 1950): GW Δ%  =
+        (ML_TotGW − USGS_GW) / USGS_GW × 100.  USGS pre-1945 reports
+        only GW (no SW data — not zero, just untracked), so a
+        share-of-Total comparison is not meaningful; the volume-%
+        diff against USGS_GW is the right calibration check.
+      - ``gw_only_cutoff`` onward: Δ pp for every category share
+        (Irr%, NIR%, IrrGW, IrrSW, NIGW, NISW, GW%, SW%) computed as
+        ``ML_share − USGS_share``.
+
+    Logs the per-year table and the MAE summary.  Writes
+    ``USGS_AZ_Category_Comparison.csv`` (per-year diffs) and
+    ``USGS_AZ_Category_MAE.csv`` (per-category MAE / MAPE) to
+    *output_dir*.
+
+    Args:
+        annual_summaries_dir: Directory containing the model's per-
+            category ``Annual_Summaries/*.csv``.
+        usgs_summary_csv: Path to ``AZ_Annual_WU_Summary.csv``.
+        output_dir: Output directory for the comparison CSVs.
+        gw_only_cutoff: Year boundary between pre-1945 GW-only USGS
+            era and the full-category USGS era (default 1950).
+
+    Returns:
+        Per-year diff DataFrame (also written to CSV).
+    """
+    makedirs(output_dir)
+    if not os.path.isfile(usgs_summary_csv):
+        logger.warning(
+            'USGS summary CSV not found at %s; skipping category '
+            'comparison',
+            usgs_summary_csv,
+        )
+        return pd.DataFrame()
+
+    usgs_df = pd.read_csv(usgs_summary_csv)
+    # Keep all USGS + ADWR rows.  USGS dominates anchors at 1915/1950+,
+    # ADWR provides additional anchors at 1957, 1980, 1990, 2000, 2010,
+    # 2014, 2017 (Total only) and 2019 (shares only).  Multiple rows can
+    # exist for a year (e.g. USGS + ADWR 1990) — both are scored.
+    usgs_df = usgs_df[
+        usgs_df['Source'].astype(str).str.match(r'^(USGS|ADWR)', na=False)
+    ].copy()
+
+    ml_files = {
+        'Total_Predicted': 'Total_Predicted.csv',
+        'Irrigation': 'Irrigation.csv',
+        'Non_Irrigation': 'Non_Irrigation.csv',
+        'Irrigation_GW': 'Irrigation_GW.csv',
+        'Irrigation_SW': 'Irrigation_SW.csv',
+        'Non_Irrigation_GW': 'Non_Irrigation_GW.csv',
+        'Non_Irrigation_SW': 'Non_Irrigation_SW.csv',
+        'Total_GW': 'Total_GW.csv',
+        'Total_SW': 'Total_SW.csv',
+    }
+    ml_data = {}
+    for key, fname in ml_files.items():
+        path = os.path.join(annual_summaries_dir, fname)
+        if not os.path.isfile(path):
+            logger.warning(
+                'Model CSV %s missing — skipping category comparison',
+                path,
+            )
+            return pd.DataFrame()
+        ml_data[key] = (
+            pd.read_csv(path)
+            .set_index('Year')['Volume_AF']
+            / 1000.0  # → kAF
+        )
+
+    keymap = {
+        'Irr%':  'Total_Irr_MAF',
+        'NIR%':  'Total_NonIrr_MAF',
+        'IrrGW': 'Irr_GW_MAF',
+        'IrrSW': 'Irr_SW_MAF',
+        'NIGW':  'NonIrr_GW_MAF',
+        'NISW':  'NonIrr_SW_MAF',
+        'GW%':   'Total_GW_MAF',
+        'SW%':   'Total_SW_MAF',
+    }
+    ml_keymap = {
+        'Irr%':  'Irrigation',
+        'NIR%':  'Non_Irrigation',
+        'IrrGW': 'Irrigation_GW',
+        'IrrSW': 'Irrigation_SW',
+        'NIGW':  'Non_Irrigation_GW',
+        'NISW':  'Non_Irrigation_SW',
+        'GW%':   'Total_GW',
+        'SW%':   'Total_SW',
+    }
+    share_cols = list(keymap.keys())
+
+    pct_cols = [
+        'GW_pct', 'SW_pct', 'Reclaimed_pct', 'Irr_pct', 'NonIrr_pct',
+    ]
+    rows = []
+    pre_gw_pcts: list[float] = []
+    total_pcts: list[float] = []
+    share_diffs: dict[str, list[float]] = {k: [] for k in share_cols}
+    # Iterate over each USGS / ADWR row (multiple per year possible).
+    for _, u_row in usgs_df.sort_values(['Year', 'Source']).iterrows():
+        yr = int(u_row['Year'])
+        if yr not in ml_data['Total_Predicted'].index:
+            continue
+        record: dict = {'Year': yr, 'Source': u_row['Source']}
+        mt = float(ml_data['Total_Predicted'].loc[yr])
+        mg = float(ml_data['Total_GW'].loc[yr])
+        # Total volume diff (when source has Total_MAF)
+        ut = (
+            float(u_row['Total_MAF']) * 1000.0
+            if pd.notna(u_row.get('Total_MAF')) else np.nan
+        )
+        if np.isfinite(ut) and ut > 0:
+            tot_d = 100.0 * (mt - ut) / ut
+            record['Total_VolDiff_pct'] = tot_d
+            total_pcts.append(abs(tot_d))
+        else:
+            record['Total_VolDiff_pct'] = np.nan
+        # Pre-1950 GW volume diff (USGS GW-only era; SW untracked, not zero)
+        if yr < gw_only_cutoff:
+            ug = (
+                float(u_row['Total_GW_MAF']) * 1000.0
+                if pd.notna(u_row.get('Total_GW_MAF')) else np.nan
+            )
+            if np.isfinite(ug) and ug > 0:
+                d = 100.0 * (mg - ug) / ug
+                record['GW_VolDiff_pct'] = d
+                pre_gw_pcts.append(abs(d))
+            else:
+                record['GW_VolDiff_pct'] = np.nan
+        else:
+            record['GW_VolDiff_pct'] = np.nan
+        # Per-category share pp diffs (>= cutoff): two paths
+        #   (a) MAF columns populated → compute USGS share = USGS_MAF/Total
+        #   (b) ADWR _pct columns populated (e.g. ADWR 2019 shares) →
+        #       use directly as the USGS share
+        if yr >= gw_only_cutoff:
+            for k in share_cols:
+                p_us = np.nan
+                if np.isfinite(ut) and ut > 0 and pd.notna(u_row.get(keymap[k])):
+                    p_us = 100.0 * (float(u_row[keymap[k]]) * 1000.0) / ut
+                else:
+                    # ADWR-style _pct fallback for the four broad shares
+                    pct_lookup = {
+                        'GW%': 'GW_pct', 'SW%': 'SW_pct',
+                        'Irr%': 'Irr_pct', 'NIR%': 'NonIrr_pct',
+                    }
+                    pct_col = pct_lookup.get(k)
+                    if pct_col and pd.notna(u_row.get(pct_col)):
+                        p_us = float(u_row[pct_col])
+                if pd.notna(p_us):
+                    p_ml = 100.0 * float(ml_data[ml_keymap[k]].loc[yr]) / mt
+                    d = p_ml - p_us
+                    record[f'{k}_pp_diff'] = d
+                    share_diffs[k].append(abs(d))
+                else:
+                    record[f'{k}_pp_diff'] = np.nan
+        else:
+            for k in share_cols:
+                record[f'{k}_pp_diff'] = np.nan
+        rows.append(record)
+    diff_df = pd.DataFrame(rows)
+    diff_df.to_csv(
+        os.path.join(output_dir, 'USGS_AZ_Category_Comparison.csv'),
+        index=False,
+    )
+
+    mae_rows = []
+    if total_pcts:
+        mae_rows.append({
+            'Metric': 'Total MAPE (all anchors, volume %)',
+            'N': len(total_pcts),
+            'Value': sum(total_pcts) / len(total_pcts),
+            'Unit': '%',
+        })
+    if pre_gw_pcts:
+        mae_rows.append({
+            'Metric': f'GW MAPE (pre-{gw_only_cutoff}, volume %)',
+            'N': len(pre_gw_pcts),
+            'Value': sum(pre_gw_pcts) / len(pre_gw_pcts),
+            'Unit': '%',
+        })
+    for k in share_cols:
+        if share_diffs[k]:
+            mae_rows.append({
+                'Metric': f'{k} MAE (>= {gw_only_cutoff}, share)',
+                'N': len(share_diffs[k]),
+                'Value': sum(share_diffs[k]) / len(share_diffs[k]),
+                'Unit': 'pp',
+            })
+    mae_df = pd.DataFrame(mae_rows)
+    mae_df.to_csv(
+        os.path.join(output_dir, 'USGS_AZ_Category_MAE.csv'),
+        index=False,
+    )
+
+    # Log the per-year diff table + MAE summary
+    logger.info(
+        'USGS / ADWR category comparison: Total/GW Δ%% (volume) and '
+        'category Δ pp (share of Total) at every anchor row.'
+    )
+    header = (
+        f'{"Yr":>4} {"Src":>4} | {"Tot Δ%":>6} {"GW Δ%":>6} | '
+        f'{"Irr%":>6} {"NIR%":>6} | '
+        f'{"IrrGW":>6} {"IrrSW":>6} {"NIGW":>6} {"NISW":>6} | '
+        f'{"GW%":>6} {"SW%":>6}'
+    )
+    logger.info(header)
+    logger.info('-' * len(header))
+
+    def fmt(v):
+        return f'{v:>+6.1f}' if pd.notna(v) else '   --'
+
+    for _, r in diff_df.iterrows():
+        src_short = (str(r.Source).split()[0])[:4]
+        logger.info(
+            f'{int(r.Year):>4} {src_short:>4} | '
+            f'{fmt(r.Total_VolDiff_pct)} {fmt(r.GW_VolDiff_pct)} | '
+            f'{fmt(r["Irr%_pp_diff"])} {fmt(r["NIR%_pp_diff"])} | '
+            f'{fmt(r.IrrGW_pp_diff)} {fmt(r.IrrSW_pp_diff)} '
+            f'{fmt(r.NIGW_pp_diff)} {fmt(r.NISW_pp_diff)} | '
+            f'{fmt(r["GW%_pp_diff"])} {fmt(r["SW%_pp_diff"])}'
+        )
+    for _, r in mae_df.iterrows():
+        logger.info('  %s = %.2f %s (n=%d)', r.Metric, r.Value, r.Unit, r.N)
+    logger.info(
+        'Wrote USGS_AZ_Category_Comparison.csv + USGS_AZ_Category_MAE.csv to %s',
+        output_dir,
+    )
+    return diff_df

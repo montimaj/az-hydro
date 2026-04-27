@@ -3465,15 +3465,25 @@ def run_usgs_az_calibration_overview() -> pd.DataFrame:
     usgs_csv = os.path.join(
         INPUT_DIR, 'USGS WU', 'USGS_AZ_Water_Use_1950_1980.csv',
     )
+    usgs_summary_csv = os.path.join(
+        INPUT_DIR, 'USGS WU', 'AZ_Annual_WU_Summary.csv',
+    )
     output_dir = os.path.join(prediction_dir, 'USGS_Calibration_Bars')
 
-    return intercompops.run_usgs_az_calibration_overview(
+    bars_df = intercompops.run_usgs_az_calibration_overview(
         annual_summaries_dir=annual_summaries_dir,
         usgs_csv=usgs_csv,
         sigma_rasters_dir=sigma_rasters_dir,
         output_dir=output_dir,
         pixel_area_m2=MOSAIC_RASTER_RES ** 2,
+        usgs_summary_csv=usgs_summary_csv,
     )
+    intercompops.run_usgs_az_category_comparison(
+        annual_summaries_dir=annual_summaries_dir,
+        usgs_summary_csv=usgs_summary_csv,
+        output_dir=output_dir,
+    )
+    return bars_df
 
 
 # =============================================================================
