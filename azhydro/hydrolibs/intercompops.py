@@ -1125,48 +1125,37 @@ def _compute_temporal_metrics(
 # ═════════════════════════════════════════════════════════════════════════════
 # 7. Spatial difference maps — mean-annual depth
 # ═════════════════════════════════════════════════════════════════════════════
-def _plot_basin_diff_choropleth(
-    basin_a_vols: dict[str, float],
-    basin_b_vols: dict[str, float],
+def _plot_basin_diff_panels(
+    panels: list[dict],
     basin_gdf: gpd.GeoDataFrame,
     basin_col: str,
     title: str,
     out_path: str,
     *,
-    label_a: str = 'A',
-    label_b: str = 'B',
-    basin_a_sigma: dict[str, float] | None = None,
-    basin_b_sigma: dict[str, float] | None = None,
     cmap: str = 'RdBu_r',
-    annotate_pct: bool = True,
-    annotate_ci: bool = True,
-    fontsize: float = 6.5,
+    shared_colorbar: bool = True,
 ) -> None:
-    """Render a single-panel basin-aggregated Δ Volume choropleth with
-    optional per-basin pct + 95% CI annotations.
+    """Render a 1×N basin-aggregated Δ Volume choropleth figure.
 
-    Each basin is colored by ``A − B`` in 10⁶ m³ (with an AF secondary
-    axis on the colorbar).  When ``annotate_pct`` is True, every basin
-    with a non-zero reference value is labelled at its centroid with
-    the percent difference relative to ``B``; ``annotate_ci`` adds
-    ``±X.X %`` derived from σ_A and σ_B (combined in quadrature) when
-    the σ dicts are provided.
+    Each panel shows one (A − B) comparison in 10⁶ m³; basins are
+    colored by the difference.  No per-basin pct / CI annotations
+    (colorbar carries the magnitude).  AMA / INA / GW basin legend
+    appears once on the leftmost panel (outside-right).
 
     Args:
-        basin_a_vols, basin_b_vols: ``{basin_name: AF}`` mean volumes.
-        basin_gdf: Basin polygon GeoDataFrame in the desired CRS.
+        panels: List of panel descriptors.  Each dict requires
+            ``basin_a_vols``, ``basin_b_vols`` (``{basin: AF}``),
+            and ``panel_title``.  Optional ``label_a`` / ``label_b``
+            for the colorbar label.
+        basin_gdf: Basin polygons in the target CRS.
         basin_col: Column naming each basin.
         title: Figure suptitle.
         out_path: Output PNG path.
-        label_a, label_b: Source labels (used only for default title /
-            colorbar nuance — title overrides).
-        basin_a_sigma, basin_b_sigma: ``{basin_name: σ_AF}`` (1σ).
-            When provided, the per-basin 95 % CI on the pct difference
-            is computed as ``100 × 1.96 × sqrt(σ_a² + σ_b²) / B``.
-        cmap: Diverging matplotlib colormap.
-        annotate_pct: Add basin pct-difference labels.
-        annotate_ci: Add ±95 % CI to the labels (requires σ inputs).
-        fontsize: Annotation font size.
+        cmap: Diverging colormap.
+        shared_colorbar: If True (default), all panels share a single
+            horizontal colorbar with vmax computed across all panels.
+            If False, each panel gets its own colorbar (use when
+            magnitudes differ substantially across panels).
     """
     from matplotlib.cm import ScalarMappable
     from matplotlib.colors import Normalize
@@ -1177,95 +1166,125 @@ def _plot_basin_diff_choropleth(
         else basin_gdf.columns[0]
     )
 
-    # Build per-basin diff in m³ (for colormap) and pct + CI dicts
-    diff_m3: dict[str, float] = {}
-    pct_label: dict[str, str] = {}
-    for _, row in basin_gdf.iterrows():
-        b = row[name_col]
-        a_af = basin_a_vols.get(b, np.nan)
-        b_af = basin_b_vols.get(b, np.nan)
-        if not (np.isfinite(a_af) and np.isfinite(b_af)):
-            continue
-        diff_af = a_af - b_af
-        diff_m3[b] = diff_af * af_to_m3
-        if annotate_pct and np.isfinite(b_af) and abs(b_af) > 0:
-            pct = 100.0 * diff_af / abs(b_af)
-            txt = f'{pct:+.1f}%'
-            if annotate_ci and basin_a_sigma is not None:
-                sa = basin_a_sigma.get(b, 0.0) or 0.0
-                sb = (
-                    basin_b_sigma.get(b, 0.0)
-                    if basin_b_sigma is not None else 0.0
-                ) or 0.0
-                ci_pct = 100.0 * 1.96 * np.sqrt(sa ** 2 + sb ** 2) / abs(b_af)
-                if np.isfinite(ci_pct) and ci_pct > 0:
-                    txt = f'{pct:+.1f}\u00B1{ci_pct:.1f}%'
-            pct_label[b] = txt
-
-    if not diff_m3:
+    n = len(panels)
+    if n == 0:
         return
 
-    plot_gdf = basin_gdf.set_index(name_col).copy()
-    plot_gdf['diff'] = plot_gdf.index.map(
-        lambda b: diff_m3.get(b, np.nan),
-    )
-    plot_gdf.loc[plot_gdf['diff'].abs() < 1e-3, 'diff'] = np.nan
-    d_arr = plot_gdf['diff'].dropna().values
-    if d_arr.size == 0:
-        return
-    vmax = max(
-        abs(np.nanpercentile(d_arr, 2)),
-        abs(np.nanpercentile(d_arr, 98)),
-        1e-6,
-    )
-
-    fig, ax = plt.subplots(1, 1, figsize=(8, 8), constrained_layout=True)
-    fig.suptitle(title, fontsize=14, fontweight='bold')
-    plot_gdf.plot(
-        ax=ax, column='diff', cmap=cmap,
-        vmin=-vmax, vmax=vmax,
-        edgecolor='#666666', linewidth=0.5,
-        legend=False, missing_kwds={'color': '#EEEEEE'},
-    )
-    _overlay_boundaries(
-        ax, basin_gdf, get_ama_ina_basin_names(), name_col,
-        label_fontsize=5.0, label_all=False,
-    )
-    add_ama_ina_legend(ax)
-    # Per-basin pct ± CI annotations at centroids
-    if pct_label:
+    # Compute per-panel diff series + global vmax (for shared colorbar)
+    panel_diffs = []
+    global_vmax = 1e-6
+    for p in panels:
+        a_vols = p['basin_a_vols']
+        b_vols = p['basin_b_vols']
+        diff_m3: dict[str, float] = {}
         for _, row in basin_gdf.iterrows():
             b = row[name_col]
-            txt = pct_label.get(b)
-            if not txt:
+            a_af = a_vols.get(b, np.nan)
+            b_af = b_vols.get(b, np.nan)
+            if not (np.isfinite(a_af) and np.isfinite(b_af)):
                 continue
-            c = row.geometry.representative_point()
-            ax.annotate(
-                txt, (c.x, c.y),
-                fontsize=fontsize, fontweight='bold',
-                ha='center', va='center', color='#1B2631',
-                bbox=dict(boxstyle='round,pad=0.10', fc='white',
-                          alpha=0.85, lw=0),
+            diff_m3[b] = (a_af - b_af) * af_to_m3
+        panel_diffs.append(diff_m3)
+        if diff_m3:
+            d_arr = np.array(list(diff_m3.values()))
+            d_arr = d_arr[np.abs(d_arr) > 1e-3]
+            if d_arr.size:
+                global_vmax = max(
+                    global_vmax,
+                    abs(np.nanpercentile(d_arr, 2)),
+                    abs(np.nanpercentile(d_arr, 98)),
+                )
+
+    fig, axes = plt.subplots(
+        1, n, figsize=(7 * n, 8), constrained_layout=True,
+    )
+    if n == 1:
+        axes = [axes]
+    fig.suptitle(title, fontsize=14, fontweight='bold')
+
+    last_im = None
+    for i, (panel, diff_m3) in enumerate(zip(panels, panel_diffs)):
+        ax = axes[i]
+        if shared_colorbar:
+            vmax = global_vmax
+        else:
+            d_arr = np.array(list(diff_m3.values())) if diff_m3 else np.array([])
+            d_arr = d_arr[np.abs(d_arr) > 1e-3]
+            vmax = (
+                max(abs(np.nanpercentile(d_arr, 2)),
+                    abs(np.nanpercentile(d_arr, 98)), 1e-6)
+                if d_arr.size else 1.0
             )
-    sm = ScalarMappable(cmap=cmap, norm=Normalize(-vmax, vmax))
-    sm.set_array([])
-    cbar = fig.colorbar(
-        sm, ax=ax, shrink=0.5, pad=0.06,
-        orientation='horizontal', aspect=40, extend='both',
-    )
-    cbar.formatter = mticker.FuncFormatter(lambda x, _: f'{x / 1e6:g}')
-    cbar.update_ticks()
-    cbar.set_label(
-        rf'$\Delta$ Volume ($\times$10$^{{6}}$ m$^3$, {label_a} − {label_b})',
-        fontsize=10, fontweight='bold',
-    )
-    cbar.ax.tick_params(labelsize=10)
-    secax = cbar.ax.secondary_xaxis(
-        'top',
-        functions=(lambda x: x * M3_TO_AF, lambda x: x / M3_TO_AF),
-    )
-    secax.set_xlabel('\u0394 Volume (AF)', fontsize=10, fontweight='bold')
-    secax.tick_params(labelsize=10)
+        plot_gdf = basin_gdf.set_index(name_col).copy()
+        plot_gdf['diff'] = plot_gdf.index.map(
+            lambda b: diff_m3.get(b, np.nan),
+        )
+        plot_gdf.loc[plot_gdf['diff'].abs() < 1e-3, 'diff'] = np.nan
+        plot_gdf.plot(
+            ax=ax, column='diff', cmap=cmap,
+            vmin=-vmax, vmax=vmax,
+            edgecolor='#666666', linewidth=0.5,
+            legend=False, missing_kwds={'color': '#EEEEEE'},
+        )
+        _overlay_boundaries(
+            ax, basin_gdf, get_ama_ina_basin_names(), name_col,
+            label_fontsize=5.0, label_all=False,
+        )
+        ax.set_title(panel['panel_title'], fontsize=12, fontweight='bold')
+        if not shared_colorbar:
+            sm = ScalarMappable(cmap=cmap, norm=Normalize(-vmax, vmax))
+            sm.set_array([])
+            cbar = fig.colorbar(
+                sm, ax=ax, shrink=0.5, pad=0.04,
+                orientation='horizontal', aspect=30, extend='both',
+            )
+            cbar.formatter = mticker.FuncFormatter(
+                lambda x, _: f'{x / 1e6:g}',
+            )
+            cbar.update_ticks()
+            cbar.set_label(
+                rf'$\Delta$ Volume ($\times$10$^{{6}}$ m$^3$, '
+                f'{panel.get("label_a", "A")} − '
+                f'{panel.get("label_b", "B")})',
+                fontsize=9, fontweight='bold',
+            )
+            cbar.ax.tick_params(labelsize=9)
+            secax = cbar.ax.secondary_xaxis(
+                'top',
+                functions=(lambda x: x * M3_TO_AF, lambda x: x / M3_TO_AF),
+            )
+            secax.set_xlabel(
+                '\u0394 Volume (AF)', fontsize=9, fontweight='bold',
+            )
+            secax.tick_params(labelsize=9)
+        else:
+            last_im = ScalarMappable(
+                cmap=cmap, norm=Normalize(-global_vmax, global_vmax),
+            )
+            last_im.set_array([])
+    if shared_colorbar and last_im is not None:
+        cbar = fig.colorbar(
+            last_im, ax=list(axes), shrink=0.5, pad=0.04,
+            orientation='horizontal', aspect=40, extend='both',
+        )
+        cbar.formatter = mticker.FuncFormatter(
+            lambda x, _: f'{x / 1e6:g}',
+        )
+        cbar.update_ticks()
+        cbar.set_label(
+            r'$\Delta$ Volume ($\times$10$^{6}$ m$^3$, A − B per panel)',
+            fontsize=10, fontweight='bold',
+        )
+        cbar.ax.tick_params(labelsize=10)
+        secax = cbar.ax.secondary_xaxis(
+            'top',
+            functions=(lambda x: x * M3_TO_AF, lambda x: x / M3_TO_AF),
+        )
+        secax.set_xlabel(
+            '\u0394 Volume (AF)', fontsize=10, fontweight='bold',
+        )
+        secax.tick_params(labelsize=10)
+    add_ama_ina_legend(axes[0])
     fig.savefig(out_path, dpi=600, bbox_inches='tight')
     plt.close(fig)
 
@@ -2602,40 +2621,43 @@ def run_intercomparison(
     ]
     cat_keys_basin = [k for k in ('GW', 'SW', 'Total')
                       if k in ml_vols and k in nhm_vols and k in reitz_vols]
-    for label_a, label_b, vols_a, vols_b in pairs_basin:
-        sigma_a = _ml_sigma_mean_irr if label_a == 'ML' else (lambda _k: {})
-        sigma_b = _ml_sigma_mean_irr if label_b == 'ML' else (lambda _k: {})
-        for cat in cat_keys_basin:
+    # One figure per category — three pair panels (ML−NHM, ML−Reitz,
+    # NHM−Reitz) side-by-side with a shared colorbar.
+    for cat in cat_keys_basin:
+        cat_label = (
+            'Total_Irrigation' if cat == 'Total'
+            else f'Irrigation_{cat}'
+        )
+        panels = []
+        for label_a, label_b, vols_a, vols_b in pairs_basin:
             a_mean = vols_a.get(cat, {}).get('mean', {})
             b_mean = vols_b.get(cat, {}).get('mean', {})
             if not (a_mean and b_mean):
                 continue
-            cat_label = (
-                'Total_Irrigation' if cat == 'Total'
-                else f'Irrigation_{cat}'
-            )
-            _plot_basin_diff_choropleth(
-                basin_a_vols=a_mean,
-                basin_b_vols=b_mean,
-                basin_gdf=basin_reproj,
-                basin_col=basin_col,
-                title=(
-                    f'{cat_label.replace("_", " ")} '
-                    f'\u2014 Basin-Level Volume Diff '
-                    f'({label_a} \u2212 {label_b})'
-                ),
-                out_path=os.path.join(
-                    diff_dir,
-                    f'Spatial_Diff_Basin_{cat_label}_'
-                    f'{label_a}_minus_{label_b}.png',
-                ),
-                label_a=label_a, label_b=label_b,
-                basin_a_sigma=sigma_a(cat),
-                basin_b_sigma=sigma_b(cat),
-            )
+            panels.append({
+                'basin_a_vols': a_mean,
+                'basin_b_vols': b_mean,
+                'panel_title': f'{label_a} \u2212 {label_b}',
+                'label_a': label_a,
+                'label_b': label_b,
+            })
+        if not panels:
+            continue
+        _plot_basin_diff_panels(
+            panels=panels,
+            basin_gdf=basin_reproj,
+            basin_col=basin_col,
+            title=(
+                f'{cat_label.replace("_", " ")} \u2014 '
+                f'Basin-Level Volume Diff'
+            ),
+            out_path=os.path.join(
+                diff_dir, f'Spatial_Diff_Basin_{cat_label}.png',
+            ),
+            shared_colorbar=True,
+        )
     logger.info(
-        'Basin-level Δ volume maps with pct ±95 %% CI saved to %s',
-        diff_dir,
+        'Basin-level Δ volume multi-panel maps saved to %s', diff_dir,
     )
 
     # ── 10. HUC12-level comparison (ML/Reitz aggregated to NHM's native unit)
@@ -3372,77 +3394,213 @@ def run_cu_intercomparison(
             filename='Scatter_HUC12_CU.png',
         )
 
-        # HUC12-level spatial diff choropleth
+        # Combined HUC12 + Pixel + Basin Δ depth (3 panels, shared
+        # colorbar).  Δ Depth (mm) is the only physically meaningful
+        # unit shared across pixel / HUC12 / basin aggregation levels —
+        # Δ Volume per polygon scales by ~10^4 between pixel and basin
+        # and would visually saturate the basin panel while zeroing the
+        # pixel panel under one colorbar.  The single-mode standalone
+        # depth and volume HUC12 maps were dropped in favour of this
+        # unified 3-scale figure.
+        from matplotlib.cm import ScalarMappable
+        from matplotlib.colors import Normalize
+
         _af_to_m3_local = 1.0 / M3_TO_AF
         _mm_to_ft = 1.0 / 304.8
-        _m3_to_af_local = M3_TO_AF
-        huc12_diff_dir = os.path.join(huc12_dir, 'Spatial_Diff/')
-        makedirs(huc12_diff_dir)
+        spatial_diff_dir = os.path.join(output_dir, 'Spatial_Diff/')
+        makedirs(spatial_diff_dir)
         b_reproj = (
             basin_gdf.to_crs(huc_reproj.crs)
             if basin_gdf.crs != huc_reproj.crs else basin_gdf
         )
-        b_name = basin_col if basin_col in b_reproj.columns else b_reproj.columns[0]
+        b_name = (
+            basin_col if basin_col in b_reproj.columns
+            else b_reproj.columns[0]
+        )
         ama_ina_names = get_ama_ina_basin_names()
 
-        for unit_mode, unit_label, sec_label, sec_factor, scale_fn, tick_div in [
-            ('depth', '\u0394 Depth (mm)', '\u0394 Depth (ft)', _mm_to_ft,
-             lambda af, area: af * _af_to_m3_local / area * M_TO_MM if area > 0 else 0.0, None),
-            ('volume', r'$\Delta$ Volume ($\times$10$^{6}$ m$^3$)', '\u0394 Volume (AF)',
-             _m3_to_af_local,
-             lambda af, area: af * _af_to_m3_local, 1e6),
-        ]:
-            fig, ax = plt.subplots(1, 1, figsize=(8, 8), constrained_layout=True)
-            title_u = 'Depth' if unit_mode == 'depth' else 'Volume'
-            fig.suptitle(
-                f'Irrigation CU \u2014 HUC12-Level {title_u} Difference (ML \u2212 NHM)',
-                fontsize=14, fontweight='bold',
-            )
-            diff_vals = []
-            for h in common_hucs:
-                area = huc_areas.get(h, 1.0)
-                diff_vals.append(
-                    scale_fn(ml_huc_mean.get(h, 0.0), area)
-                    - scale_fn(nhm_huc_mean.get(h, 0.0), area)
+        # Panel 1: HUC12 Δ depth (AF / m² → mm)
+        huc12_diff_vals: dict[str, float] = {}
+        for h in common_hucs:
+            area = huc_areas.get(h, 0.0)
+            if area > 0:
+                huc12_diff_vals[h] = (
+                    (ml_huc_mean.get(h, 0.0) - nhm_huc_mean.get(h, 0.0))
+                    * _af_to_m3_local / area * M_TO_MM
                 )
-            plot_gdf = huc_reproj[huc_reproj['huc12'].isin(common_hucs)].copy()
-            plot_gdf = plot_gdf.set_index('huc12').loc[common_hucs]
-            plot_gdf['diff'] = diff_vals
-            plot_gdf.loc[plot_gdf['diff'].abs() < 1e-10, 'diff'] = np.nan
-            d_arr = np.array([d for d in diff_vals if abs(d) > 1e-10])
-            vmax = max(abs(np.nanpercentile(d_arr, 2)), abs(np.nanpercentile(d_arr, 98)), 1e-6) if d_arr.size else 1.0
 
-            from matplotlib.cm import ScalarMappable
-            from matplotlib.colors import Normalize
-            plot_gdf.plot(
-                ax=ax, column='diff', cmap='RdBu_r',
-                vmin=-vmax, vmax=vmax,
-                edgecolor='#AAAAAA', linewidth=0.3,
-                legend=False, missing_kwds={'color': '#EEEEEE'},
+        # Panel 2: Pixel-level Δ depth (read mean-annual rasters)
+        ml_mean_raster = os.path.join(
+            os.path.dirname(irr_cu_dir.rstrip('/')),
+            'ML_mean_annual_CU_mm.tif',
+        )
+        nhm_mean_raster = os.path.join(
+            nhm_cu_out, 'NHM_mean_annual_CU_mm.tif',
+        )
+        pixel_diff_arr = None
+        pixel_extent = None
+        if os.path.isfile(ml_mean_raster) and os.path.isfile(nhm_mean_raster):
+            with rio.open(ml_mean_raster) as src:
+                ml_arr = src.read(1).astype(np.float64)
+                pixel_extent = [
+                    src.bounds.left, src.bounds.right,
+                    src.bounds.bottom, src.bounds.top,
+                ]
+            with rio.open(nhm_mean_raster) as src:
+                nhm_arr = src.read(1).astype(np.float64)
+            ml_arr[np.isnan(ml_arr)] = 0.0
+            nhm_arr[np.isnan(nhm_arr)] = 0.0
+            pixel_diff_arr = ml_arr - nhm_arr
+
+        # Panel 3: Basin Δ depth (AF / m² → mm)
+        basin_areas_lookup = {
+            row[basin_col]: row.geometry.area
+            for _, row in b_reproj.iterrows()
+        }
+        basin_diff_vals: dict[str, float] = {}
+        for b in basin_names:
+            area = basin_areas_lookup.get(b, 0.0)
+            if area > 0:
+                basin_diff_vals[b] = (
+                    (ml_cu['mean'].get(b, 0.0) - nhm_cu['mean'].get(b, 0.0))
+                    * _af_to_m3_local / area * M_TO_MM
+                )
+
+        # Shared vmax across the three panels (2nd/98th percentile)
+        vmax_candidates: list[float] = []
+        if huc12_diff_vals:
+            vals = np.array(
+                [v for v in huc12_diff_vals.values() if abs(v) > 1e-6],
             )
-            _overlay_boundaries(ax, b_reproj, ama_ina_names, b_name,
-                                label_fontsize=5.0, label_all=True)
-            import matplotlib.ticker as mticker
-            sm = ScalarMappable(cmap='RdBu_r', norm=Normalize(-vmax, vmax))
-            sm.set_array([])
-            cbar = fig.colorbar(sm, ax=ax, shrink=0.5, pad=0.06,
-                                orientation='horizontal', aspect=40, extend='both')
-            if tick_div:
-                cbar.formatter = mticker.FuncFormatter(lambda x, _: f'{x/tick_div:g}')
-                cbar.update_ticks()
-            cbar.set_label(unit_label, fontsize=10, fontweight='bold')
-            cbar.ax.tick_params(labelsize=10)
-            secax = cbar.ax.secondary_xaxis(
-                'top', functions=(lambda x: x*sec_factor, lambda x: x/sec_factor))
-            secax.set_xlabel(sec_label, fontsize=10, fontweight='bold')
-            secax.tick_params(labelsize=10)
-            add_ama_ina_legend(ax)
+            if vals.size:
+                vmax_candidates.extend([
+                    abs(np.nanpercentile(vals, 2)),
+                    abs(np.nanpercentile(vals, 98)),
+                ])
+        if pixel_diff_arr is not None:
+            pix_vals = pixel_diff_arr[np.abs(pixel_diff_arr) > 1e-6]
+            if pix_vals.size:
+                vmax_candidates.extend([
+                    abs(np.nanpercentile(pix_vals, 2)),
+                    abs(np.nanpercentile(pix_vals, 98)),
+                ])
+        if basin_diff_vals:
+            vals = np.array(
+                [v for v in basin_diff_vals.values() if abs(v) > 1e-6],
+            )
+            if vals.size:
+                vmax_candidates.extend([
+                    abs(np.nanpercentile(vals, 2)),
+                    abs(np.nanpercentile(vals, 98)),
+                ])
+        vmax = max(vmax_candidates) if vmax_candidates else 1.0
+        vmax = max(vmax, 1e-6)
 
-            suffix = '' if unit_mode == 'depth' else '_Volume'
-            fig.savefig(os.path.join(huc12_diff_dir, f'Spatial_Diff_HUC12_CU{suffix}.png'),
-                        dpi=600, bbox_inches='tight')
-            plt.close(fig)
-        logger.info(f'  HUC12-level CU diff maps saved to {huc12_diff_dir}')
+        fig, axes = plt.subplots(
+            1, 3, figsize=(20, 7), constrained_layout=True,
+        )
+        fig.suptitle(
+            'Irrigation CU \u2014 Mean-Annual Depth Difference '
+            '(ML \u2212 NHM)',
+            fontsize=14, fontweight='bold',
+        )
+
+        # Panel 1: HUC12
+        ax_huc = axes[0]
+        ax_huc.set_facecolor('#D5D5D5')
+        plot_gdf = huc_reproj[huc_reproj['huc12'].isin(common_hucs)].copy()
+        plot_gdf = plot_gdf.set_index('huc12').loc[common_hucs]
+        plot_gdf['diff'] = [
+            huc12_diff_vals.get(h, np.nan) for h in common_hucs
+        ]
+        plot_gdf.loc[plot_gdf['diff'].abs() < 1e-6, 'diff'] = np.nan
+        plot_gdf.plot(
+            ax=ax_huc, column='diff', cmap='RdBu_r',
+            vmin=-vmax, vmax=vmax,
+            edgecolor='#AAAAAA', linewidth=0.3,
+            legend=False, missing_kwds={'color': '#EEEEEE'},
+        )
+        _overlay_boundaries(
+            ax_huc, b_reproj, ama_ina_names, b_name,
+            label_fontsize=5.0, label_all=False,
+        )
+        ax_huc.set_title('HUC12-Level', fontweight='bold')
+
+        # Panel 2: Pixel-level
+        ax_pix = axes[1]
+        ax_pix.set_facecolor('#D5D5D5')
+        if pixel_diff_arr is not None:
+            pix_mask = np.abs(pixel_diff_arr) < 1e-6
+            pix_masked = np.ma.masked_where(pix_mask, pixel_diff_arr)
+            ax_pix.imshow(
+                pix_masked, extent=pixel_extent, origin='upper',
+                cmap='RdBu_r', vmin=-vmax, vmax=vmax,
+                interpolation='nearest',
+            )
+            _overlay_boundaries(
+                ax_pix, b_reproj, ama_ina_names, b_name,
+                label_fontsize=5.0, label_all=False,
+            )
+        else:
+            ax_pix.text(
+                0.5, 0.5, 'Pixel-level rasters unavailable',
+                ha='center', va='center', transform=ax_pix.transAxes,
+            )
+            ax_pix.axis('off')
+        ax_pix.set_title('Pixel-Level', fontweight='bold')
+
+        # Panel 3: Basin
+        ax_bas = axes[2]
+        ax_bas.set_facecolor('#D5D5D5')
+        plot_b = b_reproj.set_index(basin_col).copy()
+        plot_b['diff'] = plot_b.index.map(
+            lambda b: basin_diff_vals.get(b, np.nan),
+        )
+        plot_b.loc[plot_b['diff'].abs() < 1e-6, 'diff'] = np.nan
+        plot_b.plot(
+            ax=ax_bas, column='diff', cmap='RdBu_r',
+            vmin=-vmax, vmax=vmax,
+            edgecolor='#666666', linewidth=0.5,
+            legend=False, missing_kwds={'color': '#EEEEEE'},
+        )
+        _overlay_boundaries(
+            ax_bas, b_reproj, ama_ina_names, b_name,
+            label_fontsize=5.0, label_all=False,
+        )
+        ax_bas.set_title('Basin-Level', fontweight='bold')
+
+        # Single shared colorbar (Δ Depth mm, secondary axis ft)
+        sm = ScalarMappable(cmap='RdBu_r', norm=Normalize(-vmax, vmax))
+        sm.set_array([])
+        cbar = fig.colorbar(
+            sm, ax=list(axes), shrink=0.5, pad=0.06,
+            orientation='horizontal', aspect=40, extend='both',
+        )
+        cbar.set_label(
+            '\u0394 Depth (mm)', fontsize=10, fontweight='bold',
+        )
+        cbar.ax.tick_params(labelsize=10)
+        secax = cbar.ax.secondary_xaxis(
+            'top',
+            functions=(
+                lambda x: x * _mm_to_ft,
+                lambda x: x / _mm_to_ft,
+            ),
+        )
+        secax.set_xlabel(
+            '\u0394 Depth (ft)', fontsize=10, fontweight='bold',
+        )
+        secax.tick_params(labelsize=10)
+
+        add_ama_ina_legend(axes[0])
+        fig.savefig(
+            os.path.join(spatial_diff_dir, 'Spatial_Diff_CU.png'),
+            dpi=600, bbox_inches='tight',
+        )
+        plt.close(fig)
+        logger.info(
+            f'  CU 3-panel diff figure saved to {spatial_diff_dir}'
+        )
 
         # ── HUC12-level temporal diagnostics ──
         logger.info('  Computing HUC12-level CU temporal diagnostics...')
@@ -3893,6 +4051,48 @@ def run_peff_intercomparison(
         filename='Scatter_Peff.png',
     )
 
+    # ── 8b. Basin-aggregated Δ Volume choropleth (3 panels) ───────────
+    # Mirrors the NHM-withdrawal / PS basin-diff multi-panel pattern:
+    # one figure with three panels (USDA-SCS−NHM, ML PCML−NHM,
+    # USDA-SCS−ML PCML).  Shared colorbar — all three panels are
+    # in the same Peff units (10⁶ m³) so magnitudes are comparable.
+    basin_diff_dir = os.path.join(output_dir, 'Spatial_Diff/')
+    makedirs(basin_diff_dir)
+    peff_basin_pairs = [
+        ('USDA-SCS Peff', 'NHM Peff', 'ML_Peff', 'NHM_Peff'),
+        ('ML Peff PCML', 'NHM Peff', 'ML_Peff_PCML', 'NHM_Peff'),
+        ('USDA-SCS Peff', 'ML Peff PCML', 'ML_Peff', 'ML_Peff_PCML'),
+    ]
+    panels_peff = []
+    for label_a, label_b, key_a, key_b in peff_basin_pairs:
+        a_mean = all_sources[key_a]['mean']
+        b_mean = all_sources[key_b]['mean']
+        if not (a_mean and b_mean):
+            continue
+        panels_peff.append({
+            'basin_a_vols': a_mean,
+            'basin_b_vols': b_mean,
+            'panel_title': f'{label_a} \u2212 {label_b}',
+            'label_a': label_a,
+            'label_b': label_b,
+        })
+    if panels_peff:
+        _plot_basin_diff_panels(
+            panels=panels_peff,
+            basin_gdf=basin_reproj,
+            basin_col=basin_col,
+            title=(
+                'Effective Precipitation \u2014 Basin-Level Volume Diff'
+            ),
+            out_path=os.path.join(
+                basin_diff_dir, 'Spatial_Diff_Basin_Peff.png',
+            ),
+            shared_colorbar=True,
+        )
+        logger.info(
+            f'Basin-level Peff Δ volume figure saved to {basin_diff_dir}'
+        )
+
     # ── HUC12-level Peff comparison ─────────────────────────────────────
     logger.info('--- HUC12-level Peff comparison ---')
     huc12_dir = os.path.join(output_dir, 'HUC12_Comparison/')
@@ -4125,6 +4325,142 @@ def run_peff_intercomparison(
             )
             plt.close(fig)
         logger.info(f'  HUC12-level Peff diff maps saved to {huc12_diff_dir}')
+
+        # ── Pixel-level Peff diff (3 pairs side by side) ──────────────
+        # Mirrors the HUC12 figure structure (3 panels = 3 pairs) but
+        # at native raster resolution.  Uses Δ Depth (mm) since every
+        # pixel has identical area and depth is the most direct
+        # comparison unit at pixel scale.
+        pixel_diff_dir = os.path.join(output_dir, 'Spatial_Diff/')
+        makedirs(pixel_diff_dir)
+        peff_mean_rasters = {
+            'ML_Peff': os.path.join(
+                ml_peff_out, 'ML_mean_annual_Peff_mm.tif',
+            ),
+            'ML_Peff_PCML': os.path.join(
+                ml_pcml_out, 'ML_mean_annual_Peff_PCML_mm.tif',
+            ),
+            'NHM_Peff': os.path.join(
+                nhm_peff_out, 'NHM_mean_annual_Peff_mm.tif',
+            ),
+        }
+        peff_pixel_arrays: dict[str, np.ndarray] = {}
+        pixel_extent_pf = None
+        for src_key, rpath in peff_mean_rasters.items():
+            if os.path.isfile(rpath):
+                with rio.open(rpath) as src:
+                    arr = src.read(1).astype(np.float64)
+                    if pixel_extent_pf is None:
+                        pixel_extent_pf = [
+                            src.bounds.left, src.bounds.right,
+                            src.bounds.bottom, src.bounds.top,
+                        ]
+                arr[np.isnan(arr)] = 0.0
+                peff_pixel_arrays[src_key] = arr
+
+        peff_pixel_pairs = [
+            ('USDA-SCS Peff', 'NHM Peff', 'ML_Peff', 'NHM_Peff'),
+            ('ML Peff PCML', 'NHM Peff', 'ML_Peff_PCML', 'NHM_Peff'),
+            ('USDA-SCS Peff', 'ML Peff PCML', 'ML_Peff', 'ML_Peff_PCML'),
+        ]
+        # Compute shared vmax across the 3 pair panels
+        global_vmax_pix = 1e-6
+        for _, _, key_a, key_b in peff_pixel_pairs:
+            if key_a in peff_pixel_arrays and key_b in peff_pixel_arrays:
+                d = peff_pixel_arrays[key_a] - peff_pixel_arrays[key_b]
+                m_zero = (
+                    (peff_pixel_arrays[key_a] == 0)
+                    & (peff_pixel_arrays[key_b] == 0)
+                )
+                d_valid = d[~m_zero]
+                if d_valid.size:
+                    global_vmax_pix = max(
+                        global_vmax_pix,
+                        abs(np.nanpercentile(d_valid, 2)),
+                        abs(np.nanpercentile(d_valid, 98)),
+                    )
+
+        from matplotlib.cm import ScalarMappable
+        from matplotlib.colors import Normalize
+
+        fig, axes = plt.subplots(
+            1, 3, figsize=(20, 7), constrained_layout=True,
+        )
+        fig.suptitle(
+            'Effective Precipitation \u2014 Pixel-Level Depth '
+            'Difference',
+            fontsize=14, fontweight='bold',
+        )
+        for col_i, (name_a, name_b, key_a, key_b) in enumerate(
+            peff_pixel_pairs,
+        ):
+            ax = axes[col_i]
+            ax.set_facecolor('#D5D5D5')
+            if (
+                key_a in peff_pixel_arrays
+                and key_b in peff_pixel_arrays
+                and pixel_extent_pf is not None
+            ):
+                diff = (
+                    peff_pixel_arrays[key_a] - peff_pixel_arrays[key_b]
+                )
+                mask = (
+                    (peff_pixel_arrays[key_a] == 0)
+                    & (peff_pixel_arrays[key_b] == 0)
+                )
+                diff_masked = np.ma.masked_where(mask, diff)
+                ax.imshow(
+                    diff_masked, extent=pixel_extent_pf,
+                    origin='upper', cmap='RdBu_r',
+                    vmin=-global_vmax_pix, vmax=global_vmax_pix,
+                    interpolation='nearest',
+                )
+                _overlay_boundaries(
+                    ax, b_reproj, ama_ina_names, b_name,
+                    label_fontsize=5.0, label_all=False,
+                )
+            else:
+                ax.text(
+                    0.5, 0.5,
+                    f'Pixel rasters unavailable\n({key_a} or {key_b})',
+                    ha='center', va='center', transform=ax.transAxes,
+                )
+                ax.axis('off')
+            ax.set_title(f'{name_a} \u2212 {name_b}', fontweight='bold')
+
+        sm = ScalarMappable(
+            cmap='RdBu_r',
+            norm=Normalize(-global_vmax_pix, global_vmax_pix),
+        )
+        sm.set_array([])
+        cbar = fig.colorbar(
+            sm, ax=list(axes), shrink=0.5, pad=0.06,
+            orientation='horizontal', aspect=40, extend='both',
+        )
+        cbar.set_label(
+            '\u0394 Depth (mm)', fontsize=10, fontweight='bold',
+        )
+        cbar.ax.tick_params(labelsize=10)
+        secax = cbar.ax.secondary_xaxis(
+            'top',
+            functions=(
+                lambda x: x * _mm_to_ft,
+                lambda x: x / _mm_to_ft,
+            ),
+        )
+        secax.set_xlabel(
+            '\u0394 Depth (ft)', fontsize=10, fontweight='bold',
+        )
+        secax.tick_params(labelsize=10)
+        add_ama_ina_legend(axes[0])
+        fig.savefig(
+            os.path.join(pixel_diff_dir, 'Spatial_Diff_Pixel_Peff.png'),
+            dpi=600, bbox_inches='tight',
+        )
+        plt.close(fig)
+        logger.info(
+            f'  Pixel-level Peff diff figure saved to {pixel_diff_dir}'
+        )
 
         # ── HUC12-level Peff temporal diagnostics ──
         logger.info('  Computing HUC12-level Peff temporal diagnostics...')
@@ -5580,6 +5916,10 @@ def run_ps_intercomparison(
     )
 
     # ── 8. Scatter plots ──────────────────────────────────────────────
+    # Log-scale axes for PS basin scatter — public-supply volumes span
+    # ~3 decades across AZ basins (a few hundred AF in rural basins to
+    # >100 kAF in Phoenix AMA), so a linear axis collapses the small-
+    # basin signal at the origin.
     scatter_dir = os.path.join(output_dir, 'Scatter/')
     for cat_key, cat_name in cat_labels.items():
         plot_intercomp_scatter(
@@ -5588,6 +5928,7 @@ def run_ps_intercomparison(
             basin_names, basin_areas_m2, scatter_dir,
             title=f'{cat_name} — ML vs USGS Public Supply',
             filename=f'Scatter_{cat_name}.png',
+            log_scale=True,
         )
 
     # ── 8b. Statewide stacked bar plots ──────────────────────────────
@@ -5679,21 +6020,32 @@ def run_ps_intercomparison(
                 f'PctDiff={m["Pct_Diff"]:.1f}%'
             )
 
-            # HUC12 scatter
+            # HUC12 scatter (log scale — HUC12 PS volumes span 4-5
+            # decades, dominated by a long tail of small rural HUC12s)
             huc12_scatter_dir = os.path.join(huc12_dir, 'Scatter/')
             plot_intercomp_scatter(
                 [('ML Non-Irrigation', 'USGS PS', ml_huc_mean_ps, ps_huc_mean)],
                 common_hucs_ps, huc_areas_ps, huc12_scatter_dir,
                 title=f'{cat_name} — HUC12-Level Scatter',
                 filename=f'Scatter_HUC12_{cat_name}.png',
+                log_scale=True,
             )
 
-            # HUC12 spatial diff choropleth
+            # Combined HUC12 + Pixel + Basin Δ depth (3 panels, shared
+            # colorbar in mm).  Same rationale as the CU 3-panel figure:
+            # Δ Depth is the only physically meaningful unit shared
+            # across pixel / HUC12 / basin scales.  PS data is
+            # natively HUC12-level — rasterising it produces a
+            # piecewise-uniform raster, so the pixel diff (ML pixel −
+            # PS HUC12-uniform) shows where ML's pixel-level estimate
+            # deviates from the HUC12 average.
+            from matplotlib.cm import ScalarMappable
+            from matplotlib.colors import Normalize
+
             _af_to_m3_local = 1.0 / M3_TO_AF
             _mm_to_ft = 1.0 / 304.8
-            _m3_to_af_local = M3_TO_AF
-            huc12_diff_dir = os.path.join(huc12_dir, 'Spatial_Diff/')
-            makedirs(huc12_diff_dir)
+            spatial_diff_dir = os.path.join(output_dir, 'Spatial_Diff/')
+            makedirs(spatial_diff_dir)
             b_reproj_ps = (
                 basin_gdf.to_crs(huc_reproj_ps.crs)
                 if basin_gdf.crs != huc_reproj_ps.crs else basin_gdf
@@ -5704,81 +6056,216 @@ def run_ps_intercomparison(
             )
             ama_ina_names_ps = get_ama_ina_basin_names()
 
-            # Volume-only HUC12 diff for PS comparison.
-            for unit_mode, unit_label, sec_label, sec_factor, scale_fn, tick_div in [
-                ('volume', r'$\Delta$ Volume ($\times$10$^{6}$ m$^3$)', '\u0394 Volume (AF)',
-                 _m3_to_af_local,
-                 lambda af, area: af * _af_to_m3_local, 1e6),
-            ]:
-                fig, ax = plt.subplots(1, 1, figsize=(8, 8), constrained_layout=True)
-                title_u = 'Volume'
-                fig.suptitle(
-                    f'{cat_name} \u2014 HUC12-Level {title_u} Diff (ML \u2212 PS)',
-                    fontsize=14, fontweight='bold',
-                )
-                diff_vals = []
-                for h in common_hucs_ps:
-                    area = huc_areas_ps.get(h, 1.0)
-                    diff_vals.append(
-                        scale_fn(ml_huc_mean_ps.get(h, 0.0), area)
-                        - scale_fn(ps_huc_mean.get(h, 0.0), area)
+            # Panel 1: HUC12 Δ depth (mm)
+            huc12_diff_vals: dict[str, float] = {}
+            for h in common_hucs_ps:
+                area = huc_areas_ps.get(h, 0.0)
+                if area > 0:
+                    huc12_diff_vals[h] = (
+                        (ml_huc_mean_ps.get(h, 0.0)
+                         - ps_huc_mean.get(h, 0.0))
+                        * _af_to_m3_local / area * M_TO_MM
                     )
-                plot_gdf = huc_reproj_ps[
-                    huc_reproj_ps['huc12'].isin(common_hucs_ps)
-                ].copy()
-                plot_gdf = plot_gdf.set_index('huc12').loc[common_hucs_ps]
-                plot_gdf['diff'] = diff_vals
-                plot_gdf.loc[plot_gdf['diff'].abs() < 1e-10, 'diff'] = np.nan
-                d_arr = np.array([d for d in diff_vals if abs(d) > 1e-10])
-                vmax = (
-                    max(abs(np.nanpercentile(d_arr, 2)),
-                        abs(np.nanpercentile(d_arr, 98)), 1e-6)
-                    if d_arr.size else 1.0
+
+            # Panel 2: Pixel-level Δ depth — ML mean raster minus
+            # PS HUC12 depth rasterised onto the ML grid.
+            ml_mean_raster_ps = os.path.join(
+                output_dir,
+                f'ML_mean_annual_NonIrr_{cat_key}_mm.tif',
+            )
+            pixel_diff_arr_ps = None
+            pixel_extent_ps = None
+            if os.path.isfile(ml_mean_raster_ps):
+                with rio.open(ml_mean_raster_ps) as src:
+                    ml_arr_ps = src.read(1).astype(np.float64)
+                    pixel_extent_ps = [
+                        src.bounds.left, src.bounds.right,
+                        src.bounds.bottom, src.bounds.top,
+                    ]
+                    ps_ref_transform = src.transform
+                    ps_ref_shape = (src.height, src.width)
+                ml_arr_ps[np.isnan(ml_arr_ps)] = 0.0
+
+                # Rasterise PS HUC12 depths onto the ML grid
+                ps_depth_shapes = []
+                for _, hrow in huc_reproj_ps.iterrows():
+                    h_id = str(hrow['huc12'])
+                    area = huc_areas_ps.get(h_id, 0.0)
+                    if area <= 0:
+                        continue
+                    ps_af = ps_huc_mean.get(h_id, 0.0)
+                    if ps_af == 0:
+                        continue
+                    depth_mm = ps_af * _af_to_m3_local / area * M_TO_MM
+                    ps_depth_shapes.append((hrow.geometry, depth_mm))
+                if ps_depth_shapes:
+                    ps_arr = rasterize(
+                        ps_depth_shapes, out_shape=ps_ref_shape,
+                        transform=ps_ref_transform, fill=0.0,
+                        dtype='float64',
+                        merge_alg=rio.enums.MergeAlg.replace,
+                    )
+                else:
+                    ps_arr = np.zeros(ps_ref_shape, dtype=np.float64)
+                pixel_diff_arr_ps = ml_arr_ps - ps_arr
+
+            # Panel 3: Basin Δ depth (mm)
+            basin_areas_lookup_ps = {
+                row[basin_col]: row.geometry.area
+                for _, row in b_reproj_ps.iterrows()
+            }
+            basin_diff_vals: dict[str, float] = {}
+            for b in basin_names:
+                area = basin_areas_lookup_ps.get(b, 0.0)
+                if area > 0:
+                    basin_diff_vals[b] = (
+                        (ml_vols[cat_key]['mean'].get(b, 0.0)
+                         - ps_vols[cat_key]['mean'].get(b, 0.0))
+                        * _af_to_m3_local / area * M_TO_MM
+                    )
+
+            # Shared vmax across the three panels
+            vmax_candidates: list[float] = []
+            if huc12_diff_vals:
+                vals = np.array(
+                    [v for v in huc12_diff_vals.values() if abs(v) > 1e-6],
                 )
-                from matplotlib.cm import ScalarMappable
-                from matplotlib.colors import Normalize
-                plot_gdf.plot(
-                    ax=ax, column='diff', cmap='RdBu_r',
-                    vmin=-vmax, vmax=vmax,
-                    edgecolor='#AAAAAA', linewidth=0.3,
-                    legend=False, missing_kwds={'color': '#EEEEEE'},
+                if vals.size:
+                    vmax_candidates.extend([
+                        abs(np.nanpercentile(vals, 2)),
+                        abs(np.nanpercentile(vals, 98)),
+                    ])
+            if pixel_diff_arr_ps is not None:
+                pix_vals = pixel_diff_arr_ps[
+                    np.abs(pixel_diff_arr_ps) > 1e-6
+                ]
+                if pix_vals.size:
+                    vmax_candidates.extend([
+                        abs(np.nanpercentile(pix_vals, 2)),
+                        abs(np.nanpercentile(pix_vals, 98)),
+                    ])
+            if basin_diff_vals:
+                vals = np.array(
+                    [v for v in basin_diff_vals.values() if abs(v) > 1e-6],
+                )
+                if vals.size:
+                    vmax_candidates.extend([
+                        abs(np.nanpercentile(vals, 2)),
+                        abs(np.nanpercentile(vals, 98)),
+                    ])
+            vmax = max(vmax_candidates) if vmax_candidates else 1.0
+            vmax = max(vmax, 1e-6)
+
+            fig, axes = plt.subplots(
+                1, 3, figsize=(20, 7), constrained_layout=True,
+            )
+            fig.suptitle(
+                f'{cat_name} \u2014 Mean-Annual Depth Difference '
+                f'(ML \u2212 PS)',
+                fontsize=14, fontweight='bold',
+            )
+
+            # Panel 1: HUC12
+            ax_huc = axes[0]
+            ax_huc.set_facecolor('#D5D5D5')
+            plot_gdf = huc_reproj_ps[
+                huc_reproj_ps['huc12'].isin(common_hucs_ps)
+            ].copy()
+            plot_gdf = plot_gdf.set_index('huc12').loc[common_hucs_ps]
+            plot_gdf['diff'] = [
+                huc12_diff_vals.get(h, np.nan) for h in common_hucs_ps
+            ]
+            plot_gdf.loc[plot_gdf['diff'].abs() < 1e-6, 'diff'] = np.nan
+            plot_gdf.plot(
+                ax=ax_huc, column='diff', cmap='RdBu_r',
+                vmin=-vmax, vmax=vmax,
+                edgecolor='#AAAAAA', linewidth=0.3,
+                legend=False, missing_kwds={'color': '#EEEEEE'},
+            )
+            _overlay_boundaries(
+                ax_huc, b_reproj_ps, ama_ina_names_ps, b_name_ps,
+                label_fontsize=5.0, label_all=False,
+            )
+            ax_huc.set_title('HUC12-Level', fontweight='bold')
+
+            # Panel 2: Pixel-level
+            ax_pix = axes[1]
+            ax_pix.set_facecolor('#D5D5D5')
+            if pixel_diff_arr_ps is not None:
+                pix_mask = np.abs(pixel_diff_arr_ps) < 1e-6
+                pix_masked = np.ma.masked_where(pix_mask, pixel_diff_arr_ps)
+                ax_pix.imshow(
+                    pix_masked, extent=pixel_extent_ps, origin='upper',
+                    cmap='RdBu_r', vmin=-vmax, vmax=vmax,
+                    interpolation='nearest',
                 )
                 _overlay_boundaries(
-                    ax, b_reproj_ps, ama_ina_names_ps, b_name_ps,
-                    label_fontsize=5.0, label_all=True,
+                    ax_pix, b_reproj_ps, ama_ina_names_ps, b_name_ps,
+                    label_fontsize=5.0, label_all=False,
                 )
-                add_ama_ina_legend(ax)
-                import matplotlib.ticker as mticker
-                sm = ScalarMappable(cmap='RdBu_r', norm=Normalize(-vmax, vmax))
-                sm.set_array([])
-                cbar = fig.colorbar(
-                    sm, ax=ax, shrink=0.5, pad=0.06,
-                    orientation='horizontal', aspect=40, extend='both',
+            else:
+                ax_pix.text(
+                    0.5, 0.5, 'Pixel-level rasters unavailable',
+                    ha='center', va='center', transform=ax_pix.transAxes,
                 )
-                if tick_div:
-                    cbar.formatter = mticker.FuncFormatter(
-                        lambda x, _: f'{x/tick_div:g}')
-                    cbar.update_ticks()
-                cbar.set_label(unit_label, fontsize=10, fontweight='bold')
-                cbar.ax.tick_params(labelsize=10)
-                secax = cbar.ax.secondary_xaxis(
-                    'top',
-                    functions=(
-                        lambda x: x * sec_factor,
-                        lambda x: x / sec_factor,
-                    ),
-                )
-                secax.set_xlabel(sec_label, fontsize=10, fontweight='bold')
-                secax.tick_params(labelsize=10)
-                suffix = '' if unit_mode == 'depth' else '_Volume'
-                fig.savefig(
-                    os.path.join(
-                        huc12_diff_dir,
-                        f'Spatial_Diff_HUC12_{cat_name}{suffix}.png',
-                    ),
-                    dpi=600, bbox_inches='tight',
-                )
-                plt.close(fig)
+                ax_pix.axis('off')
+            ax_pix.set_title('Pixel-Level', fontweight='bold')
+
+            # Panel 3: Basin
+            ax_bas = axes[2]
+            ax_bas.set_facecolor('#D5D5D5')
+            plot_b = b_reproj_ps.set_index(basin_col).copy()
+            plot_b['diff'] = plot_b.index.map(
+                lambda b: basin_diff_vals.get(b, np.nan),
+            )
+            plot_b.loc[plot_b['diff'].abs() < 1e-6, 'diff'] = np.nan
+            plot_b.plot(
+                ax=ax_bas, column='diff', cmap='RdBu_r',
+                vmin=-vmax, vmax=vmax,
+                edgecolor='#666666', linewidth=0.5,
+                legend=False, missing_kwds={'color': '#EEEEEE'},
+            )
+            _overlay_boundaries(
+                ax_bas, b_reproj_ps, ama_ina_names_ps, b_name_ps,
+                label_fontsize=5.0, label_all=False,
+            )
+            ax_bas.set_title('Basin-Level', fontweight='bold')
+
+            # Shared colorbar (Δ Depth in mm, secondary axis ft)
+            sm = ScalarMappable(cmap='RdBu_r', norm=Normalize(-vmax, vmax))
+            sm.set_array([])
+            cbar = fig.colorbar(
+                sm, ax=list(axes), shrink=0.5, pad=0.06,
+                orientation='horizontal', aspect=40, extend='both',
+            )
+            cbar.set_label(
+                '\u0394 Depth (mm)', fontsize=10, fontweight='bold',
+            )
+            cbar.ax.tick_params(labelsize=10)
+            secax = cbar.ax.secondary_xaxis(
+                'top',
+                functions=(
+                    lambda x: x * _mm_to_ft,
+                    lambda x: x / _mm_to_ft,
+                ),
+            )
+            secax.set_xlabel(
+                '\u0394 Depth (ft)', fontsize=10, fontweight='bold',
+            )
+            secax.tick_params(labelsize=10)
+
+            add_ama_ina_legend(axes[0])
+            fig.savefig(
+                os.path.join(
+                    spatial_diff_dir, f'Spatial_Diff_PS_{cat_name}.png',
+                ),
+                dpi=600, bbox_inches='tight',
+            )
+            plt.close(fig)
+            logger.info(
+                f'  PS 3-panel diff figure for {cat_name} saved to '
+                f'{spatial_diff_dir}'
+            )
 
             # HUC12 temporal diagnostics
             # Build per-year {year: {huc12: AF}} for ML
@@ -5857,22 +6344,34 @@ def run_ps_intercomparison(
             if vals:
                 out[b] = float(np.mean(vals))
         return out
+    panels_ps = []
     for cat_key, cat_name in cat_labels.items():
-        ml_sigma_mean = _sigma_mean_for_cat(cat_key)
-        _plot_basin_diff_choropleth(
-            basin_a_vols=ml_vols[cat_key]['mean'],
-            basin_b_vols=ps_vols[cat_key]['mean'],
+        a_mean = ml_vols[cat_key]['mean']
+        b_mean = ps_vols[cat_key]['mean']
+        if not (a_mean and b_mean):
+            continue
+        panels_ps.append({
+            'basin_a_vols': a_mean,
+            'basin_b_vols': b_mean,
+            'panel_title': cat_name.replace('_', ' '),
+            'label_a': 'ML',
+            'label_b': 'PS',
+        })
+    if panels_ps:
+        # Per-panel colorbars (Total / GW / SW magnitudes can differ
+        # by 2-3× — a shared colorbar would compress the GW / SW
+        # signal next to the larger Total).
+        _plot_basin_diff_panels(
+            panels=panels_ps,
             basin_gdf=basin_b_reproj,
             basin_col=basin_col,
-            title=f'{cat_name} \u2014 Basin-Level Volume Diff (ML \u2212 PS)',
+            title='Non-Irrigation \u2014 Basin-Level Volume Diff (ML \u2212 PS)',
             out_path=os.path.join(
-                basin_diff_dir, f'Spatial_Diff_{cat_name}_Volume.png',
+                basin_diff_dir, 'Spatial_Diff_PS.png',
             ),
-            label_a='ML', label_b='PS',
-            basin_a_sigma=ml_sigma_mean,
-            basin_b_sigma=None,
+            shared_colorbar=False,
         )
-    logger.info(f'Basin-level Δ volume maps saved to {basin_diff_dir}')
+    logger.info(f'Basin-level Δ volume map saved to {basin_diff_dir}')
 
     # ── Summary ───────────────────────────────────────────────────────
     logger.info('\n' + '=' * 60)

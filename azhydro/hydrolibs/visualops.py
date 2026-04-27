@@ -4397,16 +4397,26 @@ def _draw_sigma_attribution_legend(
                        linewidth=0.6, label=_SIGMA_ATTR_SHARE_LABELS[i])
         for i in range(5)
     ]
+    # σ_Model dominant overlay handle (Projection era only — the
+    # Mgmt-vs-Climate axis cannot represent Model-dominated variance,
+    # so those basins get a lavender + xxx-hatch overlay).
+    if era == 'Projection':
+        model_dom_patch = mpatches.Patch(
+            facecolor='#E8E0FF', edgecolor='#444444',
+            linewidth=0.6, hatch='xxx', label='σ_Model dominated',
+        )
+        handles.append(model_dom_patch)
     na_patch = mpatches.Patch(
         facecolor='#E8E8E8', edgecolor='#999999',
         linewidth=0.6, hatch='///', label='N/A',
     )
     na_patch.set_edgecolor('#AAAAAA')
     handles.append(na_patch)
+    ncol = len(handles)
     leg = fig.legend(
         handles=handles,
         loc='lower center',
-        ncol=6,
+        ncol=ncol,
         bbox_to_anchor=(0.5, 0.01),
         frameon=False,
         fontsize=9,
@@ -4454,8 +4464,8 @@ def _draw_sigma_attribution_disclosure_box(
         f'({n_model_dom / n_total * 100:.0f}%); median Model share '
         f'{median_model:.0f}%.\n'
         f'Color axis classifies Management vs Climate within the '
-        f'remaining variance; basins with a red edge are '
-        f'Model-dominated overall.'
+        f'remaining variance; basins with the lavender ×-hatch overlay '
+        f'(see legend) are Model-dominated overall.'
     )
     # Make room for the two-line disclosure between the map panels and
     # the bottom legend. The legend-only bottom margin is computed in
@@ -4818,16 +4828,35 @@ def _draw_attribution_basin_panel(
                 (model_share[finite] > mgmt_share[finite])
                 & (model_share[finite] > clim_share[finite])
             )
-            edge_colors[dominant] = '#d62728'
-            linewidths[dominant] = 1.8
+        else:
+            dominant = np.zeros(len(merged), dtype=bool)
 
-    # Plot all basins with solid edges
+    # Plot all basins with default thin gray edges
     merged.plot(
         ax=ax,
         color=face_colors,
         edgecolor=list(edge_colors),
         linewidth=list(linewidths),
     )
+
+    # Overlay σ_Model-dominant basins (Projection only) with a light
+    # lavender fill + cross-hatch pattern, mirroring the N/A overlay
+    # convention but with a distinct color (lavender → purple-family
+    # to suggest "Model" the same way the hindcast/historical palette
+    # uses purple for the Model-Dominated bin) and a distinct hatch
+    # (xxx vs N/A's ///).  Indicates that the Mgmt-vs-Climate
+    # classification at these basins is secondary signal — the
+    # dominant variance is the σ_Model component which the binary
+    # Mgmt/Climate axis cannot represent.
+    if not ternary and era == 'Projection' and dominant.any():
+        dom_gdf = merged[dominant]
+        dom_gdf.plot(
+            ax=ax,
+            color='#E8E0FF',
+            edgecolor='#888888',
+            linewidth=0.6,
+            hatch='xxx',
+        )
 
     # Overlay N/A basins with a diagonal-hatch pattern on a light
     # gray fill, matching the NV reference figure. The hatch is
@@ -4847,8 +4876,17 @@ def _draw_attribution_basin_panel(
         )
         # Set the hatch color to a medium gray (matplotlib uses
         # rcParams for hatch color, but we can override per-patch).
+        # N/A `///` hatches use light gray; σ_Model-dominant `xxx`
+        # hatches keep the darker `#444444` edge for stronger visual
+        # weight (the Model-dom flag is a calibration concern reviewers
+        # should notice immediately).
         for patch in ax.patches:
-            if hasattr(patch, 'get_hatch') and patch.get_hatch():
+            if not (hasattr(patch, 'get_hatch') and patch.get_hatch()):
+                continue
+            h = patch.get_hatch() or ''
+            if 'x' in h:
+                patch.set_edgecolor('#444444')
+            else:
                 patch.set_edgecolor('#AAAAAA')
 
     # Label every basin
@@ -6935,11 +6973,27 @@ def plot_intercomp_scatter(
                 # near the zero-crossing on log-scale axes, which is
                 # visually confusing.  The fit equation in the legend
                 # plus the metrics box still convey the regression.
+                # Intercept reported in the SAME unit as the displayed
+                # axis: km³ (= z[1] / 1e9) for volume mode, raw value
+                # for ratio mode.  Without this conversion the equation
+                # showed huge m³ values (e.g. "5,000,000.0") next to
+                # km³ axis ticks (e.g. "0.005"), which was confusing.
                 if not log_scale:
                     x_fit = np.linspace(lo, hi, 100)
-                    sign = '\u2212' if z[1] < 0 else '+'
-                    ax.plot(x_fit, np.polyval(z, x_fit), 'r-', lw=1.2,
-                            label=f'y={z[0]:.2f}x {sign} {abs(z[1]):.1f}')
+                    if mode == 'volume':
+                        intercept_disp = z[1] / 1e9
+                        intercept_unit = ' km³'
+                    else:
+                        intercept_disp = z[1]
+                        intercept_unit = ''
+                    sign = '\u2212' if intercept_disp < 0 else '+'
+                    ax.plot(
+                        x_fit, np.polyval(z, x_fit), 'r-', lw=1.2,
+                        label=(
+                            f'y={z[0]:.2f}x {sign} '
+                            f'{abs(intercept_disp):.3g}{intercept_unit}'
+                        ),
+                    )
                 # Validation (is_validation=True) vs observed data:
                 # R² (Nash-Sutcliffe form) is appropriate because a
                 # single ground-truth reference exists and we want to
