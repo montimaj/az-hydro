@@ -7029,19 +7029,19 @@ def plot_intercomp_scatter(
             )
             ax.legend(fontsize=8, loc='upper left')
             ax.grid(True, alpha=0.3, linestyle='--', which='both')
-            # Set limits BEFORE aspect so set_aspect('equal',
-            # adjustable='box') doesn't fight a later set_ylim and
-            # emit the "Ignoring fixed y limits to fulfill fixed data
-            # aspect with adjustable data limits" warning.
+            # Order matters: set xlim/ylim → create twin → set twin
+            # ylim → THEN set aspect.  set_aspect('equal',
+            # adjustable='box') reapplies its constraint whenever the
+            # bounding box would change, and the twin axis shares the
+            # parent's bbox — so any set_ylim on the twin AFTER the
+            # parent's aspect is locked emits the "Ignoring fixed y
+            # limits to fulfill fixed data aspect" warning.  Doing
+            # the twin setup first avoids that.
             if log_scale:
                 ax.set_xscale('log')
                 ax.set_yscale('log')
             ax.set_xlim(lo, hi)
             ax.set_ylim(lo, hi)
-            if not log_scale:
-                # Aspect-equal is meaningless on log axes; let the box
-                # scale to the figsize so all labels are readable.
-                ax.set_aspect('equal', adjustable='box')
             # For volume mode, format primary axes as km³ and add an
             # AF twin on the right Y only so the same scatter can be
             # read in both unit systems.  Twiny on the top axis is
@@ -7070,6 +7070,16 @@ def plot_intercomp_scatter(
                 )
                 _maf_suffix = '(MAF, log scale)' if log_scale else '(MAF)'
                 ax_right.set_ylabel(f'{label_b} {_maf_suffix}', fontweight='bold')
+            if not log_scale:
+                # Aspect-equal is meaningless on log axes; let the box
+                # scale to the figsize so all labels are readable.
+                # Must use adjustable='datalim' (not 'box') because
+                # the volume-mode branch above creates a twinx() and
+                # matplotlib disallows adjustable='box' on twinned
+                # Axes (RuntimeError at draw time).  Since we already
+                # set xlim == ylim == (lo, hi), the data limits don't
+                # actually need to change to satisfy equal aspect.
+                ax.set_aspect('equal', adjustable='datalim')
 
     out_path = os.path.join(output_dir, filename)
     fig.savefig(out_path, dpi=300, bbox_inches='tight')
