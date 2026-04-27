@@ -3180,6 +3180,7 @@ def create_graphical_abstract(
     name_col = 'BASIN_NAME' if 'BASIN_NAME' in basins_gdf.columns else basins_gdf.columns[0]
     _overlay_boundaries(ax_map, basins_gdf, ama_ina, name_col,
                         label_fontsize=6, label_all=True)
+    add_ama_ina_legend(ax_map)
 
     cbar = fig.colorbar(im, ax=ax_map, shrink=0.45, pad=0.08, extend='both')
     cbar_fontsize = 10
@@ -3361,6 +3362,54 @@ def _extract_year(filename: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+AMA_BORDER_COLOR = 'black'
+INA_BORDER_COLOR = '#B71C1C'
+BASIN_BORDER_COLOR = '#555555'
+
+
+def add_ama_ina_legend(
+    target,
+    *,
+    loc: str = 'upper left',
+    bbox_to_anchor: tuple[float, float] | None = (1.02, 1.0),
+    fontsize: int = 8,
+    framealpha: float = 0.9,
+) -> None:
+    """Add a single AMA / INA / GW basin legend to a Figure or Axes.
+
+    Default placement is **outside the right edge of the target Axes**
+    (anchor ``(1.02, 1.0)`` with ``loc='upper left'``) — pass the
+    first map's Axes (e.g. ``axes[0]``) for multi-panel figures so the
+    legend appears once next to the leftmost panel.
+
+    Use this once per figure with multi-panel boundary overlays —
+    pass ``show_legend=False`` to ``_overlay_boundaries`` on each
+    subplot and call this helper at the figure level.
+
+    Args:
+        target: A matplotlib ``Figure`` or ``Axes``.  When passing an
+            Axes, the default anchor places the legend just outside
+            the right edge of that axes.
+        loc: Matplotlib legend ``loc``.
+        bbox_to_anchor: Anchor in target coordinates.  Pass ``None``
+            to skip anchoring.
+        fontsize: Legend font size.
+        framealpha: Legend frame transparency.
+    """
+    from matplotlib.lines import Line2D
+    handles = [
+        Line2D([0], [0], color=BASIN_BORDER_COLOR, lw=0.8,
+               label='GW basin'),
+        Line2D([0], [0], color=AMA_BORDER_COLOR, lw=1.4, label='AMA'),
+        Line2D([0], [0], color=INA_BORDER_COLOR, lw=1.4, label='INA'),
+    ]
+    kwargs = dict(handles=handles, loc=loc, fontsize=fontsize,
+                  framealpha=framealpha)
+    if bbox_to_anchor is not None:
+        kwargs['bbox_to_anchor'] = bbox_to_anchor
+    target.legend(**kwargs)
+
+
 def _overlay_boundaries(
     ax,
     basins_gdf: gpd.GeoDataFrame,
@@ -3369,7 +3418,7 @@ def _overlay_boundaries(
     *,
     label_fontsize: float = 5.5,
     label_all: bool = False,
-    show_legend: bool = True,
+    show_legend: bool = False,
 ) -> None:
     """Draw basin boundaries and label basins on a map axis.
 
@@ -3384,21 +3433,28 @@ def _overlay_boundaries(
     Args:
         label_all: If True, label all basins (small font for non-AMA/INA).
             If False (default), label only AMA/INA basins.
-        show_legend: If True (default), add a small AMA/INA legend.
+        show_legend: If True, attach the AMA / INA / GW-basin legend
+            to **this axes** (outside-right placement).  Defaults to
+            False — for multi-panel figures, leave this False on every
+            subplot and call :func:`add_ama_ina_legend` once at the
+            figure level (or on the first axes) so the legend appears
+            exactly once per figure.
     """
-    AMA_COLOR = 'black'
-    INA_COLOR = '#B71C1C'   # dark red
-    BASE_COLOR = '#555555'
-
     ama_basins, ina_basins = get_ama_ina_classification()
 
-    basins_gdf.boundary.plot(ax=ax, color=BASE_COLOR, linewidth=0.4)
+    basins_gdf.boundary.plot(
+        ax=ax, color=BASIN_BORDER_COLOR, linewidth=0.4,
+    )
     ama_gdf = basins_gdf[basins_gdf[name_col].isin(ama_basins)]
     ina_gdf = basins_gdf[basins_gdf[name_col].isin(ina_basins)]
     if not ama_gdf.empty:
-        ama_gdf.boundary.plot(ax=ax, color=AMA_COLOR, linewidth=1.2)
+        ama_gdf.boundary.plot(
+            ax=ax, color=AMA_BORDER_COLOR, linewidth=1.2,
+        )
     if not ina_gdf.empty:
-        ina_gdf.boundary.plot(ax=ax, color=INA_COLOR, linewidth=1.2)
+        ina_gdf.boundary.plot(
+            ax=ax, color=INA_BORDER_COLOR, linewidth=1.2,
+        )
     for _, row in pd.concat([ama_gdf, ina_gdf], ignore_index=True).iterrows():
         centroid = row.geometry.centroid
         short = row[name_col].replace(' AMA', '').replace(' INA', '')
@@ -3407,7 +3463,7 @@ def _overlay_boundaries(
             short, (centroid.x, centroid.y),
             fontsize=label_fontsize, fontweight='bold',
             ha='center', va='center',
-            color=AMA_COLOR if is_ama else INA_COLOR,
+            color=AMA_BORDER_COLOR if is_ama else INA_BORDER_COLOR,
             bbox=dict(boxstyle='round,pad=0.12', fc='white',
                       alpha=0.8, lw=0),
         )
@@ -3424,25 +3480,7 @@ def _overlay_boundaries(
                           alpha=0.6, lw=0),
             )
     if show_legend:
-        from matplotlib.lines import Line2D
-        handles = [
-            Line2D([0], [0], color=BASE_COLOR, lw=0.8,
-                   label='GW basin'),
-            Line2D([0], [0], color=AMA_COLOR, lw=1.4, label='AMA'),
-            Line2D([0], [0], color=INA_COLOR, lw=1.4, label='INA'),
-        ]
-        # Preserve any existing legend handles already on the axis
-        # (e.g. choropleth class labels) by prepending our entries.
-        existing = ax.get_legend()
-        if existing is not None:
-            handles = (
-                handles
-                + [h for h in existing.legend_handles]
-            )
-        ax.legend(
-            handles=handles, loc='upper right',
-            fontsize=7, framealpha=0.85,
-        )
+        add_ama_ina_legend(ax)
     ax.axis('off')
 
 
@@ -3681,6 +3719,9 @@ def create_era_raster_maps(
             fontsize=12, fontweight='bold',
         )
 
+    # Single AMA / INA / GW basin legend, outside-right of first panel
+    add_ama_ina_legend(axes_flat[0])
+
     # Shared colorbar with dual units
     era_cbar_fontsize = 10
     cbar = fig.colorbar(
@@ -3915,6 +3956,9 @@ def create_ood_era_raster_maps(
             f'{panel_labels[idx]} {era} ({y1}–{y2})',
             fontsize=12, fontweight='bold',
         )
+
+    # Single AMA / INA / GW basin legend, outside-right of first panel
+    add_ama_ina_legend(axes_flat[0])
 
     era_cbar_fontsize = 10
     if last_partial_im is not None:
@@ -4791,6 +4835,7 @@ def _draw_attribution_basin_panel(
         ax, basins_gdf, ama_ina, basin_col,
         label_fontsize=5.5, label_all=True,
     )
+    add_ama_ina_legend(ax)
     ax.set_title(
         f'{panel_label} {panel_title}',
         fontsize=11, fontweight='bold',
@@ -6319,6 +6364,7 @@ def create_trend_maps(
         im = _draw_pixel_panel(ax, period_name, pr, pr['abs_max'],
                                slope_scale=pixel_scale,
                                show_title=False)
+        add_ama_ina_legend(ax)
         cbar = fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02,
                             extend='both')
         cbar.set_label(
@@ -6349,6 +6395,7 @@ def create_trend_maps(
             _draw_basin_panel(ax_b, period_name, pr, b_abs,
                               slope_scale=basin_scale,
                               show_title=False)
+            add_ama_ina_legend(ax_b)
             sm = plt.cm.ScalarMappable(
                 cmap='RdBu_r',
                 norm=plt.Normalize(
@@ -6397,6 +6444,7 @@ def create_trend_maps(
                 ax, period_name, period_results[period_name], eras_abs,
                 slope_scale=eras_scale,
             )
+        add_ama_ina_legend(axes[0])
         cbar = fig.colorbar(last_im, ax=axes, shrink=0.7, pad=0.02,
                             extend='both', location='right')
         cbar.set_label(
@@ -6445,6 +6493,7 @@ def create_trend_maps(
                     ax_b, period_name, period_results[period_name],
                     b_abs_eras, slope_scale=basin_eras_scale,
                 )
+            add_ama_ina_legend(axes_b[0])
             sm = plt.cm.ScalarMappable(
                 cmap='RdBu_r',
                 norm=plt.Normalize(
@@ -6896,15 +6945,19 @@ def plot_intercomp_scatter(
             )
             ax.legend(fontsize=8, loc='upper left')
             ax.grid(True, alpha=0.3, linestyle='--', which='both')
+            # Set limits BEFORE aspect so set_aspect('equal',
+            # adjustable='box') doesn't fight a later set_ylim and
+            # emit the "Ignoring fixed y limits to fulfill fixed data
+            # aspect with adjustable data limits" warning.
             if log_scale:
                 ax.set_xscale('log')
                 ax.set_yscale('log')
-                # Aspect-equal is meaningless on log axes; let the box
-                # scale to the figsize so all labels are readable.
-            else:
-                ax.set_aspect('equal', adjustable='box')
             ax.set_xlim(lo, hi)
             ax.set_ylim(lo, hi)
+            if not log_scale:
+                # Aspect-equal is meaningless on log axes; let the box
+                # scale to the figsize so all labels are readable.
+                ax.set_aspect('equal', adjustable='box')
             # For volume mode, format primary axes as km³ and add an
             # AF twin on the right Y only so the same scatter can be
             # read in both unit systems.  Twiny on the top axis is
