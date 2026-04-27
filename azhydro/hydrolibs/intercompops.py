@@ -3436,7 +3436,7 @@ def run_cu_intercomparison(
                 'top', functions=(lambda x: x*sec_factor, lambda x: x/sec_factor))
             secax.set_xlabel(sec_label, fontsize=10, fontweight='bold')
             secax.tick_params(labelsize=10)
-            add_ama_ina_legend(axes[0])
+            add_ama_ina_legend(ax)
 
             suffix = '' if unit_mode == 'depth' else '_Volume'
             fig.savefig(os.path.join(huc12_diff_dir, f'Spatial_Diff_HUC12_CU{suffix}.png'),

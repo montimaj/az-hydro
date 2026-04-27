@@ -3419,6 +3419,7 @@ def _overlay_boundaries(
     label_fontsize: float = 5.5,
     label_all: bool = False,
     show_legend: bool = False,
+    show_labels: bool = True,
 ) -> None:
     """Draw basin boundaries and label basins on a map axis.
 
@@ -3455,19 +3456,20 @@ def _overlay_boundaries(
         ina_gdf.boundary.plot(
             ax=ax, color=INA_BORDER_COLOR, linewidth=1.2,
         )
-    for _, row in pd.concat([ama_gdf, ina_gdf], ignore_index=True).iterrows():
-        centroid = row.geometry.centroid
-        short = row[name_col].replace(' AMA', '').replace(' INA', '')
-        is_ama = row[name_col] in ama_basins
-        ax.annotate(
-            short, (centroid.x, centroid.y),
-            fontsize=label_fontsize, fontweight='bold',
-            ha='center', va='center',
-            color=AMA_BORDER_COLOR if is_ama else INA_BORDER_COLOR,
-            bbox=dict(boxstyle='round,pad=0.12', fc='white',
-                      alpha=0.8, lw=0),
-        )
-    if label_all:
+    if show_labels:
+        for _, row in pd.concat([ama_gdf, ina_gdf], ignore_index=True).iterrows():
+            centroid = row.geometry.centroid
+            short = row[name_col].replace(' AMA', '').replace(' INA', '')
+            is_ama = row[name_col] in ama_basins
+            ax.annotate(
+                short, (centroid.x, centroid.y),
+                fontsize=label_fontsize, fontweight='bold',
+                ha='center', va='center',
+                color=AMA_BORDER_COLOR if is_ama else INA_BORDER_COLOR,
+                bbox=dict(boxstyle='round,pad=0.12', fc='white',
+                          alpha=0.8, lw=0),
+            )
+    if show_labels and label_all:
         other_gdf = basins_gdf[~basins_gdf[name_col].isin(ama_ina_names)]
         for _, row in other_gdf.iterrows():
             centroid = row.geometry.centroid
@@ -3507,6 +3509,7 @@ def _compute_era_means(
     tif_files = sorted(f for f in os.listdir(raster_dir) if f.endswith('.tif'))
     era_sums: dict[str, np.ndarray] = {}
     era_counts: dict[str, np.ndarray] = {}
+    era_present: dict[str, np.ndarray] = {}  # pixel was finite in any year
 
     for fname in tif_files:
         year = _extract_year(fname)
@@ -3520,12 +3523,28 @@ def _compute_era_means(
             if band > src.count:
                 continue
             arr = src.read(band).astype(np.float64)
-        finite = np.isfinite(arr)
+        # Per-year per-year-raster contribution.  ``finite`` (numerator)
+        # only adds non-NaN, positive values.  ``era_counts``
+        # (denominator) increments by 1 every era year regardless of
+        # the pixel's value, so pixels active in only a handful of
+        # peak years (e.g. crop_edge_halo at 1951-57 / 1970-80) are
+        # diluted by the surrounding inactive years and don't show as
+        # the same brightness as continuously-pumping core pixels.
+        # ``era_present`` tracks pixels that had at least one finite
+        # observation in the era so we can mask the truly-empty pixels
+        # (count > 0 always now, so we need this separate mask).
+        finite_any = np.isfinite(arr)
+        finite = finite_any & (arr > 0)
         if era not in era_sums:
             era_sums[era] = np.zeros(raster_shape, dtype=np.float64)
             era_counts[era] = np.zeros(raster_shape, dtype=np.float64)
+            era_present[era] = np.zeros(raster_shape, dtype=bool)
         era_sums[era][finite] += arr[finite]
-        era_counts[era][finite] += 1
+        era_counts[era] += 1
+        # Pixel counted as "present" if it had any finite observation
+        # (including a finite zero, which is meaningful for ratio bands
+        # like CV where 0 is valid).
+        era_present[era] |= finite_any
 
     era_means = {}
     for era in ERA_PERIODS:
@@ -3536,13 +3555,16 @@ def _compute_era_means(
                     era_sums[era] / era_counts[era],
                     0.0,
                 )
+            # Mask out pixels that were never observed (NaN in every
+            # era year).  Pixels observed in at least one year keep
+            # their (possibly small) frequency-weighted mean.
             if mask_nan_only:
                 era_means[era] = np.ma.masked_where(
-                    era_counts[era] == 0, mean_arr,
+                    ~era_present[era], mean_arr,
                 )
             else:
                 era_means[era] = np.ma.masked_where(
-                    (mean_arr == 0) | (era_counts[era] == 0), mean_arr,
+                    (mean_arr == 0) | ~era_present[era], mean_arr,
                 )
         else:
             era_means[era] = np.ma.masked_all(raster_shape)
@@ -5699,9 +5721,25 @@ def create_actual_vs_predicted_maps(
                 im_shared = im
 
             if is_actual or is_diff:
+                # Merge AMA / INA / GW basin entries with the unmetered
+                # patch in a single legend so the boundary classes are
+                # legible alongside the unmetered hatching.  Legend
+                # anchored just below the axes (bbox_to_anchor y < 0)
+                # so it doesn't overlap the southwest desert pixels.
+                from matplotlib.lines import Line2D
+                handles = [
+                    unmetered_handle,
+                    Line2D([0], [0], color=BASIN_BORDER_COLOR, lw=0.8,
+                           label='GW basin'),
+                    Line2D([0], [0], color=AMA_BORDER_COLOR, lw=1.4,
+                           label='AMA'),
+                    Line2D([0], [0], color=INA_BORDER_COLOR, lw=1.4,
+                           label='INA'),
+                ]
                 ax.legend(
-                    handles=[unmetered_handle],
-                    loc='lower left', framealpha=0.9,
+                    handles=handles,
+                    loc='lower left', bbox_to_anchor=(0.0, -0.05),
+                    framealpha=0.9,
                     fontsize=avp_fontsize, frameon=True,
                 )
 
@@ -6339,6 +6377,12 @@ def create_trend_maps(
                 bbox=dict(boxstyle='round,pad=0.1', fc='white',
                           alpha=0.7, lw=0),
             )
+        # Overlay AMA / INA / GW basin boundaries (colored borders only —
+        # labels are already added above with the per-basin trend value).
+        _overlay_boundaries(
+            ax, basins_gdf, ama_ina, name_col,
+            label_all=False, show_labels=False,
+        )
         if show_title:
             ax.set_title(period_name, fontsize=12, fontweight='bold')
         ax.axis('off')
