@@ -7,7 +7,7 @@
 
 Maintainer: [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majumdar/) [sayantan.majumdar@dri.edu]
 
-## TL;DR
+## Executive Summary
 
 **What it is.** A physics-constrained ML pipeline producing annual GW + SW withdrawals, irrigation consumptive use, surface-water capture, and CAP shortage-scenario projections for every 2 km pixel in Arizona, every year from 1896 through 2099.
 
@@ -19,12 +19,20 @@ Maintainer: [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majum
 4. **204-year continuous record** — hindcast (1896–1983) + historical (1984–2025) + projection (2026–2099), driven by 5 GCMs × 2 RCPs × 4 LULC scenarios × 112 streamflow ensemble members.
 5. **First-of-a-kind statewide irrigation CU dataset** at 2 km annual resolution with per-pixel and per-well uncertainty.
 6. **Six-component σ_total UQ** — σ_MACA + σ_model + σ_irr + σ_LULC + σ_GW + σ_USBR (Upper-Basin Colorado River streamflow ensemble — the climate axis σ_MACA does not reach), in t-corrected quadrature with linear-sum aggregation across basins for correlation-correct AZ-wide CIs. Produces 6-band augmented rasters (pred, σ, CV, SNR, lower/upper 95 % CI) for every product.
-7. **CAP shortage scenario analysis** — eight WestWater + ADWR-aligned scenarios (DCP Tier 0–3 + Baseline / Basic Coordination / Extreme Shortage) re-partitioned over 2026–2099, quantifying the GW substitution pathway. Independently agrees with [WestWater Research (2026)](https://library.cap-az.com/documents/public-information/Economic-Impact-to-CAP.pdf) Figs 4 and 5 within the σ band, despite using completely different methodologies.
+7. **CAP shortage scenario analysis** — eight WestWater + ADWR-aligned scenarios (DCP Tier 0/1/2a/2b/3 + Baseline / Basic Coordination / Extreme Shortage) re-partitioned over 2026–2099, quantifying the GW substitution pathway. Independently agrees with [WestWater Research (2026)](https://library.cap-az.com/documents/public-information/Economic-Impact-to-CAP.pdf) Figs 4 and 5 within the σ band, despite using completely different methodologies.
 
 **Headline validation.** Trained *only* on metered ADWR records from the ten AMA/INA management areas, then applied to every 2 km pixel statewide — including ~25 unmetered basins (~35–40 % of statewide volume) the model has never seen labels for. Independent agency cross-checks (post-fix; no federal-delivery offset required):
 
 | Year(s) | Source | Reported | Model | Δ |
 |---|---|---|---|---|
+| 1915 | [USGS OFR 94-476](https://pubs.usgs.gov/of/1994/0476/report.pdf) GW (Anning & Duet 1994 Fig 1) | 0.10 MAF | **0.11 MAF** | **+0.01 (+8.3 %)** |
+| 1925 | USGS OFR 94-476 GW | 0.45 MAF | **0.46 MAF** | **+0.01 (+2.0 %)** |
+| 1930 | USGS OFR 94-476 GW | 0.75 MAF | **0.75 MAF** | **0.00 (−0.1 %)** |
+| 1940 | USGS OFR 94-476 GW | 1.80 MAF | **1.76 MAF** | **−0.04 (−2.1 %)** |
+| 1945 | USGS OFR 94-476 GW | 2.80 MAF | **2.77 MAF** | **−0.03 (−1.1 %)** |
+| 1950 | [USGS Circular 115](https://pubs.usgs.gov/circ/1950/0115/report.pdf) Total | 5.38 MAF | **5.18 MAF** | **−0.20 (−3.8 %)** |
+| 1955 | [USGS Circular 398](https://pubs.usgs.gov/circ/1957/0398/report.pdf) Total | 8.09 MAF | **7.59 MAF** | **−0.50 (−6.2 %)** |
+| 1960 | [USGS Circular 456](https://pubs.usgs.gov/circ/1961/0456/report.pdf) Total | 5.62 MAF | **5.55 MAF** | **−0.07 (−1.3 %)** |
 | 2016 | [ADWR Annual Report 2018](https://www.azwater.gov/sites/default/files/2022-08/ADWR_Annual_Report_2018_.pdf) Total | ~7.0 MAF | **6.72 MAF** | **−0.28 (−4.0 %)** |
 | 2016 | ADWR GW % | 40 % | **44.2 %** | **+4.2 pp** |
 | 2017 | ADWR Total | 7.00 MAF | **6.81 MAF** | **−0.19 (−2.7 %)** |
@@ -35,7 +43,7 @@ Maintainer: [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majum
 | 2027–2060 | [WestWater (2026)](https://library.cap-az.com/documents/public-information/Economic-Impact-to-CAP.pdf) cumulative ΔGW under Basic Coordination CAP shortage | 8.0 MAF (GW + LTSC) | **7.24 MAF** | inside ±1σ band (~0.35 – 14.13 MAF) — within −9 % of WestWater anchor |
 | 2027–2060 | [WestWater (2026)](https://library.cap-az.com/documents/public-information/Economic-Impact-to-CAP.pdf) cumulative ΔGW under Extreme Shortage CAP shortage | 8.7 MAF (GW + LTSC) | **13.08 MAF** | inside ±1σ band (~6.19 – 19.97 MAF) |
 
-The first four anchors are statewide totals/shares — partially within the partition's calibration set (USGS Circulars 1950–2015 + ADWR Annual Report 2016).  The two CAP shortage drawdown comparisons are **strictly out-of-sample** — neither WestWater (2026) nor the CAP shortage scenarios ever entered the calibration loop.  Both Extreme Shortage scenarios impose the same physical CAP curtailment (0 kAF/yr); the +4.4 MAF gap reflects the methodological difference (AZ-Hydro routes all lost CAP to GW pumping with no regulatory ceiling, while WestWater's 8.7 MAF is bounded by the GW pumping cap + LTSC + 2.3 MAF AWBA buffer — the gap is what WestWater treats as unmet demand).  All anchors fall within the model's σ_total interval.  Per-basin calibration details and the full calibration tables (USGS OFR 94-476 + Circulars 1950–2015 + ADWR anchors 1957–2017) are in [`azhydro/README.md` § Calibration](azhydro/README.md#calibration).  The XGBoost predictions of total annual pumping themselves remain uncalibrated to any agency aggregate; only the deterministic partition step incorporates the historical anchors.
+The 1915–1945 GW anchors come from USGS OFR 94-476 (Anning & Duet 1994), recovered by the model to within ±8 % at every 5-year USGS GW point spanning a 28× growth in pumping (0.10 → 2.80 MAF) — most agree to <2 %.  USGS reports no statewide SW separately before 1948, so pre-1948 rows are GW-only; from 1950 onward the table reports Total because USGS Circulars (115, 398, 456, …) start splitting GW + SW + Reclaimed.  All pre-2018 statewide totals/shares are partially within the partition's calibration set (USGS OFR 94-476 + USGS Circulars 1950–2015 + ADWR Annual Report 2016).  The two CAP shortage drawdown comparisons are **strictly out-of-sample** — neither WestWater (2026) nor the CAP shortage scenarios ever entered the calibration loop.  Both Extreme Shortage scenarios impose the same physical CAP curtailment (0 kAF/yr); the +4.4 MAF gap reflects the methodological difference (AZ-Hydro routes all lost CAP to GW pumping with no regulatory ceiling, while WestWater's 8.7 MAF is bounded by the GW pumping cap + LTSC + 2.3 MAF AWBA buffer — the gap is what WestWater treats as unmet demand).  All anchors fall within the model's σ_total interval.  Per-basin calibration details and the full calibration tables (USGS OFR 94-476 + Circulars 1950–2015 + ADWR anchors 1957–2017) are in [`azhydro/README.md` § Calibration](azhydro/README.md#calibration).  The XGBoost predictions of total annual pumping themselves remain uncalibrated to any agency aggregate; only the deterministic partition step incorporates the historical anchors.
 
 **What it doesn't do.** See [Known Limitations](azhydro/README.md#known-limitations) for the structural caveats (deep-hindcast extrapolation, projection structural-change blindness, irrigation efficiency paradox in CU projections, sparse metering in Willcox/Hualapai, static WTD raster, peak-year 12–18 % under-prediction from 2024 registry attrition).
 
@@ -45,7 +53,7 @@ The first four anchors are statewide totals/shares — partially within the part
 
 ![Graphical Abstract](docs/images/Graphical_Abstract_Fig1.png)
 
-**(a)** Mean annual predicted withdrawal depth (mm) across Arizona (1896–2099) with groundwater basin boundaries and AMA/INA labels. **(b)** Statewide annual withdrawal time series with 95 % confidence intervals — propagated from a six-component σ_total framework (σ_MACA + σ_Model + σ_Irr + σ_LULC + σ_GW + σ_USBR, with σ_USBR adding Upper-Basin Colorado River streamflow uncertainty that the AZ-local σ_MACA does not reach) — across three eras: Hindcast (1896–1983), Historical (1984–2025), and Projection (2026–2099). **(c)** Era-average withdrawal volumes with 95 % CI error bars; the partition into Irrigation/Non-Irrigation × GW/SW is calibrated against USGS Circulars (1950–2015) and ADWR anchors (1957/1980/1990/2000/2010/2014/2017/2019), with per-basin GW caps at Colorado River direct basins (Parker / Yuma / Lake Mohave) reflecting CRIT senior rights and Yuma Project mainstem deliveries.  Eight CAP delivery shortage scenarios (DCP Tier 0–3 + WestWater Baseline / Basic Coordination / Extreme Shortage) quantify the projected GW substitution pathway through 2099, with cumulative drawdown (~10–30 MAF over 2026–2099) bracketing [WestWater (2026)](https://library.cap-az.com/documents/public-information/Economic-Impact-to-CAP.pdf) within the model's σ band. **(d)** Key contributions.
+**(a)** Mean annual predicted withdrawal depth (mm) across Arizona (1896–2099) with groundwater basin boundaries and AMA/INA labels. **(b)** Statewide annual withdrawal time series with 95 % confidence intervals — propagated from a six-component σ_total framework (σ_MACA + σ_Model + σ_Irr + σ_LULC + σ_GW + σ_USBR, with σ_USBR adding Upper-Basin Colorado River streamflow uncertainty that the AZ-local σ_MACA does not reach) — across three eras: Hindcast (1896–1983), Historical (1984–2025), and Projection (2026–2099). **(c)** Era-average withdrawal volumes with 95 % CI error bars; the partition into Irrigation/Non-Irrigation × GW/SW is calibrated against USGS Circulars (1950–2015) and ADWR anchors (1957/1970/1980/1990/2000/2010/2014/2017 Total + 2019 shares only), with per-basin GW caps at Colorado River direct basins (Parker / Yuma / Lake Mohave) reflecting CRIT senior rights and Yuma Project mainstem deliveries.  Eight CAP delivery shortage scenarios (DCP Tier 0/1/2a/2b/3 + WestWater Baseline / Basic Coordination / Extreme Shortage) quantify the projected GW substitution pathway through 2099, with cumulative drawdown (~10–30 MAF over 2026–2099) bracketing [WestWater (2026)](https://library.cap-az.com/documents/public-information/Economic-Impact-to-CAP.pdf) within the model's σ band. **(d)** Key contributions.
 
 ## Abstract
 
@@ -177,7 +185,7 @@ This work was supported by NASA (Grant numbers 80NSSC21K0979 and 80NSSC23K1453) 
 ## AI Usage Disclosure
 
 Portions of this codebase were developed with the assistance of **Claude Code**
-(Anthropic, Claude Opus 4.6), an AI-powered coding assistant. The AI was used
+(Anthropic, Claude Opus 4.7), an AI-powered coding assistant. The AI was used
 for:
 
 - **Code generation and refactoring** — implementing pipeline steps,
@@ -195,6 +203,8 @@ writing remain entirely the responsibility of the authors.
 ## References
 
 Alzraiee, A., Niswonger, R., Luukkonen, C., Larsen, J., Martin, D., Herbert, D., Buchwald, C., Dieter, C., Miller, L., Stewart, J., Houston, N., Paulinski, S., & Valseth, K. (2024). Next Generation Public Supply Water Withdrawal Estimation for the Conterminous United States Using Machine Learning and Operational Frameworks. _Water Resources Research_, _60_(7). https://doi.org/10.1029/2023WR036632
+
+Anning, D. W., & Duet, N. R. (1994). Summary of ground-water conditions in Arizona, 1987–90. _U.S. Geological Survey Open-File Report 94-476_. https://pubs.usgs.gov/of/1994/0476/report.pdf.
 
 Hasan, M. F., Smith, R. G., Majumdar, S., Huntington, J. L., Alves Meira Neto, A., & Minor, B. A. (2025). Satellite data and physics-constrained machine learning for estimating effective precipitation in the Western United States and application for monitoring groundwater irrigation. _Agricultural Water Management_, _319_, 109821. https://doi.org/10.1016/j.agwat.2025.109821.
 
@@ -225,3 +235,5 @@ Reitz, M., Sanford, W. E., & Saxe, S. (2023a). Ensemble Estimation of Historical
 Reitz, M., Sanford, W. E., & Saxe, S. (2023b). Historical evapotranspiration for the conterminous U.S. _U.S. Geological Survey Data Release_. https://doi.org/10.5066/P9EZ3VAS.
 
 Suresh, S., Hossain, F., Mishra, V., & Hossain, N. (2026). GRAIN — a Global Registry of Agricultural Irrigation Networks. _Earth System Science Data_, _18_(3), 1855–1875. https://doi.org/10.5194/essd-18-1855-2026.
+
+WestWater Research. (2026). _Economic impact to the Central Arizona Project (CAP) of post-2026 Colorado River operations_. Central Arizona Project. https://library.cap-az.com/documents/public-information/Economic-Impact-to-CAP.pdf.

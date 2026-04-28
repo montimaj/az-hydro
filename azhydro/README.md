@@ -5,7 +5,7 @@
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-orange.svg)](https://opensource.org/licenses/BSD-3-Clause)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19057936.svg)](https://doi.org/10.5281/zenodo.19057936)
 
-Maintainers [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majumdar/) [sayantan.majumdar@dri.edu]
+Maintainer: [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majumdar/) [sayantan.majumdar@dri.edu]
 
 ## Citations
 
@@ -1413,7 +1413,7 @@ This captures the sensitivity of the model to stochastic training choices
 
 Two independent estimates of irrigated area fraction are available:
 
-1. **IrrMapper-based** (`annual_irr_fraction`, band 14) — the primary
+1. **IrrMapper-based** (`annual_irr_fraction`, band 15) — the primary
    predictor used in the model.  Uses binary irrigated-area maps from
    IrrMapper RF v1.2 (1985–2025).
 2. **Regression-based** — a simple linear regression predicting
@@ -2309,7 +2309,7 @@ Compares irrigated effective precipitation across three sources:
 | Source | Description | Years | Resolution |
 |---|---|---|---|
 | **Peff (USDA SCS)** | Predictor band 4 × `irr_fraction` | 2000–2024 | 2 km rasters |
-| **ML Peff (PCML)** | Predictor band 5 × `irr_fraction` | 2000–2023 | 2 km rasters |
+| **PCML Peff** | Predictor band 5 × `irr_fraction` | 2000–2023 | 2 km rasters |
 | **NHM PPTeff** | USGS NHM HUC12 data ([Martin et al., 2023](https://doi.org/10.5066/P9YWR0OJ)) (Mgal/d) | 2000–2020 | HUC12 polygons |
 
 All three datasets are scaled by `annual_irr_fraction` so that volumes
@@ -3313,7 +3313,7 @@ reducing deliveries to 237 kAF — a 663 kAF cut from the 900 kAF
 baseline, or 74 % reduction).  Basic Coordination is an upper-bound
 *stress* scenario, not a central estimate, and is evaluated as one
 alternative trajectory in the CAP scenario sweep (below) along with
-Extreme Shortage and the DCP Tier 0–3 alternatives.
+Extreme Shortage and the DCP Tier 0/1/2a/2b/3 alternatives.
 
 **Caveat on the 74-year projection horizon.** Applying a single
 fixed 0.66 factor across all of 2027–2099 is a simplification —
@@ -3742,7 +3742,7 @@ from the following sources:
 
 | Source | Period | Provides |
 |---|---|---|
-| **USGS Open-File Report 94-476** (Anderson & Duet 1994) | 1915–1990 (annual GW from Figure 1) | Statewide groundwater withdrawals (kAF) |
+| **USGS Open-File Report 94-476** (Anning & Duet 1994) | 1915–1990 (annual GW from Figure 1) | Statewide groundwater withdrawals (kAF) |
 | **USGS Circulars 115, 398, 456, 556, 676, 765, 1001** | 1950, 1955, 1960, 1965, 1970, 1975, 1980 | Statewide totals + category breakdowns |
 | **USGS Circulars 1004, 1081, 1200** | 1985, 1990, 1995 | Per-state GW/SW × Irr/NonIrr |
 | **USGS Circulars 1268, 1344, 1405, 1441** | 2000, 2005, 2010, 2015 | Per-state GW/SW × all 8 categories |
@@ -3819,7 +3819,9 @@ all anchors are now well within that band.
 | 2014 | 6.74 | 6.80 | **−0.9** | within noise |
 | 2017 | 6.81 | 7.00 | **−2.7** | within noise |
 
-**ADWR 2019 share anchor (Δ pp):**
+**ADWR 2019 single-year share anchor (Δ pp; from
+[ADWR Annual Report 2018](https://www.azwater.gov/sites/default/files/2022-08/ADWR_Annual_Report_2018_.pdf),
+which reports 2019 single-year shares):**
 
 | Metric | Model | ADWR | Δ |
 |---|---|---|---|
@@ -3827,6 +3829,14 @@ all anchors are now well within that band.
 | SW% | 54.1 | 54.0 | +0.1 |
 | Irr% | 74.2 | 72.0 | +2.2 |
 | NonIrr% | 25.8 | 28.0 | −2.2 |
+
+The headline validation table at the top of the main `README.md` uses
+the **2019–2020 two-year mean** Irr% from
+[ADWR Annual Report 2020](https://www.azwater.gov/sites/default/files/2022-08/Annual%20Report_2020_Interactive_Final.pdf)
+(model 73.8 % vs ADWR 74 %, Δ = −0.2 pp); both anchor sets are valid
+and refer to the same period — the headline averages 2019 + 2020 to
+match the published ADWR 2020 report figure, while this table shows the
+single-year 2019 detail.
 
 **Calibration interpretation.**
 
@@ -4175,8 +4185,11 @@ Basin-scale comparison of ML predictions with independent USGS datasets.
 
 **CAP/SRP validation** (`run_cap_srp_validation()`):
 - Compares ML Total SW predictions with observed CAP + SRP delivery records.
-- Filters CAP to direct-use only; SRP to Surface Water (+ optional Spill
-  Water sensitivity).
+- CAP includes ALL deliveries by default — direct use plus all three
+  recharge classes (USF, GSF, ASR), the full CAP supply footprint per
+  basin (`include_recharge=True` is the loader default; pass
+  `include_recharge=False` for the direct-use-only sensitivity).  SRP
+  filters to Surface Water (+ optional Spill Water sensitivity).
 - Produces per-basin time series, scatter plots, and validation metrics.
 
 **Peff intercomparison** (`run_peff_intercomparison()`):
@@ -5302,7 +5315,7 @@ Coord ΔGW from 11.0 → 7.24 MAF over 2027-2060).  This brings
 WestWater's central values still sit inside our 95 % CI band.
 Cumulative 28-year integrations (~8.4 MAF Basic, ~12.6 MAF
 Extreme — derived from WestWater's average annual shortages)
-match our cumulative ΔGW (7.2 / 13.1 MAF) to within ±1.5 MAF.
+match our cumulative ΔGW (7.24 / 13.08 MAF) to within ±1.5 MAF.
 This is independent cross-validation of the magnitude of the
 GW substitution pathway from two unrelated frameworks
 (econometric water-supply model vs ML pixel-level prediction with
@@ -5587,6 +5600,8 @@ Abatzoglou, J. T., & Brown, T. J. (2012). A comparison of statistical downscalin
 
 Alzraiee, A., Niswonger, R., Luukkonen, C., Larsen, J., Martin, D., Herbert, D., Buchwald, C., Dieter, C., Miller, L., Stewart, J., Houston, N., Paulinski, S., & Valseth, K. (2024). Next Generation Public Supply Water Withdrawal Estimation for the Conterminous United States Using Machine Learning and Operational Frameworks. _Water Resources Research_, _60_(7). https://doi.org/10.1029/2023WR036632
 
+Anning, D. W., & Duet, N. R. (1994). Summary of ground-water conditions in Arizona, 1987–90. _U.S. Geological Survey Open-File Report 94-476_. https://pubs.usgs.gov/of/1994/0476/report.pdf.
+
 Asfaw, D., Smith, R. G., Majumdar, S., Grote, K., Fang, B., Wilson, B. B., Lakshmi, V., & Butler, J. J. (2025). Predicting groundwater withdrawals using machine learning with limited metering data: Assessment of training data requirements. Agricultural Water Management, 318, 109691. https://doi.org/10.1016/j.agwat.2025.109691
 
 Barlow, P. M., & Leake, S. A. (2012). Streamflow Depletion by Wells—Understanding and Managing the Effects of Groundwater Pumping on Streamflow. _U.S. Geological Survey Circular 1376_. https://pubs.usgs.gov/circ/1376/.
@@ -5676,5 +5691,7 @@ USGS. (2024). Annual NLCD Collection 1 Science Products. _U.S. Geological Survey
 Volk, J. M., Huntington, J. L., Melton, F. S., Allen, R., Anderson, M., Fisher, J. B., Kilic, A., Ruhoff, A., Senay, G. B., Minor, B., Morton, C., Ott, T., Johnson, L., de Andrade, B., Carrara, W., Doherty, C. T., Dunkerly, C., Friedrichs, M., Guzman, A., … Yang, Y. (2024). Assessing the accuracy of OpenET satellite-based evapotranspiration data to support water resource and land management applications. _Nature Water_, _2_(2), 193–205. https://doi.org/10.1038/s44221-023-00181-7.
 
 Volk, J., Dunkerly, C., Majumdar, S., Huntington, J., Minor, B., Kim, Y., Morton, C., ReVelle, P., Kilic, A., Melton, F., Allen, R., Pearson, C., Purdy, A., & Caldwell, T. (2026). CONUS Gridded Reference Evapotranspiration Bias Correction: Inputs, Station Validation, and Outputs (gridMET/OpenET) [Data set]. _Zenodo_. https://doi.org/10.5281/zenodo.18673484.
+
+WestWater Research. (2026). _Economic impact to the Central Arizona Project (CAP) of post-2026 Colorado River operations_. Central Arizona Project. https://library.cap-az.com/documents/public-information/Economic-Impact-to-CAP.pdf.
 
 Walkinshaw, M., O’Geen, A. T., & Beaudette, D. E. (2022). Soil Properties. _California Soil Resource Lab_. https://casoilresource.lawr.ucdavis.edu/soil-properties/.
