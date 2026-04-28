@@ -6881,8 +6881,14 @@ def plot_intercomp_scatter(
     # mismatch and is the appropriate axis for cross-product
     # intercomparison.
     n_units = 1
+    # Panel figsize chosen to be roughly square — the inner data box
+    # has to be square for set_aspect('equal', adjustable='datalim')
+    # to leave xlim/ylim alone.  When the box is wider than tall
+    # matplotlib stretches the data limits to satisfy equal aspect,
+    # which overrides our set_xlim/set_ylim and emits the
+    # "Ignoring fixed y limits to fulfill fixed data aspect" warning.
     fig, axes = plt.subplots(
-        n_units, n_pairs, figsize=(7 * n_pairs, 5),
+        n_units, n_pairs, figsize=(6 * n_pairs, 6),
         constrained_layout=True, squeeze=False,
     )
     fig.suptitle(title, fontsize=14, fontweight='bold')
@@ -6941,7 +6947,7 @@ def plot_intercomp_scatter(
                           .replace(' PLAIN', '').title(),
                         xy=(bx, by), xytext=(5, 5),
                         textcoords='offset points',
-                        fontsize=8, color='#222',
+                        fontsize=9, color='#222',
                         bbox=dict(boxstyle='round,pad=0.15',
                                   facecolor='white', alpha=0.7,
                                   edgecolor='none'),
@@ -7009,7 +7015,7 @@ def plot_intercomp_scatter(
                                 f'{e_labels[1]}={mae_pct:.1f}%\n'
                                 f'{e_labels[2]}={mbe_sign}{abs(mbe_pct):.1f}%')
                 ax.text(0.97, 0.03, metrics_text, transform=ax.transAxes,
-                        fontsize=8, verticalalignment='bottom',
+                        fontsize=10, verticalalignment='bottom',
                         horizontalalignment='right',
                         bbox=dict(boxstyle='round,pad=0.3',
                                   facecolor='white', alpha=0.8,
@@ -7021,13 +7027,14 @@ def plot_intercomp_scatter(
             scale_suffix = ', log scale' if log_scale else ''
             ax.set_xlabel(
                 f'{label_a}{unit_suffix.rstrip(")")}{scale_suffix}{")" if unit_suffix else ""}',
-                fontweight='bold',
+                fontsize=12, fontweight='bold',
             )
             ax.set_ylabel(
                 f'{label_b}{unit_suffix.rstrip(")")}{scale_suffix}{")" if unit_suffix else ""}',
-                fontweight='bold',
+                fontsize=12, fontweight='bold',
             )
-            ax.legend(fontsize=8, loc='upper left')
+            ax.tick_params(axis='both', labelsize=11)
+            ax.legend(fontsize=10, loc='upper left')
             ax.grid(True, alpha=0.3, linestyle='--', which='both')
             # Order matters: set xlim/ylim → create twin → set twin
             # ylim → THEN set aspect.  set_aspect('equal',
@@ -7052,34 +7059,64 @@ def plot_intercomp_scatter(
             # 1:1 line crosses both axes at the same volumes).
             if mode == 'volume' and unit == 'm³':
                 from matplotlib import ticker as _tk
+
+                # Adaptive formatter: small log-scale ticks (e.g.
+                # 0.001 km³) collapsed to "0.00" with the previous
+                # ``:,.2f`` format, hiding the value.  Switch to 3
+                # significant figures for sub-unit values so they
+                # render as "0.001" instead of "0.00".
+                def _adaptive_fmt(divisor):
+                    def _f(x, _):
+                        if x == 0:
+                            return '0'
+                        v = x / divisor
+                        a = abs(v)
+                        if a >= 1:
+                            return f'{v:,.2f}'
+                        return f'{v:.3g}'
+                    return _f
+
                 ax.xaxis.set_major_formatter(
-                    _tk.FuncFormatter(lambda x, _: f'{x / 1e9:,.2f}'),
+                    _tk.FuncFormatter(_adaptive_fmt(1e9)),
                 )
                 ax.yaxis.set_major_formatter(
-                    _tk.FuncFormatter(lambda x, _: f'{x / 1e9:,.2f}'),
+                    _tk.FuncFormatter(_adaptive_fmt(1e9)),
                 )
                 _kmcubed_suffix = '(km³, log scale)' if log_scale else '(km³)'
-                ax.set_xlabel(f'{label_a} {_kmcubed_suffix}', fontweight='bold')
-                ax.set_ylabel(f'{label_b} {_kmcubed_suffix}', fontweight='bold')
+                ax.set_xlabel(
+                    f'{label_a} {_kmcubed_suffix}',
+                    fontsize=12, fontweight='bold',
+                )
+                ax.set_ylabel(
+                    f'{label_b} {_kmcubed_suffix}',
+                    fontsize=12, fontweight='bold',
+                )
                 ax_right = ax.twinx()
                 if log_scale:
                     ax_right.set_yscale('log')
                 ax_right.set_ylim(lo / af_to_m3, hi / af_to_m3)
                 ax_right.yaxis.set_major_formatter(
-                    _tk.FuncFormatter(lambda x, _: f'{x / 1e6:,.2f}'),
+                    _tk.FuncFormatter(_adaptive_fmt(1e6)),
                 )
                 _maf_suffix = '(MAF, log scale)' if log_scale else '(MAF)'
-                ax_right.set_ylabel(f'{label_b} {_maf_suffix}', fontweight='bold')
-            if not log_scale:
-                # Aspect-equal is meaningless on log axes; let the box
-                # scale to the figsize so all labels are readable.
-                # Must use adjustable='datalim' (not 'box') because
-                # the volume-mode branch above creates a twinx() and
-                # matplotlib disallows adjustable='box' on twinned
-                # Axes (RuntimeError at draw time).  Since we already
-                # set xlim == ylim == (lo, hi), the data limits don't
-                # actually need to change to satisfy equal aspect.
-                ax.set_aspect('equal', adjustable='datalim')
+                ax_right.set_ylabel(
+                    f'{label_b} {_maf_suffix}',
+                    fontsize=12, fontweight='bold',
+                )
+                ax_right.tick_params(axis='y', labelsize=11)
+            # Intentionally NOT calling set_aspect('equal') —
+            # constrained_layout + suptitle + twinx label shrink the
+            # inner data box asymmetrically, so any equal-aspect
+            # constraint forces matplotlib to either:
+            #   - stretch data limits (datalim mode → emits the
+            #     "Ignoring fixed y limits to fulfill fixed data
+            #     aspect with adjustable data limits" warning), or
+            #   - resize the box (box mode → RuntimeError on
+            #     twinned axes).
+            # Without equal aspect the 1:1 line still goes corner to
+            # corner of the (lo, hi) × (lo, hi) data range and the
+            # interpretation is identical; the visual angle is just
+            # not exactly 45°.
 
     out_path = os.path.join(output_dir, filename)
     fig.savefig(out_path, dpi=300, bbox_inches='tight')

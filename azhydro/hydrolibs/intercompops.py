@@ -3382,11 +3382,15 @@ def run_cu_intercomparison(
     )
 
     scatter_dir = os.path.join(output_dir, 'Scatter/')
+    # Log-scale axes — basin CU spans ~3+ decades across AZ (a few
+    # hundred AF in rural basins to >100 kAF in Phoenix / Pinal AMA);
+    # linear axes squash the small-basin signal at the origin.
     plot_intercomp_scatter(
         [('ML', 'NHM', ml_cu['mean'], nhm_cu['mean'])],
         basin_names, basin_areas_m2, scatter_dir,
         title='Irrigation CU — Per-Basin Scatter (ML vs NHM)',
         filename='Scatter_CU.png',
+        log_scale=True,
     )
 
     # Statewide stacked bar (CU is a single category, no GW/SW split).
@@ -3483,233 +3487,53 @@ def run_cu_intercomparison(
         )
 
         # HUC12-level scatter
+        # HUC12-level CU values span 4-5 decades — log scale needed
+        # for the same reason as the basin-level scatter.
         huc12_scatter_dir = os.path.join(huc12_dir, 'Scatter/')
         plot_intercomp_scatter(
             [('ML', 'NHM', ml_huc_mean, nhm_huc_mean)],
             common_hucs, huc_areas, huc12_scatter_dir,
             title='Irrigation CU — HUC12-Level Scatter',
             filename='Scatter_HUC12_CU.png',
+            log_scale=True,
         )
 
-        # Combined HUC12 + Pixel + Basin Δ depth (3 panels, shared
-        # colorbar).  Δ Depth (mm) is the only physically meaningful
-        # unit shared across pixel / HUC12 / basin aggregation levels —
-        # Δ Volume per polygon scales by ~10^4 between pixel and basin
-        # and would visually saturate the basin panel while zeroing the
-        # pixel panel under one colorbar.  The single-mode standalone
-        # depth and volume HUC12 maps were dropped in favour of this
-        # unified 3-scale figure.
-        from matplotlib.cm import ScalarMappable
-        from matplotlib.colors import Normalize
-
-        _af_to_m3_local = 1.0 / M3_TO_AF
-        _mm_to_ft = 1.0 / 304.8
+        # ── Basin-aggregated Δ Volume choropleth (ML − NHM, 1 panel) ──
+        # Volume-only — depth was dropped per user request.  Uses the
+        # shared _plot_basin_diff_panels helper with a single panel so
+        # the colorbar carries 10⁶ m³ units.
         spatial_diff_dir = os.path.join(output_dir, 'Spatial_Diff/')
         makedirs(spatial_diff_dir)
-        b_reproj = (
+        b_reproj_cu = (
             basin_gdf.to_crs(huc_reproj.crs)
             if basin_gdf.crs != huc_reproj.crs else basin_gdf
         )
-        b_name = (
-            basin_col if basin_col in b_reproj.columns
-            else b_reproj.columns[0]
-        )
-        ama_ina_names = get_ama_ina_basin_names()
-
-        # Panel 1: HUC12 Δ depth (AF / m² → mm)
-        huc12_diff_vals: dict[str, float] = {}
-        for h in common_hucs:
-            area = huc_areas.get(h, 0.0)
-            if area > 0:
-                huc12_diff_vals[h] = (
-                    (ml_huc_mean.get(h, 0.0) - nhm_huc_mean.get(h, 0.0))
-                    * _af_to_m3_local / area * M_TO_MM
-                )
-
-        # Panel 2: Pixel-level Δ depth (read mean-annual rasters)
-        ml_mean_raster = os.path.join(
-            os.path.dirname(irr_cu_dir.rstrip('/')),
-            'ML_mean_annual_CU_mm.tif',
-        )
-        nhm_mean_raster = os.path.join(
-            nhm_cu_out, 'NHM_mean_annual_CU_mm.tif',
-        )
-        pixel_diff_arr = None
-        pixel_extent = None
-        if os.path.isfile(ml_mean_raster) and os.path.isfile(nhm_mean_raster):
-            with rio.open(ml_mean_raster) as src:
-                ml_arr = src.read(1).astype(np.float64)
-                pixel_extent = [
-                    src.bounds.left, src.bounds.right,
-                    src.bounds.bottom, src.bounds.top,
-                ]
-            with rio.open(nhm_mean_raster) as src:
-                nhm_arr = src.read(1).astype(np.float64)
-            ml_arr[np.isnan(ml_arr)] = 0.0
-            nhm_arr[np.isnan(nhm_arr)] = 0.0
-            # Constrain pixel-level diff to the workflow irrigation
-            # footprint so the signal isn't dominated by which source
-            # decided to predict CU on which non-irrigated cells.
-            if predictor_dir:
-                _cu_mask = _build_workflow_irr_mask(
-                    predictor_dir, ml_year_range,
-                )
-                if _cu_mask is not None:
-                    _cu_mask_arr, _ = _cu_mask
-                    if _cu_mask_arr.shape == ml_arr.shape:
-                        ml_arr[~_cu_mask_arr] = 0.0
-                        nhm_arr[~_cu_mask_arr] = 0.0
-            pixel_diff_arr = ml_arr - nhm_arr
-
-        # Panel 3: Basin Δ depth (AF / m² → mm)
-        basin_areas_lookup = {
-            row[basin_col]: row.geometry.area
-            for _, row in b_reproj.iterrows()
-        }
-        basin_diff_vals: dict[str, float] = {}
-        for b in basin_names:
-            area = basin_areas_lookup.get(b, 0.0)
-            if area > 0:
-                basin_diff_vals[b] = (
-                    (ml_cu['mean'].get(b, 0.0) - nhm_cu['mean'].get(b, 0.0))
-                    * _af_to_m3_local / area * M_TO_MM
-                )
-
-        # Shared vmax across the three panels (2nd/98th percentile)
-        vmax_candidates: list[float] = []
-        if huc12_diff_vals:
-            vals = np.array(
-                [v for v in huc12_diff_vals.values() if abs(v) > 1e-6],
+        ml_basin_means_cu = ml_cu.get('mean', {})
+        nhm_basin_means_cu = nhm_cu.get('mean', {})
+        if ml_basin_means_cu and nhm_basin_means_cu:
+            _plot_basin_diff_panels(
+                panels=[{
+                    'basin_a_vols': ml_basin_means_cu,
+                    'basin_b_vols': nhm_basin_means_cu,
+                    'panel_title': 'ML \u2212 NHM',
+                    'label_a': 'ML',
+                    'label_b': 'NHM',
+                }],
+                basin_gdf=b_reproj_cu,
+                basin_col=basin_col,
+                title=(
+                    'Irrigation CU \u2014 Basin-Level Volume Diff '
+                    '(ML \u2212 NHM)'
+                ),
+                out_path=os.path.join(
+                    spatial_diff_dir, 'Spatial_Diff_Basin_CU.png',
+                ),
+                shared_colorbar=True,
             )
-            if vals.size:
-                vmax_candidates.extend([
-                    abs(np.nanpercentile(vals, 2)),
-                    abs(np.nanpercentile(vals, 98)),
-                ])
-        if pixel_diff_arr is not None:
-            pix_vals = pixel_diff_arr[np.abs(pixel_diff_arr) > 1e-6]
-            if pix_vals.size:
-                vmax_candidates.extend([
-                    abs(np.nanpercentile(pix_vals, 2)),
-                    abs(np.nanpercentile(pix_vals, 98)),
-                ])
-        if basin_diff_vals:
-            vals = np.array(
-                [v for v in basin_diff_vals.values() if abs(v) > 1e-6],
+            logger.info(
+                f'  Basin-level CU Δ volume figure saved to '
+                f'{spatial_diff_dir}'
             )
-            if vals.size:
-                vmax_candidates.extend([
-                    abs(np.nanpercentile(vals, 2)),
-                    abs(np.nanpercentile(vals, 98)),
-                ])
-        vmax = max(vmax_candidates) if vmax_candidates else 1.0
-        vmax = max(vmax, 1e-6)
-
-        fig, axes = plt.subplots(
-            1, 3, figsize=(20, 7), constrained_layout=True,
-        )
-        fig.suptitle(
-            'Irrigation CU \u2014 Mean-Annual Depth Difference '
-            '(ML \u2212 NHM)',
-            fontsize=14, fontweight='bold',
-        )
-
-        # Panel 1: HUC12
-        ax_huc = axes[0]
-        ax_huc.set_facecolor('#D5D5D5')
-        plot_gdf = huc_reproj[huc_reproj['huc12'].isin(common_hucs)].copy()
-        plot_gdf = plot_gdf.set_index('huc12').loc[common_hucs]
-        plot_gdf['diff'] = [
-            huc12_diff_vals.get(h, np.nan) for h in common_hucs
-        ]
-        plot_gdf.loc[plot_gdf['diff'].abs() < 1e-6, 'diff'] = np.nan
-        plot_gdf.plot(
-            ax=ax_huc, column='diff', cmap='RdBu_r',
-            vmin=-vmax, vmax=vmax,
-            edgecolor='#AAAAAA', linewidth=0.3,
-            legend=False, missing_kwds={'color': '#EEEEEE'},
-        )
-        _overlay_boundaries(
-            ax_huc, b_reproj, ama_ina_names, b_name,
-            label_fontsize=5.0, label_all=False,
-        )
-        ax_huc.set_title('HUC12-Level', fontweight='bold')
-
-        # Panel 2: Pixel-level
-        ax_pix = axes[1]
-        ax_pix.set_facecolor('#D5D5D5')
-        if pixel_diff_arr is not None:
-            pix_mask = np.abs(pixel_diff_arr) < 1e-6
-            pix_masked = np.ma.masked_where(pix_mask, pixel_diff_arr)
-            ax_pix.imshow(
-                pix_masked, extent=pixel_extent, origin='upper',
-                cmap='RdBu_r', vmin=-vmax, vmax=vmax,
-                interpolation='nearest',
-            )
-            _overlay_boundaries(
-                ax_pix, b_reproj, ama_ina_names, b_name,
-                label_fontsize=5.0, label_all=False,
-            )
-        else:
-            ax_pix.text(
-                0.5, 0.5, 'Pixel-level rasters unavailable',
-                ha='center', va='center', transform=ax_pix.transAxes,
-            )
-            ax_pix.axis('off')
-        ax_pix.set_title('Pixel-Level', fontweight='bold')
-
-        # Panel 3: Basin
-        ax_bas = axes[2]
-        ax_bas.set_facecolor('#D5D5D5')
-        plot_b = b_reproj.set_index(basin_col).copy()
-        plot_b['diff'] = plot_b.index.map(
-            lambda b: basin_diff_vals.get(b, np.nan),
-        )
-        plot_b.loc[plot_b['diff'].abs() < 1e-6, 'diff'] = np.nan
-        plot_b.plot(
-            ax=ax_bas, column='diff', cmap='RdBu_r',
-            vmin=-vmax, vmax=vmax,
-            edgecolor='#666666', linewidth=0.5,
-            legend=False, missing_kwds={'color': '#EEEEEE'},
-        )
-        _overlay_boundaries(
-            ax_bas, b_reproj, ama_ina_names, b_name,
-            label_fontsize=5.0, label_all=False,
-        )
-        ax_bas.set_title('Basin-Level', fontweight='bold')
-
-        # Single shared colorbar (Δ Depth mm, secondary axis ft)
-        sm = ScalarMappable(cmap='RdBu_r', norm=Normalize(-vmax, vmax))
-        sm.set_array([])
-        cbar = fig.colorbar(
-            sm, ax=list(axes), shrink=0.5, pad=0.06,
-            orientation='horizontal', aspect=40, extend='both',
-        )
-        cbar.set_label(
-            '\u0394 Depth (mm)', fontsize=10, fontweight='bold',
-        )
-        cbar.ax.tick_params(labelsize=10)
-        secax = cbar.ax.secondary_xaxis(
-            'top',
-            functions=(
-                lambda x: x * _mm_to_ft,
-                lambda x: x / _mm_to_ft,
-            ),
-        )
-        secax.set_xlabel(
-            '\u0394 Depth (ft)', fontsize=10, fontweight='bold',
-        )
-        secax.tick_params(labelsize=10)
-
-        add_ama_ina_legend(axes[0])
-        fig.savefig(
-            os.path.join(spatial_diff_dir, 'Spatial_Diff_CU.png'),
-            dpi=600, bbox_inches='tight',
-        )
-        plt.close(fig)
-        logger.info(
-            f'  CU 3-panel diff figure saved to {spatial_diff_dir}'
-        )
 
         # ── HUC12-level temporal diagnostics ──
         logger.info('  Computing HUC12-level CU temporal diagnostics...')
@@ -3759,7 +3583,7 @@ def run_cu_intercomparison(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Effective Precipitation Intercomparison (USDA-SCS Peff vs ML Peff PCML vs NHM)
+# Effective Precipitation Intercomparison (USDA-SCS Peff vs PCML Peff vs NHM)
 
 
 def _load_ml_peff_to_basins(
@@ -3820,8 +3644,10 @@ def _load_ml_peff_to_basins(
         irr_mask = (irr_arr >= WORKFLOW_IRR_MIN_FRAC).astype(np.float64)
         scaled = peff_arr * irr_mask
 
-        # Write per-year raster
-        out_tif = os.path.join(output_dir, f'ML_{label}_{year}_mm.tif')
+        # Write per-year raster — *label* is the full file basename
+        # (e.g. ``USDA_SCS_Peff`` or ``PCML_Peff``), no hardcoded
+        # ``ML_`` prefix so the file naming mirrors the display name.
+        out_tif = os.path.join(output_dir, f'{label}_{year}_mm.tif')
         with rio.open(ref_raster) as ref_src:
             yr_profile = ref_src.profile.copy()
         yr_profile.update(dtype='float64', nodata=np.nan, count=1)
@@ -3853,8 +3679,8 @@ def _load_ml_peff_to_basins(
         basin_gdf.to_crs(ref_crs) if basin_gdf.crs != ref_crs else basin_gdf
     )
 
-    # Write mean-annual raster
-    out_mean = os.path.join(output_dir, f'ML_mean_annual_{label}_mm.tif')
+    # Write mean-annual raster — same label-as-basename convention.
+    out_mean = os.path.join(output_dir, f'mean_annual_{label}_mm.tif')
     with rio.open(ref_raster) as ref_src:
         profile = ref_src.profile.copy()
     profile.update(dtype='float64', nodata=np.nan, count=1)
@@ -3862,7 +3688,7 @@ def _load_ml_peff_to_basins(
     tmp[tmp == 0] = np.nan
     with rio.open(out_mean, 'w', **profile) as dst:
         dst.write(tmp, 1)
-    logger.info(f'Wrote ML mean-annual {label} raster: {out_mean}')
+    logger.info(f'Wrote mean-annual {label} raster: {out_mean}')
 
     basin_vols = _raster_basin_volumes(
         out_mean, basin_reproj, basin_col, pixel_area_m2, depth_unit='mm',
@@ -3871,7 +3697,7 @@ def _load_ml_peff_to_basins(
     # Per-year basin volumes
     yearly_vols = {}
     for year in range(start_yr, end_yr + 1):
-        raster_path = os.path.join(output_dir, f'ML_{label}_{year}_mm.tif')
+        raster_path = os.path.join(output_dir, f'{label}_{year}_mm.tif')
         if os.path.isfile(raster_path):
             yearly_vols[year] = _raster_basin_volumes(
                 raster_path, basin_reproj, basin_col,
@@ -3900,7 +3726,7 @@ def run_peff_intercomparison(
     Compare irrigated effective precipitation across three sources:
 
         1. **USDA-SCS Peff** — SCS formula-based (predictor band 4 × irr_fraction)
-        2. **ML Peff PCML** — observation-based (predictor band 5 × irr_fraction)
+        2. **PCML Peff** — observation-based (predictor band 5 × irr_fraction)
         3. **NHM Peff** — USGS NHM PPTeff HUC12 data (Mgal/day → basin AF)
 
     All three datasets are scaled by ``annual_irr_fraction`` so that
@@ -3919,7 +3745,7 @@ def run_peff_intercomparison(
         peff_pcml_band (int): Band index for ``annual_peff_pcml_mm`` (default 5).
         irr_fraction_band (int): Band index for ``annual_irr_fraction`` (default 14).
         ml_year_range (tuple[int, int]): Year range for ML Peff (default 2000-2024).
-        ml_pcml_year_range (tuple[int, int]): Year range for ML Peff PCML (default 2000-2023).
+        ml_pcml_year_range (tuple[int, int]): Year range for PCML Peff (default 2000-2023).
         nhm_year_range (tuple[int, int]): Year range for NHM PPTeff (default 2000-2020).
 
     Returns:
@@ -3962,20 +3788,20 @@ def run_peff_intercomparison(
 
     # ── 1. USDA-SCS Peff ──────────────────────────────────────────────
     logger.info('--- Loading USDA-SCS Peff (SCS formula) ---')
-    ml_peff_out = os.path.join(output_dir, 'ML_Peff_Rasters/')
+    ml_peff_out = os.path.join(output_dir, 'USDA_SCS_Peff_Rasters/')
     ml_peff = _load_ml_peff_to_basins(
         predictor_dir, basin_gdf, basin_col, ml_year_range,
         ml_peff_out, peff_band=peff_band,
-        irr_fraction_band=irr_fraction_band, label='Peff',
+        irr_fraction_band=irr_fraction_band, label='USDA_SCS_Peff',
     )
 
-    # ── 2. ML Peff PCML ─────────────────────────────────────────────────
-    logger.info('--- Loading ML Peff PCML (observation-based) ---')
-    ml_pcml_out = os.path.join(output_dir, 'ML_Peff_PCML_Rasters/')
+    # ── 2. PCML Peff ─────────────────────────────────────────────────
+    logger.info('--- Loading PCML Peff (observation-based) ---')
+    ml_pcml_out = os.path.join(output_dir, 'PCML_Peff_Rasters/')
     ml_peff_pcml = _load_ml_peff_to_basins(
         predictor_dir, basin_gdf, basin_col, ml_pcml_year_range,
         ml_pcml_out, peff_band=peff_pcml_band,
-        irr_fraction_band=irr_fraction_band, label='Peff_PCML',
+        irr_fraction_band=irr_fraction_band, label='PCML_Peff',
     )
 
     # ── 3. NHM PPTeff ────────────────────────────────────────────────────
@@ -3998,7 +3824,7 @@ def run_peff_intercomparison(
     }
     _peff_display_name = {
         'ML_Peff': 'USDA_SCS_Peff',
-        'ML_Peff_PCML': 'ML_Peff_PCML',
+        'ML_Peff_PCML': 'PCML_Peff',
         'NHM_Peff': 'NHM_Peff',
     }
     src_yr_ranges = {
@@ -4148,7 +3974,7 @@ def run_peff_intercomparison(
         colors=_peff_colors, markers=_peff_markers,
         labels={
             'ML_Peff': 'USDA-SCS Peff',
-            'ML_Peff_PCML': 'ML Peff PCML',
+            'ML_Peff_PCML': 'PCML Peff',
             'NHM_Peff': 'NHM Peff',
         },
         title_prefix='Effective Precipitation — ', file_prefix='TS_Peff',
@@ -4158,7 +3984,7 @@ def run_peff_intercomparison(
     scatter_dir = os.path.join(output_dir, 'Scatter/')
     _peff_display = {
         'ML_Peff': 'USDA-SCS Peff',
-        'ML_Peff_PCML': 'ML Peff PCML',
+        'ML_Peff_PCML': 'PCML Peff',
         'NHM_Peff': 'NHM Peff',
     }
     source_keys = list(all_sources.keys())
@@ -4173,6 +3999,7 @@ def run_peff_intercomparison(
         peff_scatter_pairs, basin_names, basin_areas_m2, scatter_dir,
         title='Effective Precipitation — Per-Basin Scatter',
         filename='Scatter_Peff.png',
+        log_scale=True,
     )
 
     # ── 8b. Basin-aggregated Δ Volume choropleth (3 panels) ───────────
@@ -4184,8 +4011,8 @@ def run_peff_intercomparison(
     makedirs(basin_diff_dir)
     peff_basin_pairs = [
         ('USDA-SCS Peff', 'NHM Peff', 'ML_Peff', 'NHM_Peff'),
-        ('ML Peff PCML', 'NHM Peff', 'ML_Peff_PCML', 'NHM_Peff'),
-        ('USDA-SCS Peff', 'ML Peff PCML', 'ML_Peff', 'ML_Peff_PCML'),
+        ('PCML Peff', 'NHM Peff', 'ML_Peff_PCML', 'NHM_Peff'),
+        ('USDA-SCS Peff', 'PCML Peff', 'ML_Peff', 'ML_Peff_PCML'),
     ]
     panels_peff = []
     for label_a, label_b, key_a, key_b in peff_basin_pairs:
@@ -4255,13 +4082,15 @@ def run_peff_intercomparison(
             vals = nhm_sub[h].values * days_per_year * MGAL_TO_M3 * M3_TO_AF
             nhm_huc_mean[h] = float(np.mean(vals)) if len(vals) > 0 else 0.0
 
-    # ML Peff (USDA-SCS) per HUC12 via zonal stats
-    ml_peff_raster_dir = os.path.join(output_dir, 'ML_Peff_Rasters/')
+    # USDA-SCS Peff per HUC12 via zonal stats
+    ml_peff_raster_dir = os.path.join(output_dir, 'USDA_SCS_Peff_Rasters/')
     ml_huc_accum: dict[str, list[float]] = {h: [] for h in az_huc12_ids}
     common_start = max(ml_year_range[0], nhm_year_range[0])
     common_end = min(ml_year_range[1], nhm_year_range[1])
     for year in range(common_start, common_end + 1):
-        rpath = os.path.join(ml_peff_raster_dir, f'ML_Peff_{year}_mm.tif')
+        rpath = os.path.join(
+            ml_peff_raster_dir, f'USDA_SCS_Peff_{year}_mm.tif',
+        )
         if not os.path.isfile(rpath):
             continue
         yr_stats = _compute_huc12_zonal_stats(
@@ -4276,12 +4105,14 @@ def run_peff_intercomparison(
         for h, v in ml_huc_accum.items()
     }
 
-    # ML Peff PCML per HUC12 via zonal stats
-    ml_pcml_raster_dir = os.path.join(output_dir, 'ML_Peff_PCML_Rasters/')
+    # PCML Peff per HUC12 via zonal stats
+    ml_pcml_raster_dir = os.path.join(output_dir, 'PCML_Peff_Rasters/')
     pcml_huc_accum: dict[str, list[float]] = {h: [] for h in az_huc12_ids}
     pcml_common_end = min(ml_pcml_year_range[1], nhm_year_range[1])
     for year in range(common_start, pcml_common_end + 1):
-        rpath = os.path.join(ml_pcml_raster_dir, f'ML_Peff_PCML_{year}_mm.tif')
+        rpath = os.path.join(
+            ml_pcml_raster_dir, f'PCML_Peff_{year}_mm.tif',
+        )
         if not os.path.isfile(rpath):
             continue
         yr_stats = _compute_huc12_zonal_stats(
@@ -4300,7 +4131,7 @@ def run_peff_intercomparison(
                    if h in nhm_huc_mean and h in ml_huc_mean]
     _peff_huc_display = {
         'ML_Peff': 'USDA_SCS_Peff',
-        'ML_Peff_PCML': 'ML_Peff_PCML',
+        'ML_Peff_PCML': 'PCML_Peff',
         'NHM_Peff': 'NHM_Peff',
     }
     if common_hucs:
@@ -4348,6 +4179,7 @@ def run_peff_intercomparison(
             common_hucs, huc_areas, huc12_scatter_dir,
             title='Effective Precipitation — HUC12-Level Scatter',
             filename='Scatter_HUC12_Peff.png',
+            log_scale=True,
         )
 
         # HUC12-level spatial diff choropleth (NHM pairs only)
@@ -4365,8 +4197,8 @@ def run_peff_intercomparison(
 
         nhm_peff_pairs = [
             ('USDA-SCS Peff', 'NHM Peff', ml_huc_mean, nhm_huc_mean),
-            ('ML Peff PCML', 'NHM Peff', pcml_huc_mean, nhm_huc_mean),
-            ('USDA-SCS Peff', 'ML Peff PCML', ml_huc_mean, pcml_huc_mean),
+            ('PCML Peff', 'NHM Peff', pcml_huc_mean, nhm_huc_mean),
+            ('USDA-SCS Peff', 'PCML Peff', ml_huc_mean, pcml_huc_mean),
         ]
 
         # Volume-only diff for Peff HUC12 (depth-mode dropped: per-HUC12
@@ -4459,10 +4291,10 @@ def run_peff_intercomparison(
         makedirs(pixel_diff_dir)
         peff_mean_rasters = {
             'ML_Peff': os.path.join(
-                ml_peff_out, 'ML_mean_annual_Peff_mm.tif',
+                ml_peff_out, 'mean_annual_USDA_SCS_Peff_mm.tif',
             ),
             'ML_Peff_PCML': os.path.join(
-                ml_pcml_out, 'ML_mean_annual_Peff_PCML_mm.tif',
+                ml_pcml_out, 'mean_annual_PCML_Peff_mm.tif',
             ),
             'NHM_Peff': os.path.join(
                 nhm_peff_out, 'NHM_mean_annual_Peff_mm.tif',
@@ -4507,8 +4339,8 @@ def run_peff_intercomparison(
 
         peff_pixel_pairs = [
             ('USDA-SCS Peff', 'NHM Peff', 'ML_Peff', 'NHM_Peff'),
-            ('ML Peff PCML', 'NHM Peff', 'ML_Peff_PCML', 'NHM_Peff'),
-            ('USDA-SCS Peff', 'ML Peff PCML', 'ML_Peff', 'ML_Peff_PCML'),
+            ('PCML Peff', 'NHM Peff', 'ML_Peff_PCML', 'NHM_Peff'),
+            ('USDA-SCS Peff', 'PCML Peff', 'ML_Peff', 'ML_Peff_PCML'),
         ]
         # Compute shared vmax across the 3 pair panels
         global_vmax_pix = 1e-6
@@ -4564,7 +4396,7 @@ def run_peff_intercomparison(
                 )
                 _overlay_boundaries(
                     ax, b_reproj, ama_ina_names, b_name,
-                    label_fontsize=5.0, label_all=False,
+                    label_fontsize=5.0, label_all=True,
                 )
             else:
                 ax.text(
@@ -4623,10 +4455,12 @@ def run_peff_intercomparison(
                 if h in yr_row.columns else 0.0
                 for h in az_cols
             }
-        # ML Peff (SCS) yearly {year: {huc12: AF}}
+        # USDA-SCS Peff yearly {year: {huc12: AF}}
         ml_yearly_huc_peff: dict[int, dict[str, float]] = {}
         for year in range(common_start, common_end + 1):
-            rpath = os.path.join(ml_peff_raster_dir, f'ML_Peff_{year}_mm.tif')
+            rpath = os.path.join(
+                ml_peff_raster_dir, f'USDA_SCS_Peff_{year}_mm.tif',
+            )
             if not os.path.isfile(rpath):
                 continue
             yr_stats = _compute_huc12_zonal_stats(
@@ -4636,10 +4470,12 @@ def run_peff_intercomparison(
                 h: yr_stats.get(h, {}).get('volume_AF', 0.0)
                 for h in az_huc12_ids
             }
-        # ML Peff PCML yearly {year: {huc12: AF}}
+        # PCML Peff yearly {year: {huc12: AF}}
         pcml_yearly_huc_peff: dict[int, dict[str, float]] = {}
         for year in range(common_start, pcml_common_end + 1):
-            rpath = os.path.join(ml_pcml_raster_dir, f'ML_Peff_PCML_{year}_mm.tif')
+            rpath = os.path.join(
+                ml_pcml_raster_dir, f'PCML_Peff_{year}_mm.tif',
+            )
             if not os.path.isfile(rpath):
                 continue
             yr_stats = _compute_huc12_zonal_stats(
@@ -4672,7 +4508,7 @@ def run_peff_intercomparison(
     logger.info('=' * 60)
     logger.info(f'\n{metrics_df.to_string(index=False)}')
     logger.info(f'\nUSDA-SCS Peff year range: {ml_year_range}')
-    logger.info(f'ML Peff PCML year range: {ml_pcml_year_range}')
+    logger.info(f'PCML Peff year range: {ml_pcml_year_range}')
     logger.info(f'NHM Peff year range: {nhm_year_range}')
 
     return metrics_df
@@ -6415,7 +6251,7 @@ def run_ps_intercomparison(
             )
             _overlay_boundaries(
                 ax_huc, b_reproj_ps, ama_ina_names_ps, b_name_ps,
-                label_fontsize=5.0, label_all=False,
+                label_fontsize=5.0, label_all=True,
             )
             ax_huc.set_title('HUC12-Level', fontweight='bold')
 
@@ -6432,7 +6268,7 @@ def run_ps_intercomparison(
                 )
                 _overlay_boundaries(
                     ax_pix, b_reproj_ps, ama_ina_names_ps, b_name_ps,
-                    label_fontsize=5.0, label_all=False,
+                    label_fontsize=5.0, label_all=True,
                 )
             else:
                 ax_pix.text(
@@ -6458,7 +6294,7 @@ def run_ps_intercomparison(
             )
             _overlay_boundaries(
                 ax_bas, b_reproj_ps, ama_ina_names_ps, b_name_ps,
-                label_fontsize=5.0, label_all=False,
+                label_fontsize=5.0, label_all=True,
             )
             ax_bas.set_title('Basin-Level', fontweight='bold')
 
