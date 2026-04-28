@@ -2228,7 +2228,7 @@ request; SRP delivery data were obtained from ADWR.
 
 | Source | Basins covered | Years | Filter |
 |---|---|---|---|
-| **CAP** | Phoenix, Tucson, Pinal AMA; Harquahala INA; Ranegras Plain; Parker | 1985–2024 | `Recharge Facility` is null (direct use only) |
+| **CAP** | Phoenix, Tucson, Pinal AMA; Harquahala INA; Ranegras Plain; Parker | 1985–2024 | All deliveries (direct use + USF + GSF + ASR recharge) |
 | **SRP** | Phoenix AMA only | 1984–2023 | `Parent Water Type == 'SURFACE WATER'` |
 
 For Phoenix AMA the CAP and SRP totals are summed; all other basins use
@@ -2239,11 +2239,38 @@ CAP data only.
 - **CAP "Multiple" AMA records** (25 rows, ~15,600 AF total) and **NaN-AMA
   records** (16 rows, ~86,300 AF) are excluded because they cannot be
   attributed to a single groundwater basin.
-- **Recharge filtering**: CAP rows where `Recharge Facility` is non-null are
-  excluded.  This removes managed aquifer recharge deliveries so that only
-  direct surface-water use is compared against the ML `Total_SW` estimate.
-  Some direct-use deliveries may be partially classified as recharge, so
-  the observed series is a conservative lower bound.
+- **Why the comparison includes recharge by default**: the loader uses
+  `include_recharge=True`, so observed CAP deliveries on the validation
+  plots are the **full CAP supply footprint** at each basin — direct use
+  plus all three permitted recharge classes:
+    - **USF (Underground Storage Facility)**: shallow basins where CAP
+      water percolates into the aquifer and earns long-term storage
+      credits (LTSCs) for later recovery as groundwater.  Through 2020
+      the AWBA had recharged ~4.46 MAF of excess CAP supplies, creating
+      ~4.2 MAF of LTSCs (largest single USF: ~513 kAF at the Tonopah
+      Desert Recharge Project, Phoenix AMA).
+    - **GSF (Groundwater Savings Facility)**: an irrigation district
+      that agrees to reduce its groundwater pumping by exactly the
+      volume of CAP water it receives — the SW *is* consumed in-year,
+      but the bookkeeping accrues "savings credits" on the saved
+      groundwater (largest single GSF: ~648 kAF of credits at
+      Maricopa-Stanfield ID&D, Pinal AMA).
+    - **ASR (Aquifer Storage and Recovery)**: utility-owned wells used
+      to inject CAP water for later same-well recovery.
+  Including all three classes is the correct apples-to-apples baseline:
+  it represents the basin's gross *renewable supply* under CAP that
+  either (a) is consumed in-year on the landscape (direct use, GSF
+  in-lieu replacement of GW pumping) or (b) becomes a future-year GW
+  credit (USF, ASR).  The ML `Total_SW` series, by construction, only
+  counts SW that is physically *used* on the landscape in a given year
+  — it excludes USF/ASR recharge volumes that become future GW.  So
+  ML Total_SW is systematically lower than the CAP-with-recharge
+  delivery total at recharge-heavy basins (Phoenix AMA: ~820 kAF of
+  recharge capacity, Pinal: ~330 kAF, Tucson: ~300 kAF — together
+  ~75 % of statewide AWBA capacity).  This offset is methodological,
+  not a calibration error.  Set `include_recharge=False` for the
+  more apples-to-apples direct-use-only comparison (which understates
+  the true CAP footprint at recharge-heavy basins).
 - **Non-CAP/non-SRP surface water**: Surface-water sources not captured by
   CAP or SRP (e.g., local canal diversions, non-SRP irrigation districts)
   are not represented in the observed comparison series.  The ML predictions
