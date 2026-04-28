@@ -187,7 +187,7 @@ Step 3h is excluded from `--steps all` because Step 3g already produces the grap
 | `sigma-irr` | Skip σ_irr — irrigation fraction uncertainty |
 | `sigma-lulc` | Skip σ_LULC — LULC projection spread (requires GEE download) |
 | `sigma-gw` | Skip σ_gw — well-density feature sensitivity across 5 recent HarDWR snapshots (2020–2024) |
-| `sigma-usbr` | Skip σ_USBR — Upper Basin Colorado River streamflow uncertainty (5 USBR CMIP3 ensemble members spanning Rupp 2013 GCM corners + mixed SRES). Captures CAP-delivery uncertainty driven by Wyoming/Colorado/Utah snowpack — the gap σ_MACA cannot reach (MACA only downscales to AZ-local domain). |
+| `sigma-usbr` | Skip σ_USBR — Upper Colorado River Basin streamflow uncertainty (5 USBR CMIP3 ensemble members spanning Rupp 2013 GCM corners + mixed SRES). Captures CAP-delivery uncertainty driven by Wyoming/Colorado/Utah snowpack — the gap σ_MACA cannot reach (MACA only downscales to AZ-local domain). |
 | `density-sensitivity` | Skip partition-level diagnostic (density-ratio ±20% + smoothing-sigma sweep {2, 8}) |
 | `sigma-total` | Skip σ_total quadrature, basin σ, visualizations, and raster augmentation |
 | `time-series-plots` | Skip the AZ-wide and basin/sub-basin σ time-series plots produced after `sigma-total` (`_plot_basin_sigma_time_series`, `_plot_uncertainty_time_series`). Underlying CSVs (`Basin_Sigma_Total.csv`, `Uncertainty_Summary_*.csv`) are still produced; only the matplotlib renders are skipped. Useful when iterating on raster augmentation or downstream analyses without spending the ~5-10 minute plotting cost. Requires `sigma-total` to have run; no-op if `sigma-total` is also skipped. |
@@ -622,7 +622,7 @@ this study:
    sample-based) + σ_irr (irrigation-fraction half-range) + σ_LULC
    (4 USGS scenarios) + σ_GW (5 recent HarDWR well-density
    snapshots, t-corrected sample-based) + σ_USBR (5 USBR CMIP3
-   Upper-Basin Colorado River streamflow ensemble members,
+   Upper Colorado River Basin streamflow ensemble members,
    t-corrected sample-based; covers the Wyoming/Colorado/Utah
    snowpack uncertainty driving Lees Ferry inflow → CAP imports —
    the climate axis σ_MACA cannot reach, since MACA only downscales
@@ -1337,7 +1337,7 @@ climate uncertainty along *different geographic axes*:
 - **σ_MACA** — AZ-local downscaled CMIP5 climate (5 GCMs).  Drives
   ET / ETo / precipitation, which controls AZ-local watershed
   streamflow (Salt, Verde, Gila, Bill Williams) and irrigation demand.
-- **σ_USBR** — Upper Basin Colorado River streamflow (5 USBR CMIP3
+- **σ_USBR** — Upper Colorado River Basin streamflow (5 USBR CMIP3
   ensemble members).  Drives Lees Ferry inflow → CAP imports.
 
 Geographic decoupling is essential: ~92 % of Colorado River flow at
@@ -1528,10 +1528,10 @@ if 2099 Arizona had 2020-era wells"), but because ``well_density`` is
 the dominant SHAP feature, probing it at real observed amounts still
 exercises the model's primary sensitivity axis.
 
-##### σ_USBR — Upper Basin Colorado River streamflow uncertainty (all years, 1896–2099)
+##### σ_USBR — Upper Colorado River Basin streamflow uncertainty (all years, 1896–2099)
 
 σ_USBR captures **inter-USBR-ensemble-member spread of CAP delivery**
-driven by Upper Basin Colorado River streamflow uncertainty — the
+driven by Upper Colorado River Basin streamflow uncertainty — the
 gap σ_MACA cannot reach (MACA downscales to AZ-local domain only,
 not the Wyoming / Colorado / Utah snowpack that produces ~92 % of
 Lees Ferry flow).
@@ -1999,7 +1999,7 @@ maps that classify each groundwater basin by whether its total
 uncertainty is dominated by **management**-driven factors (σ_irr,
 σ_LULC, σ_GW — fixable by better data), **climate**-driven factors
 (σ_MACA + σ_USBR — inherent to the GCM scenario spread for AZ-local
-forcing and Upper Basin Colorado River streamflow respectively), or
+forcing and Upper Colorado River Basin streamflow respectively), or
 the **model** training-procedure floor (σ_Model — inherent to the ML
 ensemble). The decomposition writes the three variance shares
 (`σ_mgmt² / σ_total²`, `σ_clim² / σ_total²`, `σ_model² / σ_total²`)

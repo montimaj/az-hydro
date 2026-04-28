@@ -6,7 +6,7 @@ quadrature into a total pixel-level uncertainty (σ_total):
 
     σ_total = √(σ_MACA² + σ_model² + σ_irr² + σ_gw² + σ_LULC² + σ_USBR²)
 
-σ_USBR captures Upper-Basin Colorado River streamflow uncertainty
+σ_USBR captures Upper Colorado River Basin streamflow uncertainty
 (5 USBR CMIP3 ensemble members) — the climate axis σ_MACA cannot
 reach, since MACA only downscales to AZ-local domain.
 
@@ -1865,7 +1865,7 @@ def compute_sigma_lulc(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# σ_USBR — Upper Basin Colorado River streamflow ensemble uncertainty
+# σ_USBR — Upper Colorado River Basin streamflow ensemble uncertainty
 # ═════════════════════════════════════════════════════════════════════════════
 
 def compute_sigma_usbr(
@@ -1886,7 +1886,7 @@ def compute_sigma_usbr(
         members: list[str] | None = None,
 ) -> tuple[dict[int, np.ndarray], dict[str, dict[int, np.ndarray]]]:
     """Compute σ_USBR — inter-USBR-member spread of CAP delivery driven
-    by Upper Basin Colorado River streamflow uncertainty.
+    by Upper Colorado River Basin streamflow uncertainty.
 
     For each year × USBR ensemble member, perturbs
     ``canal_weighted_streamflow_mm`` AND the SW rights density
@@ -4344,7 +4344,7 @@ def run_uncertainty_quantification(
     else:
         logger.info('  σ_gw skipped.')
 
-    # ── σ_USBR (Upper Basin Colorado River streamflow uncertainty) ──
+    # ── σ_USBR (Upper Colorado River Basin streamflow uncertainty) ──
     # Captures inter-USBR-member spread of CAP delivery driven by
     # Upper Basin headwater hydrology — the dominant climate-uncertainty
     # axis that σ_MACA does not reach (MACA downscales to AZ-local

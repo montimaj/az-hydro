@@ -4096,7 +4096,7 @@ _SIGMA_CU_POOL_MAP = {
 # - Mgmt: irrigation mapping (σ_Irr), LULC scenarios (σ_LULC),
 #         well-density temporal sensitivity (σ_GW).
 # - Clim: AZ-local downscaled climate (σ_MACA) +
-#         Upper Basin Colorado River streamflow (σ_USBR).
+#         Upper Colorado River Basin streamflow (σ_USBR).
 #         Both are climate-driven but cover different geographic
 #         basins — see README §3d climate-driver decomposition.
 # - Model: XGBRF seed ensemble (σ_Model).

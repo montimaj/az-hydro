@@ -403,7 +403,7 @@ def get_co_river_watershed_lf_shares(
 
       * ``lf_share`` = N_LF_derived_gauges / N_total_gauges
         (fraction of the watershed's averaged streamflow that derives
-        from Upper Basin Colorado River flow at Lees Ferry).  LF-
+        from Upper Colorado River Basin flow at Lees Ferry).  LF-
         derived = membership in ``USBR_DERIVED_GAUGES``.
       * ``ws_area_m2`` = the polygon's area in m² (used to normalise
         m³/s → mm/yr, mirroring ``create_streamflow_rasters``).
