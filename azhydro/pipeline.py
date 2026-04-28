@@ -2626,10 +2626,18 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
     # so the sub-saturation dynamic range is legible.
     ood_dir = os.path.join(prediction_dir, 'OOD_Rasters')
     if os.path.isdir(ood_dir):
+        # Constrain OOD footprint to the same pixel set rendered on the
+        # withdrawal era maps (Predicted_Rasters/Depth_mm with the
+        # mask-zero rule) so the two maps overlay 1:1.  Without this,
+        # OOD shows desert pixels that the withdrawal map masks as
+        # zero, making the OOD signal look more pervasive than it is.
         vizops.create_ood_era_raster_maps(
             raster_dir=ood_dir,
             basin_shp=AZ_GW_BASIN,
             output_dir=maps_dir,
+            withdrawal_mask_raster_dir=os.path.join(
+                prediction_dir, 'Predicted_Rasters', 'Depth_mm',
+            ),
         )
 
     # ── Uncertainty (Sigma components: band 1 = σ, band 2 = CV) ────

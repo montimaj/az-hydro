@@ -3835,6 +3835,7 @@ def create_ood_era_raster_maps(
     fully_ood_threshold: float = 0.999,
     fully_ood_color: str = '#888888',
     out_filename: str | None = None,
+    withdrawal_mask_raster_dir: str | None = None,
 ) -> None:
     """Era-mean OOD probability maps with two-class rendering.
 
@@ -3881,13 +3882,17 @@ def create_ood_era_raster_maps(
     apply_journal_style()
     makedirs(output_dir)
 
-    # Tone-down the default palette: the saturated ``RdYlGn_r`` ends
-    # (pure green at 0, pure red near 1) make the map feel loud next
-    # to the muted basin shapefile and labels. Build a muted five-stop
-    # diverging ramp — dark-green → sage → sand → terracotta →
-    # brick — that matches the matte tone of the σ attribution maps
-    # and the σ volume maps. Callers can override via ``cmap=...`` to
-    # pass any matplotlib colormap by name or instance.
+    # Muted five-stop ramp; the high end is intentionally PURPLE
+    # (not the original brick) so the INA boundary overlay
+    # (``INA_BORDER_COLOR`` = dark red ``#B71C1C``) stays visible
+    # against the high-OOD pixels.  Earlier versions used a
+    # green→sage→sand→terracotta→brick ramp; the brick end
+    # (``#a63a2a``) was close enough to the INA red that INA
+    # boundaries effectively disappeared in projection-era panels
+    # where most of the AMA region saturates near OOD ≈ 1.  Going
+    # green→sage→sand→amber→purple keeps the warm-cool perceptual
+    # gradient but removes the red collision.  Callers can override
+    # via ``cmap=...``.
     if cmap is None:
         cmap = LinearSegmentedColormap.from_list(
             'muted_ood_ramp',
@@ -3895,8 +3900,8 @@ def create_ood_era_raster_maps(
                 '#2e6b3c',  # dark green     (low OOD probability)
                 '#7ba86a',  # sage
                 '#d8c98a',  # sand
-                '#d38a5a',  # terracotta
-                '#a63a2a',  # brick          (high OOD probability)
+                '#d38a5a',  # amber / terracotta
+                '#5a3a8c',  # deep purple    (high OOD probability)
             ],
         )
 
@@ -3914,6 +3919,32 @@ def create_ood_era_raster_maps(
 
     era_means = _compute_era_means(raster_dir, raster_shape, band=1,
                                     mask_nan_only=True)
+
+    # Optional: align OOD footprint with the withdrawal era maps.
+    # OOD-prob rasters cover the entire predictor grid (every pixel
+    # the model evaluated, including deserts with zero withdrawal),
+    # while the withdrawal era maps mask out pixels where the era-mean
+    # is zero.  Without alignment, OOD shows red/orange across vast
+    # uninhabited areas the withdrawal map renders blank, suggesting
+    # an OOD problem at pixels where the model isn't actually making
+    # a meaningful prediction.  When ``withdrawal_mask_raster_dir`` is
+    # provided, recompute the same era-mean with the
+    # ``mask_nan_only=False`` rule (mask zeros) and apply it as an
+    # additional mask to the OOD era-means.
+    if withdrawal_mask_raster_dir and os.path.isdir(
+        withdrawal_mask_raster_dir,
+    ):
+        wd_era_means = _compute_era_means(
+            withdrawal_mask_raster_dir, raster_shape, band=1,
+            mask_nan_only=False,
+        )
+        for era, wd in wd_era_means.items():
+            ood = era_means.get(era)
+            if ood is None:
+                continue
+            era_means[era] = np.ma.masked_where(
+                np.ma.getmaskarray(wd), ood,
+            )
 
     basins_gdf = gpd.read_file(basin_shp)
     if basins_gdf.crs != crs:
