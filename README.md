@@ -21,7 +21,7 @@ Maintainer: [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majum
 6. **Six-component σ_total UQ** — σ_MACA + σ_model + σ_irr + σ_LULC + σ_GW + σ_USBR (Upper-Basin Colorado River streamflow ensemble — the climate axis σ_MACA does not reach), in t-corrected quadrature with linear-sum aggregation across basins for correlation-correct AZ-wide CIs. Produces 6-band augmented rasters (pred, σ, CV, SNR, lower/upper 95 % CI) for every product.
 7. **CAP shortage scenario analysis** — eight WestWater + ADWR-aligned scenarios (DCP Tier 0/1/2a/2b/3 + Baseline / Basic Coordination / Extreme Shortage) re-partitioned over 2026–2099, quantifying the GW substitution pathway. Independently agrees with [WestWater Research (2026)](https://library.cap-az.com/documents/public-information/Economic-Impact-to-CAP.pdf) Figs 4 and 5 within the σ band, despite using completely different methodologies.
 
-**Headline validation.** Trained *only* on metered ADWR records from the ten AMA/INA management areas, then applied to every 2 km pixel statewide — including ~25 unmetered basins (~35–40 % of statewide volume) the model has never seen labels for. Independent agency cross-checks (post-fix; no federal-delivery offset required):
+**Headline validation.** Trained *only* on metered ADWR records from the ten AMA/INA management areas, then applied to every 2 km pixel statewide — including ~25 unmetered basins (~35–40 % of statewide volume) the model has never seen labels for. Independent agency cross-checks:
 
 | Year(s) | Source | Reported | Model | Δ |
 |---|---|---|---|---|
