@@ -5180,8 +5180,8 @@ narrower than ours in two important ways:
 
 | Scenario | WestWater Fig 4 (GW + LTSC) | AZ-Hydro central ΔGW | AZ-Hydro ±1σ band | WestWater inside ±1σ? |
 |---|---|---|---|---|
-| Basic Coordination | **8.0** (4.4 native GW + 3.6 LTSC) | **7.24** | ~−1.5 – 16.0 | ✓ |
-| Extreme Shortage | **8.7** (4.5 native GW + 4.2 LTSC) | **13.08** | ~4.3 – 21.8 | ✓ |
+| Basic Coordination | **8.0** (4.4 native GW + 3.6 LTSC) | **7.24** | ~0.35 – 14.13 | ✓ |
+| Extreme Shortage | **8.7** (4.5 native GW + 4.2 LTSC) | **13.08** | ~6.19 – 19.97 | ✓ |
 
 With the current partition (well-density split at pure_desert_with_well,
 year-dependent constant Irr-bias, pre-1948 SW-kernel σ tightening,
@@ -5193,11 +5193,16 @@ small under-shoot is consistent with WestWater's regulatory-ceiling
 framing (some shortage they count as "unmet" we route to GW substitution,
 but only up to the per-pixel ML predicted demand — we don't grow
 demand to fill an AWBA bridge).  The AZ-Hydro 1σ uncertainty on
-cumulative ΔGW 2027–2060 is approximately **±8.75 MAF**, derived by
-linearly accumulating the per-year σ_total on Total_GW (quadrature
-across the 6 components — σ_MACA + σ_Model + σ_Irr + σ_LULC + σ_GW +
-σ_USBR — followed by linear sum across basins).  **WestWater's
-central estimates fall well inside our ±1σ band for both scenarios.**
+cumulative ΔGW 2027–2060 is approximately **±6.89 MAF**, derived by
+linearly accumulating the per-year AZ-wide σ_Total_GW (quadrature
+across the 5 projection-era components — σ_MACA + σ_Model + σ_LULC
++ σ_GW + σ_USBR; σ_Irr CSV terminates at 2025 so it does not
+contribute to the projection cumulative — followed by linear sum
+across basins, and linear time-sum 2027–2060 assuming perfect
+year-to-year correlation as a conservative upper bound).  Per-year
+AZ-wide σ_Total_GW averages ~0.20 MAF/yr over 2027-2060.
+**WestWater's central estimates fall well inside our ±1σ band for
+both scenarios.**
 
 **Both Extreme Shortage scenarios impose the same physical CAP
 curtailment** (0 kAF/yr delivery sustained over the projection
