@@ -4767,6 +4767,28 @@ def load_cap_srp_annual_sw(
     for _, row in cap_annual.iterrows():
         basin_year.setdefault(row['Basin'], {})[int(row['Year'])] = float(row['CAP_AF'])
 
+    # Zero-fill missing recent years per basin so every CAP service
+    # basin extends to the latest CAP delivery year (currently 2024).
+    # The source CAP file has variable per-AMA coverage — Phoenix /
+    # Pinal / Tucson run through 2024, while Harquahala INA last
+    # appears in 2022 (with deliveries trailing off to ~2.5 kAF).
+    # Treating absence-of-record as "no delivery" (== 0 AF) is the
+    # consistent interpretation: CAP either delivered to the basin
+    # in a year or it didn't, and the upstream file doesn't carry
+    # explicit zeros.  Without this fill, time-series plots truncate
+    # asymmetrically (Pinal to 2024 but Harquahala to 2022), making
+    # cross-basin visual comparison harder.  Fill range starts at
+    # each basin's first observed year (so we don't fabricate pre-
+    # CAP-arrival deliveries) and runs through the global max year.
+    if not cap_annual.empty:
+        global_max_yr = int(cap_annual['Year'].max())
+        for basin, yr_dict in basin_year.items():
+            if not yr_dict:
+                continue
+            first_yr = min(yr_dict.keys())
+            for yr in range(first_yr, global_max_yr + 1):
+                yr_dict.setdefault(yr, 0.0)
+
     # ── SRP (optional) ───────────────────────────────────────────────────
     # SRP service area boundary is not publicly mapped, so attributing
     # SRP deliveries to a single AZ GW basin (Phoenix AMA) is ambiguous.
@@ -5124,7 +5146,7 @@ def run_cap_srp_validation(
     basin_shp: str = '',
     basin_col: str = '',
     output_dir: str = '',
-    year_range: tuple[int, int] = (1985, 2023),
+    year_range: tuple[int, int] = (1985, 2024),
 ) -> pd.DataFrame:
     """
     Validate ML Total_SW predictions against observed CAP (and optionally
@@ -5457,6 +5479,42 @@ def run_cap_srp_validation(
             'CAP_SRP': cat_obs_label,
             'CAP_SRP_spill': 'CAP + SRP (+ Spill)',
         }
+        # Per-basin label / source overrides:
+        # - SRP is only loaded for Phoenix AMA, so non-Phoenix basins
+        #   carry pure CAP values.  Relabel the legend at non-Phoenix
+        #   basins from "CAP + SRP (...)" to "CAP (...)" so readers
+        #   don't think SRP is being added there.  AZ_Total keeps
+        #   the combined label since it sums all basins (Phoenix
+        #   contributes its CAP+SRP composite).
+        # - Drop the "+ Spill" sensitivity at non-Phoenix basins for
+        #   the same reason — the Spill source is SRP-only.
+        cap_obs_label_capsonly = (
+            cat_obs_label
+            .replace('CAP + SRP', 'CAP')
+            .replace('CAP+SRP', 'CAP')
+            .strip()
+        )
+        non_phoenix = [
+            b for b in cat_obs_yearly.keys()
+            if b != 'PHOENIX AMA'
+        ]
+        basin_label_overrides = {
+            b: {'CAP_SRP': cap_obs_label_capsonly} for b in non_phoenix
+        }
+        basin_skip_sources = {
+            b: {'CAP_SRP_spill'} for b in non_phoenix
+        }
+        # Phoenix-only footnote: SRP records terminate at 2023, so the
+        # CAP+SRP composite at 2024 (or the last year CAP runs past
+        # SRP) is CAP-only and dips visibly versus the prior years.
+        # Flag this in the figure rather than clipping the data so
+        # the additional year of CAP delivery info isn't lost.
+        basin_footnotes = {
+            'PHOENIX AMA': (
+                'Note: CAP+SRP at 2024 is CAP-only — the SRP source '
+                'record terminates at 2023.'
+            ),
+        }
         plot_intercomp_time_series(
             cat_ts_sources, categories=['SW'],
             basin_names=sorted(cat_obs_yearly.keys()),
@@ -5464,6 +5522,9 @@ def run_cap_srp_validation(
             output_dir=plot_dir,
             colors=_cap_colors, markers=_cap_markers, labels=cat_labels,
             title_prefix=f'{ml_label} — ', file_prefix=plot_prefix,
+            basin_label_overrides=basin_label_overrides,
+            basin_skip_sources=basin_skip_sources,
+            basin_footnotes=basin_footnotes,
         )
 
         # Per-category scatter (mean over common years)

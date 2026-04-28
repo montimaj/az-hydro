@@ -6616,6 +6616,9 @@ def plot_intercomp_time_series(
     m_to_mm: float = 1000.0,
     mm_to_ft: float = 1.0 / 304.8,
     m3_to_af: float = 1 / 1233.48184,
+    basin_label_overrides: dict[str, dict[str, str]] | None = None,
+    basin_skip_sources: dict[str, set[str]] | None = None,
+    basin_footnotes: dict[str, str] | None = None,
 ) -> None:
     """Generic per-basin intercomparison time series.
 
@@ -6671,8 +6674,19 @@ def plot_intercomp_time_series(
             else:
                 total_area = basin_areas_m2.get(basin, 1.0)
 
+            # Per-basin "skip this source" set (e.g. SRP-augmented
+            # composite shouldn't appear at non-Phoenix basins where
+            # the underlying value is CAP-only anyway — only the label
+            # would be misleading).
+            skip_set = (
+                basin_skip_sources.get(basin, set())
+                if basin_skip_sources else set()
+            )
+
             has_any_data = False
             for source, src_data in all_sources.items():
+                if source in skip_set:
+                    continue
                 yearly = src_data.get(cat, {}).get('yearly', {})
                 # Filter to numeric year keys only — some data structures
                 # (e.g. CAP/SRP) use {basin: {year: val}} and pass basin
@@ -6689,7 +6703,13 @@ def plot_intercomp_time_series(
 
                 color = colors.get(source, '#333333')
                 marker = markers.get(source, 'o')
-                label = labels.get(source, source)
+                # Per-basin label override (e.g. relabel "CAP + SRP" as
+                # "CAP" at non-Phoenix basins where SRP is not added).
+                label = (
+                    (basin_label_overrides or {})
+                    .get(basin, {})
+                    .get(source, labels.get(source, source))
+                )
 
                 # Build a lookup that handles both int and float year keys,
                 # filtering to numeric keys only.
@@ -6826,6 +6846,17 @@ def plot_intercomp_time_series(
                 axes[0].legend(fontsize=9)
                 axes[0].xaxis.set_major_locator(MaxNLocator(integer=True))
                 axes[0].tick_params(axis='both', labelsize=tick_fontsize)
+
+            # Optional per-basin footnote (e.g. data-coverage caveat
+            # like "CAP+SRP at 2024 is CAP-only — SRP records end 2023"
+            # for Phoenix AMA).  Rendered as italic text below the plot.
+            footnote = (basin_footnotes or {}).get(basin)
+            if footnote:
+                fig.text(
+                    0.5, -0.02, footnote,
+                    ha='center', va='top',
+                    fontsize=9, style='italic', color='#444444',
+                )
 
             clean = basin.replace(' ', '_').replace('/', '_').replace('.', '')
             out_path = os.path.join(output_dir,
