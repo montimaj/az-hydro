@@ -33,6 +33,9 @@ Maintainer: [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majum
 | 1950 | [USGS Circular 115](https://pubs.usgs.gov/circ/1950/0115/report.pdf) Total | 5.38 MAF | **5.18 MAF** | **−0.20 (−3.8 %)** |
 | 1955 | [USGS Circular 398](https://pubs.usgs.gov/circ/1957/0398/report.pdf) Total | 8.09 MAF | **7.59 MAF** | **−0.50 (−6.2 %)** |
 | 1960 | [USGS Circular 456](https://pubs.usgs.gov/circ/1961/0456/report.pdf) Total | 5.62 MAF | **5.55 MAF** | **−0.07 (−1.3 %)** |
+| 1970 | [USGS Circular 676](https://pubs.usgs.gov/circ/1972/0676/report.pdf) Total | 7.60 MAF | **7.84 MAF** | **+0.24 (+3.2 %)** |
+| 1975 | [USGS Circular 765](https://pubs.usgs.gov/circ/1977/0765/report.pdf) Total | 8.74 MAF | **8.06 MAF** | **−0.68 (−7.8 %)** |
+| 1980 | [USGS Circular 1001](https://pubs.usgs.gov/circ/1983/1001/report.pdf) Total | 8.93 MAF | **8.43 MAF** | **−0.50 (−5.6 %)** |
 | 2016 | [ADWR Annual Report 2018](https://www.azwater.gov/sites/default/files/2022-08/ADWR_Annual_Report_2018_.pdf) Total | ~7.0 MAF | **6.72 MAF** | **−0.28 (−4.0 %)** |
 | 2016 | ADWR GW % | 40 % | **44.2 %** | **+4.2 pp** |
 | 2017 | ADWR Total | 7.00 MAF | **6.81 MAF** | **−0.19 (−2.7 %)** |
