@@ -119,7 +119,18 @@ PREDICTION_MODEL = 'XGBRF'  # Model used for full-period prediction (Step 3+)
 USE_AMA_INA = True
 DROP_GW_BASINS = ()
 MIN_SPATIAL_EVAL_SAMPLES = 30   # skip sub-basins with fewer non-zero metered samples
-SKIP_SPATIAL_BASINS = ('WILLCOX AMA',)  # basins to exclude from spatial LOO (too few samples)
+# Basins to exclude from spatial LOO.
+#   WILLCOX AMA    — 50.7 k metered rows over 1984-2024 but only 126
+#                    positive-pumping pixels (~3 per year on average,
+#                    ~99 % of the basin reads zero).  Above the 30-sample
+#                    threshold but the positive-signal density is too
+#                    low to serve as a fair holdout target.
+#   RANEGRAS PLAIN — historically unmetered (designated AMA in Jan 2026
+#                    by ADWR, no metering history yet); zero positive-
+#                    pumping records in the current training data, so
+#                    the sample-count filter would drop it anyway —
+#                    listing here makes the exclusion explicit.
+SKIP_SPATIAL_BASINS = ('WILLCOX AMA', 'RANEGRAS PLAIN')
 SPATIAL_SEED_FRACTION = 0.1     # fraction of held-out basin samples seeded into training
 
 DROP_ATTRS = (
