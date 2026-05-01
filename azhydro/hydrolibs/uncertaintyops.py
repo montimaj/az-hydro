@@ -4580,11 +4580,9 @@ def _plot_cap_scenario_sigma_combined(
     fig, axes = plt.subplots(1, 2, figsize=(20, 10), constrained_layout=True)
     fig.suptitle(
         f'Cumulative σ_total on Total_GW over CAP service area '
-        f'({year_window[0]}–{year_window[1]})\n'
-        f'Same uncertainty applies to every CAP scenario — quadrature '
-        f'across components, linear-time-sum (perfect-correlation '
-        f'conservative upper bound).  Basin and pixel panels share the '
-        f'same CAP-restricted spatial scope and their AZ totals match.',
+        f'({year_window[0]}–{year_window[1]}) — '
+        f'same uncertainty applies to every CAP scenario; '
+        f'basin and pixel panels share the CAP-restricted scope.',
         fontsize=13, fontweight='bold',
     )
 
@@ -4828,11 +4826,9 @@ def _plot_cap_scenario_basin_snr(
 
     fig, axes = plt.subplots(2, 4, figsize=(22, 12), constrained_layout=True)
     fig.suptitle(
-        f'CAP Scenario — Basin Signal-to-Noise (SNR = |ΔGW_cum| / σ_cum) '
-        f'over {year_window[0]}–{year_window[1]}\n'
-        f'SNR ≥ 1 → scenario signal exceeds the central-pipeline '
-        f'σ_total noise floor at that basin (σ_cum aggregated over '
-        f'CAP-service-area pixels only at intersected basins)',
+        f'CAP Scenario — Basin Signal-to-Noise '
+        f'(SNR = |ΔGW_cum| / σ_cum, {year_window[0]}–{year_window[1]}). '
+        f'SNR ≥ 1 → signal exceeds central-pipeline 1σ noise.',
         fontsize=13, fontweight='bold',
     )
     axes_flat = axes.flatten()
@@ -4979,11 +4975,10 @@ def _plot_cap_scenario_pixel_snr(
 
     fig, axes = plt.subplots(2, 4, figsize=(22, 12), constrained_layout=True)
     fig.suptitle(
-        f'CAP Scenario — Pixel Signal-to-Noise (SNR = |ΔGW_cum| / σ_cum) '
-        f'over {year_window[0]}–{year_window[1]}\n'
-        f'(per-pixel ΔGW = basin Δ × pixel ML Total_GW share — '
-        f'pro-rata, NOT a hydraulic-head response; SNR ≥ 1 → signal '
-        f'exceeds local σ noise)',
+        f'CAP Scenario — Pixel Signal-to-Noise '
+        f'(SNR = |ΔGW_cum| / σ_cum, {year_window[0]}–{year_window[1]}). '
+        f'SNR ≥ 1 → signal exceeds local 1σ noise. '
+        f'Per-pixel ΔGW is a pro-rata distribution (not a hydraulic-head response).',
         fontsize=13, fontweight='bold',
     )
     axes_flat = axes.flatten()
