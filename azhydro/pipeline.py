@@ -3249,9 +3249,9 @@ def create_cap_scenario_spatial_maps(
       3. ``CAP_Scenario_Sigma_Cumulative.png`` — single 2-panel σ_cum
          context (basin choropleth | pixel raster) that applies to
          every scenario.
-      4. ``CAP_Scenario_Basin_CV.png`` — per-scenario basin signal-
+      4. ``CAP_Scenario_Basin_SNR.png`` — per-scenario basin signal-
          to-noise (|ΔGW_cum| / σ_cum) maps.
-      5. ``CAP_Scenario_Pixel_CV.png`` — pixel-level signal-to-noise.
+      5. ``CAP_Scenario_Pixel_SNR.png`` — pixel-level signal-to-noise.
       6. ``Pixel_Rasters/CAP_Scenario_Pixel_<scenario>_cum_AF.tif`` —
          per-scenario cumulative ΔGW raster used by the pixel maps.
 
@@ -3390,9 +3390,17 @@ def create_cap_scenario_spatial_maps(
             pixel_sigma_cum, pixel_ref_raster = pix_sigma_result
         else:
             pixel_sigma_cum, pixel_ref_raster = None, None
+        # σ_cum context map: use CAP-restricted basin σ so the basin
+        # and pixel panels share the same spatial scope (CAP service
+        # area only) and their AZ totals are directly comparable.
+        # Fall back to full-basin σ if no CAP geojson was provided.
+        basin_sigma_for_context = (
+            basin_sigma_cum_capclip if basin_sigma_cum_capclip
+            else basin_sigma_cum_full
+        )
         try:
             uncops._plot_cap_scenario_sigma_combined(
-                basin_sigma_cum_full, pixel_sigma_cum, pixel_ref_raster,
+                basin_sigma_for_context, pixel_sigma_cum, pixel_ref_raster,
                 basin_shp, output_dir, year_window=yw,
                 cap_service_area_geojson=cap_service_area_geojson,
             )
@@ -3401,34 +3409,34 @@ def create_cap_scenario_spatial_maps(
                 '  CAP scenario σ_cum map failed: %s', exc,
             )
 
-        # 4. Basin CV (signal-to-noise) — CAP-restricted σ denominator
-        basin_sigma_for_cv = (
+        # 4. Basin SNR (signal-to-noise) — CAP-restricted σ denominator
+        basin_sigma_for_snr = (
             basin_sigma_cum_capclip if basin_sigma_cum_capclip
             else basin_sigma_cum_full
         )
-        if basin_sigma_for_cv:
+        if basin_sigma_for_snr:
             try:
-                uncops._plot_cap_scenario_basin_cv(
-                    delta_df, basin_sigma_for_cv, basin_shp,
+                uncops._plot_cap_scenario_basin_snr(
+                    delta_df, basin_sigma_for_snr, basin_shp,
                     output_dir, year_window=yw,
                     cap_service_area_geojson=cap_service_area_geojson,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    '  CAP scenario basin CV map failed: %s', exc,
+                    '  CAP scenario basin SNR map failed: %s', exc,
                 )
 
-        # 5. Pixel CV (signal-to-noise)
+        # 5. Pixel SNR (signal-to-noise)
         if pixel_paths and pixel_sigma_cum is not None:
             try:
-                uncops._plot_cap_scenario_pixel_cv(
+                uncops._plot_cap_scenario_pixel_snr(
                     pixel_paths, pixel_sigma_cum, pixel_ref_raster,
                     basin_shp, output_dir, year_window=yw,
                     cap_service_area_geojson=cap_service_area_geojson,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    '  CAP scenario pixel CV map failed: %s', exc,
+                    '  CAP scenario pixel SNR map failed: %s', exc,
                 )
 
     logger.info(

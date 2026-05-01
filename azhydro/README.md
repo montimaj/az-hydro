@@ -1361,7 +1361,7 @@ in all σ_total CSVs.
 ##### σ_MACA — Inter-GCM climate spread (future only, 2026–2099)
 
 Five representative GCMs spanning the Southwest US climate space are
-selected following Rupp et al. (2013):
+selected following [Rupp et al. (2013)](https://doi.org/10.1002/jgrd.50843):
 
 | GCM | Climate archetype |
 |-----|-------------------|
@@ -5198,8 +5198,8 @@ CAP sub-region carries each scenario's drawdown signal:
 | `CAP_Scenario_Basin_Drawdown_<window>.png` | 2×4 grid (7 scenarios + 3×2 legend) of basin choropleths showing cumulative ΔGW vs Baseline over the window.  Basin polygons clipped to the CAP service-area intersection so Verde River / Lower Gila / Upper San Pedro etc. show only the actually-affected sliver instead of the full basin polygon.  Discrete YlOrRd bins in 10⁶ m³ with secondary kAF axis on the colorbar (left side) and full-height shared colorbar across all 7 panels. |
 | `CAP_Scenario_Pixel_Drawdown_<window>.png` | Same layout at native 2 km raster resolution.  Per-pixel ΔGW = basin Δ × pixel ML Total_GW share — pro-rata distribution of the basin total to its CAP-affected pixels.  **Not a hydraulic-head response** (sub-basin texture should not be over-interpreted as drawdown contours). |
 | `CAP_Scenario_Sigma_Cumulative_<window>.png` | Single 2-panel figure (basin + pixel) showing cumulative σ_total_GW over the same window.  Same uncertainty applies to every CAP scenario — quadrature-combined per-component σ at the basin level, linear-time-sum across years (perfect-correlation conservative upper bound). |
-| `CAP_Scenario_Basin_CV_<window>.png` | Per-scenario basin signal-to-noise (CV = \|ΔGW_cum\| / σ_cum).  The σ denominator is **CAP-restricted** — only σ from pixels inside the basin × CAP-pixel intersection — so the noise floor at small-CAP-footprint basins like Verde River reflects only the CAP-affected portion, not the full basin's σ_total.  CV > 1 ⇒ scenario signal exceeds the central-pipeline noise floor at that basin. |
-| `CAP_Scenario_Pixel_CV_<window>.png` | Pixel-level signal-to-noise (continuous imshow, same discrete bins as basin CV).  Pro-rata distribution caveat as above. |
+| `CAP_Scenario_Basin_SNR_<window>.png` | Per-scenario basin signal-to-noise (SNR = \|ΔGW_cum\| / σ_cum).  The σ denominator is **CAP-restricted** — only σ from pixels inside the basin × CAP-pixel intersection — so the noise floor at small-CAP-footprint basins like Verde River reflects only the CAP-affected portion, not the full basin's σ_total.  SNR ≥ 1 ⇒ scenario signal exceeds the central-pipeline noise floor (1σ) at that basin.  Note this is signal-to-noise (\|signal\|/σ), not the classical coefficient of variation (σ/mean) — earlier output files used the misnomer ``_CV_``. |
+| `CAP_Scenario_Pixel_SNR_<window>.png` | Pixel-level signal-to-noise (continuous imshow, same discrete bins as basin SNR).  Pro-rata distribution caveat as above. |
 | `Pixel_Rasters/CAP_Scenario_Pixel_<scenario>_cum_AF_<window>.tif` | Per-scenario per-window cumulative ΔGW raster (AF) used by the pixel maps and available for downstream analysis. |
 
 The basin-level and pixel-level drawdown maps are paired: same
@@ -5765,6 +5765,8 @@ Reitz, M., Sanford, W. E., & Saxe, S. (2023). Ensemble Estimation of Historical 
 Reitz, M., Sanford, W. E., & Saxe, S. (2023). Historical evapotranspiration for the conterminous U.S. _U.S. Geological Survey Data Release_. https://doi.org/10.5066/P9EZ3VAS.
 
 Roy, S., Majumdar, S., & Swetnam, T. (2025).  samapriya/awesome-gee-community-datasets: Community Catalog (3.9.0). _Zenodo_. https://doi.org/10.5281/zenodo.17641528.
+
+Rupp, D. E., Abatzoglou, J. T., Hegewisch, K. C., & Mote, P. W. (2013). Evaluation of CMIP5 20th century climate simulations for the Pacific Northwest USA. _Journal of Geophysical Research: Atmospheres_, _118_(19), 10884–10906. https://doi.org/10.1002/jgrd.50843.
 
 Sohl, T. L., Reker, R., Bouchard, M., Sayler, K., Dornbierer, J., Wika, S., Quenzer, R., & Friesz, A. (2016). Modeled historical land use and land cover for the conterminous United States. _Journal of Land Use Science_, _11_(4), 476–499. https://doi.org/10.1080/1747423X.2016.1147619.
 

@@ -4135,7 +4135,7 @@ def _plot_cap_scenario_pixel_drawdown(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# CAP scenario σ-cumulative + signal-to-noise (CV) maps
+# CAP scenario σ-cumulative + signal-to-noise (SNR) maps
 # ──────────────────────────────────────────────────────────────────────
 
 # Per-component independent uncertainty sources whose per-basin
@@ -4579,11 +4579,13 @@ def _plot_cap_scenario_sigma_combined(
 
     fig, axes = plt.subplots(1, 2, figsize=(20, 10), constrained_layout=True)
     fig.suptitle(
-        f'Cumulative σ_total on Total_GW ({year_window[0]}–{year_window[1]})\n'
+        f'Cumulative σ_total on Total_GW over CAP service area '
+        f'({year_window[0]}–{year_window[1]})\n'
         f'Same uncertainty applies to every CAP scenario — quadrature '
         f'across components, linear-time-sum (perfect-correlation '
-        f'conservative upper bound)',
-        fontsize=14, fontweight='bold',
+        f'conservative upper bound).  Basin and pixel panels share the '
+        f'same CAP-restricted spatial scope and their AZ totals match.',
+        fontsize=13, fontweight='bold',
     )
 
     # --- Panel (a): basin σ choropleth (clipped to CAP service area
@@ -4621,6 +4623,30 @@ def _plot_cap_scenario_sigma_combined(
         ax_basin, cap_service_area_geojson,
         target_crs=basins_gdf.crs,
     )
+    # Match panel (b)'s axes extent so both panels share the same
+    # bounding box and the basin map doesn't render with a vertical
+    # gap from auto-scaled tighter limits.
+    if pixel_ref_raster is not None and os.path.isfile(pixel_ref_raster):
+        with rio.open(pixel_ref_raster) as src:
+            _basin_extent_crs = src.crs
+            _b = src.bounds
+        if basins_gdf.crs != _basin_extent_crs:
+            ext_left, ext_bottom, ext_right, ext_top = (
+                gpd.GeoSeries.from_wkt(
+                    [f'POLYGON(({_b.left} {_b.bottom}, '
+                     f'{_b.right} {_b.bottom}, '
+                     f'{_b.right} {_b.top}, '
+                     f'{_b.left} {_b.top}, '
+                     f'{_b.left} {_b.bottom}))'],
+                    crs=_basin_extent_crs,
+                ).to_crs(basins_gdf.crs).total_bounds
+            )
+        else:
+            ext_left, ext_bottom, ext_right, ext_top = (
+                _b.left, _b.bottom, _b.right, _b.top
+            )
+        ax_basin.set_xlim(ext_left, ext_right)
+        ax_basin.set_ylim(ext_bottom, ext_top)
     az_basin_total = sum(basin_sigma_cum.values()) * af_to_m3
     ax_basin.set_title(
         f'(a) Basin σ_cum\nAZ total: {az_basin_total / 1e9:.2f} km³ '
@@ -4732,7 +4758,7 @@ def _plot_cap_scenario_sigma_combined(
     logger.info('  CAP scenario σ_cum map saved to %s', out_path)
 
 
-def _plot_cap_scenario_basin_cv(
+def _plot_cap_scenario_basin_snr(
         delta_df: 'pd.DataFrame',
         basin_sigma_cum: dict[str, float],
         basin_shp: str,
@@ -4742,12 +4768,16 @@ def _plot_cap_scenario_basin_cv(
         basin_col: str = 'BASIN_NAME',
         cap_service_area_geojson: 'str | None' = None,
 ) -> None:
-    """Per-scenario basin signal-to-noise (CV = |ΔGW_cum| / σ_cum) maps.
+    """Per-scenario basin signal-to-noise (SNR = |ΔGW_cum| / σ_cum) maps.
 
     Highlights basins where the scenario's cumulative ΔGW signal
     exceeds the central pipeline's σ_total uncertainty.  Discrete bins
-    centered on CV = 1 (signal == noise): below 0.5 the signal is
+    centered on SNR = 1 (signal == 1σ noise): below 0.5 the signal is
     statistically subtle; above 2 the basin response is robust.
+
+    Note: the metric is signal-to-noise (|signal| / σ), not the
+    classical coefficient of variation (σ / mean) — earlier versions
+    of this code mislabeled it as "CV".
     """
     import matplotlib.pyplot as plt
     import matplotlib.ticker as mticker
@@ -4798,9 +4828,9 @@ def _plot_cap_scenario_basin_cv(
 
     fig, axes = plt.subplots(2, 4, figsize=(22, 12), constrained_layout=True)
     fig.suptitle(
-        f'CAP Scenario — Basin Signal-to-Noise (|ΔGW_cum| / σ_cum) '
+        f'CAP Scenario — Basin Signal-to-Noise (SNR = |ΔGW_cum| / σ_cum) '
         f'over {year_window[0]}–{year_window[1]}\n'
-        f'CV > 1 ⇒ scenario signal exceeds the central-pipeline '
+        f'SNR ≥ 1 → scenario signal exceeds the central-pipeline '
         f'σ_total noise floor at that basin (σ_cum aggregated over '
         f'CAP-service-area pixels only at intersected basins)',
         fontsize=13, fontweight='bold',
@@ -4818,19 +4848,19 @@ def _plot_cap_scenario_basin_cv(
             ax.axis('off')
             continue
         sc_lookup = dict(zip(sc_data['Basin'], sc_data['Delta_GW_AF'].abs()))
-        cv_lookup: dict[str, float] = {}
+        snr_lookup: dict[str, float] = {}
         for b, delta_abs in sc_lookup.items():
             sigma = basin_sigma_cum.get(b, 0.0)
             # Skip basins with zero ΔGW (outside CAP service area)
-            # — they should render white, not as CV = 0 (lightest bin).
+            # — they should render white, not as SNR = 0 (lightest bin).
             if sigma > 0 and delta_abs > 1.0:
-                cv_lookup[b] = float(delta_abs / sigma)
+                snr_lookup[b] = float(delta_abs / sigma)
         plot_gdf = plot_polys.set_index(name_col).copy()
-        plot_gdf['cv'] = plot_gdf.index.map(
-            lambda b: cv_lookup.get(b, np.nan),
+        plot_gdf['snr'] = plot_gdf.index.map(
+            lambda b: snr_lookup.get(b, np.nan),
         )
         plot_gdf.plot(
-            ax=ax, column='cv', cmap=discrete_cmap, norm=norm,
+            ax=ax, column='snr', cmap=discrete_cmap, norm=norm,
             edgecolor='none', linewidth=0,
             missing_kwds={'color': '#FFFFFF', 'edgecolor': 'none',
                           'linewidth': 0},
@@ -4846,11 +4876,11 @@ def _plot_cap_scenario_basin_cv(
         title_pretty = _CAP_SCENARIO_PANEL_TITLES.get(
             sc_key, sc_key.replace('_', ' '),
         )
-        n_robust = sum(1 for v in cv_lookup.values() if v >= 1.0)
-        n_total = len([1 for v in cv_lookup.values() if v > 0])
+        n_robust = sum(1 for v in snr_lookup.values() if v >= 1.0)
+        n_total = len([1 for v in snr_lookup.values() if v > 0])
         ax.set_title(
             f'{panel_labels[i]} {title_pretty}\n'
-            f'{n_robust}/{n_total} basins with CV ≥ 1',
+            f'{n_robust}/{n_total} basins with SNR ≥ 1',
             fontsize=11, fontweight='bold',
         )
 
@@ -4875,15 +4905,15 @@ def _plot_cap_scenario_basin_cv(
 
     out_path = os.path.join(
         out_dir,
-        f'CAP_Scenario_Basin_CV_'
+        f'CAP_Scenario_Basin_SNR_'
         f'{year_window[0]}_{year_window[1]}.png',
     )
     fig.savefig(out_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
-    logger.info('  CAP scenario basin CV map saved to %s', out_path)
+    logger.info('  CAP scenario basin SNR map saved to %s', out_path)
 
 
-def _plot_cap_scenario_pixel_cv(
+def _plot_cap_scenario_pixel_snr(
         scenario_raster_paths: dict[str, str],
         pixel_sigma_cum: 'np.ndarray | None',
         pixel_ref_raster: 'str | None',
@@ -4894,9 +4924,9 @@ def _plot_cap_scenario_pixel_cv(
         basin_col: str = 'BASIN_NAME',
         cap_service_area_geojson: 'str | None' = None,
 ) -> None:
-    """Per-scenario pixel signal-to-noise (CV = |ΔGW_cum| / σ_cum) maps.
+    """Per-scenario pixel signal-to-noise (SNR = |ΔGW_cum| / σ_cum) maps.
 
-    Pixel-level analogue of :func:`_plot_cap_scenario_basin_cv`.  The
+    Pixel-level analogue of :func:`_plot_cap_scenario_basin_snr`.  The
     per-pixel σ_cum is the linear-time-sum of per-year σ_total_GW
     from ``Sigma_Total/Rasters/`` (perfect correlation, conservative
     upper bound).
@@ -4949,10 +4979,10 @@ def _plot_cap_scenario_pixel_cv(
 
     fig, axes = plt.subplots(2, 4, figsize=(22, 12), constrained_layout=True)
     fig.suptitle(
-        f'CAP Scenario — Pixel Signal-to-Noise (|ΔGW_cum| / σ_cum) '
+        f'CAP Scenario — Pixel Signal-to-Noise (SNR = |ΔGW_cum| / σ_cum) '
         f'over {year_window[0]}–{year_window[1]}\n'
         f'(per-pixel ΔGW = basin Δ × pixel ML Total_GW share — '
-        f'pro-rata, NOT a hydraulic-head response; CV > 1 ⇒ signal '
+        f'pro-rata, NOT a hydraulic-head response; SNR ≥ 1 → signal '
         f'exceeds local σ noise)',
         fontsize=13, fontweight='bold',
     )
@@ -4970,14 +5000,14 @@ def _plot_cap_scenario_pixel_cv(
             continue
         with rio.open(rpath) as src:
             arr_af = src.read(1).astype(np.float64)
-        cv = np.abs(arr_af) / sigma_safe
+        snr = np.abs(arr_af) / sigma_safe
         # Mask pixels where ΔGW = 0 (outside CAP service area) so
-        # they render in the axes face color instead of CV bin 0
+        # they render in the axes face color instead of SNR bin 0
         # (the lightest color, which would falsely imply a faint
         # CAP signal at desert basins).
-        cv = np.where(np.isfinite(arr_af) & (np.abs(arr_af) > 1.0),
-                      cv, np.nan)
-        masked = np.ma.masked_invalid(cv)
+        snr = np.where(np.isfinite(arr_af) & (np.abs(arr_af) > 1.0),
+                       snr, np.nan)
+        masked = np.ma.masked_invalid(snr)
         ax.imshow(
             masked, extent=extent, origin='upper',
             cmap=discrete_cmap, norm=norm, interpolation='nearest',
@@ -4993,15 +5023,15 @@ def _plot_cap_scenario_pixel_cv(
         title_pretty = _CAP_SCENARIO_PANEL_TITLES.get(
             sc_key, sc_key.replace('_', ' '),
         )
-        # Pct of pixels with CV >= 1 among those with finite signal
-        finite = np.isfinite(cv)
+        # Pct of pixels with SNR >= 1 among those with finite signal
+        finite = np.isfinite(snr)
         if finite.any():
-            pct_robust = 100.0 * np.nansum(cv[finite] >= 1.0) / finite.sum()
+            pct_robust = 100.0 * np.nansum(snr[finite] >= 1.0) / finite.sum()
         else:
             pct_robust = 0.0
         ax.set_title(
             f'{panel_labels[i]} {title_pretty}\n'
-            f'{pct_robust:.1f}% of pixels with CV ≥ 1',
+            f'{pct_robust:.1f}% of pixels with SNR ≥ 1',
             fontsize=11, fontweight='bold',
         )
 
@@ -5026,12 +5056,12 @@ def _plot_cap_scenario_pixel_cv(
 
     out_path = os.path.join(
         out_dir,
-        f'CAP_Scenario_Pixel_CV_'
+        f'CAP_Scenario_Pixel_SNR_'
         f'{year_window[0]}_{year_window[1]}.png',
     )
     fig.savefig(out_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
-    logger.info('  CAP scenario pixel CV map saved to %s', out_path)
+    logger.info('  CAP scenario pixel SNR map saved to %s', out_path)
 
 
 def _plot_sens_section(
