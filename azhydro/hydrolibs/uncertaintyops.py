@@ -3096,6 +3096,11 @@ def run_cap_scenario_analysis(
         az_sigma_per_cat,
     )
     logger.info('  CAP scenario plots saved to %s', cap_dir)
+    # NOTE: spatial drawdown maps (basin choropleth, pixel raster,
+    # σ-cumulative, signal-to-noise) are produced in Step 3g via
+    # ``pipeline.create_cap_scenario_spatial_maps`` so all the
+    # raster-style outputs land under ``Raster_Maps/CAP_Scenario/``
+    # alongside the rest of the era / σ map suite.
 
 
 def _load_az_sigma_per_category_basin(
@@ -3358,11 +3363,30 @@ def _plot_cap_scenarios(
         )
         plt.close(fig)
 
-    # --- Per-basin plot (WestWater scenarios, CAP-served basins) ---
-    cap_basins = [
-        'PHOENIX AMA', 'TUCSON AMA', 'PINAL AMA',
-        'HARQUAHALA INA', 'RANEGRAS PLAIN',
-    ]
+    # --- Per-basin plot (WestWater scenarios, CAP-affected basins) ---
+    # Auto-discover the basins that actually receive CAP-driven ΔGW
+    # under any non-baseline scenario.  The previous hardcoded list
+    # (Phoenix / Tucson / Pinal AMA + Harquahala / Ranegras) missed
+    # several real CAP-intersected basins (Gila Bend, McMullen Valley,
+    # Lower Gila, Upper San Pedro, Verde River, Safford) and
+    # included Ranegras Plain which has Δ = 0 (no CAP delivery).
+    # Pixels outside the CAP service-area mask have ΔGW ≡ 0 by
+    # construction (see apply_cap_delivery_perturbation), so any
+    # basin appearing here is genuinely CAP-affected.  Threshold of
+    # 1 AF lifetime cumulative |Δ| filters out floating-point noise
+    # without requiring a magnitude-based gate.
+    cap_basins: list[str] = []
+    if not delta_df.empty:
+        impact = (
+            delta_df.assign(_abs=delta_df['Delta_GW_AF'].abs())
+            .groupby('Basin')['_abs']
+            .sum()
+        )
+        cap_basins = (
+            impact[impact > 1.0]
+            .sort_values(ascending=False)
+            .index.tolist()
+        )
     if not delta_df.empty:
         avail = [b for b in cap_basins if b in delta_df['Basin'].unique()]
         if avail:
@@ -3475,6 +3499,1539 @@ def _plot_cap_scenarios(
             dpi=300,
         )
         plt.close(fig)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# CAP scenario spatial drawdown maps (basin and pixel level)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _clip_basins_to_cap(
+        basins_gdf: 'gpd.GeoDataFrame',
+        cap_service_area_geojson: 'str | None',
+) -> 'gpd.GeoDataFrame | None':
+    """Intersect basin polygons with the CAP service area.
+
+    Returns a GDF where each basin's geometry is replaced by its
+    intersection with the CAP service area union.  Basins that don't
+    intersect the CAP footprint are dropped (their cumulative ΔGW
+    is zero by construction).  Returns ``None`` if the geojson is
+    missing or unreadable so callers can fall back to rendering full
+    basin polygons.
+    """
+    if not cap_service_area_geojson or not os.path.isfile(
+        cap_service_area_geojson,
+    ):
+        return None
+    try:
+        cap_gdf = gpd.read_file(cap_service_area_geojson)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            'CAP scenario clip: cannot read %s: %s',
+            cap_service_area_geojson, exc,
+        )
+        return None
+    if cap_gdf.empty:
+        return None
+    if cap_gdf.crs != basins_gdf.crs:
+        cap_gdf = cap_gdf.to_crs(basins_gdf.crs)
+    cap_union = cap_gdf.geometry.unary_union
+    clipped = basins_gdf.copy()
+    clipped['geometry'] = clipped.geometry.apply(
+        lambda g: g.intersection(cap_union) if g.intersects(cap_union)
+        else None,
+    )
+    clipped = clipped[
+        clipped.geometry.notna() & ~clipped.geometry.is_empty
+    ]
+    return clipped
+
+# Display order for scenarios (mild → severe shortage), with the
+# reference Baseline excluded since ΔGW vs Baseline is by construction
+# zero everywhere.
+_CAP_SCENARIO_PANEL_ORDER: tuple[str, ...] = (
+    'DCP_Tier0_192kAF_cut',
+    'DCP_Tier1_512kAF_cut',
+    'DCP_Tier2a_592kAF_cut',
+    'DCP_Tier2b_640kAF_cut',
+    'DCP_Tier3_720kAF_cut',
+    'Basic_Coordination_237kAF',
+    'Extreme_Shortage_0kAF',
+)
+
+# Pretty labels for figure panel titles.
+_CAP_SCENARIO_PANEL_TITLES: dict[str, str] = {
+    'DCP_Tier0_192kAF_cut': 'DCP Tier 0 (−192 kAF cut)',
+    'DCP_Tier1_512kAF_cut': 'DCP Tier 1 (−512 kAF cut)',
+    'DCP_Tier2a_592kAF_cut': 'DCP Tier 2a (−592 kAF cut)',
+    'DCP_Tier2b_640kAF_cut': 'DCP Tier 2b (−640 kAF cut)',
+    'DCP_Tier3_720kAF_cut': 'DCP Tier 3 (−720 kAF cut)',
+    'Basic_Coordination_237kAF': 'WestWater Basic Coordination',
+    'Extreme_Shortage_0kAF': 'WestWater Extreme Shortage',
+}
+
+
+def _plot_cap_scenario_basin_drawdown(
+        delta_df: 'pd.DataFrame',
+        basin_shp: str,
+        out_dir: str,
+        *,
+        year_window: tuple[int, int] = (2027, 2060),
+        basin_col: str = 'BASIN_NAME',
+        cap_service_area_geojson: 'str | None' = None,
+) -> None:
+    """Multi-panel basin choropleth of cumulative ΔGW per CAP scenario.
+
+    Renders a 2×4 grid (7 scenario panels + 1 legend cell) showing
+    per-basin cumulative additional GW pumping volume vs the
+    Baseline_900kAF scenario, summed over *year_window* (default
+    2027-2060 to match the WestWater 2026 comparison window).
+
+    Volume space (10⁶ m³ on the primary colorbar, AF on a secondary
+    axis) — no hydraulic-head modelling is implied.  Discrete YlOrRd
+    bins make scenario-to-scenario differences readable; shared
+    colorbar across all 7 panels keeps the visual scale comparable.
+
+    Args:
+        delta_df: ``CAP_Scenario_Delta.csv`` as a DataFrame; must have
+            columns ``Year``, ``Scenario``, ``Basin``, ``Delta_GW_AF``.
+        basin_shp: Path to the AZ groundwater basin shapefile.
+        out_dir: Directory for the output PNG.
+        year_window: Inclusive ``(start, end)`` year range for the
+            cumulative sum.  Default 2027-2060 (matches WestWater).
+        basin_col: Basin name column in *basin_shp*.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+    from matplotlib import cm
+    from hydrolibs.visualops import (
+        _overlay_boundaries, get_ama_ina_basin_names,
+        add_ama_ina_legend, apply_journal_style,
+        overlay_cap_service_area,
+    )
+
+    apply_journal_style()
+    if delta_df is None or delta_df.empty:
+        logger.info('  CAP scenario basin drawdown: empty delta_df, skipping')
+        return
+
+    # Cumulative ΔGW per (scenario, basin) over the requested window
+    sub = delta_df[
+        (delta_df['Year'] >= year_window[0])
+        & (delta_df['Year'] <= year_window[1])
+    ]
+    cum = (
+        sub.groupby(['Scenario', 'Basin'])['Delta_GW_AF']
+        .sum()
+        .reset_index()
+    )
+    if cum.empty:
+        logger.info(
+            '  CAP scenario basin drawdown: no data in window %s, '
+            'skipping', year_window,
+        )
+        return
+    af_to_m3 = 1.0 / M3_TO_AF
+    cum['Delta_GW_m3'] = cum['Delta_GW_AF'] * af_to_m3
+
+    # Load basins, project to a metric CRS only if needed
+    basins_gdf = gpd.read_file(basin_shp)
+    name_col = (
+        basin_col if basin_col in basins_gdf.columns
+        else basins_gdf.columns[0]
+    )
+    ama_ina = get_ama_ina_basin_names()
+
+    # Clip basin polygons to the CAP service area so basins like
+    # Verde River / McMullen Valley / Harquahala render only the
+    # actually-affected sliver (a small CAP-pixel intersection)
+    # instead of the entire basin polygon — the basin's cumulative
+    # ΔGW is sourced from those CAP pixels only, so the colored
+    # area must visually match.
+    basins_clipped = _clip_basins_to_cap(
+        basins_gdf, cap_service_area_geojson,
+    )
+    plot_polys = (
+        basins_clipped if basins_clipped is not None else basins_gdf
+    )
+
+    # Discrete diverging-style bins in 10⁶ m³.  Most basins under most
+    # scenarios fall in 0-2000 × 10⁶ m³ cumulative ΔGW; the Phoenix
+    # AMA Extreme Shortage hits ~3400 × 10⁶ m³.  Bins chosen to keep
+    # rural near-zero basins distinguishable from mid-range and to
+    # show the Phoenix saturation at the top.
+    boundaries_m3_million = [0, 5, 25, 100, 500, 1000, 2000, 4000]
+    boundaries_m3 = [b * 1e6 for b in boundaries_m3_million]
+    n_levels = len(boundaries_m3) - 1
+    palette = cm.get_cmap('YlOrRd', n_levels)
+    discrete_cmap = ListedColormap([palette(i) for i in range(n_levels)])
+    discrete_cmap.set_under('#FFFFFF')  # truly-zero basins render white
+    norm = BoundaryNorm(boundaries_m3, discrete_cmap.N, clip=False)
+
+    # 2 × 4 grid: 7 scenario panels + 1 legend cell
+    fig, axes = plt.subplots(2, 4, figsize=(22, 12), constrained_layout=True)
+    fig.suptitle(
+        f'CAP Scenario — Cumulative Additional GW Volume vs Baseline '
+        f'({year_window[0]}–{year_window[1]})',
+        fontsize=16, fontweight='bold',
+    )
+    axes_flat = axes.flatten()
+    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)']
+
+    for i, sc_key in enumerate(_CAP_SCENARIO_PANEL_ORDER):
+        ax = axes_flat[i]
+        ax.set_facecolor('#EEEEEE')
+        sc_data = cum[cum['Scenario'] == sc_key]
+        if sc_data.empty:
+            ax.text(
+                0.5, 0.5, f'No data for {sc_key}',
+                ha='center', va='center', transform=ax.transAxes,
+            )
+            ax.axis('off')
+            continue
+        # Map basin → cumulative Δ in m³
+        sc_lookup = dict(zip(sc_data['Basin'], sc_data['Delta_GW_m3']))
+        plot_gdf = plot_polys.set_index(name_col).copy()
+        plot_gdf['delta_m3'] = plot_gdf.index.map(
+            lambda b: sc_lookup.get(b, np.nan),
+        )
+        # Treat true zeros (basins outside CAP service area) as
+        # missing so they render white via missing_kwds rather than
+        # the lightest YlOrRd bin (BoundaryNorm puts a value exactly
+        # at the lowest boundary into bin 0, not the under-color).
+        plot_gdf.loc[
+            plot_gdf['delta_m3'].fillna(-1).abs() < 1.0, 'delta_m3'
+        ] = np.nan
+        plot_gdf.plot(
+            ax=ax, column='delta_m3', cmap=discrete_cmap, norm=norm,
+            edgecolor='none', linewidth=0,
+            missing_kwds={'color': '#FFFFFF', 'edgecolor': 'none',
+                          'linewidth': 0},
+        )
+        _overlay_boundaries(
+            ax, basins_gdf, ama_ina, name_col,
+            label_fontsize=4.5, label_all=True,
+        )
+        overlay_cap_service_area(
+            ax, cap_service_area_geojson,
+            target_crs=basins_gdf.crs,
+        )
+        title_pretty = _CAP_SCENARIO_PANEL_TITLES.get(
+            sc_key, sc_key.replace('_', ' '),
+        )
+        # AZ-wide cumulative for the panel title context
+        az_cum_m3 = sc_data['Delta_GW_m3'].sum()
+        ax.set_title(
+            f'{panel_labels[i]} {title_pretty}\n'
+            f'AZ total: {az_cum_m3 / 1e9:.2f} km³ '
+            f'({az_cum_m3 * M3_TO_AF / 1e6:.2f} MAF)',
+            fontsize=11, fontweight='bold',
+        )
+
+    # Full-height shared colorbar on the right of the entire grid;
+    # AMA/INA legend in the row-2-col-4 cell (axes_flat[7]) enlarged.
+    ax_legend = axes_flat[7]
+    ax_legend.axis('off')
+    sm = ScalarMappable(cmap=discrete_cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(
+        sm, ax=axes_flat[:7], orientation='vertical',
+        shrink=1.0, pad=0.04, fraction=0.04, aspect=40,
+        boundaries=boundaries_m3, ticks=boundaries_m3, extend='both',
+    )
+    cbar.formatter = mticker.FuncFormatter(
+        lambda x, _: f'{x / 1e6:,.0f}',
+    )
+    cbar.update_ticks()
+    cbar.set_label(
+        r'Cumulative $\Delta$ GW Volume ($\times$10$^{6}$ m$^{3}$)',
+        fontsize=12, fontweight='bold',
+    )
+    cbar.ax.tick_params(labelsize=11)
+    # AF / kAF axis on the LEFT (primary m³ on the right is default).
+    secax = cbar.ax.secondary_yaxis(
+        'left',
+        functions=(lambda x: x * M3_TO_AF, lambda x: x / M3_TO_AF),
+    )
+    secax.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda x, _: f'{x / 1e3:,.0f}'),
+    )
+    secax.set_ylabel(
+        'Cumulative Δ GW Volume (kAF)',
+        fontsize=12, fontweight='bold',
+    )
+    secax.tick_params(labelsize=11)
+    add_ama_ina_legend(
+        ax_legend, loc='center', bbox_to_anchor=(0.5, 0.5),
+        fontsize=14, framealpha=1.0, include_cap=True,
+    )
+
+    out_path = os.path.join(
+        out_dir,
+        f'CAP_Scenario_Basin_Drawdown_'
+        f'{year_window[0]}_{year_window[1]}.png',
+    )
+    fig.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    logger.info('  CAP scenario basin drawdown map saved to %s', out_path)
+
+
+def _generate_cap_scenario_pixel_rasters(
+        delta_df: 'pd.DataFrame',
+        basin_shp: str,
+        total_gw_dir: str,
+        out_dir: str,
+        *,
+        year_window: tuple[int, int] = (2027, 2060),
+        basin_col: str = 'BASIN_NAME',
+        cap_service_area_geojson: 'str | None' = None,
+) -> dict[str, str]:
+    """Distribute basin-level ΔGW to pixels via ML Total_GW share.
+
+    For each (scenario, year) the basin-level ΔGW is partitioned to
+    pixels in proportion to that pixel's share of the basin's
+    ML-predicted Total_GW.  Pixels are accumulated over *year_window*
+    to produce one cumulative-ΔGW raster per scenario, written to
+    ``{out_dir}/Pixel_Rasters/CAP_Scenario_Pixel_{scenario}_cum_AF.tif``.
+
+    The pro-rata distribution is an assumption — the basin total is
+    well-constrained by the partition, but its sub-basin spatial
+    pattern follows the central pipeline's per-pixel demand prediction.
+    Reviewers should not interpret pixel-level texture as a
+    hydraulic-head response.
+
+    Args:
+        delta_df: ``CAP_Scenario_Delta.csv`` DataFrame.
+        basin_shp: AZ groundwater basin shapefile.
+        total_gw_dir: Directory with ``Total_GW_{year}_mm.tif`` rasters
+            (mean annual depth in mm).
+        out_dir: Directory under which ``Pixel_Rasters/`` will be created.
+        year_window: Inclusive cumulative window.
+        basin_col: Basin name column.
+
+    Returns:
+        ``{scenario_key: cumulative_raster_path}`` for downstream
+        rendering.  Empty dict if the source rasters or delta data
+        are unavailable.
+    """
+    from rasterio.features import geometry_mask
+    from hydrolibs.sysops import makedirs
+    if delta_df is None or delta_df.empty:
+        return {}
+
+    pixel_dir = os.path.join(out_dir, 'Pixel_Rasters')
+    makedirs(pixel_dir)
+
+    # Find a reference raster to define grid / CRS
+    start_yr, end_yr = year_window
+    ref_raster = None
+    for yr in range(start_yr, end_yr + 1):
+        cand = os.path.join(total_gw_dir, f'Total_GW_{yr}_mm.tif')
+        if os.path.isfile(cand):
+            ref_raster = cand
+            break
+    if ref_raster is None:
+        logger.warning(
+            '  CAP scenario pixel rasters: no Total_GW rasters found in '
+            '%s for window %s — skipping', total_gw_dir, year_window,
+        )
+        return {}
+
+    with rio.open(ref_raster) as ref_src:
+        ref_profile = ref_src.profile.copy()
+        ref_transform = ref_src.transform
+        ref_shape = ref_src.shape
+        ref_crs = ref_src.crs
+        pixel_area_m2 = abs(ref_transform.a * ref_transform.e)
+
+    # Pre-build CAP service area mask (when geojson provided) so basin
+    # masks below get intersected to CAP pixels only.  Without this
+    # intersection the pro-rata distribution of basin Δ would spread
+    # across the full basin polygon, including pixels OUTSIDE the CAP
+    # service area — those pixels never see the partition perturbation,
+    # so giving them non-zero ΔGW is incorrect (they're a structural
+    # zero per ``apply_cap_delivery_perturbation``).
+    cap_mask: 'np.ndarray | None' = None
+    if cap_service_area_geojson and os.path.isfile(
+        cap_service_area_geojson,
+    ):
+        cap_gdf = gpd.read_file(cap_service_area_geojson)
+        if not cap_gdf.empty:
+            if cap_gdf.crs != ref_crs:
+                cap_gdf = cap_gdf.to_crs(ref_crs)
+            cap_mask = geometry_mask(
+                list(cap_gdf.geometry), transform=ref_transform,
+                invert=True, out_shape=ref_shape,
+            )
+            if not cap_mask.any():
+                cap_mask = None
+    if cap_mask is None:
+        logger.warning(
+            '  CAP scenario pixel rasters: CAP service-area mask not '
+            'available — pixel ΔGW will distribute across full basin '
+            'polygons (non-CAP pixels will receive non-zero share).'
+        )
+
+    # Pre-build basin geometry masks once, intersected with CAP mask
+    # when available so the pro-rata distribution stays inside the
+    # CAP-affected portion of each basin.
+    basins_gdf = gpd.read_file(basin_shp)
+    if basins_gdf.crs != ref_crs:
+        basins_gdf = basins_gdf.to_crs(ref_crs)
+    name_col = (
+        basin_col if basin_col in basins_gdf.columns
+        else basins_gdf.columns[0]
+    )
+    basin_masks: dict[str, np.ndarray] = {}
+    for _, row in basins_gdf.iterrows():
+        mask = geometry_mask(
+            [row.geometry], transform=ref_transform,
+            invert=True, out_shape=ref_shape,
+        )
+        if cap_mask is not None:
+            mask = mask & cap_mask
+            if not mask.any():
+                continue
+        basin_masks[row[name_col]] = mask
+
+    # Pre-load per-year Total_GW rasters in mm and convert to AF per pixel
+    # (depth_mm × pixel_area_m² × 1e-3 m / 1233.48 m³/AF)
+    af_per_m3 = M3_TO_AF
+    mm_to_af_factor = pixel_area_m2 * 1e-3 * af_per_m3
+    yearly_gw_af: dict[int, np.ndarray] = {}
+    for yr in range(start_yr, end_yr + 1):
+        rpath = os.path.join(total_gw_dir, f'Total_GW_{yr}_mm.tif')
+        if not os.path.isfile(rpath):
+            continue
+        with rio.open(rpath) as src:
+            arr = src.read(1).astype(np.float64)
+        arr = np.where(np.isfinite(arr) & (arr > 0), arr, 0.0)
+        yearly_gw_af[yr] = arr * mm_to_af_factor
+
+    if not yearly_gw_af:
+        logger.warning(
+            '  CAP scenario pixel rasters: no usable Total_GW rasters '
+            'in %s', total_gw_dir,
+        )
+        return {}
+
+    # Pre-compute basin totals per year for share denominator
+    basin_totals: dict[int, dict[str, float]] = {}
+    for yr, arr_af in yearly_gw_af.items():
+        basin_totals[yr] = {
+            b: float(arr_af[m].sum()) for b, m in basin_masks.items()
+        }
+
+    # Index delta CSV for fast lookup
+    delta_lookup = (
+        delta_df.set_index(['Scenario', 'Basin', 'Year'])['Delta_GW_AF']
+        .to_dict()
+    )
+
+    out_paths: dict[str, str] = {}
+    for sc_key in _CAP_SCENARIO_PANEL_ORDER:
+        cumulative_af = np.zeros(ref_shape, dtype=np.float64)
+        for yr in range(start_yr, end_yr + 1):
+            arr_af = yearly_gw_af.get(yr)
+            if arr_af is None:
+                continue
+            for basin, mask in basin_masks.items():
+                delta_af = delta_lookup.get((sc_key, basin, yr), 0.0)
+                if delta_af == 0:
+                    continue
+                basin_total = basin_totals[yr].get(basin, 0.0)
+                if basin_total <= 0:
+                    continue
+                # Distribute basin Δ to its pixels in proportion to
+                # the per-pixel ML Total_GW share within the basin.
+                scale = delta_af / basin_total
+                cumulative_af[mask] += arr_af[mask] * scale
+
+        # Save cumulative raster
+        out_path = os.path.join(
+            pixel_dir,
+            f'CAP_Scenario_Pixel_{sc_key}_cum_AF_'
+            f'{year_window[0]}_{year_window[1]}.tif',
+        )
+        prof = ref_profile.copy()
+        prof.update(dtype='float32', nodata=np.nan, count=1)
+        out_arr = cumulative_af.astype(np.float32)
+        out_arr[out_arr == 0] = np.nan
+        with rio.open(out_path, 'w', **prof) as dst:
+            dst.write(out_arr, 1)
+        out_paths[sc_key] = out_path
+        logger.info(
+            '  CAP scenario pixel raster %s: %s '
+            '(AZ-wide cumulative = %.2f MAF)',
+            sc_key, out_path,
+            np.nansum(cumulative_af) / 1e6,
+        )
+
+    return out_paths
+
+
+def _plot_cap_scenario_pixel_drawdown(
+        scenario_raster_paths: dict[str, str],
+        basin_shp: str,
+        out_dir: str,
+        *,
+        year_window: tuple[int, int] = (2027, 2060),
+        basin_col: str = 'BASIN_NAME',
+        cap_service_area_geojson: 'str | None' = None,
+) -> None:
+    """Multi-panel pixel-level cumulative ΔGW drawdown maps.
+
+    Mirrors :func:`_plot_cap_scenario_basin_drawdown` but uses the
+    pixel-level cumulative-ΔGW rasters generated by
+    :func:`_generate_cap_scenario_pixel_rasters`.  Renders one panel
+    per scenario as a continuous imshow with the same discrete bins
+    so the basin choropleth and pixel maps are visually comparable.
+
+    Pro-rata distribution caveat (basin Δ × per-pixel demand share)
+    is documented in the suptitle to keep reviewers from over-
+    interpreting sub-basin texture as a hydraulic-head field.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+    from matplotlib import cm
+    from hydrolibs.visualops import (
+        _overlay_boundaries, get_ama_ina_basin_names,
+        add_ama_ina_legend, apply_journal_style,
+        overlay_cap_service_area,
+    )
+
+    apply_journal_style()
+    if not scenario_raster_paths:
+        return
+
+    # Bin scheme in m³ per pixel (cumulative over the year window).
+    # At a 2 km pixel (4×10⁶ m²) and Phoenix-AMA-equivalent peak Δ ≈
+    # 100 mm/yr × 34 years = 3.4 m → 13.6 × 10⁶ m³ per pixel.
+    boundaries_m3_million = [0, 0.1, 0.5, 1, 2, 5, 10, 20]
+    boundaries_m3 = [b * 1e6 for b in boundaries_m3_million]
+    n_levels = len(boundaries_m3) - 1
+    palette = cm.get_cmap('YlOrRd', n_levels)
+    discrete_cmap = ListedColormap([palette(i) for i in range(n_levels)])
+    discrete_cmap.set_under('#FFFFFF')
+    norm = BoundaryNorm(boundaries_m3, discrete_cmap.N, clip=False)
+
+    # Read template raster (any scenario) for extent
+    template = next(iter(scenario_raster_paths.values()))
+    with rio.open(template) as src:
+        extent = [src.bounds.left, src.bounds.right,
+                  src.bounds.bottom, src.bounds.top]
+        ref_crs = src.crs
+        pixel_area_m2 = abs(src.transform.a * src.transform.e)
+
+    basins_gdf = gpd.read_file(basin_shp)
+    if basins_gdf.crs != ref_crs:
+        basins_gdf = basins_gdf.to_crs(ref_crs)
+    name_col = (
+        basin_col if basin_col in basins_gdf.columns
+        else basins_gdf.columns[0]
+    )
+    ama_ina = get_ama_ina_basin_names()
+
+    fig, axes = plt.subplots(2, 4, figsize=(22, 12), constrained_layout=True)
+    fig.suptitle(
+        f'CAP Scenario — Pixel-Level Cumulative ΔGW Volume vs '
+        f'Baseline ({year_window[0]}–{year_window[1]})\n'
+        f'(per-pixel volume = basin Δ × pixel ML Total_GW share — '
+        f'pro-rata, NOT a hydraulic-head response)',
+        fontsize=14, fontweight='bold',
+    )
+    axes_flat = axes.flatten()
+    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)']
+
+    af_to_m3 = 1.0 / M3_TO_AF
+    for i, sc_key in enumerate(_CAP_SCENARIO_PANEL_ORDER):
+        ax = axes_flat[i]
+        ax.set_facecolor('#EEEEEE')
+        rpath = scenario_raster_paths.get(sc_key)
+        if rpath is None or not os.path.isfile(rpath):
+            ax.text(
+                0.5, 0.5, f'No raster for {sc_key}',
+                ha='center', va='center', transform=ax.transAxes,
+            )
+            ax.axis('off')
+            continue
+        with rio.open(rpath) as src:
+            arr_af = src.read(1).astype(np.float64)
+        arr_m3 = np.where(np.isfinite(arr_af) & (arr_af > 0),
+                          arr_af * af_to_m3, np.nan)
+        masked = np.ma.masked_invalid(arr_m3)
+        ax.imshow(
+            masked, extent=extent, origin='upper',
+            cmap=discrete_cmap, norm=norm, interpolation='nearest',
+        )
+        _overlay_boundaries(
+            ax, basins_gdf, ama_ina, name_col,
+            label_fontsize=4.5, label_all=True,
+        )
+        overlay_cap_service_area(
+            ax, cap_service_area_geojson,
+            target_crs=ref_crs,
+        )
+        title_pretty = _CAP_SCENARIO_PANEL_TITLES.get(
+            sc_key, sc_key.replace('_', ' '),
+        )
+        az_cum_af = np.nansum(arr_af)
+        ax.set_title(
+            f'{panel_labels[i]} {title_pretty}\n'
+            f'AZ total: {az_cum_af * af_to_m3 / 1e9:.2f} km³ '
+            f'({az_cum_af / 1e6:.2f} MAF)',
+            fontsize=11, fontweight='bold',
+        )
+
+    ax_legend = axes_flat[7]
+    ax_legend.axis('off')
+    sm = ScalarMappable(cmap=discrete_cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(
+        sm, ax=axes_flat[:7], orientation='vertical',
+        shrink=1.0, pad=0.04, fraction=0.04, aspect=40,
+        boundaries=boundaries_m3, ticks=boundaries_m3, extend='both',
+    )
+    cbar.formatter = mticker.FuncFormatter(
+        lambda x, _: f'{x / 1e6:,.1f}',
+    )
+    cbar.update_ticks()
+    cbar.set_label(
+        r'Per-Pixel Cumulative $\Delta$ GW Volume '
+        r'($\times$10$^{6}$ m$^{3}$)',
+        fontsize=12, fontweight='bold',
+    )
+    cbar.ax.tick_params(labelsize=11)
+    # AF axis on the LEFT — primary m³ on the right (default).
+    secax = cbar.ax.secondary_yaxis(
+        'left',
+        functions=(lambda x: x * M3_TO_AF, lambda x: x / M3_TO_AF),
+    )
+    secax.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda x, _: f'{x:,.0f}'),
+    )
+    secax.set_ylabel(
+        'Per-Pixel Cumulative Δ GW Volume (AF)',
+        fontsize=12, fontweight='bold',
+    )
+    secax.tick_params(labelsize=11)
+    add_ama_ina_legend(
+        ax_legend, loc='center', bbox_to_anchor=(0.5, 0.5),
+        fontsize=14, framealpha=1.0, include_cap=True,
+    )
+
+    out_path = os.path.join(
+        out_dir,
+        f'CAP_Scenario_Pixel_Drawdown_'
+        f'{year_window[0]}_{year_window[1]}.png',
+    )
+    fig.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    logger.info('  CAP scenario pixel drawdown map saved to %s', out_path)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# CAP scenario σ-cumulative + signal-to-noise (CV) maps
+# ──────────────────────────────────────────────────────────────────────
+
+# Per-component independent uncertainty sources whose per-basin
+# Total_GW Sigma_Volume_AF is quadrature-combined to a per-(basin,year)
+# σ_total before linear-time accumulation across the projection window.
+# CU is included for parity with the CU-uncertainty extension that
+# may exist on some prediction roots; missing components are silently
+# skipped at load time.
+_BASIN_SIGMA_TOTAL_GW_COMPONENTS: tuple[str, ...] = (
+    'MACA', 'Model', 'Irr', 'LULC', 'GW', 'USBR', 'CU',
+)
+
+
+def _load_basin_sigma_total_gw_yearly(
+        unc_dir: str,
+        year_window: tuple[int, int],
+) -> dict[str, dict[int, float]]:
+    """Per-basin per-year σ_total_GW (AF) over a year window.
+
+    Reads ``Basin_Sigma_<comp>_Total_GW.csv`` for each component under
+    *unc_dir* and combines the per-basin per-year σ in quadrature
+    (components are independent ensemble axes by design).
+
+    Returns ``{basin_name: {year: sigma_AF}}``.
+    """
+    var_per_basin_yr: dict[str, dict[int, float]] = {}
+    for comp in _BASIN_SIGMA_TOTAL_GW_COMPONENTS:
+        csv_path = os.path.join(
+            unc_dir, f'Sigma_{comp}',
+            f'Basin_Sigma_{comp}_Total_GW.csv',
+        )
+        if not os.path.isfile(csv_path):
+            continue
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception:  # noqa: BLE001
+            continue
+        if not {'Year', 'Region', 'Sigma_Volume_AF'}.issubset(df.columns):
+            continue
+        df = df.dropna(subset=['Year', 'Region', 'Sigma_Volume_AF'])
+        df = df[df.Year.between(year_window[0], year_window[1])]
+        for _, row in df.iterrows():
+            b = row['Region']
+            yr = int(row['Year'])
+            s = float(row['Sigma_Volume_AF'])
+            if not np.isfinite(s):
+                continue
+            var_per_basin_yr.setdefault(b, {})[yr] = (
+                var_per_basin_yr.get(b, {}).get(yr, 0.0) + s ** 2
+            )
+    return {
+        b: {yr: float(np.sqrt(v)) for yr, v in d.items()}
+        for b, d in var_per_basin_yr.items()
+    }
+
+
+def _compute_basin_sigma_cum(
+        basin_sigma_yearly: dict[str, dict[int, float]],
+        year_window: tuple[int, int],
+) -> dict[str, float]:
+    """Cumulative basin σ over *year_window* via linear time-sum
+    (perfect year-to-year correlation — conservative upper bound).
+    """
+    out: dict[str, float] = {}
+    for b, yr_dict in basin_sigma_yearly.items():
+        s = 0.0
+        for yr in range(year_window[0], year_window[1] + 1):
+            v = yr_dict.get(yr)
+            if v is not None and np.isfinite(v):
+                s += v
+        if s > 0:
+            out[b] = s
+    return out
+
+
+def _save_cap_restricted_basin_sigma_csv(
+        sigma_raster_dir: str,
+        basin_shp: str,
+        cap_service_area_geojson: str,
+        year_range: tuple[int, int],
+        out_csv: str,
+        *,
+        basin_col: str = 'BASIN_NAME',
+) -> 'pd.DataFrame | None':
+    """Per-year per-basin σ_total_GW (AF) restricted to CAP-pixel
+    intersection — saved as a permanent UQ artifact alongside the
+    other ``CAP_Scenario_*.csv`` files.
+
+    Each row reports the σ aggregated over the basin × CAP-service-
+    area intersection pixels for that year, plus the spatial pixel
+    count for transparency.  Downstream analyses (cumulative σ over
+    arbitrary windows, time-series plots, σ trajectories at CAP-
+    affected basins) can read this CSV directly without re-running
+    the per-pixel raster aggregation.
+
+    Columns: ``Year, Region, Sigma_Volume_AF, Sigma_Volume_m3,
+    N_CAP_Pixels``.
+
+    Returns the DataFrame written, or None if the inputs aren't
+    available.
+    """
+    from rasterio.features import geometry_mask
+    if (
+        not os.path.isdir(sigma_raster_dir)
+        or not os.path.isfile(cap_service_area_geojson)
+    ):
+        return None
+    start_yr, end_yr = year_range
+    ref_raster = None
+    for yr in range(start_yr, end_yr + 1):
+        cand = os.path.join(
+            sigma_raster_dir,
+            f'Sigma_Total_Total_GW_mm_{yr}.tif',
+        )
+        if os.path.isfile(cand):
+            ref_raster = cand
+            break
+    if ref_raster is None:
+        return None
+
+    with rio.open(ref_raster) as src:
+        ref_transform = src.transform
+        ref_shape = src.shape
+        ref_crs = src.crs
+        pixel_area_m2 = abs(ref_transform.a * ref_transform.e)
+
+    cap_gdf = gpd.read_file(cap_service_area_geojson)
+    if cap_gdf.empty:
+        return None
+    if cap_gdf.crs != ref_crs:
+        cap_gdf = cap_gdf.to_crs(ref_crs)
+    cap_mask = geometry_mask(
+        list(cap_gdf.geometry), transform=ref_transform,
+        invert=True, out_shape=ref_shape,
+    )
+    if not cap_mask.any():
+        return None
+
+    basins_gdf = gpd.read_file(basin_shp)
+    if basins_gdf.crs != ref_crs:
+        basins_gdf = basins_gdf.to_crs(ref_crs)
+    name_col = (
+        basin_col if basin_col in basins_gdf.columns
+        else basins_gdf.columns[0]
+    )
+    basin_cap_masks: dict[str, np.ndarray] = {}
+    basin_cap_pixels: dict[str, int] = {}
+    for _, row in basins_gdf.iterrows():
+        bm = geometry_mask(
+            [row.geometry], transform=ref_transform,
+            invert=True, out_shape=ref_shape,
+        )
+        intersect = bm & cap_mask
+        n_pix = int(intersect.sum())
+        if n_pix > 0:
+            basin_cap_masks[row[name_col]] = intersect
+            basin_cap_pixels[row[name_col]] = n_pix
+
+    af_to_m3 = 1.0 / M3_TO_AF
+    mm_to_af = pixel_area_m2 * 1e-3 * M3_TO_AF
+    rows = []
+    for yr in range(start_yr, end_yr + 1):
+        path = os.path.join(
+            sigma_raster_dir,
+            f'Sigma_Total_Total_GW_mm_{yr}.tif',
+        )
+        if not os.path.isfile(path):
+            continue
+        with rio.open(path) as src:
+            arr = src.read(1).astype(np.float64)
+        arr = np.where(np.isfinite(arr) & (arr > 0), arr, 0.0)
+        arr_af = arr * mm_to_af
+        for b, mask in basin_cap_masks.items():
+            sigma_af = float(arr_af[mask].sum())
+            if sigma_af <= 0:
+                continue
+            rows.append({
+                'Year': yr,
+                'Region': b,
+                'Sigma_Volume_AF': round(sigma_af, 2),
+                'Sigma_Volume_m3': round(sigma_af * af_to_m3, 2),
+                'N_CAP_Pixels': basin_cap_pixels[b],
+            })
+    if not rows:
+        return None
+    df_out = pd.DataFrame(rows)
+    df_out.sort_values(['Year', 'Region'], inplace=True)
+    df_out.to_csv(out_csv, index=False)
+    logger.info(
+        '  CAP-restricted basin σ CSV saved (%d rows, %d basins) to %s',
+        len(df_out), df_out['Region'].nunique(), out_csv,
+    )
+    return df_out
+
+
+def _compute_basin_sigma_cum_cap_restricted(
+        sigma_raster_dir: str,
+        basin_shp: str,
+        cap_service_area_geojson: str,
+        year_window: tuple[int, int],
+        *,
+        basin_col: str = 'BASIN_NAME',
+) -> dict[str, float]:
+    """Per-basin cumulative σ_total_GW (AF) over *year_window*,
+    aggregated over **only** the basin × CAP-service-area intersection
+    pixels (not the full basin).
+
+    For each year:
+      - Read ``Sigma_Total_Total_GW_mm_{year}.tif``
+      - Multiply by pixel area to get per-pixel σ in AF
+      - Mask to the CAP service area
+      - For each basin, linear-time-sum aggregate across years and
+        spatial linear-sum within the basin × CAP intersection
+        (perfect-correlation upper bound, consistent with the
+        AZ-wide cumulative method).
+
+    Used as the denominator for the basin CV map so the noise floor
+    at basins with small CAP footprints (Verde River, Harquahala
+    INA, McMullen Valley) reflects only the CAP-affected portion
+    rather than the full basin's σ_total.
+
+    Returns ``{basin_name: sigma_AF}`` for basins with non-zero
+    intersection and σ data, else empty dict.
+    """
+    from rasterio.features import geometry_mask
+    if (
+        not os.path.isdir(sigma_raster_dir)
+        or not os.path.isfile(cap_service_area_geojson)
+    ):
+        return {}
+    start_yr, end_yr = year_window
+    # Locate a reference σ raster
+    ref_raster = None
+    for yr in range(start_yr, end_yr + 1):
+        cand = os.path.join(
+            sigma_raster_dir,
+            f'Sigma_Total_Total_GW_mm_{yr}.tif',
+        )
+        if os.path.isfile(cand):
+            ref_raster = cand
+            break
+    if ref_raster is None:
+        return {}
+
+    with rio.open(ref_raster) as src:
+        ref_transform = src.transform
+        ref_shape = src.shape
+        ref_crs = src.crs
+        pixel_area_m2 = abs(ref_transform.a * ref_transform.e)
+
+    # CAP service area mask
+    cap_gdf = gpd.read_file(cap_service_area_geojson)
+    if cap_gdf.empty:
+        return {}
+    if cap_gdf.crs != ref_crs:
+        cap_gdf = cap_gdf.to_crs(ref_crs)
+    cap_mask = geometry_mask(
+        list(cap_gdf.geometry), transform=ref_transform,
+        invert=True, out_shape=ref_shape,
+    )
+    if not cap_mask.any():
+        return {}
+
+    # Basin × CAP intersection masks (one per basin, restricted
+    # to CAP pixels)
+    basins_gdf = gpd.read_file(basin_shp)
+    if basins_gdf.crs != ref_crs:
+        basins_gdf = basins_gdf.to_crs(ref_crs)
+    name_col = (
+        basin_col if basin_col in basins_gdf.columns
+        else basins_gdf.columns[0]
+    )
+    basin_cap_masks: dict[str, np.ndarray] = {}
+    for _, row in basins_gdf.iterrows():
+        bm = geometry_mask(
+            [row.geometry], transform=ref_transform,
+            invert=True, out_shape=ref_shape,
+        )
+        intersect = bm & cap_mask
+        if intersect.any():
+            basin_cap_masks[row[name_col]] = intersect
+    if not basin_cap_masks:
+        return {}
+
+    mm_to_af = pixel_area_m2 * 1e-3 * M3_TO_AF
+    cum_per_basin: dict[str, float] = {b: 0.0 for b in basin_cap_masks}
+    for yr in range(start_yr, end_yr + 1):
+        path = os.path.join(
+            sigma_raster_dir,
+            f'Sigma_Total_Total_GW_mm_{yr}.tif',
+        )
+        if not os.path.isfile(path):
+            continue
+        with rio.open(path) as src:
+            arr = src.read(1).astype(np.float64)
+        arr = np.where(np.isfinite(arr) & (arr > 0), arr, 0.0)
+        arr_af = arr * mm_to_af
+        for b, mask in basin_cap_masks.items():
+            cum_per_basin[b] += float(arr_af[mask].sum())
+    return {b: v for b, v in cum_per_basin.items() if v > 0}
+
+
+def _compute_pixel_sigma_cum(
+        sigma_raster_dir: str,
+        year_window: tuple[int, int],
+        cap_service_area_geojson: 'str | None' = None,
+) -> 'tuple[np.ndarray, str] | None':
+    """Cumulative pixel σ_total_GW (AF) over *year_window*.
+
+    Reads ``Sigma_Total_Total_GW_mm_{year}.tif`` for each year and
+    accumulates in linear time-sum (perfect-correlation upper bound).
+    When ``cap_service_area_geojson`` is provided, restricts the
+    output to CAP-service-area pixels (sets non-CAP pixels to NaN)
+    so the σ_cum context map matches the pixel ΔGW footprint.
+    Returns ``(cum_AF, ref_raster_path)`` or ``None`` if no rasters
+    are available.
+    """
+    from rasterio.features import geometry_mask
+    if not os.path.isdir(sigma_raster_dir):
+        return None
+    ref_raster = None
+    for yr in range(year_window[0], year_window[1] + 1):
+        cand = os.path.join(
+            sigma_raster_dir,
+            f'Sigma_Total_Total_GW_mm_{yr}.tif',
+        )
+        if os.path.isfile(cand):
+            ref_raster = cand
+            break
+    if ref_raster is None:
+        return None
+    with rio.open(ref_raster) as src:
+        ref_shape = src.shape
+        ref_transform = src.transform
+        ref_crs = src.crs
+        pixel_area_m2 = abs(src.transform.a * src.transform.e)
+    mm_to_af = pixel_area_m2 * 1e-3 * M3_TO_AF
+
+    # Optional CAP mask
+    cap_mask: 'np.ndarray | None' = None
+    if cap_service_area_geojson and os.path.isfile(
+        cap_service_area_geojson,
+    ):
+        cap_gdf = gpd.read_file(cap_service_area_geojson)
+        if not cap_gdf.empty:
+            if cap_gdf.crs != ref_crs:
+                cap_gdf = cap_gdf.to_crs(ref_crs)
+            cap_mask = geometry_mask(
+                list(cap_gdf.geometry), transform=ref_transform,
+                invert=True, out_shape=ref_shape,
+            )
+            if not cap_mask.any():
+                cap_mask = None
+
+    cum = np.zeros(ref_shape, dtype=np.float64)
+    n = 0
+    for yr in range(year_window[0], year_window[1] + 1):
+        path = os.path.join(
+            sigma_raster_dir,
+            f'Sigma_Total_Total_GW_mm_{yr}.tif',
+        )
+        if not os.path.isfile(path):
+            continue
+        with rio.open(path) as src:
+            arr = src.read(1).astype(np.float64)
+        arr = np.where(np.isfinite(arr) & (arr > 0), arr, 0.0)
+        cum += arr * mm_to_af
+        n += 1
+    if n == 0:
+        return None
+    if cap_mask is not None:
+        cum = np.where(cap_mask, cum, np.nan)
+    return cum, ref_raster
+
+
+def _plot_cap_scenario_sigma_combined(
+        basin_sigma_cum: dict[str, float],
+        pixel_sigma_cum: 'np.ndarray | None',
+        pixel_ref_raster: 'str | None',
+        basin_shp: str,
+        out_dir: str,
+        *,
+        year_window: tuple[int, int] = (2027, 2060),
+        basin_col: str = 'BASIN_NAME',
+        cap_service_area_geojson: 'str | None' = None,
+) -> None:
+    """Single 2-panel figure showing the cumulative σ_total_GW context
+    (basin choropleth | pixel raster) that applies to every CAP scenario.
+
+    Renders the per-pixel and per-basin uncertainty bound that the
+    central drawdown maps share.  Same colorbar (10⁶ m³ primary, AF
+    secondary) as the central figures so reviewers can compare a
+    scenario's signal magnitude against the noise floor at a glance.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+    from matplotlib import cm
+    from hydrolibs.visualops import (
+        _overlay_boundaries, get_ama_ina_basin_names,
+        add_ama_ina_legend, apply_journal_style,
+        overlay_cap_service_area,
+    )
+
+    apply_journal_style()
+    if not basin_sigma_cum and pixel_sigma_cum is None:
+        return
+
+    af_to_m3 = 1.0 / M3_TO_AF
+
+    # Basin σ in 10⁶ m³ — same bin scheme as the central drawdown so
+    # the eye can compare σ to ΔGW directly.
+    boundaries_m3_million_basin = [0, 5, 25, 100, 500, 1000, 2000, 4000]
+    boundaries_basin = [b * 1e6 for b in boundaries_m3_million_basin]
+    n_levels = len(boundaries_basin) - 1
+    palette_basin = cm.get_cmap('Purples', n_levels)
+    cmap_basin = ListedColormap(
+        [palette_basin(i) for i in range(n_levels)],
+    )
+    cmap_basin.set_under('#FFFFFF')
+    norm_basin = BoundaryNorm(boundaries_basin, cmap_basin.N, clip=False)
+
+    # Pixel σ in 10⁶ m³ per pixel — finer bins (smaller scale).
+    boundaries_m3_million_pix = [0, 0.1, 0.5, 1, 2, 5, 10, 20]
+    boundaries_pix = [b * 1e6 for b in boundaries_m3_million_pix]
+    n_levels_pix = len(boundaries_pix) - 1
+    palette_pix = cm.get_cmap('Purples', n_levels_pix)
+    cmap_pix = ListedColormap(
+        [palette_pix(i) for i in range(n_levels_pix)],
+    )
+    cmap_pix.set_under('#FFFFFF')
+    norm_pix = BoundaryNorm(boundaries_pix, cmap_pix.N, clip=False)
+
+    basins_gdf = gpd.read_file(basin_shp)
+    name_col = (
+        basin_col if basin_col in basins_gdf.columns
+        else basins_gdf.columns[0]
+    )
+    ama_ina = get_ama_ina_basin_names()
+
+    fig, axes = plt.subplots(1, 2, figsize=(20, 10), constrained_layout=True)
+    fig.suptitle(
+        f'Cumulative σ_total on Total_GW ({year_window[0]}–{year_window[1]})\n'
+        f'Same uncertainty applies to every CAP scenario — quadrature '
+        f'across components, linear-time-sum (perfect-correlation '
+        f'conservative upper bound)',
+        fontsize=14, fontweight='bold',
+    )
+
+    # --- Panel (a): basin σ choropleth (clipped to CAP service area
+    #     so the colored polygon matches the basin × CAP intersection,
+    #     consistent with the central drawdown maps)
+    ax_basin = axes[0]
+    ax_basin.set_facecolor('#EEEEEE')
+    basins_clipped = _clip_basins_to_cap(
+        basins_gdf, cap_service_area_geojson,
+    )
+    plot_polys = (
+        basins_clipped if basins_clipped is not None else basins_gdf
+    )
+    sigma_m3_lookup = {
+        b: s * af_to_m3 for b, s in basin_sigma_cum.items()
+    }
+    plot_gdf = plot_polys.set_index(name_col).copy()
+    plot_gdf['sigma_m3'] = plot_gdf.index.map(
+        lambda b: sigma_m3_lookup.get(b, np.nan),
+    )
+    plot_gdf.loc[
+        plot_gdf['sigma_m3'].fillna(-1).abs() < 1.0, 'sigma_m3'
+    ] = np.nan
+    plot_gdf.plot(
+        ax=ax_basin, column='sigma_m3', cmap=cmap_basin, norm=norm_basin,
+        edgecolor='none', linewidth=0,
+        missing_kwds={'color': '#FFFFFF', 'edgecolor': 'none',
+                      'linewidth': 0},
+    )
+    _overlay_boundaries(
+        ax_basin, basins_gdf, ama_ina, name_col,
+        label_fontsize=4.5, label_all=True,
+    )
+    overlay_cap_service_area(
+        ax_basin, cap_service_area_geojson,
+        target_crs=basins_gdf.crs,
+    )
+    az_basin_total = sum(basin_sigma_cum.values()) * af_to_m3
+    ax_basin.set_title(
+        f'(a) Basin σ_cum\nAZ total: {az_basin_total / 1e9:.2f} km³ '
+        f'({sum(basin_sigma_cum.values()) / 1e6:.2f} MAF)',
+        fontsize=12, fontweight='bold',
+    )
+    sm_b = ScalarMappable(cmap=cmap_basin, norm=norm_basin)
+    sm_b.set_array([])
+    cbar_b = fig.colorbar(
+        sm_b, ax=ax_basin, orientation='horizontal',
+        shrink=0.8, pad=0.06, aspect=30,
+        boundaries=boundaries_basin, ticks=boundaries_basin,
+        extend='both',
+    )
+    cbar_b.formatter = mticker.FuncFormatter(
+        lambda x, _: f'{x / 1e6:,.0f}',
+    )
+    cbar_b.update_ticks()
+    cbar_b.set_label(
+        r'Basin Cumulative σ_total ($\times$10$^{6}$ m$^{3}$)',
+        fontsize=11, fontweight='bold',
+    )
+    secax_b = cbar_b.ax.secondary_xaxis(
+        'top',
+        functions=(lambda x: x * M3_TO_AF, lambda x: x / M3_TO_AF),
+    )
+    secax_b.xaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda x, _: f'{x / 1e3:,.0f}'),
+    )
+    secax_b.set_xlabel('Basin Cumulative σ_total (kAF)',
+                       fontsize=11, fontweight='bold')
+
+    # --- Panel (b): pixel σ raster ---
+    ax_pix = axes[1]
+    ax_pix.set_facecolor('#EEEEEE')
+    if pixel_sigma_cum is not None and pixel_ref_raster is not None:
+        with rio.open(pixel_ref_raster) as src:
+            extent = [src.bounds.left, src.bounds.right,
+                      src.bounds.bottom, src.bounds.top]
+            ref_crs = src.crs
+        sigma_m3_arr = pixel_sigma_cum * af_to_m3
+        masked = np.ma.masked_where(
+            ~np.isfinite(sigma_m3_arr) | (sigma_m3_arr <= 0),
+            sigma_m3_arr,
+        )
+        ax_pix.imshow(
+            masked, extent=extent, origin='upper',
+            cmap=cmap_pix, norm=norm_pix, interpolation='nearest',
+        )
+        basins_pix = (
+            basins_gdf.to_crs(ref_crs)
+            if basins_gdf.crs != ref_crs else basins_gdf
+        )
+        _overlay_boundaries(
+            ax_pix, basins_pix, ama_ina, name_col,
+            label_fontsize=4.5, label_all=True,
+        )
+        overlay_cap_service_area(
+            ax_pix, cap_service_area_geojson,
+            target_crs=ref_crs,
+        )
+        az_pix_total = float(np.nansum(pixel_sigma_cum))
+        ax_pix.set_title(
+            f'(b) Pixel σ_cum\nAZ total (sum of pixels): '
+            f'{az_pix_total * af_to_m3 / 1e9:.2f} km³ '
+            f'({az_pix_total / 1e6:.2f} MAF)',
+            fontsize=12, fontweight='bold',
+        )
+    else:
+        ax_pix.text(
+            0.5, 0.5, 'Pixel σ rasters unavailable',
+            ha='center', va='center', transform=ax_pix.transAxes,
+        )
+        ax_pix.axis('off')
+    sm_p = ScalarMappable(cmap=cmap_pix, norm=norm_pix)
+    sm_p.set_array([])
+    cbar_p = fig.colorbar(
+        sm_p, ax=ax_pix, orientation='horizontal',
+        shrink=0.8, pad=0.06, aspect=30,
+        boundaries=boundaries_pix, ticks=boundaries_pix, extend='both',
+    )
+    cbar_p.formatter = mticker.FuncFormatter(
+        lambda x, _: f'{x / 1e6:,.1f}',
+    )
+    cbar_p.update_ticks()
+    cbar_p.set_label(
+        r'Pixel Cumulative σ_total ($\times$10$^{6}$ m$^{3}$)',
+        fontsize=11, fontweight='bold',
+    )
+    secax_p = cbar_p.ax.secondary_xaxis(
+        'top',
+        functions=(lambda x: x * M3_TO_AF, lambda x: x / M3_TO_AF),
+    )
+    secax_p.xaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda x, _: f'{x:,.0f}'),
+    )
+    secax_p.set_xlabel('Pixel Cumulative σ_total (AF)',
+                       fontsize=11, fontweight='bold')
+
+    add_ama_ina_legend(ax_basin, include_cap=True)
+
+    out_path = os.path.join(
+        out_dir,
+        f'CAP_Scenario_Sigma_Cumulative_'
+        f'{year_window[0]}_{year_window[1]}.png',
+    )
+    fig.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    logger.info('  CAP scenario σ_cum map saved to %s', out_path)
+
+
+def _plot_cap_scenario_basin_cv(
+        delta_df: 'pd.DataFrame',
+        basin_sigma_cum: dict[str, float],
+        basin_shp: str,
+        out_dir: str,
+        *,
+        year_window: tuple[int, int] = (2027, 2060),
+        basin_col: str = 'BASIN_NAME',
+        cap_service_area_geojson: 'str | None' = None,
+) -> None:
+    """Per-scenario basin signal-to-noise (CV = |ΔGW_cum| / σ_cum) maps.
+
+    Highlights basins where the scenario's cumulative ΔGW signal
+    exceeds the central pipeline's σ_total uncertainty.  Discrete bins
+    centered on CV = 1 (signal == noise): below 0.5 the signal is
+    statistically subtle; above 2 the basin response is robust.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+    from matplotlib import cm
+    from hydrolibs.visualops import (
+        _overlay_boundaries, get_ama_ina_basin_names,
+        add_ama_ina_legend, apply_journal_style,
+        overlay_cap_service_area,
+    )
+
+    apply_journal_style()
+    if delta_df is None or delta_df.empty or not basin_sigma_cum:
+        return
+
+    sub = delta_df[
+        (delta_df['Year'] >= year_window[0])
+        & (delta_df['Year'] <= year_window[1])
+    ]
+    cum = (
+        sub.groupby(['Scenario', 'Basin'])['Delta_GW_AF']
+        .sum()
+        .reset_index()
+    )
+    if cum.empty:
+        return
+
+    boundaries = [0, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0]
+    n_levels = len(boundaries) - 1
+    palette = cm.get_cmap('PuBuGn', n_levels)
+    discrete_cmap = ListedColormap([palette(i) for i in range(n_levels)])
+    discrete_cmap.set_under('#FFFFFF')
+    norm = BoundaryNorm(boundaries, discrete_cmap.N, clip=False)
+
+    basins_gdf = gpd.read_file(basin_shp)
+    name_col = (
+        basin_col if basin_col in basins_gdf.columns
+        else basins_gdf.columns[0]
+    )
+    ama_ina = get_ama_ina_basin_names()
+    basins_clipped = _clip_basins_to_cap(
+        basins_gdf, cap_service_area_geojson,
+    )
+    plot_polys = (
+        basins_clipped if basins_clipped is not None else basins_gdf
+    )
+
+    fig, axes = plt.subplots(2, 4, figsize=(22, 12), constrained_layout=True)
+    fig.suptitle(
+        f'CAP Scenario — Basin Signal-to-Noise (|ΔGW_cum| / σ_cum) '
+        f'over {year_window[0]}–{year_window[1]}\n'
+        f'CV > 1 ⇒ scenario signal exceeds the central-pipeline '
+        f'σ_total noise floor at that basin (σ_cum aggregated over '
+        f'CAP-service-area pixels only at intersected basins)',
+        fontsize=13, fontweight='bold',
+    )
+    axes_flat = axes.flatten()
+    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)']
+
+    for i, sc_key in enumerate(_CAP_SCENARIO_PANEL_ORDER):
+        ax = axes_flat[i]
+        ax.set_facecolor('#EEEEEE')
+        sc_data = cum[cum['Scenario'] == sc_key]
+        if sc_data.empty:
+            ax.text(0.5, 0.5, f'No data for {sc_key}',
+                    ha='center', va='center', transform=ax.transAxes)
+            ax.axis('off')
+            continue
+        sc_lookup = dict(zip(sc_data['Basin'], sc_data['Delta_GW_AF'].abs()))
+        cv_lookup: dict[str, float] = {}
+        for b, delta_abs in sc_lookup.items():
+            sigma = basin_sigma_cum.get(b, 0.0)
+            # Skip basins with zero ΔGW (outside CAP service area)
+            # — they should render white, not as CV = 0 (lightest bin).
+            if sigma > 0 and delta_abs > 1.0:
+                cv_lookup[b] = float(delta_abs / sigma)
+        plot_gdf = plot_polys.set_index(name_col).copy()
+        plot_gdf['cv'] = plot_gdf.index.map(
+            lambda b: cv_lookup.get(b, np.nan),
+        )
+        plot_gdf.plot(
+            ax=ax, column='cv', cmap=discrete_cmap, norm=norm,
+            edgecolor='none', linewidth=0,
+            missing_kwds={'color': '#FFFFFF', 'edgecolor': 'none',
+                          'linewidth': 0},
+        )
+        _overlay_boundaries(
+            ax, basins_gdf, ama_ina, name_col,
+            label_fontsize=4.5, label_all=True,
+        )
+        overlay_cap_service_area(
+            ax, cap_service_area_geojson,
+            target_crs=basins_gdf.crs,
+        )
+        title_pretty = _CAP_SCENARIO_PANEL_TITLES.get(
+            sc_key, sc_key.replace('_', ' '),
+        )
+        n_robust = sum(1 for v in cv_lookup.values() if v >= 1.0)
+        n_total = len([1 for v in cv_lookup.values() if v > 0])
+        ax.set_title(
+            f'{panel_labels[i]} {title_pretty}\n'
+            f'{n_robust}/{n_total} basins with CV ≥ 1',
+            fontsize=11, fontweight='bold',
+        )
+
+    ax_legend = axes_flat[7]
+    ax_legend.axis('off')
+    sm = ScalarMappable(cmap=discrete_cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(
+        sm, ax=axes_flat[:7], orientation='vertical',
+        shrink=1.0, pad=0.04, fraction=0.04, aspect=40,
+        boundaries=boundaries, ticks=boundaries, extend='both',
+    )
+    cbar.set_label(
+        '|Cumulative ΔGW| / σ_total (signal-to-noise)',
+        fontsize=12, fontweight='bold',
+    )
+    cbar.ax.tick_params(labelsize=11)
+    add_ama_ina_legend(
+        ax_legend, loc='center', bbox_to_anchor=(0.5, 0.5),
+        fontsize=14, framealpha=1.0, include_cap=True,
+    )
+
+    out_path = os.path.join(
+        out_dir,
+        f'CAP_Scenario_Basin_CV_'
+        f'{year_window[0]}_{year_window[1]}.png',
+    )
+    fig.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    logger.info('  CAP scenario basin CV map saved to %s', out_path)
+
+
+def _plot_cap_scenario_pixel_cv(
+        scenario_raster_paths: dict[str, str],
+        pixel_sigma_cum: 'np.ndarray | None',
+        pixel_ref_raster: 'str | None',
+        basin_shp: str,
+        out_dir: str,
+        *,
+        year_window: tuple[int, int] = (2027, 2060),
+        basin_col: str = 'BASIN_NAME',
+        cap_service_area_geojson: 'str | None' = None,
+) -> None:
+    """Per-scenario pixel signal-to-noise (CV = |ΔGW_cum| / σ_cum) maps.
+
+    Pixel-level analogue of :func:`_plot_cap_scenario_basin_cv`.  The
+    per-pixel σ_cum is the linear-time-sum of per-year σ_total_GW
+    from ``Sigma_Total/Rasters/`` (perfect correlation, conservative
+    upper bound).
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+    from matplotlib import cm
+    from hydrolibs.visualops import (
+        _overlay_boundaries, get_ama_ina_basin_names,
+        add_ama_ina_legend, apply_journal_style,
+        overlay_cap_service_area,
+    )
+
+    apply_journal_style()
+    if (
+        not scenario_raster_paths
+        or pixel_sigma_cum is None
+        or pixel_ref_raster is None
+    ):
+        return
+
+    boundaries = [0, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0]
+    n_levels = len(boundaries) - 1
+    palette = cm.get_cmap('PuBuGn', n_levels)
+    discrete_cmap = ListedColormap([palette(i) for i in range(n_levels)])
+    discrete_cmap.set_under('#FFFFFF')
+    norm = BoundaryNorm(boundaries, discrete_cmap.N, clip=False)
+
+    with rio.open(pixel_ref_raster) as src:
+        extent = [src.bounds.left, src.bounds.right,
+                  src.bounds.bottom, src.bounds.top]
+        ref_crs = src.crs
+        ref_shape = src.shape
+
+    basins_gdf = gpd.read_file(basin_shp)
+    if basins_gdf.crs != ref_crs:
+        basins_gdf = basins_gdf.to_crs(ref_crs)
+    name_col = (
+        basin_col if basin_col in basins_gdf.columns
+        else basins_gdf.columns[0]
+    )
+    ama_ina = get_ama_ina_basin_names()
+
+    sigma_safe = np.where(
+        np.isfinite(pixel_sigma_cum) & (pixel_sigma_cum > 0),
+        pixel_sigma_cum, np.nan,
+    )
+
+    fig, axes = plt.subplots(2, 4, figsize=(22, 12), constrained_layout=True)
+    fig.suptitle(
+        f'CAP Scenario — Pixel Signal-to-Noise (|ΔGW_cum| / σ_cum) '
+        f'over {year_window[0]}–{year_window[1]}\n'
+        f'(per-pixel ΔGW = basin Δ × pixel ML Total_GW share — '
+        f'pro-rata, NOT a hydraulic-head response; CV > 1 ⇒ signal '
+        f'exceeds local σ noise)',
+        fontsize=13, fontweight='bold',
+    )
+    axes_flat = axes.flatten()
+    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)']
+
+    for i, sc_key in enumerate(_CAP_SCENARIO_PANEL_ORDER):
+        ax = axes_flat[i]
+        ax.set_facecolor('#EEEEEE')
+        rpath = scenario_raster_paths.get(sc_key)
+        if rpath is None or not os.path.isfile(rpath):
+            ax.text(0.5, 0.5, f'No raster for {sc_key}',
+                    ha='center', va='center', transform=ax.transAxes)
+            ax.axis('off')
+            continue
+        with rio.open(rpath) as src:
+            arr_af = src.read(1).astype(np.float64)
+        cv = np.abs(arr_af) / sigma_safe
+        # Mask pixels where ΔGW = 0 (outside CAP service area) so
+        # they render in the axes face color instead of CV bin 0
+        # (the lightest color, which would falsely imply a faint
+        # CAP signal at desert basins).
+        cv = np.where(np.isfinite(arr_af) & (np.abs(arr_af) > 1.0),
+                      cv, np.nan)
+        masked = np.ma.masked_invalid(cv)
+        ax.imshow(
+            masked, extent=extent, origin='upper',
+            cmap=discrete_cmap, norm=norm, interpolation='nearest',
+        )
+        _overlay_boundaries(
+            ax, basins_gdf, ama_ina, name_col,
+            label_fontsize=4.5, label_all=True,
+        )
+        overlay_cap_service_area(
+            ax, cap_service_area_geojson,
+            target_crs=ref_crs,
+        )
+        title_pretty = _CAP_SCENARIO_PANEL_TITLES.get(
+            sc_key, sc_key.replace('_', ' '),
+        )
+        # Pct of pixels with CV >= 1 among those with finite signal
+        finite = np.isfinite(cv)
+        if finite.any():
+            pct_robust = 100.0 * np.nansum(cv[finite] >= 1.0) / finite.sum()
+        else:
+            pct_robust = 0.0
+        ax.set_title(
+            f'{panel_labels[i]} {title_pretty}\n'
+            f'{pct_robust:.1f}% of pixels with CV ≥ 1',
+            fontsize=11, fontweight='bold',
+        )
+
+    ax_legend = axes_flat[7]
+    ax_legend.axis('off')
+    sm = ScalarMappable(cmap=discrete_cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(
+        sm, ax=axes_flat[:7], orientation='vertical',
+        shrink=1.0, pad=0.04, fraction=0.04, aspect=40,
+        boundaries=boundaries, ticks=boundaries, extend='both',
+    )
+    cbar.set_label(
+        '|Cumulative ΔGW| / σ_total (signal-to-noise)',
+        fontsize=12, fontweight='bold',
+    )
+    cbar.ax.tick_params(labelsize=11)
+    add_ama_ina_legend(
+        ax_legend, loc='center', bbox_to_anchor=(0.5, 0.5),
+        fontsize=14, framealpha=1.0, include_cap=True,
+    )
+
+    out_path = os.path.join(
+        out_dir,
+        f'CAP_Scenario_Pixel_CV_'
+        f'{year_window[0]}_{year_window[1]}.png',
+    )
+    fig.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    logger.info('  CAP scenario pixel CV map saved to %s', out_path)
 
 
 def _plot_sens_section(
@@ -4536,15 +6093,27 @@ def run_uncertainty_quantification(
     # ── Re-plot prediction time series with uncertainty bounds ──
     # Derive all uncertainty data directly from the augmented 6-band
     # rasters using zonal statistics with basin / sub-basin shapefiles.
-    _replot_from_augmented_rasters(
-        prediction_dir=full_pred_dir,
-        basin_shp=basin_shp,
-        subbasin_shp=subbasin_shp,
-        ama_code_map=ama_code_map,
-        start_year=start_year,
-        end_year=end_year,
-        mosaic_res=mosaic_res,
-    )
+    # Gated on the same ``time-series-plots`` skip token as the
+    # σ-component time-series block above so a single
+    # ``--skip-uq time-series-plots`` skips ALL time-series replot
+    # work in Step 3b (this is the slow ~10-minute zonal-stats loop;
+    # gating it correctly keeps the underlying augmented rasters and
+    # CSVs intact while skipping the rendering cost).
+    if 'time-series-plots' not in skip:
+        _replot_from_augmented_rasters(
+            prediction_dir=full_pred_dir,
+            basin_shp=basin_shp,
+            subbasin_shp=subbasin_shp,
+            ama_code_map=ama_code_map,
+            start_year=start_year,
+            end_year=end_year,
+            mosaic_res=mosaic_res,
+        )
+    else:
+        logger.info(
+            '  Augmented-raster time-series replot skipped '
+            '(--skip-uq time-series-plots).'
+        )
 
     logger.info(f'Uncertainty quantification complete. Results in {unc_dir}')
 

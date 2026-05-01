@@ -5039,23 +5039,33 @@ envelope of all DCP tiers and represents the model's response if
 Arizona received zero CAP deliveries from 2026 through 2099 while
 still meeting all demand from groundwater alone.*
 
-**Cumulative additional GW pumping over the 2026–2099 horizon (MAF):**
+**Cumulative additional GW pumping over the 2026–2099 horizon
+(MAF) and 2027–2060 sub-window (matches the WestWater 2026 Fig 4
+comparison anchor):**
 
-| Scenario | Cumulative ΔGW |
-|---|---|
-| DCP_Tier0_192kAF_cut | 0.08 MAF |
-| DCP_Tier1_512kAF_cut | **9.81 MAF** |
-| DCP_Tier2a_592kAF_cut | 14.10 MAF |
-| DCP_Tier2b_640kAF_cut | 16.33 MAF |
-| Basic_Coordination_237kAF | 17.16 MAF |
-| DCP_Tier3_720kAF_cut | **24.93 MAF** |
-| Extreme_Shortage_0kAF | **30.29 MAF** |
+| Scenario | Cumulative ΔGW (2026–2099) | Cumulative ΔGW (2027–2060) | Peak annual ΔGW (kAF/yr) |
+|---|---|---|---|
+| DCP_Tier0_192kAF_cut | 0.08 MAF | 0.03 MAF | 1 |
+| DCP_Tier1_512kAF_cut | **9.81 MAF** | 4.05 MAF | 155 |
+| DCP_Tier2a_592kAF_cut | 14.10 MAF | 5.89 MAF | 219 |
+| DCP_Tier2b_640kAF_cut | 16.33 MAF | 6.87 MAF | 251 |
+| Basic_Coordination_237kAF | 17.16 MAF | **7.24 MAF** | 263 |
+| DCP_Tier3_720kAF_cut | **24.93 MAF** | 10.69 MAF | 373 |
+| Extreme_Shortage_0kAF | **30.29 MAF** | **13.08 MAF** | 448 |
 
 For context, AZ's total well-mediated GW pumping over the same
-74-year horizon under the baseline is ~245 MAF (3.3 MAF/yr × 74 yr),
-so DCP Tier 3 represents an additional **~10.2 % cumulative GW
+74-year horizon under the baseline is ~250 MAF (3.4 MAF/yr × 74 yr),
+so DCP Tier 3 represents an additional **~10.0 % cumulative GW
 withdrawal** over the projection period, and the extreme-shortage
-scenario adds **~12.4 %**.
+scenario adds **~12.1 %**.  The 2027–2060 column matches the
+WestWater (2026) Fig 4 comparison anchor used in the headline
+validation table — AZ-Hydro's Basic Coordination = 7.24 MAF
+agrees with WestWater's 8.0 MAF anchor within −9.5 % (essentially
+exact given the methodological differences); Extreme Shortage =
+13.08 MAF sits +4.4 MAF above WestWater's 8.7 MAF, with the gap
+representing the additional drawdown WestWater categorises as
+unmet demand rather than physical aquifer mining (see the §
+WestWater methodological-comparison block below).
 
 ![CAP cumulative drawdown comparison](../docs/images/CAP_Scenario_Cumulative_Drawdown.png)
 
@@ -5075,31 +5085,48 @@ adaptation.*
 
 | Basin | ΔGW (additional pumping) | ΔSW (lost surface water) |
 |---|---|---|
-| Pinal AMA | +95 | −95 |
-| Phoenix AMA | +72 | −72 |
-| Gila Bend | +71 | −71 |
-| Tucson AMA | +46 | −46 |
-| Harquahala INA | +39 | −39 |
-| McMullen Valley | +5 | −5 |
+| Pinal AMA | +95.3 | −95.3 |
+| Phoenix AMA | +71.7 | −71.7 |
+| Gila Bend | +70.8 | −70.6 |
+| Tucson AMA | +45.7 | −45.7 |
+| Harquahala INA | +38.8 | −38.8 |
+| McMullen Valley | +5.3 | −4.6 |
+| Lower Gila | +1.3 | −1.2 |
+| Upper San Pedro | +0.8 | −0.3 |
+| Verde River | +0.6 | −0.1 |
+| Safford | ~0 | ~0 |
 
 The CAP-served urban AMAs (Phoenix, Tucson) and the CAP-served ag
 basins (Pinal, Harquahala, Gila Bend) absorb essentially all of the
-shortage-driven GW pumping increase.  Non-CAP basins (Willcox,
-Douglas, Joseph City, the Mogollon plateau basins) show ΔGW = 0 in
-all scenarios — they have no CAP imports to lose in the first place.
+shortage-driven GW pumping increase.  The smaller CAP-intersected
+basins (McMullen Valley, Lower Gila, Upper San Pedro, Verde River,
+Safford) show order-of-magnitude smaller responses corresponding to
+the small fraction of each basin that falls inside the CAP service-
+area footprint.  Non-CAP basins (Willcox, Douglas, Joseph City, the
+Mogollon plateau basins) show ΔGW = **exactly 0** in all scenarios
+by construction — `apply_cap_delivery_perturbation` indexes only the
+CAP-pixel mask, so non-CAP pixels see no feature change → identical
+ML prediction → identical partition → ΔGW ≡ 0.  This is a structural
+zero, not numerical near-zero.
 
 ![CAP per-basin ΔGW under shortage scenarios](../docs/images/CAP_Scenario_Basin.png)
 
 *Figure: Per-basin additional GW pumping (ΔGW vs Baseline) for
-the five CAP-served AMA/INAs (Phoenix, Tucson, Pinal, Harquahala,
-Ranegras Plain) under the WestWater Basic Coordination and
-Extreme Shortage scenarios.  Each panel shows one basin's
-year-by-year ΔGW trajectory.  The Phoenix and Tucson AMAs absorb
-the largest absolute increases (urban M&I demand has the least
-elasticity — when CAP is cut, these basins must pump more to
-maintain municipal supply); Pinal AMA shows a comparable
-agricultural response.  All five panels share the same y-axis
-range, which makes the relative magnitude immediately legible.*
+**all CAP-affected basins**, auto-discovered from the delta data
+(any basin with non-zero cumulative |ΔGW| over the projection
+window).  This includes the four primary CAP-customer AMA/INAs
+(Phoenix, Tucson, Pinal, Harquahala) plus six smaller basins that
+intersect the CAP service area (Gila Bend — comparable to Phoenix
+in absolute magnitude due to its CAP-NIA acreage; McMullen Valley;
+Lower Gila; Upper San Pedro; Verde River; Safford).  Earlier
+versions hardcoded the panel list to five basins (the four primary
+AMAs + Ranegras Plain, which has Δ ≡ 0); the current
+implementation derives the basin list dynamically from
+`CAP_Scenario_Delta.csv` so no real CAP-affected basin is missed
+and zero-impact basins like Ranegras are dropped.  Each panel
+shows one basin's year-by-year ΔGW trajectory under the WestWater
+Basic Coordination and Extreme Shortage scenarios; panels are
+sorted by impact magnitude (Pinal AMA at top).*
 
 **Comparison with the WestWater / ADWR shortage-narrative framing.**
 The published WestWater 2026 Plan of Operation and the ADWR Tier
@@ -5142,10 +5169,79 @@ withdrawal stretched across each decade of the projection period**.
 
 Output products under
 `Uncertainty/CAP_Scenario/`:
-`CAP_Scenario_Statewide.csv`, `CAP_Scenario_Delta.csv`,
-`CAP_Scenario_Cumulative.csv`, plus the four PNG plots
-(`CAP_Scenario_WestWater.png`, `CAP_Scenario_DCP_Tiers.png`,
-`CAP_Scenario_Basin.png`, `CAP_Scenario_Cumulative_Drawdown.png`).
+- `CAP_Scenario_Statewide.csv`, `CAP_Scenario_Basin.csv`,
+  `CAP_Scenario_Delta.csv`, `CAP_Scenario_Cumulative.csv`
+- `CAP_Scenario_WestWater.png`, `CAP_Scenario_DCP_Tiers.png`,
+  `CAP_Scenario_Basin.png`, `CAP_Scenario_Cumulative_Drawdown.png`
+- `Basin_Sigma_CAP_Restricted_Total_GW_<start>_<end>.csv` — per-year
+  per-basin σ on Total_GW restricted to the basin × CAP-pixel
+  intersection over the cumulative window `<start>–<end>` (written
+  by Step 3g once per window — 2027–2060 and 2027–2099; consumed by
+  the basin CV map but persisted as a permanent UQ artifact for
+  downstream analyses)
+
+#### Spatial drawdown maps (Step 3g)
+
+Step 3g (`create_cap_scenario_spatial_maps` in `pipeline.py`) reads
+the CSVs above and renders five spatial figures + a per-scenario
+pixel-raster stack to
+[`Raster_Maps/CAP_Scenario/`](../Data/Outputs/ML_Model_All_Wells_2000m/Full_Prediction_XGBRF/Raster_Maps/CAP_Scenario/),
+each emitted for **two cumulative windows**: the WestWater anchor
+window 2027–2060 and the full projection window 2027–2099 (filenames
+auto-suffixed with `_<start>_<end>`).  All maps overlay the CAP
+service area as three color-coded county outlines (Maricopa = blue,
+Pima = purple, Pinal = teal) so reviewers can immediately see which
+CAP sub-region carries each scenario's drawdown signal:
+
+| File | Content |
+|---|---|
+| `CAP_Scenario_Basin_Drawdown_<window>.png` | 2×4 grid (7 scenarios + 3×2 legend) of basin choropleths showing cumulative ΔGW vs Baseline over the window.  Basin polygons clipped to the CAP service-area intersection so Verde River / Lower Gila / Upper San Pedro etc. show only the actually-affected sliver instead of the full basin polygon.  Discrete YlOrRd bins in 10⁶ m³ with secondary kAF axis on the colorbar (left side) and full-height shared colorbar across all 7 panels. |
+| `CAP_Scenario_Pixel_Drawdown_<window>.png` | Same layout at native 2 km raster resolution.  Per-pixel ΔGW = basin Δ × pixel ML Total_GW share — pro-rata distribution of the basin total to its CAP-affected pixels.  **Not a hydraulic-head response** (sub-basin texture should not be over-interpreted as drawdown contours). |
+| `CAP_Scenario_Sigma_Cumulative_<window>.png` | Single 2-panel figure (basin + pixel) showing cumulative σ_total_GW over the same window.  Same uncertainty applies to every CAP scenario — quadrature-combined per-component σ at the basin level, linear-time-sum across years (perfect-correlation conservative upper bound). |
+| `CAP_Scenario_Basin_CV_<window>.png` | Per-scenario basin signal-to-noise (CV = \|ΔGW_cum\| / σ_cum).  The σ denominator is **CAP-restricted** — only σ from pixels inside the basin × CAP-pixel intersection — so the noise floor at small-CAP-footprint basins like Verde River reflects only the CAP-affected portion, not the full basin's σ_total.  CV > 1 ⇒ scenario signal exceeds the central-pipeline noise floor at that basin. |
+| `CAP_Scenario_Pixel_CV_<window>.png` | Pixel-level signal-to-noise (continuous imshow, same discrete bins as basin CV).  Pro-rata distribution caveat as above. |
+| `Pixel_Rasters/CAP_Scenario_Pixel_<scenario>_cum_AF_<window>.tif` | Per-scenario per-window cumulative ΔGW raster (AF) used by the pixel maps and available for downstream analysis. |
+
+The basin-level and pixel-level drawdown maps are paired: same
+colorbar style, same panel ordering (DCP Tier 0 → 1 → 2a → 2b → 3 →
+Basic Coord → Extreme Shortage), identical scenarios, but different
+aggregation levels.  The basin map shows what each AMA / INA
+decision-maker "sees" as their basin's total ΔGW; the pixel map
+shows the intra-basin distribution that the central-pipeline ML
+prediction implies (assuming proportional well-density-weighted GW
+substitution within the CAP footprint).  AZ-wide totals printed in
+each panel title are computed directly from the rendered values, so
+basin and pixel sums match the source `CAP_Scenario_Delta.csv` to
+within float32 round-off (see e.g. Basic Coordination 2027–2060:
+**7.24 MAF** in the CSV and in both the basin and pixel map titles).
+
+![CAP scenario pixel drawdown 2027-2060](../docs/images/CAP_Scenario_Pixel_Drawdown_2027_2060.png)
+
+*Figure: Pixel-level cumulative ΔGW vs Baseline over the WestWater
+2027–2060 anchor window for all 7 CAP shortage scenarios, with each
+CAP service-area county color-coded.  The Phoenix–Pinal–Tucson
+metro-AMA corridor inside the CAP service area carries essentially
+all of the modeled ΔGW signal under every scenario, with intensity
+ramping from DCP Tier 0 (a, near-zero) to Extreme Shortage (g,
+13.08 MAF AZ-wide).  Sub-basin texture follows the per-pixel ML
+Total_GW share — it is a pro-rata distribution of the basin total,
+not a hydraulic-head response.*
+
+![CAP scenario pixel drawdown 2027-2099](../docs/images/CAP_Scenario_Pixel_Drawdown_2027_2099.png)
+
+*Figure: Same maps over the full projection horizon 2027–2099.  The
+2099-window AZ-wide totals (e.g. Extreme Shortage = 29.89 MAF) reflect
+the cumulative effect of sustained shortage substitution across the
+full 73-year horizon and grow approximately linearly with window
+length because per-year ΔGW is roughly stationary in this scenario
+sweep.*
+
+The `_Sigma_Cumulative` panel acts as an honest scale reference: it
+puts the basin σ (Panel a) and pixel σ (Panel b) on the same colorbar
+as the central drawdown maps so reviewers can read the ΔGW signal
+against its noise floor at a glance.  Same CAP-clipping treatment
+applied to the basin panel for visual consistency with the central
+maps.
 
 #### Direct comparison with WestWater (2026) Figures 4 and 5
 

@@ -221,12 +221,31 @@ def get_ama_ina_classification() -> tuple[list[str], list[str]]:
 def apply_journal_style():
     """Apply journal-quality matplotlib settings.
 
+    Also installs a targeted ``warnings`` filter that silences the
+    ``"overflow encountered in multiply"`` ``RuntimeWarning`` emitted
+    by matplotlib's colormap ``__call__`` (``colors.py:778``,
+    ``xa *= self.N``).  That overflow fires when a ``MaskedArray`` is
+    passed to ``imshow`` and matplotlib internally fills masked pixels
+    with a sentinel that, post-Normalize + uint8 cast, wraps around
+    the lookup-table size.  It's a long-standing matplotlib internal
+    quirk for diverging-cmap renders of masked rasters — the figures
+    still save correctly — so the warning is filtered at the message
+    level rather than module-wide to avoid hiding genuinely
+    informative numpy overflows from elsewhere.
+
     Returns:
         None.
     """
+    import warnings as _warnings
     plt.rcParams.update(JOURNAL_SETTINGS)
     sns.set_style("whitegrid")
     sns.set_context("paper", font_scale=1.2)
+    _warnings.filterwarnings(
+        'ignore',
+        message='overflow encountered in multiply',
+        category=RuntimeWarning,
+        module=r'matplotlib\.colors',
+    )
 
 
 def compute_confidence_interval(
@@ -3367,6 +3386,21 @@ INA_BORDER_COLOR = '#B71C1C'
 BASIN_BORDER_COLOR = '#555555'
 
 
+CAP_SERVICE_AREA_COLOR = '#1565C0'
+
+CAP_COUNTY_COLORS: dict[str, str] = {
+    'MARICOPA': '#1565C0',
+    'PIMA': '#6A1B9A',
+    'PINAL': '#00897B',
+}
+
+CAP_COUNTY_DISPLAY: dict[str, str] = {
+    'MARICOPA': 'Maricopa',
+    'PIMA': 'Pima',
+    'PINAL': 'Pinal',
+}
+
+
 def add_ama_ina_legend(
     target,
     *,
@@ -3374,6 +3408,8 @@ def add_ama_ina_legend(
     bbox_to_anchor: tuple[float, float] | None = (1.02, 1.0),
     fontsize: int = 8,
     framealpha: float = 0.9,
+    include_cap: bool = False,
+    ncol: int | None = None,
 ) -> None:
     """Add a single AMA / INA / GW basin legend to a Figure or Axes.
 
@@ -3395,6 +3431,12 @@ def add_ama_ina_legend(
             to skip anchoring.
         fontsize: Legend font size.
         framealpha: Legend frame transparency.
+        include_cap: If True, also include per-county CAP service-area
+            entries (one line per CAP county, color-keyed to the
+            ``overlay_cap_service_area`` per-county outlines).
+        ncol: Number of legend columns.  When None, defaults to 2 if
+            *include_cap* (so the 6-entry legend renders as a 3-row ×
+            2-col grid) and 1 otherwise.
     """
     from matplotlib.lines import Line2D
     handles = [
@@ -3403,11 +3445,66 @@ def add_ama_ina_legend(
         Line2D([0], [0], color=AMA_BORDER_COLOR, lw=1.4, label='AMA'),
         Line2D([0], [0], color=INA_BORDER_COLOR, lw=1.4, label='INA'),
     ]
+    if include_cap:
+        for county_key, display in CAP_COUNTY_DISPLAY.items():
+            handles.append(
+                Line2D([0], [0],
+                       color=CAP_COUNTY_COLORS[county_key], lw=1.6,
+                       label=f'CAP — {display}'),
+            )
+    if ncol is None:
+        ncol = 2 if include_cap else 1
     kwargs = dict(handles=handles, loc=loc, fontsize=fontsize,
-                  framealpha=framealpha)
+                  framealpha=framealpha, ncol=ncol)
     if bbox_to_anchor is not None:
         kwargs['bbox_to_anchor'] = bbox_to_anchor
     target.legend(**kwargs)
+
+
+def overlay_cap_service_area(
+    ax,
+    cap_service_area_geojson: 'str | None',
+    target_crs=None,
+    *,
+    linewidth: float = 1.2,
+    linestyle: str = '-',
+    alpha: float = 0.95,
+    name_col: str = 'NAME',
+) -> bool:
+    """Overlay the CAP service-area boundary onto a map axis.
+
+    Each CAP county polygon is drawn in its own color (per
+    :data:`CAP_COUNTY_COLORS`) so the three service-area sub-units
+    (Maricopa / Pima / Pinal) are individually identifiable.  Returns
+    True if the overlay was drawn so callers can decide whether to
+    add the CAP legend entries.
+    """
+    if not cap_service_area_geojson or not os.path.isfile(
+        cap_service_area_geojson,
+    ):
+        return False
+    try:
+        cap_gdf = gpd.read_file(cap_service_area_geojson)
+    except Exception:  # noqa: BLE001
+        return False
+    if cap_gdf.empty:
+        return False
+    if target_crs is not None and cap_gdf.crs != target_crs:
+        cap_gdf = cap_gdf.to_crs(target_crs)
+    if name_col not in cap_gdf.columns:
+        cap_gdf.boundary.plot(
+            ax=ax, color=CAP_SERVICE_AREA_COLOR,
+            linewidth=linewidth, linestyle=linestyle, alpha=alpha,
+        )
+        return True
+    for _, row in cap_gdf.iterrows():
+        county = str(row[name_col]).upper().strip()
+        color = CAP_COUNTY_COLORS.get(county, CAP_SERVICE_AREA_COLOR)
+        gpd.GeoSeries([row.geometry], crs=cap_gdf.crs).boundary.plot(
+            ax=ax, color=color, linewidth=linewidth,
+            linestyle=linestyle, alpha=alpha,
+        )
+    return True
 
 
 def _overlay_boundaries(
