@@ -5426,7 +5426,9 @@ A useful reframing of the apparent under-prediction at the central
 estimate: AZ-Hydro's 95 % CI band brackets *both* the WestWater
 drawdown rate **and** the additional unmet shortage on top of it.
 
-| Annual rate at 2060 (kAF/yr) | Basic Coord | Extreme |
+*Annual rate at 2060 (kAF/yr):*
+
+| Quantity | Basic Coord | Extreme |
 |---|---|---|
 | Fig 4 drawdown rate (visual estimate) | ~250 | ~275 |
 | Fig 5 differential shortage | **446** | **588** |
@@ -5435,9 +5437,21 @@ drawdown rate **and** the additional unmet shortage on top of it.
 | AZ-Hydro 95 % CI upper | **805** | **985** |
 | Upper CI brackets total gap? | **805 > 696** ✓ | **985 > 863** ✓ |
 
+*Cumulative 2027–2060 (MAF):*
+
+| Quantity | Basic Coord | Extreme |
+|---|---|---|
+| Fig 4 reported cumulative drawdown | 8.0 | **8.7** |
+| Fig 5 derived cumulative differential shortage | ~8.5 | **~13.7** |
+| **Total demand-supply gap = drawdown + shortage** | **~16.5** | **~22.4** |
+| AZ-Hydro central cumulative ΔGW | 7.24 | **13.08** |
+| AZ-Hydro 1σ on cumulative ΔGW | 6.89 | 6.89 |
+| **AZ-Hydro 95 % CI upper** (central + 1.96 σ) | **~20.7** | **~26.6** |
+| Upper CI brackets total gap? | **20.7 > 16.5** ✓ | **26.6 > 22.4** ✓ |
+
 So the interpretation isn't "AZ-Hydro under-predicts what WestWater
 says" — it is that the **AZ-Hydro UQ envelope spans the regulatory-
-constraint gap**:
+constraint gap** at *both* the annual and cumulative scales:
 
 - **Lower-to-central part of the AZ-Hydro CI** ≈ regulatory-constrained
   physical delivery (≈ WestWater Fig 4 drawdown rate).  This is what
