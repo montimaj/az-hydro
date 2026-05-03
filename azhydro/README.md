@@ -39,7 +39,7 @@ git clone https://github.com/<owner>/az-hydro.git
 cd az-hydro
 ```
 
-The `Data/` folder is hosted separately on Zenodo due to its size (~14 GB).
+The `Data/` folder is hosted separately on Zenodo: ~9 GB of inputs (the per-pipeline subset, with HarDWR / GRAIN / NHM / Reitz / PS Crop Surveys obtained from external sources) plus ~200 GB of generated outputs.  See [`Data/README.md`](../Data/README.md) for the full inventory and external-source citations.
 Download it from [https://doi.org/10.5281/zenodo.19057936](https://doi.org/10.5281/zenodo.19057936) and extract it at the repository root so that `Data/Inputs/` exists.
 Unzip all zipped files — several input datasets are compressed and must be unzipped before running the pipeline.
 
