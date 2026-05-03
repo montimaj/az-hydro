@@ -185,3 +185,7 @@ Data/Inputs/GW_Data/Water Rights
 NASA_report.md
 wtd_states.zip
 wtd_states/
+
+Data/Inputs*
+*.7z
+*.sh

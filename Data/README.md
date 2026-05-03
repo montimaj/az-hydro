@@ -14,7 +14,7 @@ and methodology.
 
 | Component | Size | Notes |
 |---|---|---|
-| **Inputs** (Zenodo subset) | **~9 GB** | Pipeline inputs minus externally-sourced datasets (see "External datasets" below) |
+| **Inputs** (Zenodo) | **~9 GB** | Pipeline-required files only (see per-directory inventory below).  After the user downloads the external USGS NHM / Reitz / PS reanalysis bundle from USGS ScienceBase (see "External datasets" below), on-disk Inputs grows to ~20 GB. |
 | &emsp;`Inputs/GEE_Data/` | ~3.4 GB | Raw 2 km Google Earth Engine tiles + AZ HUC12 vector |
 | &emsp;`Inputs/GW_Data/` | ~5.8 GB | ADWR meter records, well registry, GW basin / AMA-INA / CAP / SRP / streamflow / USBR vectors, statewide WTD TIFs |
 | &emsp;`Inputs/USGS WU/` | <1 MB | Two curated USGS/ADWR rollup CSVs |
@@ -24,13 +24,12 @@ and methodology.
 | &emsp;`Outputs/GW/` | ~14 GB | Observed ADWR-metered withdrawal depth/volume rasters + per-year vector shapefiles |
 | &emsp;`Outputs/GW_Data/` | ~8 GB | Reprojected vector products (basins, wells, CAP, etc.) |
 | &emsp;`Outputs/ML_Model_All_Wells_2000m/` | ~161 GB | ML evaluation (~121 GB), Step 3 prediction + UQ + augmented rasters + figures (~40 GB) |
-| **Total** | **~210 GB** | Full archive |
+| **Total** | **~220 GB** | After downloading both the Zenodo deposit and the external USGS data products |
 
 External datasets that the pipeline reads but are **not** redistributed
 on Zenodo (must be obtained by the user from the cited source) total
-roughly an additional 7.7 GB on disk: HarDWR water rights (~360 MB),
-GRAIN canal network (~1.85 GB), USGS NHM withdrawals + CU/IE + Reitz
-irrigation + PS reanalysis (~5.5 GB combined).  See **External
+roughly an additional ~5.5 GB on disk — the USGS NHM withdrawals +
+CU/IE + Reitz irrigation + PS reanalysis bundle.  See **External
 datasets** below for the full inventory.
 
 ---
@@ -67,20 +66,21 @@ hydrologic ancillary vectors.
 | Path | Description |
 |---|---|
 | `ADWR_Groundwater_Subbasin/` | ADWR groundwater sub-basin shapefile for sub-basin aggregation in time-series outputs. |
-| `ADWR_Groundwater_Subbasin_2024.csv` | Sub-basin reference table (basin name, code, parent AMA/INA). |
 | `AMA_and_INA.geojson` | Active Management Areas + Irrigation Non-Expansion Areas polygons. |
 | `AZ.geojson` | Arizona state boundary polygon. |
 | `AZ_Polygons_80000m.geojson` | 80 km × 80 km tiling grid that GEE tile downloads use. |
 | `CAP/CAP_Service_Area.geojson` | Central Arizona Project service area polygon (3 county sub-units: Maricopa / Pima / Pinal).  Drives the per-pixel CAP delivery perturbation in `apply_cap_delivery_perturbation`. |
 | `CAP/CAP Delivery Data DRI Request.xlsx` | Annual CAP delivery volumes by sub-contractor / category, supplied by CAP for the AZ-Hydro project (1985–2024). |
+| `GRAIN_v.1.0/GeoParquet/us-west_GRAIN_v.1.0.parquet` | Western-US subset of the GRAIN canal-network database from Suresh et al. (2026), *Earth System Science Data* 18(3), 1855–1875.  DOI: [10.5194/essd-18-1855-2026](https://doi.org/10.5194/essd-18-1855-2026).  Bundled here (~55 MB after extracting only the western-US tile) — used to build the `canal_density` predictor.  The full release is available at the source DOI; replace this folder with a fresh download if you need other regions. |
 | `Groundwater_Basin/` | Statewide GW basin polygons shapefile (52 basins) — primary basin aggregation unit. |
 | `Meter Data/GW_<year>.csv` | Per-year ADWR meter records (1984–2024, one CSV per year, 41 files).  Each row = one well-year with reported `AF Pumped`, lat/lon, basin, etc.  These are the primary training labels for the ML model. |
 | `SRP/SRP WATER DELVS HISTORY.xlsx` | Salt River Project annual delivery history (used to validate Phoenix AMA SW totals). |
 | `Streamflow/` | USGS gauge monthly streamflow for the Colorado River system (HCDN reference + USBR sites; 8 stations, 1896-present where available).  Used in σ_USBR and Lees Ferry inflow context. |
 | `Surface_Watershed.geojson` | Surface watershed boundaries used for SW capture index aggregation. |
 | `USBR/` | USBR / HCDN monthly streamflow zips (compressed mirror of `Streamflow/`) plus extracted CSVs.  Used by σ_USBR ensemble member loader. |
+| `Water Rights/stateWaterRightsHarmonized/arizona/arizonaStatePOD.{shp,dbf,shx,cpg,prj}` | HarDWR Western U.S. water-rights Point-of-Diversion shapefile (Arizona subset, ~142 MB) from Lisk et al. (2024).  DOIs: data — [10.57931/2475303](https://doi.org/10.57931/2475303); paper — [10.1038/s41597-024-03434-6](https://doi.org/10.1038/s41597-024-03434-6).  Used as the priority-date source for canal `first_delivery_year` dating and the `irr_sw_rights_density` / `nonirr_sw_rights_density` predictor rasters.  Only the shapefile is needed by the pipeline — the harmonized-records CSVs from the original release are not used and have been excluded from this bundle to save space. |
 | `Well_Registry_2024/` | ADWR Well Registry snapshot (Dec 2024) — used to build the per-pixel `well_density` feature (the #1 SHAP-importance predictor). |
-| `wtd_states/wtd_<state>.tif` | Water-table-depth statewide TIFs (`wtd_arizona.tif`, `wtd_california.tif`, `wtd_nevada.tif`) from Ma et al. (2026), *High resolution US water table depth estimates reveal quantity of accessible groundwater*, Communications Earth & Environment 7(1), 45.  DOI: [10.1038/s43247-025-03094-3](https://doi.org/10.1038/s43247-025-03094-3).  Bundled in this Zenodo deposit because the per-state TIFs are not separately discoverable on the source data portal. |
+| `wtd_states/wtd_<state>.tif` | Water-table-depth statewide TIFs (`wtd_arizona.tif`, `wtd_california.tif`, `wtd_nevada.tif`) from Ma et al. (2026), *High resolution US water table depth estimates reveal quantity of accessible groundwater*, Communications Earth & Environment 7(1), 45.  DOI: [10.1038/s43247-025-03094-3](https://doi.org/10.1038/s43247-025-03094-3).  Bundled in this Zenodo deposit because the per-state TIFs are not separately discoverable on the source data portal.  The CONUS dataset is also available as a Google Earth Engine asset at `projects/nmose-openet/assets/WTD-US` — see the [CONUS WTD explorer](https://code.earthengine.google.com/87c965aae54facde740850b0949fc3b4) for an interactive viewer; users with GEE access can pull the WTD raster directly from there instead of downloading the bundled per-state TIFs. |
 
 ### `Inputs/USGS WU/`
 
@@ -263,35 +263,6 @@ Expected sub-directories (each is a per-year stack of monthly TIFs
 - `Irrigation_groundwater_1980-2018/` — GW-supplied irrigation ET
 - `Irrigation_surfacewater_1980-2018/` — SW-supplied irrigation ET
 - `HistoricalET_metadata.xml` — FGDC metadata
-
-### `Data/Inputs/GW_Data/` external sources
-
-#### `GRAIN_v.1.0/` (canal network)
-
-Source: Suresh et al. (2026), *Earth System Science Data* 18(3),
-1855–1875 — *GRAIN: a Global Registry of Agricultural Irrigation
-Networks*.
-DOI: [10.5194/essd-18-1855-2026](https://doi.org/10.5194/essd-18-1855-2026).
-
-Expected layout: download the GeoParquet release; pipeline reads
-`GeoParquet/us-west_GRAIN_v.1.0.parquet` for the AZ canal-density
-feature.  The pipeline builds `canal_density` from this single file —
-do not unpack other regions if disk-constrained.  The full Zenodo
-release is the GeoParquet collection; the AZ subset is ~50 MB after
-filtering but we ingest the western-US tile (~1.85 GB compressed) for
-upstream flexibility.
-
-#### `Water Rights/` (HarDWR water-rights database)
-
-Source (data): Lisk et al. (2024, Zenodo) — *HarDWR: Harmonized
-Database of Western U.S. Water Rights* (v2.0).
-DOI: [10.57931/2475303](https://doi.org/10.57931/2475303).
-Source (paper): Lisk et al. (2024), *Sci Data* 11(1), 598.
-DOI: [10.1038/s41597-024-03434-6](https://doi.org/10.1038/s41597-024-03434-6).
-
-Expected layout: AZ subset of the HarDWR water-rights records (used to
-build `irr_sw_rights_density` and `nonirr_sw_rights_density` features).
-Pipeline reads from `Inputs/GW_Data/Water Rights/`.
 
 ### Other external datasets
 
