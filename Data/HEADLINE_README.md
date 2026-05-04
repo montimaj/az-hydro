@@ -108,15 +108,24 @@ The matching spatial maps are in `Raster_Maps/CAP_Scenario/` (see § 8).
 ### 7. Validation / intercomparison outputs
 
 Step 4 outputs comparing AZ-Hydro predictions against independent
-agency datasets:
+agency datasets.  Each intercomparison directory contains time-series
+plots, scatter plots, and per-source / per-basin metric CSVs; the
+following table summarizes which spatial-diff levels (basin / HUC12 /
+pixel) each one renders.
 
-- `Withdrawal_Intercomparison/` — vs USGS NHM withdrawals (2000–2020)
-- `CU_Intercomparison/` — vs Martin et al. (2025) NHM consumptive-use reanalysis
-- `Peff_Intercomparison/` — vs Reitz et al. (2023) historical ET/Peff
-- `PS_Intercomparison/` — vs Luukkonen et al. (2023) public-supply reanalysis
-- `NHM_IE_Basins/` — irrigation-efficiency aggregation by basin
-- `USGS_Calibration_Bars/` — partition calibration vs USGS Circulars 1950–2015
-- `CAP_SRP_Validation/` — vs CAP delivery + SRP delivery records (1985–2024)
+| Directory | Comparison source | Year window | Spatial-diff levels rendered |
+|---|---|---|---|
+| `Withdrawal_Intercomparison/` | USGS NHM withdrawals (Haynes 2023) + Reitz 2023 historical ET | ML-vs-NHM 2000–2020; ML-vs-Reitz 1980–2018; NHM-vs-Reitz 2000–2018 (pairwise intersection) | basin (`Spatial_Diff/`) + HUC12 (`HUC12_Comparison/Spatial_Diff/`) |
+| `CU_Intercomparison/` | Martin et al. (2025) NHM consumptive-use reanalysis | 2000–2020 (common) | **basin + HUC12 + pixel** (all three at `Spatial_Diff/Spatial_Diff_{Basin,HUC12,Pixel}_CU.png`) |
+| `Peff_Intercomparison/` | USDA-SCS + PCML + NHM Peff (Reitz/Haynes/Martin) | 2000–2020 (pinned common — see pipeline override) | basin (`Spatial_Diff/`) + HUC12 (`HUC12_Comparison/Spatial_Diff/`) + pixel (`Spatial_Diff/`) |
+| `PS_Intercomparison/` | Luukkonen et al. (2023) public-supply reanalysis | 2000–2020 (common) | basin (4 panels: PS total + Non_Irrigation total/GW/SW) |
+| `NHM_IE_Basins/` | NHM irrigation efficiency aggregated to basins | 2000–2020 | basin scatter + per-basin tables |
+| `USGS_Calibration_Bars/` | Statewide AZ totals vs USGS Circulars 1950–2015 + ADWR Annual Reports 2016–2024 | 1950–2024 | annual statewide bar charts (no spatial diff) |
+| `CAP_SRP_Validation/` | CAP delivery + SRP delivery records | 1985–2024 | per-CAP-county time series (no spatial diff) |
+
+CU, Peff, and Withdrawal all use **pairwise common-year windows** so
+each diff is computed apples-to-apples — see § 7 of the methodology
+section in `azhydro/README.md` for the per-pair window definitions.
 
 ### 8. Era-mean and trend spatial figures (`Raster_Maps/`)
 
@@ -157,6 +166,11 @@ conventions), then follow the runtime instructions in
 
 ## License
 
-Code: MIT (see `LICENSE` in the GitHub repository).  Data: CC-BY-4.0
-unless noted otherwise.  External datasets retain their original
-licenses — see the cited source for terms.
+This Zenodo deposit (data archives `az-hydro-data.7z` and
+`az-hydro-headline.7z`, plus this README) is released under
+**CC-BY-4.0** — see [https://creativecommons.org/licenses/by/4.0/](https://creativecommons.org/licenses/by/4.0/).
+
+The accompanying source code in the
+[GitHub repository](https://github.com/montimaj/az-hydro) is released
+separately under **BSD 3-Clause "Revised"** — see the `LICENSE` file
+at the repo root.

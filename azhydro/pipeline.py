@@ -3664,6 +3664,13 @@ def run_peff_usgs_intercomparison() -> pd.DataFrame:
     huc12_geojson = os.path.join(INPUT_DIR, 'GEE_Data', 'AZ_HUC12.geojson')
     output_dir = os.path.join(prediction_dir, 'Peff_Intercomparison')
 
+    # Pin all three Peff sources (USDA-SCS, PCML, NHM) to the common
+    # 2000–2020 window so every pairwise comparison (USDA-SCS vs NHM,
+    # PCML vs NHM, USDA-SCS vs PCML) is computed over the same 21-year
+    # mean.  Without this override, defaults are 2000–2024 (USDA-SCS) /
+    # 2000–2023 (PCML) / 2000–2020 (NHM), and pair diffs use each
+    # source's native window — adding a 1–4 year asymmetry to the
+    # apparent differences (~1–2 % of the mean).
     return intercompops.run_peff_intercomparison(
         predictor_dir=PRED_DATA_DIR,
         nhm_peff_csv=nhm_peff_csv,
@@ -3671,6 +3678,9 @@ def run_peff_usgs_intercomparison() -> pd.DataFrame:
         basin_shp=AZ_GW_BASIN,
         basin_col='BASIN_NAME',
         output_dir=output_dir,
+        ml_year_range=(2000, 2020),
+        ml_pcml_year_range=(2000, 2020),
+        nhm_year_range=(2000, 2020),
     )
 
 

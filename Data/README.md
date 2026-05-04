@@ -321,6 +321,15 @@ Withdrawal Patterns (1896–2099).*  In prep. for *AGU Earth's Future*.
 
 ## License
 
-Code: MIT (see `LICENSE` in the GitHub repository).  Data: CC-BY-4.0
-unless noted otherwise.  External datasets retain their original
-licenses — see the cited source for terms.
+This Zenodo deposit (data archives `az-hydro-data.7z` and
+`az-hydro-headline.7z`, plus this README) is released under
+**CC-BY-4.0** — see [https://creativecommons.org/licenses/by/4.0/](https://creativecommons.org/licenses/by/4.0/).
+
+The accompanying source code in the
+[GitHub repository](https://github.com/montimaj/az-hydro) is released
+separately under **BSD 3-Clause "Revised"** — see the `LICENSE` file
+at the repo root.
+
+External datasets bundled here (HarDWR water-rights shapefile, GRAIN
+canal network, WTD TIFs) retain their original licenses — see the
+cited source for terms.

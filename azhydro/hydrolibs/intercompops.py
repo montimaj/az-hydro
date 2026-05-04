@@ -3535,6 +3535,225 @@ def run_cu_intercomparison(
                 f'{spatial_diff_dir}'
             )
 
+        # ── HUC12-level Δ Volume choropleth (ML − NHM, 1 panel) ──
+        # Mirrors the basin choropleth above but at HUC12 resolution.
+        # Uses ml_huc_mean / nhm_huc_mean (already computed above as
+        # {huc12_id: AF}).  Plots via inline imshow-style code rather
+        # than _plot_basin_diff_panels because that helper bakes in
+        # basin-level overlay; here we want HUC12 polygons colored
+        # with basin / AMA-INA boundaries overlaid for context.
+        import matplotlib.ticker as mticker
+        from matplotlib.cm import ScalarMappable
+        from matplotlib.colors import Normalize
+        ama_ina_names_cu = get_ama_ina_basin_names()
+        b_name_cu = (
+            basin_col if basin_col in b_reproj_cu.columns
+            else b_reproj_cu.columns[0]
+        )
+        _af_to_m3_cu = 1.0 / M3_TO_AF
+        _mm_to_ft_cu = 1.0 / 304.8
+        huc_diff_vals = [
+            (ml_huc_mean.get(h, 0.0) - nhm_huc_mean.get(h, 0.0)) * _af_to_m3_cu
+            for h in common_hucs
+        ]
+        huc_diff_arr = np.array(huc_diff_vals)
+        huc_diff_nz = huc_diff_arr[np.abs(huc_diff_arr) > 1.0]
+        if huc_diff_nz.size:
+            huc12_vmax = max(
+                abs(np.nanpercentile(huc_diff_nz, 2)),
+                abs(np.nanpercentile(huc_diff_nz, 98)),
+                1e-6,
+            )
+            fig, ax = plt.subplots(
+                1, 1, figsize=(10, 8), constrained_layout=True,
+            )
+            fig.suptitle(
+                'Irrigation CU — HUC12-Level Volume Difference '
+                '(ML − NHM)',
+                fontsize=14, fontweight='bold',
+            )
+            ax.set_facecolor('#D5D5D5')
+            plot_gdf = (
+                huc_reproj[huc_reproj['huc12'].isin(common_hucs)]
+                .set_index('huc12').loc[common_hucs].copy()
+            )
+            plot_gdf['diff'] = huc_diff_vals
+            plot_gdf.loc[plot_gdf['diff'].abs() < 1e-3, 'diff'] = np.nan
+            plot_gdf.plot(
+                ax=ax, column='diff', cmap='RdBu_r',
+                vmin=-huc12_vmax, vmax=huc12_vmax,
+                edgecolor='#AAAAAA', linewidth=0.3,
+                legend=False, missing_kwds={'color': '#EEEEEE'},
+            )
+            _overlay_boundaries(
+                ax, b_reproj_cu, ama_ina_names_cu, b_name_cu,
+                label_fontsize=5.0, label_all=True,
+            )
+            ax.set_title(
+                'ML − NHM', fontweight='bold', fontsize=12,
+            )
+            sm = ScalarMappable(
+                cmap='RdBu_r',
+                norm=Normalize(-huc12_vmax, huc12_vmax),
+            )
+            sm.set_array([])
+            cbar = fig.colorbar(
+                sm, ax=ax, shrink=0.5, pad=0.06,
+                orientation='horizontal', aspect=30, extend='both',
+            )
+            cbar.formatter = mticker.FuncFormatter(
+                lambda x, _: f'{x / 1e6:g}',
+            )
+            cbar.update_ticks()
+            cbar.set_label(
+                r'$\Delta$ Volume ($\times$10$^{6}$ m$^{3}$, ML $-$ NHM)',
+                fontsize=10, fontweight='bold',
+            )
+            cbar.ax.tick_params(labelsize=10)
+            secax = cbar.ax.secondary_xaxis(
+                'top',
+                functions=(
+                    lambda x: x * M3_TO_AF, lambda x: x / M3_TO_AF,
+                ),
+            )
+            secax.set_xlabel(
+                'Δ Volume (AF)', fontsize=10, fontweight='bold',
+            )
+            secax.tick_params(labelsize=10)
+            add_ama_ina_legend(ax)
+            fig.savefig(
+                os.path.join(
+                    spatial_diff_dir, 'Spatial_Diff_HUC12_CU.png',
+                ),
+                dpi=600, bbox_inches='tight',
+            )
+            plt.close(fig)
+            logger.info(
+                f'  HUC12-level CU Δ volume figure saved to '
+                f'{spatial_diff_dir}'
+            )
+
+        # ── Pixel-level Δ Depth (mm) imshow (ML − NHM, 1 panel) ──
+        # Mirrors the Peff pixel diff but with a single panel since CU
+        # has only one ML variant (no PCML).  Masks both rasters to
+        # the workflow irrigation footprint so the diff signal isn't
+        # dominated by which irrigation mask each source carries.
+        ml_mean_cu_tif = os.path.join(
+            os.path.dirname(irr_cu_dir.rstrip('/')),
+            'ML_mean_annual_CU_mm.tif',
+        )
+        nhm_mean_cu_tif = os.path.join(
+            nhm_cu_out, 'NHM_mean_annual_CU_mm.tif',
+        )
+        if (
+            os.path.isfile(ml_mean_cu_tif)
+            and os.path.isfile(nhm_mean_cu_tif)
+        ):
+            with rio.open(ml_mean_cu_tif) as src_ml:
+                ml_pix = src_ml.read(1).astype(np.float64)
+                pixel_extent_cu = [
+                    src_ml.bounds.left, src_ml.bounds.right,
+                    src_ml.bounds.bottom, src_ml.bounds.top,
+                ]
+            with rio.open(nhm_mean_cu_tif) as src_nhm:
+                nhm_pix = src_nhm.read(1).astype(np.float64)
+            ml_pix[np.isnan(ml_pix)] = 0.0
+            nhm_pix[np.isnan(nhm_pix)] = 0.0
+
+            # Apply the workflow irrigation mask so we compare like
+            # footprints (NHM is HUC12-aggregated then rasterized; ML
+            # is per-pixel — both need the same irr mask applied to
+            # avoid the diff being dominated by mask-mismatch).
+            if predictor_dir:
+                _cu_mask_result = _build_workflow_irr_mask(
+                    predictor_dir, ml_year_range,
+                )
+                if _cu_mask_result is not None:
+                    _cu_irr_mask, _ = _cu_mask_result
+                    if ml_pix.shape == _cu_irr_mask.shape:
+                        ml_pix[~_cu_irr_mask] = 0.0
+                    if nhm_pix.shape == _cu_irr_mask.shape:
+                        nhm_pix[~_cu_irr_mask] = 0.0
+                    logger.info(
+                        '  Applied workflow irrigation mask to CU pixel '
+                        'arrays (%d masked-in pixels)',
+                        int(_cu_irr_mask.sum()),
+                    )
+
+            diff_pix = ml_pix - nhm_pix
+            both_zero = (ml_pix == 0) & (nhm_pix == 0)
+            diff_valid = diff_pix[~both_zero]
+            if diff_valid.size:
+                pix_vmax_cu = max(
+                    abs(np.nanpercentile(diff_valid, 2)),
+                    abs(np.nanpercentile(diff_valid, 98)),
+                    1e-6,
+                )
+                fig, ax = plt.subplots(
+                    1, 1, figsize=(10, 8), constrained_layout=True,
+                )
+                fig.suptitle(
+                    'Irrigation CU — Pixel-Level Depth Difference',
+                    fontsize=14, fontweight='bold',
+                )
+                ax.set_facecolor('#D5D5D5')
+                ax.imshow(
+                    np.ma.masked_where(both_zero, diff_pix),
+                    extent=pixel_extent_cu, origin='upper',
+                    cmap='RdBu_r',
+                    vmin=-pix_vmax_cu, vmax=pix_vmax_cu,
+                    interpolation='nearest',
+                )
+                _overlay_boundaries(
+                    ax, b_reproj_cu, ama_ina_names_cu, b_name_cu,
+                    label_fontsize=5.0, label_all=True,
+                )
+                ax.set_title(
+                    'ML − NHM', fontweight='bold', fontsize=12,
+                )
+                sm = ScalarMappable(
+                    cmap='RdBu_r',
+                    norm=Normalize(-pix_vmax_cu, pix_vmax_cu),
+                )
+                sm.set_array([])
+                cbar = fig.colorbar(
+                    sm, ax=ax, shrink=0.5, pad=0.06,
+                    orientation='horizontal', aspect=30, extend='both',
+                )
+                cbar.set_label(
+                    'Δ Depth (mm)', fontsize=10, fontweight='bold',
+                )
+                cbar.ax.tick_params(labelsize=10)
+                secax = cbar.ax.secondary_xaxis(
+                    'top',
+                    functions=(
+                        lambda x: x * _mm_to_ft_cu,
+                        lambda x: x / _mm_to_ft_cu,
+                    ),
+                )
+                secax.set_xlabel(
+                    'Δ Depth (ft)',
+                    fontsize=10, fontweight='bold',
+                )
+                secax.tick_params(labelsize=10)
+                add_ama_ina_legend(ax)
+                fig.savefig(
+                    os.path.join(
+                        spatial_diff_dir, 'Spatial_Diff_Pixel_CU.png',
+                    ),
+                    dpi=600, bbox_inches='tight',
+                )
+                plt.close(fig)
+                logger.info(
+                    f'  Pixel-level CU Δ depth figure saved to '
+                    f'{spatial_diff_dir}'
+                )
+        else:
+            logger.info(
+                '  Skipping pixel-level CU diff: missing %s or %s',
+                ml_mean_cu_tif, nhm_mean_cu_tif,
+            )
+
         # ── HUC12-level temporal diagnostics ──
         logger.info('  Computing HUC12-level CU temporal diagnostics...')
         # NHM yearly {year: {huc12: AF}}
