@@ -179,8 +179,9 @@ downstream products.
 | `Uncertainty/` | Step 3b UQ outputs — per-component rasters (Sigma_MACA, Sigma_Model, Sigma_Irr, Sigma_LULC, Sigma_GW, Sigma_USBR, Sigma_CU, Sigma_Total), per-basin / per-sub-basin σ CSVs, attribution figures, sensitivity diagnostics, and `CAP_Scenario/` sub-directory with the 7-scenario CAP delivery sweep (Baseline / DCP Tier 0–3 / Basic Coordination / Extreme Shortage). |
 | `Raster_Maps/` | Step 3g era-mean raster maps (Hindcast / Historical / Projection × all categories), trend maps (per-pixel Mann-Kendall + Sen slope on annual rasters), ternary attribution figures, and the `CAP_Scenario/` spatial-map suite. |
 | `SW_Capture/` | SW Capture Index outputs (per-pool capture fraction / depth / volume rasters with σ propagation, per-well capture disaggregation, surface-watershed summaries). |
-| `Well_Package/` | Per-well GeoParquet + GPKG locations with predicted withdrawals and σ bands (1984–2099) — the primary user-facing per-well product. |
+| `Well_Package/` | Four GeoParquet files (Parquet with embedded `geometry` column + GeoParquet metadata): `Well_Package_{mm,ft,m3,AF}.parquet`, one per unit convention.  Each holds ~34.7 M rows (every ADWR well × every year 1984–2099) × 34 columns: `REGISTRY_I`, `Year`, `WATER_USE`, `geometry`, plus prediction + σ for the 11 partition / CU categories and 3 SW Capture bands.  Primary user-facing per-well product. |
 | `Annual_Summaries/` | Statewide and per-basin annual summary CSVs (Total_Predicted, per-category, σ_Total). |
+| `ADWR/` | ADWR partner CSV delivery (Step 3i): 16 long-format CSVs — 8 per-basin (`Basin_<cat>.csv`) + 8 per-sub-basin (`Subbasin_<cat>.csv`) — covering Total_Predicted, Total_GW, Total_SW, Irrigation_GW/SW, Non_Irrigation_GW/SW, and Irrigation_CU.  Plus a `readme.txt` describing the schema and source.  Aggregated from per-basin/sub-basin `<cat>/Basin_Time_Series/*_Annual.csv` and `<cat>/Subbasin_Time_Series/*_Annual.csv` files; each row has `Year, Basin/Subbasin, Mean_Depth_mm, Mean_Depth_ft, Volume_m3, Volume_AF, Era` (sub-basin files additionally have `Parent_Basin`).  Designed for delivery to ADWR / state-agency partners (e.g. Senate Bill 1740 basin assessments) without requiring users to navigate the full per-basin file tree. |
 | `Basin_Time_Series/`, `AMA_INA_Time_Series/`, `Subbasin_Time_Series/` | Per-basin / per-AMA / per-sub-basin time series figures + CSVs. |
 | `Withdrawal_Intercomparison/`, `CU_Intercomparison/`, `Peff_Intercomparison/`, `PS_Intercomparison/`, `NHM_IE_Basins/`, `USGS_Calibration_Bars/`, `CAP_SRP_Validation/` | Step 4 intercomparison outputs against USGS NHM withdrawals / NHM CU / Reitz Peff / PS reanalysis / CAP+SRP delivery records. |
 | `Model/` | Trained model pickles, hyperparameter search history, SHAP cache, calibration curves. |
@@ -302,7 +303,7 @@ companion paper:
 
 Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C.
 (2026).  *AZ-Hydro — Historical and Projected Arizona Annual Water
-Use: Software, Input Data, Models, Raster and Well GeoPackage
+Use: Software, Input Data, Models, Raster and Well Package
 Predictions, and Validation at 2 km Resolution (1896–2099).*
 **Zenodo.** [DOI: 10.5281/zenodo.19057936](https://doi.org/10.5281/zenodo.19057936)
 

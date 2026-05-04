@@ -19,7 +19,7 @@ citations, see [`Data/README.md`](Data/README.md) inside this archive
 
 Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C.
 (2026). *AZ-Hydro — Historical and Projected Arizona Annual Water
-Use: Software, Input Data, Models, Raster and Well GeoPackage
+Use: Software, Input Data, Models, Raster and Well Package
 Predictions, and Validation at 2 km Resolution (1896–2099).* Zenodo.
 [https://doi.org/10.5281/zenodo.19057936](https://doi.org/10.5281/zenodo.19057936)
 
@@ -67,10 +67,28 @@ the six σ components (σ_MACA + σ_Model + σ_Irr + σ_LULC + σ_GW +
 σ rasters are in the larger `az-hydro-data.7z` archive; only the
 combined σ_Total is included here.
 
-### 3. Per-well GeoPackage + Parquet (`Well_Package/`)
+### 3. Per-well GeoParquet (`Well_Package/`)
 
-Per-well predicted withdrawals + σ bands (1984–2099), GPKG and
-GeoParquet formats.  Headline product for well-level analysis.
+Four GeoParquet files (Parquet with embedded `geometry` column +
+GeoParquet metadata) covering every ADWR Well Registry well × every
+year 1984–2099 (~34.7 M well-year rows).  Each file holds the same
+34 columns in a different unit convention:
+
+- `Well_Package_mm.parquet` — depths in mm
+- `Well_Package_ft.parquet` — depths in ft
+- `Well_Package_m3.parquet` — volumes in m³
+- `Well_Package_AF.parquet` — volumes in acre-feet
+
+Columns: `REGISTRY_I`, `Year`, `WATER_USE`, `geometry`, plus
+prediction + σ for the 11 categories (Total, Total_GW, Total_SW,
+Irrigation, Irrigation_GW, Irrigation_SW, Non_Irrigation,
+Non_Irrigation_GW, Non_Irrigation_SW, Irrigation_CU,
+Irrigation_GW_CU, Irrigation_SW_CU) and the 3 SW Capture bands
+(Total, Irrigation, Non_Irrigation).  Headline product for
+well-level analysis.
+
+Load in Python with `geopandas.read_parquet(...)` or in R with
+`arrow` + `sfarrow`.
 
 ### 4. SW Capture Index (`SW_Capture/`)
 
@@ -91,6 +109,7 @@ below.)
 
 - `Annual_Summaries/` — statewide + per-basin annual rollup CSVs
 - `Basin_Time_Series/`, `AMA_INA_Time_Series/`, `Subbasin_Time_Series/` — per-basin / per-AMA / per-sub-basin annual time series CSVs + figures
+- **`ADWR/`** — partner-ready long-format CSV delivery: 16 files (`Basin_<cat>.csv` × 8 + `Subbasin_<cat>.csv` × 8) covering Total_Predicted, Total_GW, Total_SW, Irrigation_GW/SW, Non_Irrigation_GW/SW, and Irrigation_CU.  Each file is a long-format time series (one row per Year × Basin/Subbasin), aggregated from the per-basin / per-sub-basin `<cat>/Basin_Time_Series/*_Annual.csv` files.  Includes a `readme.txt` describing the schema, units, era definitions, and load examples.  Designed for ADWR / state-agency partners (e.g. Senate Bill 1740 basin assessments) who want one CSV per category instead of navigating the per-basin file tree.
 - `Full_Period_Time_Series.csv` + `.png` — headline statewide trajectory
 - `Era_Summary_Bar.png`, `Mean_Annual_Predicted_mm.tif`, `Prediction_Exceedance_Summary.csv`, `Graphical_Abstract_Fig1.png` — top-level summary figures and CSVs
 

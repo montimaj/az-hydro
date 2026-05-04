@@ -3538,6 +3538,150 @@ def create_graphical_abstract_only() -> None:
 
 
 # =============================================================================
+# Step 3i — ADWR partner CSV delivery
+# =============================================================================
+
+# 7 partition categories that have per-category Basin_Time_Series and
+# Subbasin_Time_Series sub-directories.  Total_Predicted is handled
+# separately because it's already aggregated as Annual_Summaries/
+# Basin_Total.csv and Subbasin_Total.csv and not present as a per-
+# category Total_Predicted/ directory.
+_ADWR_DELIVERY_CATEGORIES: tuple[str, ...] = (
+    'Total_GW',
+    'Total_SW',
+    'Irrigation_GW',
+    'Irrigation_SW',
+    'Non_Irrigation_GW',
+    'Non_Irrigation_SW',
+    'Irrigation_CU',
+)
+
+
+def create_adwr_csv_delivery() -> None:
+    """Generate the per-category long-format basin + sub-basin CSVs for
+    the ADWR partner data delivery (Senate Bill 1740 basin assessments).
+
+    Writes 16 long-format CSVs to ``{prediction_dir}/ADWR/``:
+
+    * 8 ``Basin_<cat>.csv`` (one per category, ~52 basins concatenated)
+    * 8 ``Subbasin_<cat>.csv`` (one per category, ~82 sub-basins
+      concatenated)
+
+    Categories: ``Total_Predicted, Total_GW, Total_SW, Irrigation_GW,
+    Irrigation_SW, Non_Irrigation_GW, Non_Irrigation_SW, Irrigation_CU``.
+
+    For ``Total_Predicted``, copies the already-aggregated
+    ``Annual_Summaries/Basin_Total.csv`` and
+    ``Annual_Summaries/Subbasin_Total.csv`` directly.  For the other
+    seven categories, concatenates the per-basin / per-subbasin
+    ``<cat>/Basin_Time_Series/<NAME>_Annual.csv`` and
+    ``<cat>/Subbasin_Time_Series/<NAME>_Annual.csv`` files into one
+    long-format CSV per (category, level), preserving the source schema
+    (Year, Basin/Subbasin, Mean_Depth_mm, Mean_Depth_ft, Volume_m3,
+    Volume_AF, Era; sub-basin files additionally have Parent_Basin).
+
+    Reads only files Step 3 / 3b have already cached on disk; runs in
+    a few seconds.  Idempotent — overwrites previous deliverables on
+    each run.
+
+    Output lives under ``Data/Outputs/.../Full_Prediction_XGBRF/ADWR/``
+    so it auto-bundles into both Zenodo archives (``az-hydro-data.7z``
+    and ``az-hydro-headline.7z``) without any extra packaging step.
+    """
+    import shutil
+    logger.info('=' * 60)
+    logger.info('Step 3i: ADWR partner CSV delivery')
+    logger.info('=' * 60)
+
+    prediction_dir = os.path.join(
+        MODEL_DIR, f'Full_Prediction_{PREDICTION_MODEL}',
+    )
+    annual_dir = os.path.join(prediction_dir, 'Annual_Summaries')
+
+    # Output dir = {prediction_dir}/ADWR (sibling of Annual_Summaries/,
+    # Raster_Maps/, Uncertainty/, etc.).  Lives under Data/Outputs/ so
+    # it ships with both Zenodo .7z archives by default.
+    out_dir = os.path.join(prediction_dir, 'ADWR')
+    makedirs(out_dir)
+    logger.info(f'Output directory: {out_dir}')
+
+    # Always refresh the partner-facing readme.txt from the template
+    # bundled with the repo (azhydro/templates/adwr_readme.txt).  This
+    # ensures the readme survives full Outputs/ wipes and stays in
+    # sync with whatever's currently in the template — to update the
+    # partner-facing description, edit azhydro/templates/adwr_readme.txt
+    # and re-run Step 3i.
+    template_readme = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        'templates', 'adwr_readme.txt',
+    )
+    if os.path.isfile(template_readme):
+        shutil.copy2(template_readme, os.path.join(out_dir, 'readme.txt'))
+        logger.info(
+            f'  Copied readme.txt from azhydro/templates/adwr_readme.txt',
+        )
+    else:
+        logger.warning(
+            f'  Template missing: {template_readme} — readme.txt not refreshed',
+        )
+
+    # ── 1. Total_Predicted (already aggregated by Step 3) ──────────
+    for src_name, dst_name in [
+        ('Basin_Total.csv', 'Basin_Total_Predicted.csv'),
+        ('Subbasin_Total.csv', 'Subbasin_Total_Predicted.csv'),
+    ]:
+        src = os.path.join(annual_dir, src_name)
+        dst = os.path.join(out_dir, dst_name)
+        if os.path.isfile(src):
+            shutil.copy2(src, dst)
+            logger.info(f'  Copied {dst_name} from Annual_Summaries/{src_name}')
+        else:
+            logger.warning(
+                f'  {src} not found — skipping {dst_name}.  Run Step 3 first.',
+            )
+
+    # ── 2. Per-category basin + sub-basin time series ──────────────
+    for cat in _ADWR_DELIVERY_CATEGORIES:
+        for src_subdir, out_prefix in [
+            ('Basin_Time_Series', 'Basin'),
+            ('Subbasin_Time_Series', 'Subbasin'),
+        ]:
+            src_dir = os.path.join(prediction_dir, cat, src_subdir)
+            if not os.path.isdir(src_dir):
+                logger.warning(
+                    f'  {src_dir} not found — skipping {cat} {out_prefix}',
+                )
+                continue
+            files = sorted(
+                f for f in os.listdir(src_dir) if f.endswith('_Annual.csv')
+            )
+            if not files:
+                logger.warning(
+                    f'  No *_Annual.csv files in {src_dir} — skipping.',
+                )
+                continue
+            out_path = os.path.join(out_dir, f'{out_prefix}_{cat}.csv')
+            n_rows = 0
+            with open(out_path, 'w') as out_f:
+                for i, fname in enumerate(files):
+                    fpath = os.path.join(src_dir, fname)
+                    with open(fpath) as in_f:
+                        header = in_f.readline()
+                        if i == 0:
+                            out_f.write(header)
+                        for line in in_f:
+                            if line.strip():
+                                out_f.write(line)
+                                n_rows += 1
+            logger.info(
+                f'  Wrote {out_prefix}_{cat}.csv '
+                f'({n_rows:,} rows from {len(files)} files)',
+            )
+
+    logger.info(f'ADWR CSV delivery complete: {out_dir}')
+
+
+# =============================================================================
 # Step 4 — Intercomparison with USGS datasets
 # =============================================================================
 
@@ -3785,6 +3929,12 @@ Pipeline steps (comma-separated or 'all'):
        Annual_Summaries/ from disk). Must be explicitly requested —
        excluded from --steps all because 3g already produces this
        figure. Intended for iterating on the Figure 1 layout.
+  3i   ADWR partner CSV delivery (16 long-format CSVs at
+       Data/Outputs/.../Full_Prediction_XGBRF/ADWR/ — per-basin and
+       per-sub-basin time series for 7 partition categories +
+       Irrigation CU; aggregated from per-basin/subbasin Annual.csv
+       files in each per-category Basin_Time_Series/ and
+       Subbasin_Time_Series/ directory).
   4    USGS intercomparison
   4b   CU intercomparison
   4c   CAP/SRP surface-water validation
@@ -4115,6 +4265,16 @@ def main() -> None:
     # suite), so ``--steps all`` intentionally skips it.
     if '3h' in selected:
         create_graphical_abstract_only()
+
+    # Step 3i — ADWR partner CSV delivery.  Reads only Annual_Summaries/
+    # and per-category Basin_Time_Series/Subbasin_Time_Series caches
+    # produced by Step 3 (and their per-category companions); runs in
+    # a few seconds.  Output lives at {prediction_dir}/ADWR/ so it
+    # auto-bundles into the Zenodo .7z archives.  Included in
+    # --steps all because it produces a distinct deliverable
+    # (long-format per-category CSVs) that no other step generates.
+    if should_run('3i'):
+        create_adwr_csv_delivery()
 
     # Step 4
     if should_run('4'):

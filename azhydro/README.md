@@ -13,7 +13,7 @@ Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Hi
 
 Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Where Arizona's Water Goes: Declining Agricultural Dominance and Rising Urban Demand Drive a Two-Century Shift in Withdrawal Patterns (1896–2099). _In prep. for AGU Earth's Future_.
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). AZ-Hydro — Historical and Projected Arizona Annual Water Use: Software, Input Data, Models, Raster and Well GeoPackage Predictions, and Validation at 2 km Resolution (1896–2099). _Zenodo_. https://doi.org/10.5281/zenodo.19057936.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). AZ-Hydro — Historical and Projected Arizona Annual Water Use: Software, Input Data, Models, Raster and Well Package Predictions, and Validation at 2 km Resolution (1896–2099). _Zenodo_. https://doi.org/10.5281/zenodo.19057936.
 
 ---
 
@@ -143,9 +143,10 @@ Step 3h is excluded from `--steps all` because Step 3g already produces the grap
 | `2s` | Cross-strategy summary (can run standalone from saved results) |
 | `3`  | Full-period XGBRF prediction (1896–2099) |
 | `3b` | Hybrid uncertainty quantification (incl. σ-propagated SW Capture Index and per-well σ disaggregation) |
-| `3e` | Well package (per-well Parquet + GPKG locations with uncertainty, incl. SW capture + σ) |
+| `3e` | Well Package (per-well GeoParquet predictions in 4 unit conventions: mm / ft / m³ / AF, ~34.7 M well-year rows × 34 columns each, with σ + SW Capture bands) |
 | `3g` | Raster maps, actual vs predicted, and trend analysis for all output categories |
 | `3h` | Graphical abstract / Figure 1 only (lightweight; reads `Annual_Summaries/` from disk). Must be explicitly requested — excluded from `--steps all` because `3g` already produces this figure. Intended for iterating on the Figure 1 layout in ~30 s without re-running anything else. |
+| `3i` | ADWR partner CSV delivery: 16 long-format CSVs + a `readme.txt` at `Data/Outputs/.../Full_Prediction_XGBRF/ADWR/` — per-basin and per-sub-basin time series for 7 partition categories (Total_GW, Total_SW, Irrigation_GW/SW, Non_Irrigation_GW/SW, Irrigation_CU) plus Total_Predicted.  Aggregated from per-basin/subbasin `<cat>/Basin_Time_Series/*_Annual.csv` and `<cat>/Subbasin_Time_Series/*_Annual.csv` files plus `Annual_Summaries/{Basin,Subbasin}_Total.csv`; `readme.txt` is refreshed from `azhydro/templates/adwr_readme.txt`.  Lightweight (~0.5 s) and idempotent — fully reproducible from a clean `Outputs/` wipe.  Lives under `Data/Outputs/` so it auto-bundles into both Zenodo `.7z` archives.  Included in `--steps all`. |
 | `4`  | USGS intercomparison |
 | `4b` | CU intercomparison |
 | `4c` | CAP/SRP surface-water validation |
@@ -668,9 +669,10 @@ Step 1   ─  Create AZ Predictor DataFrame
 Step 2   ─  Model Evaluation (5 strategies: Random, Pixel Holdout, Temporal LOO, Spatial LOO, Seeded Spatial LOO)
 Step 3   ─  Full-Period XGBRF Prediction (1896–2099)
 Step 3b  ─  Hybrid 6-component σ_total UQ, raster augmentation, σ-propagated SW Capture Index
-Step 3e  ─  Well Package (per-well Parquet + GPKG locations with uncertainty, incl. SW capture + σ)
+Step 3e  ─  Well Package (per-well GeoParquet predictions in 4 unit conventions with uncertainty, incl. SW capture + σ)
 Step 3g  ─  Raster Maps & Trend Analysis for All Output Categories
 Step 3h  ─  Graphical Abstract / Figure 1 only (~30 s; explicit opt-in)
+Step 3i  ─  ADWR partner CSV delivery (16 long-format CSVs to Data/Outputs/.../Full_Prediction_XGBRF/ADWR/)
 Step 4   ─  USGS Intercomparison (Withdrawals, CU, Peff)
 ```
 
@@ -1315,6 +1317,59 @@ calls `vizops.create_graphical_abstract()` directly — no era-mean raster
 maps, no trend analysis, no σ recomputation, no GEE traffic.  Step 3h is
 deliberately excluded from `--steps all` because Step 3g already produces
 the graphical abstract as part of its full raster-map suite.
+
+
+#### Step 3i — ADWR partner CSV delivery (`create_adwr_csv_delivery()`)
+
+```bash
+python pipeline.py --steps 3i   # ≈ 0.5 s; reads basin / sub-basin time-series CSVs from disk
+```
+
+Step 3i produces a focused CSV deliverable for ADWR partners (Senate
+Bill 1740 basin assessments and similar) at
+`Data/Outputs/ML_Model_All_Wells_2000m/Full_Prediction_XGBRF/ADWR/`
+(sibling of `Annual_Summaries/`, `Raster_Maps/`, `Uncertainty/`, etc.).
+Output: **16 long-format CSVs** — one per (category × spatial level)
+— covering the eight published water-use categories at both basin
+and sub-basin scales:
+
+| Spatial level | Categories included | File pattern |
+|---|---|---|
+| Basin (52 ADWR basins) | Total_Predicted, Total_GW, Total_SW, Irrigation_GW, Irrigation_SW, Non_Irrigation_GW, Non_Irrigation_SW, Irrigation_CU | `Basin_<category>.csv` |
+| Sub-basin (82 ADWR sub-basins) | same 8 categories | `Subbasin_<category>.csv` |
+
+Schema is identical to the per-basin / per-sub-basin `*_Annual.csv`
+sources but stitched into one file per (category, level): `Year,
+Basin (or Subbasin), Mean_Depth_mm, Mean_Depth_ft, Volume_m3,
+Volume_AF, Era` (sub-basin files additionally have `Parent_Basin`).
+
+**How the aggregation works.**  `Total_Predicted` is copied directly
+from `Annual_Summaries/Basin_Total.csv` and
+`Annual_Summaries/Subbasin_Total.csv` (already aggregated by Step 3
+into long format).  The other seven categories are **concatenated**
+from each `<category>/Basin_Time_Series/*_Annual.csv` and
+`<category>/Subbasin_Time_Series/*_Annual.csv` directory — header from
+the first file, rows from all files, in alphabetical basin order.
+
+Step 3i also writes a partner-facing `readme.txt` alongside the 16
+CSVs, refreshed from the version-controlled template at
+`azhydro/templates/adwr_readme.txt` on every run.  To update the
+description partners see, edit the template and re-run Step 3i —
+the readme inside `Data/Outputs/.../ADWR/` (and downstream Zenodo
+archives) will pick up the change automatically.
+
+Step 3i is **fully idempotent and self-contained**: re-running
+overwrites the 16 CSVs and `readme.txt` on each invocation, and
+nothing in `paper/` or any other repo location is required.  Reads
+only on-disk caches from Step 3 / 3b — no model invocation, no GEE
+traffic, no raster generation.  Included in `--steps all` because it
+produces a unique deliverable not generated by any other step.
+
+Because the output lives under `Data/Outputs/`, it **auto-bundles
+into both Zenodo `.7z` archives** (`az-hydro-data.7z` and
+`az-hydro-headline.7z` via the explicit `Full_Prediction_XGBRF/ADWR`
+include) — partners can either download the deposit and extract just
+the `ADWR/` sub-directory, or be sent the 17 files directly.
 
 
 #### 3d. Hybrid uncertainty quantification (`uncertaintyops.run_uncertainty_quantification()`)
