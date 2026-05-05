@@ -50,7 +50,7 @@ The 1915–1945 GW anchors come from USGS OFR 94-476 (Anning & Duet 1994), recov
 
 **What it doesn't do.** See [Known Limitations](azhydro/README.md#known-limitations) for the structural caveats (deep-hindcast extrapolation, projection structural-change blindness, irrigation efficiency paradox in CU projections, sparse metering in Willcox/Hualapai, static WTD raster, peak-year 12–18 % under-prediction from 2024 registry attrition).
 
-**Where to start.** Methods and CLI usage: [`azhydro/README.md`](azhydro/README.md). GEE export scripts: [`gee/README.md`](gee/README.md). Input/output data inventory and external-dataset citations: [`Data/README.md`](Data/README.md). Zenodo archive: [10.5281/zenodo.19057936](https://doi.org/10.5281/zenodo.19057936).
+**Where to start.** Live web app: [AZ-Hydro Explorer](https://azhydro.projects.earthengine.app/view/azhydro-explorer) (interactive GEE App — year slider, side-by-side category compare, click-driven pixel/basin/sub-basin/well time series with 95 % CI). Methods and CLI usage: [`azhydro/README.md`](azhydro/README.md). GEE export scripts: [`gee/README.md`](gee/README.md). Input/output data inventory and external-dataset citations: [`Data/README.md`](Data/README.md). Zenodo archive: [10.5281/zenodo.19057936](https://doi.org/10.5281/zenodo.19057936).
 
 ## Graphical Abstract
 
@@ -93,8 +93,10 @@ az-hydro/
 ├── LICENSE                          # BSD 3-Clause "Revised"
 ├── environment.yml                  # Conda environment specification
 ├── ruff.toml                        # Ruff linter configuration
-├── compress_for_zenodo.sh           # Build az-hydro-data.7z (full archive, ~74 GB)
-├── compress_headline.sh             # Build az-hydro-headline.7z (headline subset, ~8 GB)
+│
+├── zenodo/                          # Zenodo deposit build scripts (run from repo root)
+│   ├── compress_for_zenodo.sh       # Build az-hydro-data.7z (full archive, ~74 GB)
+│   └── compress_headline.sh         # Build az-hydro-headline.7z (headline subset, ~8 GB)
 │
 ├── azhydro/                         # ML pipeline package
 │   ├── README.md                    # Methods, CLI usage, and Results documentation
@@ -116,24 +118,18 @@ az-hydro/
 │       ├── visualops.py             # Journal-quality time-series & map plotting
 │       └── wellops.py               # Well-level disaggregation from pixel rasters
 │
-├── gee/                             # Google Earth Engine export scripts
+├── gee/                             # Google Earth Engine export + output-visualization scripts
 │   ├── README.md                    # GEE script documentation
 │   ├── config.py                    # Shared GEE constants (bands, models, scales)
 │   ├── run_all_exports.py           # CLI to batch-run all export scripts
 │   ├── plot_monthly_ratios.py       # Diagnostic plots for monthly ET/ETo ratios
-│   ├── export_gridmet_hargreaves_ratio.py
-│   ├── export_lulc_ensemble.py
-│   ├── export_maca_gcm_annual_et.py
-│   ├── export_maca_gcm_annual_eto.py
-│   ├── export_maca_gcm_annual_peff.py
-│   ├── export_maca_monthly_et.py
-│   ├── export_maca_monthly_eto.py
-│   ├── export_monthly_etof.py
-│   ├── export_monthly_peff.py
-│   ├── export_openet_reitz_ratio.py
-│   ├── export_prism_hargreaves_eto.py
-│   ├── export_usgs_adjusted_et.py
-│   └── js/                          # GEE Code Editor visualization scripts
+│   ├── export_*.py                  # 12 input-export scripts (climate, ET, LULC ensemble, etc.)
+│   ├── generate_geeup_metadata.py   # Walk gee/Data/, write per-leaf metadata.csv for upload
+│   ├── upload_to_gee.sh             # Batch raster upload (geeup upload --resume, 10 workers)
+│   ├── pivot_to_geojson.py          # Pivot Well_Package GeoParquet → 15 per-category zipped GeoJSONs
+│   ├── upload_well_package.sh       # Batch tabular upload (geeup tabup) of well GeoJSONs
+│   ├── azhydro-visualizer.js        # Interactive GEE Apps visualizer (year slider + click-driven time series)
+│   └── js/                          # Legacy GEE Code Editor visualization scripts
 │
 ├── tests/                           # Unit tests
 │   ├── conftest.py                  # Shared fixtures

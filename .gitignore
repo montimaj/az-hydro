@@ -188,5 +188,6 @@ wtd_states/
 
 Data/Inputs*
 *.7z
-*.sh
 *.tmp
+gee/Data
+zenodo/*.md

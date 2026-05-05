@@ -503,6 +503,123 @@ tmmn   = maca_ic.select('tasmin').mean()
 
 Since every day has exactly one image per model/scenario pair, `.mean()` across all ~14,600 images/year gives the grand mean (equivalent to per-model averaging). For additive quantities (precipitation), `.sum().divide(40)` gives the ensemble-mean annual total.
 
+## Output Visualization Pipeline
+
+**Live app:** [AZ-Hydro Explorer](https://azhydro.projects.earthengine.app/view/azhydro-explorer) — published GEE App backed by the assets and the visualizer described below.
+
+The scripts above export **inputs** consumed by the modeling pipeline.  The files below ingest the modeling pipeline's **outputs** (`Data/Outputs/.../Full_Prediction_XGBRF/`) into GEE and serve them through an interactive visualizer.  All assets land under `projects/azhydro/assets/az-wu/`.
+
+The pipeline uses two distinct upload paths:
+- **Rasters** → `geeup upload` (handles ImageCollections via `metadata.csv` files).
+- **Tabular FeatureCollections (CSVs with `.geo` GeoJSON column)** → `gsutil cp` → `earthengine upload table`.  geeup tabup was tried first but rejected the CSVs in practice ("No tables to upload" both bare and zipped); the EE CLI accepts the `.geo` column natively.  CSVs are staged in `gs://azhydro/` (the same bucket already used by the pipeline for the HUC12 GeoJSON — see [`azhydro/hydrolibs/dataops.py`](../azhydro/hydrolibs/dataops.py)).
+
+### Files
+
+| File | Purpose |
+|---|---|
+| [`generate_geeup_metadata.py`](generate_geeup_metadata.py) | Walk `gee/Data/`, write per-leaf `metadata.csv` files (`id_no`, `system:time_start`, `year`, `unit`, `category`, `asset_collection`).  Detects unit-parent dirs (`Depth_mm`/`Depth_ft`/`Volume_m3`/`Volume_AF`) and consolidates the four unit conventions into a **single** ImageCollection per category, tagging each image with a `unit` property the visualizer filters on. |
+| [`upload_to_gee.sh`](upload_to_gee.sh) | Batch raster upload.  Iterates every `metadata.csv`, runs `geeup upload --workers 10 --resume` on each.  Per-source logs in `gee/upload_logs/`.  Supports `--dry-run` and `--filter <pattern>`. |
+| [`pivot_to_csv.py`](pivot_to_csv.py) | Pivot the Well_Package long-format GeoParquet (170,137 wells × 204 years × 15 categories, ~2.1 GB) into 15 per-category CSVs at `gee/Data/Well_Package/csv/Well_Package__<Cat>.csv`.  Each row carries a `.geo` column (GeoJSON Point), `REGISTRY_I`, `WATER_USE`, plus year-stamped property columns (`<Cat>_AF_<year>`, `<Cat>_AF_sigma_<year>`) — ~412 properties / row.  Paths anchored to the script location, so it runs from any cwd.  ~5–10 min per category on 64 GB RAM. |
+| [`upload_well_package.sh`](upload_well_package.sh) | Loops the 15 CSVs: `gsutil cp` to `gs://azhydro/Well_Package__<Cat>.csv`, then `earthengine upload table --asset_id=projects/azhydro/assets/az-wu/Well_Package__<Cat>` to ingest each.  Per-stage log: `gee/upload_logs/Well_Package_upload.log`.  `--dry-run` and `--filter <pattern>` flags.  Cleanup hint at the end (`gsutil -m rm`). |
+| [`pivot_cap_cumulative.py`](pivot_cap_cumulative.py) | Pivot `Data/Outputs/.../CAP_Scenario/CAP_Scenario_Cumulative.csv` (long format, ~27 k rows) into a wide-format CSV with `.geo` column: 364 features (52 basins × 7 scenarios), `Cum_<year>` columns covering 2026–2099, basin centroid as the geometry. |
+| [`upload_cap_cumulative.sh`](upload_cap_cumulative.sh) | Stage the CSV to `gs://azhydro/CAP_Scenario_Cumulative.csv` and ingest as `projects/azhydro/assets/az-wu/CAP_Scenario_Cumulative`.  The visualizer reads this asset on every CAP click to chart all 7 scenarios for the basin. |
+| [`cap_service_area_to_csv.py`](cap_service_area_to_csv.py) | Convert the CAP service-area polygon GeoJSON (3 polygons, MARICOPA / PIMA / PINAL) into `gee/Data/CAP/CAP.csv` with a `.geo` GeoJSON-string column (polygon geometry preserved exactly). |
+| [`upload_cap_service_area.sh`](upload_cap_service_area.sh) | Stage to `gs://azhydro/CAP.csv` and ingest as `projects/azhydro/assets/az-wu/CAP`.  Asset is consumed by the visualizer as the CAP-eligible county overlay layer. |
+| [`azhydro-visualizer.js`](azhydro-visualizer.js) | GEE Apps interactive visualizer.  Year slider 1896–2099, category / unit / band dropdowns, manual color-stretch override (auto-fills with the 2nd / 98th percentile of the current image), click-driven pixel + basin + sub-basin time series with **prediction + 95 % CI envelope** on every chart, plus a **nearest-well** chart pulled from the Well_Package FeatureCollections (capacity-disaggregated per-well values; AF → selected unit converted client-side).  **Side-by-side comparison** via the Compare toggle: `ui.SplitPanel` with linked zoom/pan + draggable wipe divider; each map has its own category dropdown AND its own CAP scenario / window dropdowns so two CAP scenarios can be compared on the wipe.  Vector overlays include AMA / INA / regular basins in distinct colours, sub-basins, ADWR wells, and the **CAP-eligible counties** (Maricopa / Pima / Pinal as dashed outlines).  Special UX for OOD (single band, no unit), **SW Capture Fraction** (dimensionless 0–1, OOD-style palette), and **CAP scenarios** (scenario × window dropdowns + cumulative ΔGW readout + per-basin × 7-scenario time-series chart). |
+
+### Workflow (one-time, after the modeling pipeline finishes)
+
+```bash
+# Pre-flight (one-time)
+gcloud auth login
+gcloud config set project azhydro
+earthengine authenticate
+pip install earthengine-api geeup
+
+# 1. Rasters: generate metadata.csv files, batch-upload via geeup
+python gee/generate_geeup_metadata.py
+./gee/upload_to_gee.sh                    # all dirs (resumable)
+./gee/upload_to_gee.sh --filter Total_GW  # one category
+./gee/upload_to_gee.sh --dry-run          # preview only
+
+# 2. Well_Package: pivot parquet → 15 CSVs, then GCS + earthengine
+python gee/pivot_to_csv.py                # writes gee/Data/Well_Package/csv/
+./gee/upload_well_package.sh              # gsutil cp + earthengine upload table
+
+# 3. CAP cumulative basin time series (per-basin × 7-scenario chart)
+python gee/pivot_cap_cumulative.py
+./gee/upload_cap_cumulative.sh
+
+# 4. CAP service-area polygons (county overlay)
+python gee/cap_service_area_to_csv.py
+./gee/upload_cap_service_area.sh
+
+# 5. Open the visualizer
+#    Live app:  https://azhydro.projects.earthengine.app/view/azhydro-explorer
+#    Source:    paste gee/azhydro-visualizer.js into
+#               https://code.earthengine.google.com
+#               (or publish via Apps > Publish for your own shareable URL).
+```
+
+### Asset paths used by the visualizer
+
+All assets live under `projects/azhydro/assets/az-wu/`.
+
+#### Per-category augmented raster ImageCollections (12)
+
+Each is a 6-band stack: prediction + σ + CV + SNR + lower 95 % CI + upper 95 % CI.  Four unit conventions (`Depth_mm`, `Depth_ft`, `Volume_m3`, `Volume_AF`) live in the **same** IC and are filterable via the `unit` property.  Year filterable via the `year` property.
+
+| Asset | Category |
+|---|---|
+| `Predicted_Rasters` | Total annual prediction |
+| `Total_GW_Rasters` | GW component of total |
+| `Total_SW_Rasters` | SW component of total |
+| `Irrigation_Rasters` | Irrigation total |
+| `Irrigation_GW_Rasters` | Irrigation GW |
+| `Irrigation_SW_Rasters` | Irrigation SW |
+| `Non_Irrigation_Rasters` | Non-irrigation total |
+| `Non_Irrigation_GW_Rasters` | Non-irrigation GW |
+| `Non_Irrigation_SW_Rasters` | Non-irrigation SW |
+| `Irrigation_CU_Rasters` | Irrigation consumptive use total |
+| `Irrigation_GW_CU_Rasters` | Irrigation CU, GW component |
+| `Irrigation_SW_CU_Rasters` | Irrigation CU, SW component |
+
+#### SW Capture rasters (3 augmented + 3 fractions)
+
+Augmented (`SW_Capture__*_Rasters`) follow the same 6-band convention and 4 unit conventions as above.  Fractions (`SW_Capture__*_Fraction`) are single-band, dimensionless 0–1.
+
+| Asset | Category |
+|---|---|
+| `SW_Capture__Total_SW_Capture_Rasters` | Total SW captured by GW pumping (volume) |
+| `SW_Capture__Irrigation_SW_Capture_Rasters` | Irrigation share of SW capture |
+| `SW_Capture__Non_Irrigation_SW_Capture_Rasters` | Non-irrigation share of SW capture |
+| `SW_Capture__Total_SW_Capture_Fraction` | Total SW capture fraction (0–1) |
+| `SW_Capture__Irrigation_SW_Capture_Fraction` | Irrigation SW capture fraction |
+| `SW_Capture__Non_Irrigation_SW_Capture_Fraction` | Non-irrigation SW capture fraction |
+
+#### Other raster assets
+
+| Asset | Category |
+|---|---|
+| `OOD_Rasters` | Annual out-of-distribution probability (single band, dimensionless 0–1) |
+| `CAP_Scenario__Pixel_Rasters` | 14 cumulative ΔGW images = 7 shortfall scenarios × 2 windows (2027–2060, 2027–2099); single AF band per image, `system:index` = `CAP_Scenario_Pixel_<scenario>_cum_AF_<window>` |
+
+#### Tabular FeatureCollections
+
+| Asset | Contents |
+|---|---|
+| `Well_Package__<Cat>` (15) | One per category: ~170 k well features, each with `REGISTRY_I`, `WATER_USE`, `.geo` geometry, plus year-stamped `<Cat>_AF_<year>` and `<Cat>_AF_sigma_<year>` properties (1896–2099).  Capacity-disaggregated per-well values from the published parquet. |
+| `CAP_Scenario_Cumulative` | 364 features (52 basins × 7 scenarios), each with `Basin`, `Scenario`, `.geo` (basin centroid Point), and year-stamped `Cum_<year>` properties for 2026–2099.  Powers the per-basin × 7-scenario time-series chart in CAP click mode. |
+
+#### Vector overlay layers
+
+| Asset | Contents |
+|---|---|
+| `Groundwater_Basin` | 52 GW-basin polygons (`BASIN_NAME` property).  Visualizer filters into AMA / INA / other groups by exact name match for distinct styling. |
+| `ADWR_Groundwater_Subbasin` | 82 sub-basin polygons (`SUBBASIN_N` property) |
+| `Well_Registry_2024` | ADWR well-registry points; powers the nearest-well lookup on click |
+| `CAP` | 3 CAP-eligible county polygons (Maricopa, Pima, Pinal) with `NAME` property; rendered as dashed outlines in the visualizer |
+
 ## Citations
 
 Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Historical and projected groundwater/surface-water withdrawals, irrigation consumptive use, and pumping-induced surface water capture for Arizona, 1896–2099. _In prep. for Nature Scientific Data_.
