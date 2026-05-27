@@ -180,10 +180,14 @@ function wellPackageCategoryFor(catKey) {
   return map[catKey] || null;  // null for OOD / CAP / SW Capture Fraction
 }
 
-// Search radius for the nearest-well lookup (m).  2.5 km ≈ slightly
-// larger than 1 native pixel; keeps the lookup fast and avoids
-// pulling a well from across the basin if the click was on empty land.
-var WELL_SEARCH_RADIUS_M = 2500;
+// Search radius for the nearest-well lookup (m).  20 km is generous on
+// purpose: well markers visually cover tens of km of ground at typical
+// zoom, so users routinely click on what *looks* like a well but is
+// actually 5–15 km away on the ground.  Within the buffer we rank
+// candidates by true distance to the click and surface the chosen
+// well's distance in the chart title, so the user can judge whether the
+// match is meaningful for their click.
+var WELL_SEARCH_RADIUS_M = 20000;
 
 // AF → unit conversion (well-level only — pixel rasters live in their
 // own unit-specific ICs).  Pixel area = 2000² = 4,000,000 m².
@@ -249,7 +253,37 @@ var VIS_DEFAULTS = {
 
 var basins = ee.FeatureCollection(ASSET_ROOT + '/Groundwater_Basin');
 var subbasins = ee.FeatureCollection(ASSET_ROOT + '/ADWR_Groundwater_Subbasin');
-var wells = ee.FeatureCollection(ASSET_ROOT + '/Well_Registry_2024');
+
+// ── Wells: keep only consumptive-use wells ──────────────────────────
+// The ADWR Well Registry has ~238 k wells, of which ~58 k (24 %) are
+// purely non-consumptive — MONITORING, NO WATER USE, TEST, DEWATERING,
+// REMEDIATION, OTHER - MINERAL EXPLORE, and combinations of these.
+// They never pump for use, so they have no meaningful water-use time
+// series and shouldn't be the "nearest well" surfaced on a map click
+// or appear in the ADWR-Wells overlay.
+//
+// A well is considered consumptive if its WATER_USE string contains
+// at least ONE consumptive keyword.  Mixed-use wells (e.g.
+// "DOMESTIC, MONITORING") stay in: they pump for domestic use AND
+// were also used for monitoring.  Pure "MONITORING, NO WATER USE"
+// wells drop out because none of the keywords match.  Ambiguous codes
+// (RESERVED, UNKNOWN, NO USE CODE ON NOI) are included on the
+// conservative side, since they aren't explicitly non-consumptive.
+var CONSUMPTIVE_USE_KEYWORDS = [
+  'IRRIGATION', 'DOMESTIC', 'STOCK', 'MUNICIPAL', 'INDUSTRIAL',
+  'COMMERCIAL', 'MINING', 'UTILITY', 'RECOVERY', 'RECREATION',
+  'SUBDIVISION', 'DRAINAGE', 'OTHER - PRODUCTION',
+  'RESERVED', 'UNKNOWN', 'NO USE CODE',
+];
+var consumptiveWellFilter = ee.Filter.or.apply(
+  null,
+  CONSUMPTIVE_USE_KEYWORDS.map(function(kw) {
+    return ee.Filter.stringContains('WATER_USE', kw);
+  })
+);
+var wells = ee.FeatureCollection(ASSET_ROOT + '/Well_Registry_2024')
+              .filter(consumptiveWellFilter);
+
 var capServiceArea = ee.FeatureCollection(ASSET_ROOT + '/CAP');
 var az = ee.FeatureCollection('TIGER/2018/States').filter(ee.Filter.eq('STATEFP', '04'));
 
@@ -716,7 +750,7 @@ var subbasinToggle = ui.Checkbox({label: 'Sub-basins (82)', value: false,
                                    onChange: refreshOverlays});
 var capAreaToggle = ui.Checkbox({label: 'CAP-eligible counties (Maricopa / Pima / Pinal)',
                                   value: true, onChange: refreshOverlays});
-var wellToggle = ui.Checkbox({label: 'ADWR Wells', value: false,
+var wellToggle = ui.Checkbox({label: 'ADWR Wells (consumptive use only)', value: false,
                                onChange: refreshOverlays});
 sidePanel.add(basinToggle);
 sidePanel.add(subbasinToggle);
@@ -1431,17 +1465,32 @@ function addNearestWellTimeSeries(pt, catKey, unit) {
                        margin: '6px 0 0 0'});
   chartsPanel.add(stub);
 
+  // 1. Narrow to candidates inside the generous search radius.
+  // 2. Tag each candidate with its true distance to the click.
+  // 3. Sort ascending and pick the first — i.e. the truly nearest well,
+  //    not just *some* well that the bounds-filter happened to return
+  //    (the old `.filterBounds().first()` path had no ordering guarantee,
+  //    so even when wells were nearby the chart could miss them).
   var searchArea = pt.buffer(WELL_SEARCH_RADIUS_M);
-  var nearest = ee.Feature(wells.filterBounds(searchArea).first());
+  var nearest = ee.Feature(
+    wells.filterBounds(searchArea)
+      .map(function(f) {
+        return f.set('_dist_m', f.geometry().distance(pt, 1));
+      })
+      .sort('_dist_m')
+      .first()
+  );
 
-  // Bundle: (a) the nearest well attributes, (b) all of its
-  // Well_Package year-stamped properties, in one server roundtrip.
+  // Bundle: (a) the nearest well attributes + distance to click, (b)
+  // all of its Well_Package year-stamped properties, in one server
+  // roundtrip.
   var bundle = ee.Algorithms.If(
     nearest,
     ee.Dictionary({
       hasWell: true,
       registryId: nearest.get('REGISTRY_I'),
       waterUse:   nearest.get('WATER_USE'),
+      distance_m: nearest.get('_dist_m'),
       lonlat:     nearest.geometry().coordinates(),
       props: ee.Feature(
         ee.FeatureCollection(assetIdFor('Well_Package__' + wpCat))
@@ -1512,11 +1561,14 @@ function addNearestWellTimeSeries(pt, catKey, unit) {
     }
 
     var lonlat = d.lonlat || [null, null];
+    var distKm = (d.distance_m != null)
+        ? (Number(d.distance_m) / 1000).toFixed(2) + ' km from click'
+        : null;
     var titleSuffix = ' — ' + wpCat + ' (' + conv.label +
                       ', capacity-disaggregated)';
     var chart = ui.Chart(rows, 'LineChart', {
       title: 'Well ' + d.registryId + ' [' + (d.waterUse || 'n/a') + ']' +
-             titleSuffix,
+             (distKm ? ', ' + distKm : '') + titleSuffix,
       hAxis: {title: 'Year', format: '####'},
       vAxis: {title: conv.label},
       series: {
