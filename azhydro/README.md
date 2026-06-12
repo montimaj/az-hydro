@@ -5868,7 +5868,7 @@ rather than as validated point estimates.
 
 ## References
 
-Abatzoglou, J. T. (2013). Development of gridded surface meteorological data for ecological applications and modeling. _International Journal of Climatology_, _33_(1), 121–131. https://doi.org/10.1002/joc.3413.
+Abatzoglou, J. T. (2013). Development of gridded surface meteorological data for ecological applications and modelling. _International Journal of Climatology_, _33_(1), 121–131. https://doi.org/10.1002/joc.3413.
 
 Abatzoglou, J. T., & Brown, T. J. (2012). A comparison of statistical downscaling methods suited for wildfire applications. _International Journal of Climatology_, _32_(5), 772–780. https://doi.org/10.1002/joc.2312.
 
@@ -5902,7 +5902,7 @@ Hasan, M. F., Smith, R. G., Majumdar, S., Huntington, J. L., Alves Meira Neto, A
 
 Haynes, J.V., Read, A.L., Chan, A.Y., Martin, D.J., Regan, R.S., Henson, W.R., Niswonger, R.G., & Stewart, J.S., 2023, Monthly crop irrigation withdrawals and efficiencies by HUC12 watershed for years 2000-2020 within the conterminous United States (ver. 2.0, September 2024). _U.S. Geological Survey data release_, https://doi.org/10.5066/P9LGISUM.
 
-Hodson, T.O., Hariharan, J.A., Black, S., & Horsburgh, J.S.. (2023). dataretrieval (Python): a Python package for discovering and retrieving water data available from U.S. federal hydrologic web services. _U.S. Geological Survey software release_. https://doi.org/10.5066/P94I5TX3.
+Hodson, T.O., Hariharan, J.A., Black, S., & Horsburgh, J.S. (2023). dataretrieval (Python): a Python package for discovering and retrieving water data available from U.S. federal hydrologic web services. _U.S. Geological Survey software release_. https://doi.org/10.5066/P94I5TX3.
 
 Hung, F., Chiarelli, D. D., Famiglietti, J. S., & Müller, M. F. (2025). Downscaled global 60-meter resolution estimates of irrigation water sources (2000–2015). _Scientific Data_, _12_(1), 1632. https://doi.org/10.1038/s41597-025-05920-x.
 
