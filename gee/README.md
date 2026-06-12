@@ -223,15 +223,15 @@ Two external datasets — [Reitz Ensemble ET](https://doi.org/10.5066/P9EZ3VAS) 
 
 **Dependency:** `openet_reitz_et_ratio`
 
-**Purpose:** Monthly ET for 1896–1999, bias-corrected to match OpenET.
+**Purpose:** Monthly bias-corrected ET spanning the full Reitz record (1896–2018). Only 1896–1999 is consumed at tile-download time — OpenET takes over from 2000 — but the 2000–2018 overlap years are exported as well so the ratio correction can be validated directly against OpenET.
 
-**Method:** For each year in 1896–1999:
+**Method:** For each year in 1896–2018:
 1. Load Reitz ET for that year, convert mm/day → mm/month.
 2. Inner join with the 12 pre-exported OpenET/Reitz ratio grids on `month`.
 3. Multiply: $\text{ET}_{\text{adj}} = \text{Reitz ET (mm/month)} \times \text{ratio}$ → band `actual_et`.
 4. Export each of the 12 monthly images.
 
-**Output:** 1,248 images (`{year}_{month:02d}`), each with band `actual_et` in mm/month.
+**Output:** 1,473 images (`{year}_{month:02d}`), each with band `actual_et` in mm/month.
 
 ---
 

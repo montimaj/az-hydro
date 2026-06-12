@@ -658,6 +658,22 @@ would require transient groundwater flow modeling.
 
 ## Pipeline overview (`pipeline.py`)
 
+![Pipeline workflow and three-era data harmonization](../docs/images/Pipeline_Harmonization_Fig2.png)
+
+**(a)** Processing chain from inputs to published products: the
+three-era-harmonized GEE predictor stack and the infrastructure layers
+feed the Optuna-tuned XGBRF model trained on ADWR metered records
+(1984–2024, AMA/INA areas only); statewide annual predictions are
+post-processed through the conservation-consistent density-ratio
+partition, the CU = IE × Withdrawal calculation, and the Surface Water
+Capture Index, with the six-component uncertainty framework propagated
+into every published product.  **(b)** Source timeline for the six
+harmonized predictor families across the hindcast (1896–1983),
+historical (1984–2025), and projection (2026–2099) eras; annotations
+mark the overlap-period bias corrections that stitch adjacent sources
+together (see [`gee/README.md`](../gee/README.md) for the export-side
+details).
+
 The pipeline is the top-level orchestrator that chains together data
 preparation, ML model evaluation, full-period prediction, and
 intercomparison with independent USGS datasets.  It is divided into five
