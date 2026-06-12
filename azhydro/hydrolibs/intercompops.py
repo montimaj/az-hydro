@@ -2787,11 +2787,22 @@ def run_intercomparison(
     # Per-cat ML raster directory and prefix (Total uses the
     # Irrigation_*_mm.tif rasters; Reitz uses the All_irr_YYYY.tif
     # rasters in the Irrigation_all_1980-2018 subdir).
+    # irr_gw_dir ends in .../Irrigation_GW_Rasters/Depth_mm — go up TWO
+    # levels to the prediction root before descending into the sibling
+    # Irrigation_Rasters/Depth_mm dir (one dirname only reaches
+    # Irrigation_GW_Rasters and yields a non-existent nested path,
+    # which silently zeroed the ML Total series in the HUC12 scatter).
     irr_total_dir = (
-        os.path.join(os.path.dirname(irr_gw_dir.rstrip('/')),
-                     'Irrigation_Rasters', 'Depth_mm')
+        os.path.join(
+            os.path.dirname(os.path.dirname(irr_gw_dir.rstrip('/'))),
+            'Irrigation_Rasters', 'Depth_mm')
         if irr_gw_dir else None
     )
+    if irr_total_dir and not os.path.isdir(irr_total_dir):
+        logger.warning(
+            f'  ML Irrigation Total raster dir not found: {irr_total_dir} '
+            '— HUC12 Total comparison will have zero ML volumes'
+        )
     ml_cat_dirs = {
         'GW': (irr_gw_dir, 'Irrigation_GW'),
         'SW': (irr_sw_dir, 'Irrigation_SW'),
@@ -6454,7 +6465,18 @@ def run_ps_intercomparison(
                     )
                 else:
                     ps_arr = np.zeros(ps_ref_shape, dtype=np.float64)
-                pixel_diff_arr_ps = ml_arr_ps - ps_arr
+                # Clip the difference to the AZ basin footprint:
+                # border-crossing HUC12s (kept by the 10 % AZ-overlap
+                # filter) otherwise paint their out-of-state polygon
+                # area into the pixel panel as spurious 0 − PS pixels.
+                az_mask_ps = rasterize(
+                    [(geom, 1) for geom in b_reproj_ps.geometry],
+                    out_shape=ps_ref_shape,
+                    transform=ps_ref_transform, fill=0, dtype='uint8',
+                )
+                pixel_diff_arr_ps = np.where(
+                    az_mask_ps == 1, ml_arr_ps - ps_arr, 0.0,
+                )
 
             # Panel 3: Basin Δ depth (mm)
             basin_areas_lookup_ps = {
