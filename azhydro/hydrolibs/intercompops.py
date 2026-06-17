@@ -1482,7 +1482,7 @@ def _plot_paired_choropleth_diff_grid(
                 ax.set_title(col_label, fontsize=14, fontweight='bold')
             if col == 0:
                 ax.text(
-                    -0.06, 0.5, panel['title'],
+                    -0.06, 0.62, panel['title'],
                     transform=ax.transAxes, rotation=90,
                     va='center', ha='center',
                     fontsize=12, fontweight='bold',
@@ -1784,7 +1784,7 @@ def _plot_spatial_diff_maps(
                     )
                 if col == 0:
                     ax.text(
-                        -0.06, 0.5, pair_lbl,
+                        -0.06, 0.62, pair_lbl,
                         transform=ax.transAxes, rotation=90,
                         va='center', ha='center',
                         fontsize=12, fontweight='bold',
