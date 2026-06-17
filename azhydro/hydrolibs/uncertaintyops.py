@@ -3712,7 +3712,7 @@ def _plot_cap_scenario_basin_drawdown(
         )
         _overlay_boundaries(
             ax, basins_gdf, ama_ina, name_col,
-            label_fontsize=4.5, label_all=True,
+            label_fontsize=8, label_all=False,
         )
         overlay_cap_service_area(
             ax, cap_service_area_geojson,
@@ -4036,15 +4036,23 @@ def _plot_cap_scenario_pixel_drawdown(
     )
     ama_ina = get_ama_ina_basin_names()
 
-    fig, axes = plt.subplots(2, 4, figsize=(22, 12), constrained_layout=True)
+    # Grid of scenario maps (multiple columns and rows, like the paired
+    # era figures) with a single HORIZONTAL colorbar spanning the bottom.
+    n_sc = len(_CAP_SCENARIO_PANEL_ORDER)
+    n_cols = 2
+    n_rows = int(np.ceil((n_sc + 1) / n_cols))   # +1 reserves a legend cell
+    fig, axes = plt.subplots(
+        n_rows, n_cols, figsize=(5.0 * n_cols, 5.0 * n_rows),
+        constrained_layout=True,
+    )
     fig.suptitle(
         f'CAP Scenario — Pixel-Level Cumulative ΔGW Volume vs '
         f'Baseline ({year_window[0]}–{year_window[1]})\n'
         f'(per-pixel volume = basin Δ × pixel ML Total_GW share — '
         f'pro-rata, NOT a hydraulic-head response)',
-        fontsize=14, fontweight='bold',
+        fontsize=13, fontweight='bold',
     )
-    axes_flat = axes.flatten()
+    axes_flat = list(axes.flatten())
     panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)']
 
     af_to_m3 = 1.0 / M3_TO_AF
@@ -4070,11 +4078,10 @@ def _plot_cap_scenario_pixel_drawdown(
         )
         _overlay_boundaries(
             ax, basins_gdf, ama_ina, name_col,
-            label_fontsize=4.5, label_all=True,
+            label_fontsize=8, label_all=False,
         )
         overlay_cap_service_area(
-            ax, cap_service_area_geojson,
-            target_crs=ref_crs,
+            ax, cap_service_area_geojson, target_crs=ref_crs,
         )
         title_pretty = _CAP_SCENARIO_PANEL_TITLES.get(
             sc_key, sc_key.replace('_', ' '),
@@ -4082,48 +4089,49 @@ def _plot_cap_scenario_pixel_drawdown(
         az_cum_af = np.nansum(arr_af)
         ax.set_title(
             f'{panel_labels[i]} {title_pretty}\n'
-            f'AZ total: {az_cum_af * af_to_m3 / 1e9:.2f} km³ '
+            f'{az_cum_af * af_to_m3 / 1e9:.2f} km³ '
             f'({az_cum_af / 1e6:.2f} MAF)',
-            fontsize=11, fontweight='bold',
+            fontsize=13, fontweight='bold',
         )
 
-    ax_legend = axes_flat[7]
+    # Legend in the first unused cell; hide any remaining trailing cells.
+    ax_legend = axes_flat[n_sc]
     ax_legend.axis('off')
-    sm = ScalarMappable(cmap=discrete_cmap, norm=norm)
-    sm.set_array([])
-    cbar = fig.colorbar(
-        sm, ax=axes_flat[:7], orientation='vertical',
-        shrink=1.0, pad=0.04, fraction=0.04, aspect=40,
-        boundaries=boundaries_m3, ticks=boundaries_m3, extend='both',
-    )
-    cbar.formatter = mticker.FuncFormatter(
-        lambda x, _: f'{x / 1e6:,.1f}',
-    )
-    cbar.update_ticks()
-    cbar.set_label(
-        r'Per-Pixel Cumulative $\Delta$ GW Volume '
-        r'($\times$10$^{6}$ m$^{3}$)',
-        fontsize=12, fontweight='bold',
-    )
-    cbar.ax.tick_params(labelsize=11)
-    # AF axis on the LEFT — primary m³ on the right (default).
-    secax = cbar.ax.secondary_yaxis(
-        'left',
-        functions=(lambda x: x * M3_TO_AF, lambda x: x / M3_TO_AF),
-    )
-    secax.yaxis.set_major_formatter(
-        mticker.FuncFormatter(lambda x, _: f'{x:,.0f}'),
-    )
-    secax.set_ylabel(
-        'Per-Pixel Cumulative Δ GW Volume (AF)',
-        fontsize=12, fontweight='bold',
-    )
-    secax.tick_params(labelsize=11)
+    for j in range(n_sc + 1, len(axes_flat)):
+        axes_flat[j].axis('off')
     add_ama_ina_legend(
         ax_legend, loc='center', bbox_to_anchor=(0.5, 0.5),
         fontsize=14, framealpha=1.0, include_cap=True,
     )
 
+    # Single horizontal colorbar across the bottom: ×10⁶ m³ on the
+    # bottom axis, AF on the top axis.
+    sm = ScalarMappable(cmap=discrete_cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(
+        sm, ax=axes_flat[:n_sc], orientation='horizontal',
+        location='bottom', shrink=0.6, pad=0.04, aspect=45,
+        boundaries=boundaries_m3, ticks=boundaries_m3, extend='both',
+    )
+    cbar.formatter = mticker.FuncFormatter(lambda x, _: f'{x / 1e6:,.1f}')
+    cbar.update_ticks()
+    cbar.set_label(
+        r'Per-Pixel Cumulative $\Delta$ GW Volume ($\times$10$^{6}$ m$^{3}$)',
+        fontsize=15, fontweight='bold',
+    )
+    cbar.ax.tick_params(labelsize=13)
+    secax = cbar.ax.secondary_xaxis(
+        'top',
+        functions=(lambda x: x * M3_TO_AF, lambda x: x / M3_TO_AF),
+    )
+    secax.xaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda x, _: f'{x:,.0f}'),
+    )
+    secax.set_xlabel(
+        'Per-Pixel Cumulative Δ GW Volume (AF)',
+        fontsize=15, fontweight='bold',
+    )
+    secax.tick_params(labelsize=13)
     out_path = os.path.join(
         out_dir,
         f'CAP_Scenario_Pixel_Drawdown_'
@@ -4583,7 +4591,7 @@ def _plot_cap_scenario_sigma_combined(
         f'({year_window[0]}–{year_window[1]}) — '
         f'same uncertainty applies to every CAP scenario; '
         f'basin and pixel panels share the CAP-restricted scope.',
-        fontsize=13, fontweight='bold',
+        fontsize=20, fontweight='bold',
     )
 
     # --- Panel (a): basin σ choropleth (clipped to CAP service area
@@ -4615,7 +4623,7 @@ def _plot_cap_scenario_sigma_combined(
     )
     _overlay_boundaries(
         ax_basin, basins_gdf, ama_ina, name_col,
-        label_fontsize=4.5, label_all=True,
+        label_fontsize=8, label_all=False,
     )
     overlay_cap_service_area(
         ax_basin, cap_service_area_geojson,
@@ -4649,7 +4657,7 @@ def _plot_cap_scenario_sigma_combined(
     ax_basin.set_title(
         f'(a) Basin σ_cum\nAZ total: {az_basin_total / 1e9:.2f} km³ '
         f'({sum(basin_sigma_cum.values()) / 1e6:.2f} MAF)',
-        fontsize=12, fontweight='bold',
+        fontsize=18, fontweight='bold',
     )
     sm_b = ScalarMappable(cmap=cmap_basin, norm=norm_basin)
     sm_b.set_array([])
@@ -4665,7 +4673,7 @@ def _plot_cap_scenario_sigma_combined(
     cbar_b.update_ticks()
     cbar_b.set_label(
         r'Basin Cumulative σ_total ($\times$10$^{6}$ m$^{3}$)',
-        fontsize=11, fontweight='bold',
+        fontsize=17, fontweight='bold',
     )
     secax_b = cbar_b.ax.secondary_xaxis(
         'top',
@@ -4675,7 +4683,7 @@ def _plot_cap_scenario_sigma_combined(
         mticker.FuncFormatter(lambda x, _: f'{x / 1e3:,.0f}'),
     )
     secax_b.set_xlabel('Basin Cumulative σ_total (kAF)',
-                       fontsize=11, fontweight='bold')
+                       fontsize=17, fontweight='bold')
 
     # --- Panel (b): pixel σ raster ---
     ax_pix = axes[1]
@@ -4700,7 +4708,7 @@ def _plot_cap_scenario_sigma_combined(
         )
         _overlay_boundaries(
             ax_pix, basins_pix, ama_ina, name_col,
-            label_fontsize=4.5, label_all=True,
+            label_fontsize=8, label_all=False,
         )
         overlay_cap_service_area(
             ax_pix, cap_service_area_geojson,
@@ -4711,7 +4719,7 @@ def _plot_cap_scenario_sigma_combined(
             f'(b) Pixel σ_cum\nAZ total (sum of pixels): '
             f'{az_pix_total * af_to_m3 / 1e9:.2f} km³ '
             f'({az_pix_total / 1e6:.2f} MAF)',
-            fontsize=12, fontweight='bold',
+            fontsize=18, fontweight='bold',
         )
     else:
         ax_pix.text(
@@ -4732,7 +4740,7 @@ def _plot_cap_scenario_sigma_combined(
     cbar_p.update_ticks()
     cbar_p.set_label(
         r'Pixel Cumulative σ_total ($\times$10$^{6}$ m$^{3}$)',
-        fontsize=11, fontweight='bold',
+        fontsize=17, fontweight='bold',
     )
     secax_p = cbar_p.ax.secondary_xaxis(
         'top',
@@ -4742,7 +4750,7 @@ def _plot_cap_scenario_sigma_combined(
         mticker.FuncFormatter(lambda x, _: f'{x:,.0f}'),
     )
     secax_p.set_xlabel('Pixel Cumulative σ_total (AF)',
-                       fontsize=11, fontweight='bold')
+                       fontsize=17, fontweight='bold')
 
     add_ama_ina_legend(ax_basin, include_cap=True)
 
@@ -4824,12 +4832,12 @@ def _plot_cap_scenario_basin_snr(
         basins_clipped if basins_clipped is not None else basins_gdf
     )
 
-    fig, axes = plt.subplots(2, 4, figsize=(22, 12), constrained_layout=True)
+    fig, axes = plt.subplots(2, 4, figsize=(17, 10), constrained_layout=True)
     fig.suptitle(
         f'CAP Scenario — Basin Signal-to-Noise '
         f'(SNR = |ΔGW_cum| / σ_cum, {year_window[0]}–{year_window[1]}). '
         f'SNR ≥ 1 → signal exceeds central-pipeline 1σ noise.',
-        fontsize=13, fontweight='bold',
+        fontsize=20, fontweight='bold',
     )
     axes_flat = axes.flatten()
     panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)']
@@ -4863,7 +4871,7 @@ def _plot_cap_scenario_basin_snr(
         )
         _overlay_boundaries(
             ax, basins_gdf, ama_ina, name_col,
-            label_fontsize=4.5, label_all=True,
+            label_fontsize=8, label_all=False,
         )
         overlay_cap_service_area(
             ax, cap_service_area_geojson,
@@ -4877,7 +4885,7 @@ def _plot_cap_scenario_basin_snr(
         ax.set_title(
             f'{panel_labels[i]} {title_pretty}\n'
             f'{n_robust}/{n_total} basins with SNR ≥ 1',
-            fontsize=11, fontweight='bold',
+            fontsize=17, fontweight='bold',
         )
 
     ax_legend = axes_flat[7]
@@ -4891,12 +4899,12 @@ def _plot_cap_scenario_basin_snr(
     )
     cbar.set_label(
         '|Cumulative ΔGW| / σ_total (signal-to-noise)',
-        fontsize=12, fontweight='bold',
+        fontsize=18, fontweight='bold',
     )
-    cbar.ax.tick_params(labelsize=11)
+    cbar.ax.tick_params(labelsize=17)
     add_ama_ina_legend(
         ax_legend, loc='center', bbox_to_anchor=(0.5, 0.5),
-        fontsize=14, framealpha=1.0, include_cap=True,
+        fontsize=22, framealpha=1.0, include_cap=True,
     )
 
     out_path = os.path.join(
@@ -4973,13 +4981,13 @@ def _plot_cap_scenario_pixel_snr(
         pixel_sigma_cum, np.nan,
     )
 
-    fig, axes = plt.subplots(2, 4, figsize=(22, 12), constrained_layout=True)
+    fig, axes = plt.subplots(2, 4, figsize=(17, 10), constrained_layout=True)
     fig.suptitle(
         f'CAP Scenario — Pixel Signal-to-Noise '
         f'(SNR = |ΔGW_cum| / σ_cum, {year_window[0]}–{year_window[1]}). '
         f'SNR ≥ 1 → signal exceeds local 1σ noise. '
         f'Per-pixel ΔGW is a pro-rata distribution (not a hydraulic-head response).',
-        fontsize=13, fontweight='bold',
+        fontsize=20, fontweight='bold',
     )
     axes_flat = axes.flatten()
     panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)']
@@ -5009,7 +5017,7 @@ def _plot_cap_scenario_pixel_snr(
         )
         _overlay_boundaries(
             ax, basins_gdf, ama_ina, name_col,
-            label_fontsize=4.5, label_all=True,
+            label_fontsize=8, label_all=False,
         )
         overlay_cap_service_area(
             ax, cap_service_area_geojson,
@@ -5027,7 +5035,7 @@ def _plot_cap_scenario_pixel_snr(
         ax.set_title(
             f'{panel_labels[i]} {title_pretty}\n'
             f'{pct_robust:.1f}% of pixels with SNR ≥ 1',
-            fontsize=11, fontweight='bold',
+            fontsize=17, fontweight='bold',
         )
 
     ax_legend = axes_flat[7]
@@ -5041,12 +5049,12 @@ def _plot_cap_scenario_pixel_snr(
     )
     cbar.set_label(
         '|Cumulative ΔGW| / σ_total (signal-to-noise)',
-        fontsize=12, fontweight='bold',
+        fontsize=18, fontweight='bold',
     )
-    cbar.ax.tick_params(labelsize=11)
+    cbar.ax.tick_params(labelsize=17)
     add_ama_ina_legend(
         ax_legend, loc='center', bbox_to_anchor=(0.5, 0.5),
-        fontsize=14, framealpha=1.0, include_cap=True,
+        fontsize=22, framealpha=1.0, include_cap=True,
     )
 
     out_path = os.path.join(

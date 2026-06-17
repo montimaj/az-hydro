@@ -2572,59 +2572,91 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
         pretty = cu.replace('_', ' ')
         depth_categories.append((f'{cu}_Rasters', pretty))
 
-    for folder, title in depth_categories:
-        raster_dir = os.path.join(prediction_dir, folder, 'Depth_mm')
-        if not os.path.isdir(raster_dir):
-            logger.info(f'  Skipping {folder}/Depth_mm (not found)')
-            continue
-        vizops.create_era_raster_maps(
-            raster_dir=raster_dir,
-            basin_shp=AZ_GW_BASIN,
-            output_dir=maps_dir,
-            title=title,
-            unit_label='Depth (mm)',
-            cmap='Spectral_r',
-        )
+    # Categories rendered as PAIRED GW/SW figures (columns a = Groundwater,
+    # b = Surface Water; eras as rows; single shared colorbar) instead of
+    # separate single-pool era maps: the two budget-closing pools of each
+    # partition category, plus the GW/SW split of irrigation consumptive
+    # use (CU).  Their individual pool folders are skipped in the
+    # single-pool loops below; only the non-pool products (Total Predicted
+    # withdrawal, total Irrigation CU) keep standalone era maps.
+    # (left_folder, right_folder, base_title, col_labels, out_tag)
+    _GW_SW = ('Groundwater', 'Surface Water')
+    _PAIRED_CATEGORIES = [
+        # Groundwater vs surface-water source split
+        ('Total_GW_Rasters', 'Total_SW_Rasters', 'Total', _GW_SW, 'GW_SW'),
+        ('Irrigation_GW_Rasters', 'Irrigation_SW_Rasters', 'Irrigation',
+         _GW_SW, 'GW_SW'),
+        ('Non_Irrigation_GW_Rasters', 'Non_Irrigation_SW_Rasters',
+         'Non-Irrigation', _GW_SW, 'GW_SW'),
+        ('Irrigation_GW_CU_Rasters', 'Irrigation_SW_CU_Rasters',
+         'Irrigation CU', _GW_SW, 'GW_SW'),
+        # Irrigation vs non-irrigation use-type split
+        ('Irrigation_Rasters', 'Non_Irrigation_Rasters',
+         'Withdrawal by Use', ('Irrigation', 'Non-Irrigation'),
+         'Irr_NonIrr'),
+    ]
+    _paired_pool_folders = {c[0] for c in _PAIRED_CATEGORIES}
+    _paired_pool_folders |= {c[1] for c in _PAIRED_CATEGORIES}
 
-    # ── Volume-based categories (use Volume_m3 sub-directory) ─────────
+    # Single-pool era maps (non-paired products): ONE map per product
+    # with a dual depth (mm) + volume (×10⁶ m³) colorbar — depth and
+    # volume are the same field on a constant-area grid, so a single map
+    # carries both unit scales instead of two identical figures.
     for folder, title in depth_categories:
+        if folder in _paired_pool_folders:
+            continue
+        depth_dir = os.path.join(prediction_dir, folder, 'Depth_mm')
+        if os.path.isdir(depth_dir):
+            vizops.create_era_raster_maps(
+                raster_dir=depth_dir, basin_shp=AZ_GW_BASIN,
+                output_dir=maps_dir, title=title,
+                unit_label='Depth (mm)', cmap='Spectral_r',
+                dual_depth_volume=True,
+            )
+        else:
+            # Volume-only fallback when no depth raster exists.
+            vol_dir = os.path.join(prediction_dir, folder, 'Volume_m3')
+            if os.path.isdir(vol_dir):
+                vizops.create_era_raster_maps(
+                    raster_dir=vol_dir, basin_shp=AZ_GW_BASIN,
+                    output_dir=maps_dir, title=f'{title} Volume',
+                    unit_label=r'Volume (m$^3$)', cmap='Spectral_r',
+                )
+
+    # Single-pool volume-sigma (band 2) era maps (non-paired products only).
+    for folder, title in depth_categories:
+        if folder in _paired_pool_folders:
+            continue
         raster_dir = os.path.join(prediction_dir, folder, 'Volume_m3')
         if not os.path.isdir(raster_dir):
             continue
         vizops.create_era_raster_maps(
-            raster_dir=raster_dir,
-            basin_shp=AZ_GW_BASIN,
-            output_dir=maps_dir,
-            title=f'{title} Volume',
-            unit_label=r'Volume (m$^3$)',
-            cmap='Spectral_r',
+            raster_dir=raster_dir, basin_shp=AZ_GW_BASIN,
+            output_dir=maps_dir, title=f'{title} Volume — Std Dev',
+            unit_label=r'Volume (m$^3$)', cmap='Purples', band=2,
         )
 
-    # ── Volume-based σ (band 2 of the same augmented volume rasters) ──
-    # The 6-band augmented volume rasters written by
-    # augment_prediction_rasters / augment_category_rasters carry
-    # band 2 = σ in m³, so a second pass over the same directories
-    # with band=2 produces σ volume era maps that pair 1:1 with the
-    # central-value Volume era maps above.  The Purples colormap
-    # matches the mm σ std-dev maps rendered from the σ-component
-    # rasters later in this step.  Uses the default cbar_extend='both'
-    # so the horizontal colorbar renders triangular ends on both sides
-    # that match the corresponding central-value Volume maps — the
-    # previous 'max' setting produced a visually inconsistent
-    # flat-ended colorbar pair when placed next to the non-σ map.
-    for folder, title in depth_categories:
-        raster_dir = os.path.join(prediction_dir, folder, 'Volume_m3')
-        if not os.path.isdir(raster_dir):
-            continue
-        vizops.create_era_raster_maps(
-            raster_dir=raster_dir,
-            basin_shp=AZ_GW_BASIN,
-            output_dir=maps_dir,
-            title=f'{title} Volume \u2014 Std Dev',
-            unit_label=r'Volume (m$^3$)',
-            cmap='Purples',
-            band=2,
-        )
+    # Paired GW/SW era figures (depth, volume, sigma-volume) per category.
+    _PAIRED_PRODUCTS = [
+        ('Depth_mm', '', 'Depth (mm)', 'Spectral_r', 1),
+        ('Volume_m3', 'Volume', r'Volume (m$^3$)', 'Spectral_r', 1),
+        ('Volume_m3', 'Volume — Std Dev', r'Volume (m$^3$)',
+         'Purples', 2),
+    ]
+    for left_folder, right_folder, base, col_labels, out_tag in \
+            _PAIRED_CATEGORIES:
+        for subdir, suffix, unit, cmap_, band_ in _PAIRED_PRODUCTS:
+            left_dir = os.path.join(prediction_dir, left_folder, subdir)
+            right_dir = os.path.join(prediction_dir, right_folder, subdir)
+            if not (os.path.isdir(left_dir) and os.path.isdir(right_dir)):
+                continue
+            vizops.create_gw_sw_era_raster_maps(
+                gw_raster_dir=left_dir, sw_raster_dir=right_dir,
+                basin_shp=AZ_GW_BASIN, output_dir=maps_dir,
+                title=f'{base} {suffix}'.strip(), unit_label=unit,
+                col_labels=col_labels, out_tag=out_tag,
+                cmap=cmap_, band=band_,
+            )
 
     # ── OOD Rasters (probability, 0 = in-distribution, 1 = OOD) ─────
     # Uses the dedicated OOD era-map renderer: in practice most AZ
@@ -2754,10 +2786,11 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
     # slug reads "Total Capture", "Irrigation Capture", and
     # "Non-Irrigation Capture" rather than "Total SW SW Capture".
     sw_cap_base = os.path.join(prediction_dir, 'SW_Capture')
+    # Total SW capture is rendered as individual era maps; the
+    # Irrigation vs Non-Irrigation split is rendered as paired figures
+    # (columns a = Irrigation, b = Non-Irrigation) further below.
     _cap_pretty = {
         'Total_SW_Capture': 'Total SW Capture',
-        'Irrigation_SW_Capture': 'Irrigation SW Capture',
-        'Non_Irrigation_SW_Capture': 'Non-Irrigation SW Capture',
     }
     for cap_cat, pretty in _cap_pretty.items():
         # Capture fraction (band 2 = central λ=10m).  The default
@@ -2864,6 +2897,63 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
                 cmap='Purples',
                 band=2,
             )
+
+    # ── Paired Total SW capture: fraction (a) + volume (b) ──────────
+    # Two different metrics in one figure, each with its own colorbar.
+    _tot_frac = os.path.join(sw_cap_base, 'Total_SW_Capture_Fraction')
+    _tot_vol = os.path.join(
+        sw_cap_base, 'Total_SW_Capture_Rasters', 'Volume_m3')
+    if os.path.isdir(_tot_frac) and os.path.isdir(_tot_vol):
+        vizops.create_dual_metric_era_raster_maps(
+            basin_shp=AZ_GW_BASIN, output_dir=maps_dir,
+            title='Total SW Capture',
+            left={'raster_dir': _tot_frac,
+                  'label': 'Capture Fraction (λ=10m)',
+                  'unit': 'Capture Fraction', 'cmap': 'YlOrRd', 'band': 2},
+            right={'raster_dir': _tot_vol, 'label': 'Capture Volume',
+                   'unit': r'Volume (m$^3$)', 'cmap': 'YlOrRd', 'band': 1},
+            out_tag='Frac_Vol',
+        )
+
+
+    # ── Paired Irrigation vs Non-Irrigation SW capture era maps ──────
+    # Capture VOLUME and DEPTH (and their σ / CV) differ by use type, so
+    # those are paired (columns a = Irrigation / b = Non-Irrigation).
+    # Capture FRACTION is deliberately NOT paired: it is a purely
+    # geographic susceptibility field (exp(-wtd/λ) × cw_norm) that is
+    # identical for irrigation and non-irrigation, so a paired fraction
+    # figure would show the same map twice — the single Total fraction
+    # map above already represents it.
+    # (subpath_template, title, unit_label, cmap, band, extra_kwargs)
+    _CAP_PAIRED_PRODUCTS = [
+        ('{c}_Rasters/Depth_mm', 'SW Capture', 'Capture (mm)',
+         'YlOrRd', 1, {}),
+        ('{c}_Rasters/Depth_mm', 'SW Capture — Std Dev', 'σ (mm)',
+         'Purples', 2, {}),
+        ('{c}_Rasters/Depth_mm', 'SW Capture — CV',
+         'CV (σ / |capture|)', 'inferno', 3,
+         {'mask_nan_only': True, 'vmin': 0.0, 'vmax': 1.0}),
+        ('{c}_Rasters/Volume_m3', 'SW Capture Volume', r'Volume (m$^3$)',
+         'YlOrRd', 1, {}),
+        ('{c}_Rasters/Volume_m3', 'SW Capture Volume — Std Dev',
+         r'Volume (m$^3$)', 'Purples', 2, {}),
+    ]
+    for subpath, ptitle, unit, cmap_, band_, extra in _CAP_PAIRED_PRODUCTS:
+        left_dir = os.path.join(
+            sw_cap_base,
+            *subpath.format(c='Irrigation_SW_Capture').split('/'))
+        right_dir = os.path.join(
+            sw_cap_base,
+            *subpath.format(c='Non_Irrigation_SW_Capture').split('/'))
+        if not (os.path.isdir(left_dir) and os.path.isdir(right_dir)):
+            continue
+        vizops.create_gw_sw_era_raster_maps(
+            gw_raster_dir=left_dir, sw_raster_dir=right_dir,
+            basin_shp=AZ_GW_BASIN, output_dir=maps_dir,
+            title=ptitle, unit_label=unit,
+            col_labels=('Irrigation', 'Non-Irrigation'),
+            out_tag='Irr_NonIrr', cmap=cmap_, band=band_, **extra,
+        )
 
     # ── Trend analysis (Mann-Kendall + Sen's slope) ────────────────
     # Gated on --skip-maps trends because this is the slowest

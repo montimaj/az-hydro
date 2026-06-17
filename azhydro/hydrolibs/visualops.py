@@ -3198,8 +3198,10 @@ def create_graphical_abstract(
     ama_ina = get_ama_ina_basin_names()
     name_col = 'BASIN_NAME' if 'BASIN_NAME' in basins_gdf.columns else basins_gdf.columns[0]
     _overlay_boundaries(ax_map, basins_gdf, ama_ina, name_col,
-                        label_fontsize=6, label_all=True)
-    add_ama_ina_legend(ax_map)
+                        label_fontsize=9, label_all=True)
+    # SW-corner legend nudged down into the gap below the map, matching
+    # the other era maps (no box).
+    add_ama_ina_legend(ax_map, loc='lower left', bbox_to_anchor=(0.0, -0.12))
 
     cbar = fig.colorbar(im, ax=ax_map, shrink=0.45, pad=0.08, extend='both')
     cbar_fontsize = 10
@@ -3385,6 +3387,14 @@ AMA_BORDER_COLOR = 'black'
 INA_BORDER_COLOR = '#B71C1C'
 BASIN_BORDER_COLOR = '#555555'
 
+# Major surface-water corridor basins (Colorado River mainstem + lower
+# Gila).  On the fully-labeled maps these get the same large font as the
+# AMA/INA management areas (in a distinct blue) so the surface-water
+# story is readable, rather than being relegated to the small minor-basin
+# font.  Names match BASIN_NAME in the GW basin shapefile exactly.
+MAJOR_SW_BASINS = frozenset({'YUMA', 'PARKER', 'LOWER GILA', 'GILA BEND'})
+SW_BASIN_LABEL_COLOR = '#0b5394'
+
 
 CAP_SERVICE_AREA_COLOR = '#1565C0'
 
@@ -3404,10 +3414,11 @@ CAP_COUNTY_DISPLAY: dict[str, str] = {
 def add_ama_ina_legend(
     target,
     *,
-    loc: str = 'upper left',
-    bbox_to_anchor: tuple[float, float] | None = (1.02, 1.0),
-    fontsize: int = 8,
+    loc: str = 'lower left',
+    bbox_to_anchor: tuple[float, float] | None = None,
+    fontsize: int = 10,
     framealpha: float = 0.9,
+    frameon: bool = False,
     include_cap: bool = False,
     ncol: int | None = None,
 ) -> None:
@@ -3455,7 +3466,7 @@ def add_ama_ina_legend(
     if ncol is None:
         ncol = 2 if include_cap else 1
     kwargs = dict(handles=handles, loc=loc, fontsize=fontsize,
-                  framealpha=framealpha, ncol=ncol)
+                  framealpha=framealpha, frameon=frameon, ncol=ncol)
     if bbox_to_anchor is not None:
         kwargs['bbox_to_anchor'] = bbox_to_anchor
     target.legend(**kwargs)
@@ -3513,7 +3524,7 @@ def _overlay_boundaries(
     ama_ina_names: list[str],
     name_col: str,
     *,
-    label_fontsize: float = 5.5,
+    label_fontsize: float = 9.0,
     label_all: bool = False,
     show_legend: bool = False,
     show_labels: bool = True,
@@ -3554,29 +3565,134 @@ def _overlay_boundaries(
             ax=ax, color=INA_BORDER_COLOR, linewidth=1.2,
         )
     if show_labels:
-        for _, row in pd.concat([ama_gdf, ina_gdf], ignore_index=True).iterrows():
-            centroid = row.geometry.centroid
-            short = row[name_col].replace(' AMA', '').replace(' INA', '')
-            is_ama = row[name_col] in ama_basins
+        # Major labels: the AMA/INA management areas always, plus the
+        # major surface-water corridor basins when the map is fully
+        # labeled (label_all).  All share the large font and are
+        # decluttered together so none hides another.
+        major_frames = [ama_gdf, ina_gdf]
+        if label_all:
+            sw_gdf = basins_gdf[basins_gdf[name_col].isin(MAJOR_SW_BASINS)]
+            if not sw_gdf.empty:
+                major_frames.append(sw_gdf)
+        label_rows = pd.concat(major_frames, ignore_index=True)
+        # Several of these areas are east–west neighbours at nearly the
+        # same latitude (Phoenix/Harquahala, Tucson/Willcox, Santa
+        # Cruz/Douglas), so their horizontal labels overprint each other
+        # at page-width panel sizes.  Nudge horizontally-adjacent labels
+        # onto separate vertical rows with a leader line back to the
+        # basin centroid, so no name is hidden behind another.
+        minx, miny, maxx, maxy = basins_gdf.total_bounds
+        span_x, span_y = (maxx - minx), (maxy - miny)
+        x_thr = 0.22 * span_x     # horizontal proximity that risks overlap
+        # Wide labels overprint at a larger horizontal separation than the
+        # vertical-clustering threshold catches — e.g. Santa Cruz / Douglas
+        # sit 0.23·span_x apart yet "SANTA CRUZ" still runs into "DOUGLAS".
+        # The horizontal push-apart therefore uses its own wider threshold.
+        x_thr_h = 0.28 * span_x
+        y_thr = 0.055 * span_y    # vertical gap that counts as the same row
+        step = 0.055 * span_y     # per-bump vertical offset
+        # Allow several steps so dense clusters (Parker / Harquahala /
+        # Ranegras / Phoenix in the central-west) can spread out, but an
+        # order-preservation rule forbids a label from crossing a
+        # neighbour's row — so an edge basin like Douglas (far SE corner,
+        # blocked from moving south) can never climb past Willcox and
+        # invert the geography.  A label that still can't clear stays on
+        # its centroid and accepts a minor overlap.
+        max_k = 4
+        items = []
+        for _, row in label_rows.iterrows():
+            c = row.geometry.centroid
+            nm = row[name_col]
+            if nm in ama_basins:
+                color = AMA_BORDER_COLOR
+            elif nm in ina_basins:
+                color = INA_BORDER_COLOR
+            else:
+                color = SW_BASIN_LABEL_COLOR
+            items.append({
+                'x': c.x, 'y0': c.y, 'y': c.y,
+                'text': nm.replace(' AMA', '').replace(' INA', ''),
+                'color': color,
+            })
+        placed: list[dict] = []
+        for it in sorted(items, key=lambda d: d['x']):
+            chosen = it['y0']
+            for k in range(max_k + 1):
+                found = False
+                for s in ([0] if k == 0 else [1, -1]):
+                    y = it['y0'] + s * k * step
+                    if not (miny <= y <= maxy):
+                        continue
+                    # No collision with an already-placed nearby label.
+                    if not all(
+                        abs(it['x'] - p['x']) >= x_thr
+                        or abs(y - p['y']) >= y_thr
+                        for p in placed
+                    ):
+                        continue
+                    # Preserve vertical order: never cross a nearby placed
+                    # label relative to the original centroid order — EXCEPT
+                    # for near-same-latitude neighbours (|Δy0| < y_thr), where
+                    # there is no real geographic order to preserve.  Without
+                    # this exemption a label squeezed between two same-row
+                    # neighbours (e.g. Harquahala between Parker and Phoenix)
+                    # can never reach a clear row and overprints its neighbour.
+                    if not all(
+                        abs(it['x'] - p['x']) >= x_thr
+                        or (it['y0'] < p['y0']) == (y < p['y'])
+                        or abs(it['y0'] - p['y0']) < y_thr
+                        for p in placed
+                    ):
+                        continue
+                    chosen, found = y, True
+                    break
+                if found:
+                    break
+            it['y'] = chosen
+            it['ha'] = 'center'
+            placed.append(it)
+        # Labels that still share a row after the vertical declutter
+        # (e.g. Harquahala vs Phoenix in the dense central-west) get their
+        # text pushed apart horizontally: the left basin anchors its text
+        # to the right (growing left, away from its neighbour) and the
+        # right basin anchors left, so long names stop overprinting.
+        for _i in range(len(placed)):
+            for _j in range(_i + 1, len(placed)):
+                a, b = placed[_i], placed[_j]
+                if (abs(a['x'] - b['x']) < x_thr_h
+                        and abs(a['y'] - b['y']) < y_thr):
+                    left, right = (a, b) if a['x'] < b['x'] else (b, a)
+                    left['ha'] = 'right'
+                    right['ha'] = 'left'
+        for it in items:
             ax.annotate(
-                short, (centroid.x, centroid.y),
+                it['text'], (it['x'], it['y']),
                 fontsize=label_fontsize, fontweight='bold',
-                ha='center', va='center',
-                color=AMA_BORDER_COLOR if is_ama else INA_BORDER_COLOR,
+                ha=it.get('ha', 'center'), va='center',
+                color=it['color'],
                 bbox=dict(boxstyle='round,pad=0.12', fc='white',
                           alpha=0.8, lw=0),
+                zorder=5,
             )
     if show_labels and label_all:
-        other_gdf = basins_gdf[~basins_gdf[name_col].isin(ama_ina_names)]
+        # Remaining basins (not AMA/INA and not a major SW corridor basin)
+        # are labeled in a distinctly smaller, lighter font so the major
+        # labels stay visually dominant.  These minor labels are
+        # intentionally small — a reference aid when the figure is zoomed,
+        # not meant to be legible at 100 %.
+        minor_fontsize = max(label_fontsize * 0.55, 4.0)
+        major_names = set(ama_ina_names) | set(MAJOR_SW_BASINS)
+        other_gdf = basins_gdf[~basins_gdf[name_col].isin(major_names)]
         for _, row in other_gdf.iterrows():
             centroid = row.geometry.centroid
             short = row[name_col].title()
             ax.annotate(
                 short, (centroid.x, centroid.y),
-                fontsize=max(label_fontsize - 1.5, 3.5), fontstyle='italic',
-                ha='center', va='center', color='#333333',
+                fontsize=minor_fontsize, fontstyle='italic',
+                ha='center', va='center', color='#555555',
                 bbox=dict(boxstyle='round,pad=0.08', fc='white',
-                          alpha=0.6, lw=0),
+                          alpha=0.55, lw=0),
+                zorder=3,
             )
     if show_legend:
         add_ama_ina_legend(ax)
@@ -3685,8 +3801,15 @@ def create_era_raster_maps(
     percentile_clip: tuple[float, float] = (2.0, 98.0),
     gamma: float | None = None,
     cbar_extend: str = 'both',
+    dual_depth_volume: bool = False,
 ) -> None:
     """Create a 2×2 panel figure of era-mean raster maps.
+
+    When ``dual_depth_volume`` is True and the base raster is a depth
+    (mm) raster, the colorbar carries BOTH the depth scale (mm, bottom)
+    and the equivalent per-pixel volume scale (×10⁶ m³, top) — depth and
+    volume are the same field on a constant-area grid, so this shows one
+    map in both units instead of two identical figures.
 
     Each panel shows the mean raster value for one era (Hindcast,
     Historical, Projection) with groundwater basin boundaries
@@ -3755,6 +3878,7 @@ def create_era_raster_maps(
                   src.bounds.bottom, src.bounds.top]
         crs = src.crs
         raster_shape = src.shape
+        pixel_area_m2 = abs(src.transform.a * src.transform.e)
 
     # ---- Compute era means ----
     era_means = _compute_era_means(raster_dir, raster_shape, band=band,
@@ -3796,9 +3920,16 @@ def create_era_raster_maps(
         norm = PowerNorm(gamma=gamma, vmin=vmin, vmax=vmax)
 
     # ---- Create figure ----
+    # Single-column vertical stack: one era per row so every map spans
+    # the full page width (~6.5 in) instead of being squeezed into a
+    # ~2 in third of a horizontal strip.  At full width the figure is
+    # authored at roughly its display size, so the page-fit shrink is
+    # ~1x and the font literals below are ordinary publication point
+    # sizes (no shrink-compensation inflation).  The trade-off is a
+    # tall figure (~one full page per ~3 eras).
     n_eras = len(ERA_PERIODS)
     fig, axes = plt.subplots(
-        1, n_eras, figsize=(6 * n_eras, 7), constrained_layout=True,
+        n_eras, 1, figsize=(5.2, 4.3 * n_eras), constrained_layout=True,
     )
     fig.suptitle(f'{title} — Era Mean', fontsize=16, fontweight='bold')
     if n_eras == 1:
@@ -3831,21 +3962,32 @@ def create_era_raster_maps(
                 interpolation='nearest', **imshow_kwargs,
             )
 
+        # Label only the AMA/INA management areas (the basins the paper
+        # discusses by name).  Labeling all 52 basins overlaps into an
+        # unreadable mass once the font is large enough to read on a
+        # page-width 3-panel strip.
         _overlay_boundaries(ax, basins_gdf, ama_ina, name_col,
-                            label_all=True)
+                            label_all=True, label_fontsize=8)
         ax.set_title(
             f'{panel_labels[idx]} {era} ({y1}–{y2})',
-            fontsize=12, fontweight='bold',
+            fontsize=14, fontweight='bold',
         )
 
-    # Single AMA / INA / GW basin legend, outside-right of first panel
-    add_ama_ina_legend(axes_flat[0])
+    # GW basin / AMA / INA legend as a horizontal row centred just below
+    # the bottom (last-era) panel, between the map and the colorbar.  The
+    # tight per-panel height leaves no SW-corner slack, so anchoring the
+    # legend by its top (loc='upper center') makes it grow DOWN into the
+    # gap above the colorbar instead of up into the map.
+    add_ama_ina_legend(
+        axes_flat[-1], loc='upper center', bbox_to_anchor=(0.5, -0.03),
+        fontsize=10, ncol=3,
+    )
 
     # Shared colorbar with dual units
-    era_cbar_fontsize = 10
+    era_cbar_fontsize = 12
     cbar = fig.colorbar(
-        im, ax=axes_flat, shrink=0.5, pad=0.06,
-        orientation='horizontal', aspect=40, extend=cbar_extend,
+        im, ax=axes_flat, shrink=0.92, pad=0.02,
+        orientation='horizontal', aspect=28, extend=cbar_extend,
     )
 
     # Detect volume maps and inline the 10⁶ scale factor into the
@@ -3888,7 +4030,47 @@ def create_era_raster_maps(
     # with colorbar extensions: it shares the parent axis transform,
     # preserves the arrowhead region, and applies the unit conversion
     # through a paired (forward, inverse) function tuple.
-    if 'mm' in unit_label.lower():
+    if 'mm' in unit_label.lower() and dual_depth_volume:
+        # Same map, four scales: depth (mm, primary) + volume (×10⁶ m³)
+        # on top, with the imperial equivalents — depth (ft) and volume
+        # (AF) — stacked below the metric axes.  volume_m3 = depth_mm ×
+        # pixel_area / 1000.
+        _vol_factor = pixel_area_m2 / 1.0e9            # mm -> ×10⁶ m³
+        _af_factor = pixel_area_m2 / 1000.0 / _AF_TO_M3  # mm -> AF
+        # Top: volume (×10⁶ m³)
+        sec_vol = cbar.ax.secondary_xaxis(
+            'top',
+            functions=(lambda mm: mm * _vol_factor,
+                       lambda v: v / _vol_factor),
+        )
+        sec_vol.set_xlabel(
+            r'Volume ($\times$10$^{6}$ m$^3$)',
+            fontsize=era_cbar_fontsize, fontweight='bold',
+        )
+        sec_vol.tick_params(labelsize=era_cbar_fontsize)
+        # Below the metric depth axis: depth (ft)
+        sec_ft = cbar.ax.secondary_xaxis(
+            -5.5,
+            functions=(lambda mm: mm * _MM_TO_FT,
+                       lambda ft: ft / _MM_TO_FT),
+        )
+        sec_ft.set_xlabel(
+            'Depth (ft)', fontsize=era_cbar_fontsize, fontweight='bold',
+            labelpad=2,
+        )
+        sec_ft.tick_params(labelsize=era_cbar_fontsize)
+        # Below that: volume (AF)
+        sec_af = cbar.ax.secondary_xaxis(
+            -11.0,
+            functions=(lambda mm: mm * _af_factor,
+                       lambda af: af / _af_factor),
+        )
+        sec_af.set_xlabel(
+            'Volume (AF)', fontsize=era_cbar_fontsize, fontweight='bold',
+            labelpad=2,
+        )
+        sec_af.tick_params(labelsize=era_cbar_fontsize)
+    elif 'mm' in unit_label.lower():
         secax = cbar.ax.secondary_xaxis(
             'top',
             functions=(
@@ -3920,6 +4102,369 @@ def create_era_raster_maps(
     fig.savefig(out_path, dpi=600, bbox_inches='tight')
     plt.close(fig)
     logger.info(f'Era raster maps saved to {out_path}')
+
+
+def create_gw_sw_era_raster_maps(
+    gw_raster_dir: str,
+    sw_raster_dir: str,
+    basin_shp: str,
+    output_dir: str,
+    *,
+    title: str,
+    unit_label: str,
+    col_labels: tuple[str, str] = ('Groundwater', 'Surface Water'),
+    out_tag: str = 'GW_SW',
+    cmap: str = 'Spectral_r',
+    band: int = 1,
+    mask_nan_only: bool = False,
+    percentile_clip: tuple[float, float] = (2.0, 98.0),
+    vmin: float | None = None,
+    vmax: float | None = None,
+    cbar_extend: str = 'both',
+    out_filename: str | None = None,
+) -> None:
+    """Paired two-category era-mean maps in one figure.
+
+    Columns are the two paired categories — labeled **(a)
+    {col_labels[0]}** and **(b) {col_labels[1]}** — and rows are the
+    eras (Hindcast / Historical / Projection), labeled down the left
+    edge.  A single shared colorbar spans both columns (color limits
+    pooled over both categories) so the two are directly comparable on
+    one scale.  Used both for the groundwater/surface-water source split
+    (default ``col_labels``) and the irrigation/non-irrigation use-type
+    split.
+
+    Args mirror :func:`create_era_raster_maps`, but take a separate
+    ``gw_raster_dir`` (left/column-a) and ``sw_raster_dir``
+    (right/column-b), each a directory of per-year ``*.tif`` rasters.
+    Output defaults to ``Era_Maps_{title_slug}_{out_tag}.png``.
+    """
+    import rasterio as rio
+
+    apply_journal_style()
+    makedirs(output_dir)
+
+    def _means_and_meta(rdir):
+        tifs = sorted(f for f in os.listdir(rdir) if f.endswith('.tif'))
+        if not tifs:
+            return None, None
+        with rio.open(os.path.join(rdir, tifs[0])) as src:
+            meta = (
+                [src.bounds.left, src.bounds.right,
+                 src.bounds.bottom, src.bounds.top],
+                src.crs, src.shape,
+            )
+        means = _compute_era_means(
+            rdir, meta[2], band=band, mask_nan_only=mask_nan_only,
+        )
+        return means, meta
+
+    gw_means, gw_meta = _means_and_meta(gw_raster_dir)
+    sw_means, _ = _means_and_meta(sw_raster_dir)
+    if gw_means is None or sw_means is None:
+        logger.warning(
+            'Missing GW or SW rasters for %s — skipping paired era maps.',
+            title,
+        )
+        return
+    extent, crs, raster_shape = gw_meta
+
+    basins_gdf = gpd.read_file(basin_shp)
+    if basins_gdf.crs != crs:
+        basins_gdf = basins_gdf.to_crs(crs)
+    name_col = (
+        'BASIN_NAME' if 'BASIN_NAME' in basins_gdf.columns
+        else basins_gdf.columns[0]
+    )
+    ama_ina = get_ama_ina_basin_names()
+
+    # Shared color limits pooled over BOTH pools so GW and SW share one
+    # comparable scale under the single colorbar.
+    valid = [
+        em.compressed()
+        for em in list(gw_means.values()) + list(sw_means.values())
+        if em is not None and em.count() > 0
+    ]
+    if not valid:
+        logger.warning('All era means empty for %s — skipping.', title)
+        return
+    all_vals = np.concatenate(valid)
+    lo_pct, hi_pct = percentile_clip
+    if vmin is None:
+        vmin = float(np.nanpercentile(all_vals, lo_pct))
+    if vmax is None:
+        vmax = float(np.nanpercentile(all_vals, hi_pct))
+
+    # Wider per-column canvas (~4.7 in/map) so the dense central-Arizona
+    # labels (Phoenix vs Harquahala, etc.) have room and don't overprint.
+    n_eras = len(ERA_PERIODS)
+    fig, axes = plt.subplots(
+        n_eras, 2, figsize=(9.6, 5.8 * n_eras), constrained_layout=True,
+    )
+    fig.suptitle(f'{title} — Era Mean', fontsize=16, fontweight='bold')
+    axes = np.atleast_2d(axes)
+
+    pools = [(col_labels[0], gw_means), (col_labels[1], sw_means)]
+    col_tags = ['(a)', '(b)']
+    im = None
+    for ri, (era, (y1, y2)) in enumerate(ERA_PERIODS.items()):
+        for ci, (pool_name, means) in enumerate(pools):
+            ax = axes[ri, ci]
+            ax.set_facecolor('#D5D5D5')
+            arr = means.get(era)
+            if arr is None or arr.count() == 0:
+                arr = np.ma.masked_all(raster_shape)
+            im = ax.imshow(
+                arr, extent=extent, origin='upper',
+                interpolation='nearest', cmap=cmap, vmin=vmin, vmax=vmax,
+            )
+            _overlay_boundaries(ax, basins_gdf, ama_ina, name_col,
+                                label_all=True, label_fontsize=8)
+            # Column headers (pool name) only on the top row.
+            if ri == 0:
+                ax.set_title(
+                    f'{col_tags[ci]} {pool_name}',
+                    fontsize=14, fontweight='bold',
+                )
+        # Era label down the left edge of the row (no a/b/c prefix —
+        # the a/b now denote the GW/SW columns).
+        axes[ri, 0].text(
+            -0.06, 0.5, f'{era}\n({y1}–{y2})',
+            transform=axes[ri, 0].transAxes, rotation=90,
+            va='center', ha='center', fontsize=12, fontweight='bold',
+        )
+
+    # GW basin / AMA / INA legend at the south-west corner of the
+    # bottom-left (Groundwater / last-era) panel, nudged down slightly so
+    # it sits in the gap between the bottom map and the colorbar —
+    # Arizona's SW corner is the cut-off no-data triangle, so it stays
+    # clear of the data.
+    add_ama_ina_legend(
+        axes[-1, 0], loc='lower left', bbox_to_anchor=(0.0, -0.12),
+        fontsize=10, ncol=1, frameon=False,
+    )
+
+    # Single shared full-width colorbar with dual units across both
+    # columns, nudged up close to the maps.
+    era_cbar_fontsize = 12
+    cbar = fig.colorbar(
+        im, ax=axes, shrink=0.92, pad=0.02,
+        orientation='horizontal', aspect=45, extend=cbar_extend,
+    )
+    is_volume_m3 = 'm$^3$' in unit_label or 'm3' in unit_label.lower()
+    if is_volume_m3:
+        import matplotlib.ticker as mticker
+        cbar.set_label(
+            r'Volume ($\times$10$^{6}$ m$^3$)',
+            fontsize=era_cbar_fontsize, fontweight='bold',
+        )
+        cbar.formatter = mticker.FuncFormatter(lambda x, _: f'{x / 1e6:g}')
+        cbar.update_ticks()
+    else:
+        cbar.set_label(
+            unit_label, fontsize=era_cbar_fontsize, fontweight='bold',
+        )
+    cbar.ax.tick_params(labelsize=era_cbar_fontsize)
+    if 'mm' in unit_label.lower():
+        secax = cbar.ax.secondary_xaxis(
+            'top',
+            functions=(lambda mm: mm * _MM_TO_FT, lambda ft: ft / _MM_TO_FT),
+        )
+        secax.set_xlabel(
+            'Depth (ft)', fontsize=era_cbar_fontsize, fontweight='bold',
+        )
+        secax.tick_params(labelsize=era_cbar_fontsize)
+    elif is_volume_m3:
+        secax = cbar.ax.secondary_xaxis(
+            'top',
+            functions=(lambda m3: m3 / _AF_TO_M3, lambda af: af * _AF_TO_M3),
+        )
+        secax.set_xlabel(
+            'Volume (AF)', fontsize=era_cbar_fontsize, fontweight='bold',
+        )
+        secax.tick_params(labelsize=era_cbar_fontsize)
+
+    if out_filename is None:
+        slug = title.replace(' ', '_').replace('/', '_')
+        out_filename = f'Era_Maps_{slug}_{out_tag}.png'
+    out_path = os.path.join(output_dir, out_filename)
+    fig.savefig(out_path, dpi=600, bbox_inches='tight')
+    plt.close(fig)
+    logger.info('Paired era maps saved to %s', out_path)
+
+
+def create_dual_metric_era_raster_maps(
+    basin_shp: str,
+    output_dir: str,
+    *,
+    title: str,
+    left: dict,
+    right: dict,
+    out_tag: str = 'dual',
+    cbar_extend: str = 'both',
+    out_filename: str | None = None,
+) -> None:
+    """Paired era-mean maps of two DIFFERENT metrics, one colorbar each.
+
+    Unlike :func:`create_gw_sw_era_raster_maps` (single shared colorbar),
+    the two columns carry different quantities on different scales
+    (e.g. capture *fraction* vs capture *volume*), so each column gets
+    its own colorbar with the appropriate unit treatment.  Columns are
+    (a) ``left`` / (b) ``right``; rows are the eras.
+
+    ``left`` and ``right`` are dicts with keys: ``raster_dir`` (required),
+    ``label`` (column header), ``unit`` (colorbar label), ``cmap``
+    (default ``'YlOrRd'``), ``band`` (1), ``vmin``/``vmax`` (None →
+    percentile), ``percentile_clip`` ((2, 98)), ``mask_nan_only`` (False).
+    """
+    import rasterio as rio
+    import matplotlib.ticker as mticker
+
+    apply_journal_style()
+    makedirs(output_dir)
+
+    def _means_meta(rdir, band, mask_nan_only):
+        tifs = sorted(f for f in os.listdir(rdir) if f.endswith('.tif'))
+        if not tifs:
+            return None, None
+        with rio.open(os.path.join(rdir, tifs[0])) as src:
+            meta = (
+                [src.bounds.left, src.bounds.right,
+                 src.bounds.bottom, src.bounds.top],
+                src.crs, src.shape,
+            )
+        return _compute_era_means(
+            rdir, meta[2], band=band, mask_nan_only=mask_nan_only,
+        ), meta
+
+    cols = []
+    for spec in (left, right):
+        means, meta = _means_meta(
+            spec['raster_dir'], spec.get('band', 1),
+            spec.get('mask_nan_only', False),
+        )
+        if means is None:
+            logger.warning(
+                'Missing rasters for %s — skipping dual-metric maps.', title,
+            )
+            return
+        valid = [
+            em.compressed() for em in means.values()
+            if em is not None and em.count() > 0
+        ]
+        if not valid:
+            logger.warning('All era means empty for %s — skipping.', title)
+            return
+        allv = np.concatenate(valid)
+        lo, hi = spec.get('percentile_clip', (2.0, 98.0))
+        vmin = spec.get('vmin')
+        vmax = spec.get('vmax')
+        if vmin is None:
+            vmin = float(np.nanpercentile(allv, lo))
+        if vmax is None:
+            vmax = float(np.nanpercentile(allv, hi))
+        cols.append({
+            'means': means, 'meta': meta, 'vmin': vmin, 'vmax': vmax,
+            'cmap': spec.get('cmap', 'YlOrRd'),
+            'label': spec['label'], 'unit': spec['unit'],
+        })
+
+    extent, crs, raster_shape = cols[0]['meta']
+    basins_gdf = gpd.read_file(basin_shp)
+    if basins_gdf.crs != crs:
+        basins_gdf = basins_gdf.to_crs(crs)
+    name_col = (
+        'BASIN_NAME' if 'BASIN_NAME' in basins_gdf.columns
+        else basins_gdf.columns[0]
+    )
+    ama_ina = get_ama_ina_basin_names()
+
+    n_eras = len(ERA_PERIODS)
+    fig, axes = plt.subplots(
+        n_eras, 2, figsize=(9.6, 5.8 * n_eras), constrained_layout=True,
+    )
+    fig.suptitle(f'{title} — Era Mean', fontsize=16, fontweight='bold')
+    axes = np.atleast_2d(axes)
+    col_tags = ['(a)', '(b)']
+    ims = [None, None]
+    for ri, (era, (y1, y2)) in enumerate(ERA_PERIODS.items()):
+        for ci, col in enumerate(cols):
+            ax = axes[ri, ci]
+            ax.set_facecolor('#D5D5D5')
+            arr = col['means'].get(era)
+            if arr is None or arr.count() == 0:
+                arr = np.ma.masked_all(raster_shape)
+            ims[ci] = ax.imshow(
+                arr, extent=extent, origin='upper',
+                interpolation='nearest', cmap=col['cmap'],
+                vmin=col['vmin'], vmax=col['vmax'],
+            )
+            _overlay_boundaries(ax, basins_gdf, ama_ina, name_col,
+                                label_all=True, label_fontsize=8)
+            if ri == 0:
+                ax.set_title(
+                    f"{col_tags[ci]} {col['label']}",
+                    fontsize=14, fontweight='bold',
+                )
+        axes[ri, 0].text(
+            -0.06, 0.5, f'{era}\n({y1}–{y2})',
+            transform=axes[ri, 0].transAxes, rotation=90,
+            va='center', ha='center', fontsize=12, fontweight='bold',
+        )
+
+    add_ama_ina_legend(
+        axes[-1, 0], loc='lower left', bbox_to_anchor=(0.0, -0.12),
+        fontsize=10, ncol=1, frameon=False,
+    )
+
+    def _apply_units(cbar, unit_label):
+        is_vol = 'm$^3$' in unit_label or 'm3' in unit_label.lower()
+        if is_vol:
+            cbar.set_label(
+                r'Volume ($\times$10$^{6}$ m$^3$)',
+                fontsize=11, fontweight='bold',
+            )
+            cbar.formatter = mticker.FuncFormatter(lambda x, _: f'{x / 1e6:g}')
+            cbar.update_ticks()
+        else:
+            cbar.set_label(unit_label, fontsize=11, fontweight='bold')
+        cbar.ax.tick_params(labelsize=11)
+        if 'mm' in unit_label.lower():
+            sx = cbar.ax.secondary_xaxis(
+                'top',
+                functions=(lambda mm: mm * _MM_TO_FT,
+                           lambda ft: ft / _MM_TO_FT),
+            )
+            sx.set_xlabel('Depth (ft)', fontsize=11, fontweight='bold')
+            sx.tick_params(labelsize=11)
+        elif is_vol:
+            sx = cbar.ax.secondary_xaxis(
+                'top',
+                functions=(lambda m3: m3 / _AF_TO_M3,
+                           lambda af: af * _AF_TO_M3),
+            )
+            sx.set_xlabel('Volume (AF)', fontsize=11, fontweight='bold')
+            sx.tick_params(labelsize=11)
+
+    # One colorbar per column, placed under its own column.
+    cbar_a = fig.colorbar(
+        ims[0], ax=list(axes[:, 0]), orientation='horizontal',
+        shrink=0.92, pad=0.02, aspect=30, extend=cbar_extend,
+    )
+    _apply_units(cbar_a, cols[0]['unit'])
+    cbar_b = fig.colorbar(
+        ims[1], ax=list(axes[:, 1]), orientation='horizontal',
+        shrink=0.92, pad=0.02, aspect=30, extend=cbar_extend,
+    )
+    _apply_units(cbar_b, cols[1]['unit'])
+
+    if out_filename is None:
+        slug = title.replace(' ', '_').replace('/', '_')
+        out_filename = f'Era_Maps_{slug}_{out_tag}.png'
+    out_path = os.path.join(output_dir, out_filename)
+    fig.savefig(out_path, dpi=600, bbox_inches='tight')
+    plt.close(fig)
+    logger.info('Dual-metric paired era maps saved to %s', out_path)
 
 
 def create_ood_era_raster_maps(
@@ -4054,7 +4599,7 @@ def create_ood_era_raster_maps(
 
     n_eras = len(ERA_PERIODS)
     fig, axes = plt.subplots(
-        1, n_eras, figsize=(6 * n_eras, 7), constrained_layout=True,
+        n_eras, 1, figsize=(5.2, 4.3 * n_eras), constrained_layout=True,
     )
     fig.suptitle(f'{title} — Era Mean', fontsize=16, fontweight='bold')
     if n_eras == 1:
@@ -4104,11 +4649,12 @@ def create_ood_era_raster_maps(
         )
         ax.set_title(
             f'{panel_labels[idx]} {era} ({y1}–{y2})',
-            fontsize=12, fontweight='bold',
+            fontsize=14, fontweight='bold',
         )
 
     # Single AMA / INA / GW basin legend, outside-right of first panel
-    add_ama_ina_legend(axes_flat[0])
+    add_ama_ina_legend(axes_flat[-1], loc='upper center',
+        bbox_to_anchor=(0.5, -0.03), ncol=3)
 
     era_cbar_fontsize = 10
     if last_partial_im is not None:
@@ -4119,8 +4665,8 @@ def create_ood_era_raster_maps(
         # nothing is actually clipped below vmin); the right arrowhead
         # points toward the separately-rendered fully-OOD class.
         cbar = fig.colorbar(
-            last_partial_im, ax=axes_flat, shrink=0.5, pad=0.06,
-            orientation='horizontal', aspect=40, extend='both',
+            last_partial_im, ax=axes_flat, shrink=0.92, pad=0.02,
+            orientation='horizontal', aspect=45, extend='both',
         )
         cbar.set_label(
             'Mean OOD Probability (partial)',
@@ -4541,21 +5087,23 @@ def _draw_sigma_attribution_legend(
     )
     na_patch.set_edgecolor('#AAAAAA')
     handles.append(na_patch)
-    ncol = len(handles)
+    # Wrap to at most 4 columns so the legend fits the single-column
+    # (~5 in wide) vertical figure instead of forcing it wide.
+    ncol = min(len(handles), 4)
     leg = fig.legend(
         handles=handles,
         loc='lower center',
         ncol=ncol,
         bbox_to_anchor=(0.5, 0.01),
         frameon=False,
-        fontsize=9,
+        fontsize=11,
         handlelength=1.4,
         columnspacing=1.2,
         title=(
-            f'Management share of classifiable variance    '
+            f'Management share of classifiable variance\n'
             f'({left_tag}  ←  Mixed (50 / 50)  →  {right_tag})'
         ),
-        title_fontsize=10,
+        title_fontsize=12,
     )
     leg._legend_box.align = 'center'
 
@@ -4588,13 +5136,22 @@ def _draw_sigma_attribution_disclosure_box(
     )
     n_total = int(finite.sum())
     median_model = float(np.median(model_share_f)) * 100.0
-    txt = (
+    # Hard-wrap each sentence so the disclosure stays within the narrow
+    # (~5 in) single-column figure width — an unwrapped ~150-char line
+    # would expand the tight bbox and blow the figure out sideways.
+    import textwrap as _textwrap
+    _line1 = (
         f'σ_Model dominant in {n_model_dom}/{n_total} basins '
         f'({n_model_dom / n_total * 100:.0f}%); median Model share '
-        f'{median_model:.0f}%.\n'
-        f'Color axis classifies Management vs Climate within the '
-        f'remaining variance; basins outlined in lime green '
-        f'(see legend) are Model-dominated overall.'
+        f'{median_model:.0f}%.'
+    )
+    _line2 = (
+        'Color axis classifies Management vs Climate within the '
+        'remaining variance; basins outlined in lime green (see legend) '
+        'are Model-dominated overall.'
+    )
+    txt = '\n'.join(
+        _textwrap.fill(s, width=48) for s in (_line1, _line2)
     )
     # Make room for the two-line disclosure between the map panels and
     # the bottom legend. The legend-only bottom margin is computed in
@@ -4607,17 +5164,23 @@ def _draw_sigma_attribution_disclosure_box(
     fig_height = getattr(fig, '_attr_fig_height', None)
     bottom_inches = getattr(fig, '_attr_bottom_inches', None)
     if fig_height and bottom_inches:
-        new_bottom_inches = bottom_inches + 0.4
+        # Reserve, in absolute inches: the legend strip (bottom_inches)
+        # at the very bottom, then the disclosure text block above it,
+        # then the map panels.  Growing the bottom margin by a fixed
+        # amount keeps the same visual gap regardless of figure height
+        # (11 in headline vs 21 in detailed). The text bottom sits a
+        # little above the legend strip so it never collides with it.
+        new_bottom_inches = bottom_inches + 1.8
         new_bottom = new_bottom_inches / fig_height
-        text_y = (new_bottom_inches * 0.62) / fig_height
+        text_y = (bottom_inches + 0.35) / fig_height
     else:
-        new_bottom = 0.20
-        text_y = 0.13
+        new_bottom = 0.30
+        text_y = 0.18
     fig.subplots_adjust(bottom=new_bottom)
     fig.text(
         0.5, text_y, txt,
         ha='center', va='bottom',
-        fontsize=8,
+        fontsize=11,
         bbox=dict(
             boxstyle='round,pad=0.4', facecolor='white',
             edgecolor='#555555', linewidth=0.6, alpha=0.9,
@@ -4708,15 +5271,15 @@ def _draw_sigma_attribution_ternary_legend(fig) -> None:
     ax_inset.add_patch(outline)
     ax_inset.text(
         0.5, np.sqrt(3) / 2 + 0.05, 'Management',
-        ha='center', va='bottom', fontsize=7, fontweight='bold', color='#6a2214',
+        ha='center', va='bottom', fontsize=12, fontweight='bold', color='#6a2214',
     )
     ax_inset.text(
         -0.05, -0.02, 'Climate',
-        ha='right', va='top', fontsize=7, fontweight='bold', color='#142a6a',
+        ha='right', va='top', fontsize=12, fontweight='bold', color='#142a6a',
     )
     ax_inset.text(
         1.05, -0.02, 'Model',
-        ha='left', va='top', fontsize=7, fontweight='bold', color='#1a4a22',
+        ha='left', va='top', fontsize=12, fontweight='bold', color='#1a4a22',
     )
     # N/A swatch below the triangle — hatched to match the map polygons
     na_rect = mpatches.FancyBboxPatch(
@@ -4729,7 +5292,7 @@ def _draw_sigma_attribution_ternary_legend(fig) -> None:
     ax_inset.add_patch(na_rect)
     ax_inset.text(
         0.5, -0.22, 'N/A',
-        ha='center', va='center', fontsize=6, fontweight='bold',
+        ha='center', va='center', fontsize=11, fontweight='bold',
         color='#555555',
     )
     ax_inset.set_xlim(-0.35, 1.35)
@@ -4865,43 +5428,32 @@ def _setup_attr_figure(
     Axes are always returned as a flat list so callers can index by
     pool-order regardless of the underlying grid shape.
     """
-    if n_panels <= 1:
-        n_rows, n_cols = 1, 1
-    elif n_panels <= 3:
-        n_rows, n_cols = 1, n_panels
-    elif n_panels == 4:
-        n_rows, n_cols = 2, 2
-    else:
-        n_cols = (n_panels + 1) // 2
-        n_rows = 2
-    # Slightly more vertical height per row when stacking, to keep AZ's
-    # tall aspect ratio legible in a 2-row grid.
-    fig_height = 7 if n_rows == 1 else 12
+    # Single-column vertical stack: one pool per row so every choropleth
+    # spans the full page width instead of being squeezed into a narrow
+    # column of a horizontal strip.  Authored near display width, so the
+    # page-fit shrink is ~1x and the fonts are ordinary point sizes.
+    n_rows, n_cols = n_panels, 1
+    per_panel_h = 5.0
+    bottom_inches = 1.0   # reserved strip for the shared bottom legend
+    fig_height = per_panel_h * n_panels + bottom_inches
     fig, axes = plt.subplots(
         n_rows, n_cols,
-        figsize=(6 * n_cols, fig_height),
+        figsize=(5.2, fig_height),
         constrained_layout=False,
     )
     if n_panels == 1:
         axes_flat = [axes]
     else:
         axes_flat = list(np.asarray(axes).ravel())
-    # Hide any trailing axes that have no pool assigned to them (e.g.
-    # a 5-pool request on a 2×3 grid would leave one axis blank).
+    # Hide any trailing axes that have no pool assigned to them.
     for idx in range(n_panels, len(axes_flat)):
         axes_flat[idx].axis('off')
-    fig.suptitle(title, fontsize=16, fontweight='bold', y=0.98)
+    fig.suptitle(title, fontsize=16, fontweight='bold', y=0.99)
 
-    # Target ~1.0 inch for the legend-only bottom margin. At the 1-row
-    # fig_height=7 that yields bottom=0.143 (matches the old 0.14
-    # hard-code); at fig_height=12 it yields bottom=0.083, which
-    # eliminates the extra 0.7-inch dead strip that was showing up on
-    # the 2×2 detailed maps.
-    bottom_inches = 1.0
     bottom_frac = bottom_inches / fig_height
     plt.subplots_adjust(
-        left=0.04, right=0.98, top=0.90, bottom=bottom_frac,
-        wspace=0.06, hspace=0.08,
+        left=0.04, right=0.98, top=0.95, bottom=bottom_frac,
+        hspace=0.12,
     )
     fig._attr_fig_height = fig_height       # type: ignore[attr-defined]
     fig._attr_bottom_inches = bottom_inches  # type: ignore[attr-defined]
@@ -5003,16 +5555,18 @@ def _draw_attribution_basin_panel(
             hatch='///',
         )
 
-    # Label every basin
+    # Label only the AMA/INA management areas — labeling all 52 basins
+    # overlaps into an unreadable mass once the font is large enough to
+    # read on a page-width multi-panel figure.
     ama_ina = get_ama_ina_basin_names()
     _overlay_boundaries(
         ax, basins_gdf, ama_ina, basin_col,
-        label_fontsize=5.5, label_all=True,
+        label_fontsize=8, label_all=True,
     )
-    add_ama_ina_legend(ax)
+    add_ama_ina_legend(ax, fontsize=9)
     ax.set_title(
         f'{panel_label} {panel_title}',
-        fontsize=11, fontweight='bold',
+        fontsize=14, fontweight='bold',
     )
 
 
@@ -5817,15 +6371,16 @@ def create_actual_vs_predicted_maps(
     def _make_figure(data_sets, suptitle, primary_label, secondary_label,
                      secondary_factor, out_file, v_lo, v_hi, d_lo, d_hi):
         import matplotlib.patches as mpatches
-        from matplotlib.gridspec import GridSpec
+        from matplotlib.lines import Line2D
 
-        fig = plt.figure(figsize=(22, 9))
-        gs = GridSpec(
-            2, 3, figure=fig,
-            height_ratios=[1, 0.04],
-            hspace=0.18, wspace=0.12,
+        # constrained_layout reliably aligns the three equal-aspect maps
+        # in one row and manages the titles/colorbars/suptitle spacing
+        # (the previous manual GridSpec left the difference panel's title
+        # riding higher than the other two).
+        fig, axes = plt.subplots(
+            1, 3, figsize=(15, 6.3), constrained_layout=True,
         )
-        fig.suptitle(suptitle, fontsize=15, fontweight='bold', y=0.98)
+        fig.suptitle(suptitle, fontsize=20, fontweight='bold')
 
         unmetered_handle = mpatches.Patch(
             facecolor='#D1D1D1', edgecolor='#555555', linewidth=0.4,
@@ -5833,23 +6388,19 @@ def create_actual_vs_predicted_maps(
         )
         avp_fontsize = 10
 
-        # Detect volume labels so tick values can be scaled by ×10⁶,
-        # matching the convention in create_era_raster_maps.
         is_volume = 'm$^3$' in primary_label or 'm3' in primary_label.lower()
+        vol_formatter = vol_label = dvol_label = None
         if is_volume:
             import matplotlib.ticker as mticker
-            vol_formatter = mticker.FuncFormatter(
-                lambda x, _: f'{x / 1e6:g}',
-            )
+            vol_formatter = mticker.FuncFormatter(lambda x, _: f'{x / 1e6:g}')
             vol_label = r'Volume ($\times$10$^{6}$ m$^3$)'
             dvol_label = r'$\Delta$ Volume ($\times$10$^{6}$ m$^3$)'
 
-        # ---- Row 0: three map panels ----
-        im_shared = None   # will hold the ScalarMappable for panels a/b
-        im_diff = None     # will hold the ScalarMappable for panel c
+        im_shared = None
+        im_diff = None
         for idx, (panel_title, data, ext, cm, lo, hi, az_gray) in enumerate(
                 data_sets):
-            ax = fig.add_subplot(gs[0, idx])
+            ax = axes[idx]
             ax.set_facecolor('white')
             ax.imshow(
                 az_gray, extent=ext, origin='upper',
@@ -5857,28 +6408,19 @@ def create_actual_vs_predicted_maps(
                 interpolation='nearest', zorder=0,
             )
             im = ax.imshow(
-                data, extent=ext, origin='upper',
-                cmap=cm, vmin=lo, vmax=hi,
-                interpolation='nearest', zorder=1,
+                data, extent=ext, origin='upper', cmap=cm,
+                vmin=lo, vmax=hi, interpolation='nearest', zorder=1,
             )
             _overlay_boundaries(ax, basins_gdf, ama_ina, name_col,
                                 label_all=True)
-            ax.set_title(panel_title, fontsize=12, fontweight='bold')
-
-            is_diff = 'Difference' in panel_title
-            is_actual = 'Actual' in panel_title
-            if is_diff:
+            ax.set_title(panel_title, fontsize=14, fontweight='bold')
+            if 'Difference' in panel_title:
                 im_diff = im
             else:
                 im_shared = im
-
-            if is_actual or is_diff:
-                # Merge AMA / INA / GW basin entries with the unmetered
-                # patch in a single legend so the boundary classes are
-                # legible alongside the unmetered hatching.  Legend
-                # anchored just below the axes (bbox_to_anchor y < 0)
-                # so it doesn't overlap the southwest desert pixels.
-                from matplotlib.lines import Line2D
+            if idx == 0:
+                # Two-column, no-box legend in the SW-corner no-data
+                # triangle of the first map.
                 handles = [
                     unmetered_handle,
                     Line2D([0], [0], color=BASIN_BORDER_COLOR, lw=0.8,
@@ -5889,72 +6431,44 @@ def create_actual_vs_predicted_maps(
                            label='INA'),
                 ]
                 ax.legend(
-                    handles=handles,
-                    loc='lower left', bbox_to_anchor=(0.0, -0.05),
-                    framealpha=0.9,
-                    fontsize=avp_fontsize, frameon=True,
+                    handles=handles, loc='lower left',
+                    bbox_to_anchor=(0.0, -0.06), ncol=2,
+                    columnspacing=1.0, handlelength=1.2,
+                    fontsize=avp_fontsize, frameon=False,
                 )
 
-        # ---- Row 1: two horizontal colorbars ----
-        # Shared colorbar spanning columns 0–1 (Actual + Predicted)
-        cbar_shared_ax = fig.add_subplot(gs[1, 0:2])
-        cb_shared = fig.colorbar(
-            im_shared, cax=cbar_shared_ax,
-            orientation='horizontal', extend='both',
-        )
-        if is_volume:
-            cb_shared.set_label(
-                vol_label, fontsize=avp_fontsize, fontweight='bold',
+        def _cbar_units(cbar, plabel, slabel, vlabel):
+            if is_volume:
+                cbar.set_label(vlabel, fontsize=avp_fontsize,
+                               fontweight='bold')
+                cbar.formatter = vol_formatter
+                cbar.update_ticks()
+            else:
+                cbar.set_label(plabel, fontsize=avp_fontsize,
+                               fontweight='bold')
+            cbar.ax.tick_params(labelsize=avp_fontsize)
+            secax = cbar.ax.secondary_xaxis(
+                'top',
+                functions=(lambda x: x * secondary_factor,
+                           lambda x: x / secondary_factor),
             )
-            cb_shared.formatter = vol_formatter
-            cb_shared.update_ticks()
-        else:
-            cb_shared.set_label(
-                primary_label, fontsize=avp_fontsize, fontweight='bold',
-            )
-        cb_shared.ax.tick_params(labelsize=avp_fontsize)
-        secax_shared = cb_shared.ax.secondary_xaxis(
-            'top',
-            functions=(
-                lambda x: x * secondary_factor,
-                lambda x: x / secondary_factor,
-            ),
-        )
-        secax_shared.set_xlabel(
-            secondary_label, fontsize=avp_fontsize, fontweight='bold',
-        )
-        secax_shared.tick_params(labelsize=avp_fontsize)
+            secax.set_xlabel(slabel, fontsize=avp_fontsize, fontweight='bold')
+            secax.tick_params(labelsize=avp_fontsize)
 
-        # Difference colorbar under column 2
-        cbar_diff_ax = fig.add_subplot(gs[1, 2])
+        # Shared colorbar under (a)+(b); a separate diff colorbar under (c).
+        cb_shared = fig.colorbar(
+            im_shared, ax=[axes[0], axes[1]], orientation='horizontal',
+            location='bottom', shrink=0.8, pad=0.02, aspect=45,
+            extend='both',
+        )
+        _cbar_units(cb_shared, primary_label, secondary_label, vol_label)
         cb_diff = fig.colorbar(
-            im_diff, cax=cbar_diff_ax,
-            orientation='horizontal', extend='both',
+            im_diff, ax=axes[2], orientation='horizontal',
+            location='bottom', shrink=0.9, pad=0.02, aspect=22,
+            extend='both',
         )
-        if is_volume:
-            cb_diff.set_label(
-                dvol_label, fontsize=avp_fontsize, fontweight='bold',
-            )
-            cb_diff.formatter = vol_formatter
-            cb_diff.update_ticks()
-        else:
-            cb_diff.set_label(
-                f'\u0394 {primary_label}',
-                fontsize=avp_fontsize, fontweight='bold',
-            )
-        cb_diff.ax.tick_params(labelsize=avp_fontsize)
-        secax_diff = cb_diff.ax.secondary_xaxis(
-            'top',
-            functions=(
-                lambda x: x * secondary_factor,
-                lambda x: x / secondary_factor,
-            ),
-        )
-        secax_diff.set_xlabel(
-            f'\u0394 {secondary_label}',
-            fontsize=avp_fontsize, fontweight='bold',
-        )
-        secax_diff.tick_params(labelsize=avp_fontsize)
+        _cbar_units(cb_diff, f'Δ {primary_label}',
+                    f'Δ {secondary_label}', dvol_label)
 
         out_path = os.path.join(output_dir, out_file)
         fig.savefig(out_path, dpi=600, bbox_inches='tight')
@@ -6448,6 +6962,23 @@ def create_trend_maps(
         cb_ax2.yaxis.set_label_position('right')
         cb_ax2.yaxis.tick_right()
 
+    def _add_secondary_unit_axis_h(cbar, unit_prefix,
+                                   label_fontsize=12, tick_fontsize=10):
+        """Secondary-unit axis on TOP of a horizontal colorbar (e.g. ft,
+        AF on top; primary mm, m³ on the bottom)."""
+        if secondary_unit_label is None or secondary_unit_factor is None:
+            return
+        secax = cbar.ax.secondary_xaxis(
+            'top',
+            functions=(lambda x: x * secondary_unit_factor,
+                       lambda x: x / secondary_unit_factor),
+        )
+        secax.set_xlabel(
+            f"Sen's slope ({unit_prefix}{secondary_unit_label}/year)",
+            fontsize=label_fontsize, fontweight='bold',
+        )
+        secax.tick_params(labelsize=tick_fontsize)
+
     # ── Rendering helpers ────────────────────────────────────────────
     def _draw_pixel_panel(ax, period_name, pr, color_abs, slope_scale=1.0,
                           show_title=True):
@@ -6478,12 +7009,14 @@ def create_trend_maps(
         # figures the period name is already carried by the suptitle,
         # so a panel title would be a duplicate.
         if show_title:
-            ax.set_title(period_name, fontsize=12, fontweight='bold')
+            ax.set_title(period_name, fontsize=18, fontweight='bold')
         summary = (f"Significant: \u2191{pr['pct_inc']:.1f}%  "
                    f"\u2193{pr['pct_dec']:.1f}%  n.s. {pr['pct_ns']:.1f}%")
+        # Top-left corner (NW, away from the SW-corner legend) so the
+        # summary box never overlaps the legend on the last panel.
         ax.text(
-            0.02, 0.02, summary, transform=ax.transAxes,
-            fontsize=8, fontweight='bold', va='bottom',
+            0.02, 0.98, summary, transform=ax.transAxes,
+            fontsize=11, fontweight='bold', ha='left', va='top',
             bbox=dict(boxstyle='round,pad=0.3', fc='white',
                       alpha=0.85, lw=0.5),
         )
@@ -6533,10 +7066,10 @@ def create_trend_maps(
         # labels are already added above with the per-basin trend value).
         _overlay_boundaries(
             ax, basins_gdf, ama_ina, name_col,
-            label_all=False, show_labels=False,
+            label_all=True, show_labels=False,
         )
         if show_title:
-            ax.set_title(period_name, fontsize=12, fontweight='bold')
+            ax.set_title(period_name, fontsize=13, fontweight='bold')
         ax.axis('off')
 
     # ── Pass 2: render figures ───────────────────────────────────────
@@ -6553,27 +7086,27 @@ def create_trend_maps(
     for period_name in full_periods:
         pr = period_results[period_name]
         pixel_scale, pixel_prefix = _slope_display_scale(pr['abs_max'])
-        fig, ax = plt.subplots(1, 1, figsize=(10, 9),
+        fig, ax = plt.subplots(1, 1, figsize=(7.5, 6.8),
                                constrained_layout=True)
         # show_title=False suppresses the per-axis title because the
         # suptitle below already carries the period name.
         im = _draw_pixel_panel(ax, period_name, pr, pr['abs_max'],
                                slope_scale=pixel_scale,
                                show_title=False)
-        add_ama_ina_legend(ax)
+        add_ama_ina_legend(ax, bbox_to_anchor=(0.0, -0.12))
         cbar = fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02,
                             extend='both')
         cbar.set_label(
             f"Sen's slope ({pixel_prefix}{unit_label}/year)",
-            fontsize=12, fontweight='bold',
+            fontsize=13, fontweight='bold',
         )
-        cbar.ax.tick_params(labelsize=10)
+        cbar.ax.tick_params(labelsize=12)
         _add_secondary_unit_axis(cbar, pixel_scale, pixel_prefix,
                                  label_fontsize=12, tick_fontsize=10)
         fig.suptitle(
             f'{title} \u2014 Trend {period_name}\n'
             f"(stipple = not significant at \u03b1 = {alpha})",
-            fontsize=13, fontweight='bold',
+            fontsize=14, fontweight='bold',
         )
         out_path = os.path.join(output_dir,
                                 f"Trend_{pr['slug']}.png")
@@ -6586,12 +7119,12 @@ def create_trend_maps(
             b_abs = (max(abs(slopes.min()), abs(slopes.max()), 1e-6)
                      if len(slopes) > 0 else 1.0)
             basin_scale, basin_prefix = _slope_display_scale(b_abs)
-            fig_b, ax_b = plt.subplots(1, 1, figsize=(10, 9),
+            fig_b, ax_b = plt.subplots(1, 1, figsize=(7.5, 6.8),
                                        constrained_layout=True)
             _draw_basin_panel(ax_b, period_name, pr, b_abs,
                               slope_scale=basin_scale,
                               show_title=False)
-            add_ama_ina_legend(ax_b)
+            add_ama_ina_legend(ax_b, bbox_to_anchor=(0.0, -0.12))
             sm = plt.cm.ScalarMappable(
                 cmap='RdBu_r',
                 norm=plt.Normalize(
@@ -6604,14 +7137,14 @@ def create_trend_maps(
                                     extend='both')
             cbar_b.set_label(
                 f"Mean Sen's slope ({basin_prefix}{unit_label}/year)",
-                fontsize=11, fontweight='bold',
+                fontsize=12, fontweight='bold',
             )
-            cbar_b.ax.tick_params(labelsize=10)
+            cbar_b.ax.tick_params(labelsize=12)
             _add_secondary_unit_axis(cbar_b, basin_scale, basin_prefix,
                                      label_fontsize=11, tick_fontsize=10)
             fig_b.suptitle(
                 f'{title} \u2014 Basin Trend {period_name}',
-                fontsize=13, fontweight='bold',
+                fontsize=14, fontweight='bold',
             )
             b_out = os.path.join(output_dir,
                                  f"Basin_Trend_{pr['slug']}.png")
@@ -6629,7 +7162,7 @@ def create_trend_maps(
         eras_scale, eras_prefix = _slope_display_scale(eras_abs)
         n_eras = len(era_periods)
         fig, axes = plt.subplots(
-            1, n_eras, figsize=(8 * n_eras, 9),
+            n_eras, 1, figsize=(5.2, 4.3 * n_eras),
             constrained_layout=True,
         )
         if n_eras == 1:
@@ -6640,20 +7173,22 @@ def create_trend_maps(
                 ax, period_name, period_results[period_name], eras_abs,
                 slope_scale=eras_scale,
             )
-        add_ama_ina_legend(axes[0])
-        cbar = fig.colorbar(last_im, ax=axes, shrink=0.7, pad=0.02,
-                            extend='both', location='right')
+        add_ama_ina_legend(axes[-1], loc='upper center',
+        bbox_to_anchor=(0.5, -0.03), ncol=3)
+        cbar = fig.colorbar(last_im, ax=axes, shrink=0.92, pad=0.02,
+                            aspect=45, extend='both',
+                            orientation='horizontal')
         cbar.set_label(
             f"Sen's slope ({eras_prefix}{unit_label}/year)",
             fontsize=12, fontweight='bold',
         )
-        cbar.ax.tick_params(labelsize=10)
-        _add_secondary_unit_axis(cbar, eras_scale, eras_prefix,
-                                 label_fontsize=12, tick_fontsize=10)
+        cbar.ax.tick_params(labelsize=11)
+        _add_secondary_unit_axis_h(cbar, eras_prefix,
+                                   label_fontsize=12, tick_fontsize=10)
         fig.suptitle(
             f'{title} \u2014 Trend by Era\n'
             f"(stipple = not significant at \u03b1 = {alpha})",
-            fontsize=14, fontweight='bold',
+            fontsize=15, fontweight='bold',
         )
         eras_slug = (f'{title}_Eras'
                      .replace(' ', '_').replace('/', '_'))
@@ -6679,7 +7214,7 @@ def create_trend_maps(
                 b_abs_eras,
             )
             fig_b, axes_b = plt.subplots(
-                1, n_eras, figsize=(8 * n_eras, 9),
+                n_eras, 1, figsize=(5.2, 4.3 * n_eras),
                 constrained_layout=True,
             )
             if n_eras == 1:
@@ -6689,7 +7224,8 @@ def create_trend_maps(
                     ax_b, period_name, period_results[period_name],
                     b_abs_eras, slope_scale=basin_eras_scale,
                 )
-            add_ama_ina_legend(axes_b[0])
+            add_ama_ina_legend(axes_b[-1], loc='upper center',
+        bbox_to_anchor=(0.5, -0.03), ncol=3)
             sm = plt.cm.ScalarMappable(
                 cmap='RdBu_r',
                 norm=plt.Normalize(
@@ -6699,21 +7235,21 @@ def create_trend_maps(
             )
             sm.set_array([])
             cbar_b = fig_b.colorbar(
-                sm, ax=axes_b, shrink=0.6, pad=0.02,
-                extend='both', location='right',
+                sm, ax=axes_b, shrink=0.92, pad=0.02,
+                aspect=45, extend='both', orientation='horizontal',
             )
             cbar_b.set_label(
                 f"Mean Sen's slope ({basin_eras_prefix}{unit_label}/year)",
-                fontsize=11, fontweight='bold',
+                fontsize=12, fontweight='bold',
             )
-            cbar_b.ax.tick_params(labelsize=10)
-            _add_secondary_unit_axis(
-                cbar_b, basin_eras_scale, basin_eras_prefix,
+            cbar_b.ax.tick_params(labelsize=11)
+            _add_secondary_unit_axis_h(
+                cbar_b, basin_eras_prefix,
                 label_fontsize=11, tick_fontsize=10,
             )
             fig_b.suptitle(
                 f'{title} \u2014 Basin Trend by Era',
-                fontsize=14, fontweight='bold',
+                fontsize=22, fontweight='bold',
             )
             b_out = os.path.join(output_dir,
                                  f'Basin_Trend_{eras_slug}.png')
