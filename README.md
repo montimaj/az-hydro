@@ -227,7 +227,7 @@ Hasan, M. F., Smith, R. G., Majumdar, S., Huntington, J. L., Alves Meira Neto, A
 
 Haynes, J. V., Read, A. L., Chan, A. Y., Martin, D. J., Regan, R. S., Henson, W. R., Niswonger, R. G., & Stewart, J. S. (2023). Monthly crop irrigation withdrawals and efficiencies by HUC12 watershed for years 2000–2020 within the conterminous United States (ver. 2.0, September 2024). _U.S. Geological Survey data release_. https://doi.org/10.5066/P9LGISUM.
 
-Lisk, M. D., Grogan, D. S., Proctor, K. L., Naz, B. S., Farmer, W. H., & Bock, A. R. (2024). HarDWR — Harmonized Database of Western U.S. Water Rights (v2.0). _Zenodo_. https://doi.org/10.57931/2475303.
+Lisk, M. D., Grogan, D. S., Zuidema, S., Caccese, R., Peklak, D., Zheng, J., Fisher-Vanden, K., Lammers, R., Olmstead, S., & Fowler, L. (2024). HarDWR — Harmonized Database of Western U.S. Water Rights (v2.0). _MSD-LIVE Data Repository_. https://data.msdlive.org/records/z0h32-ne023.
 
 Luukkonen, C.L., Alzraiee, A.H., Larsen, J.D., Martin, D.J., Herbert, D.M., Buchwald, C.A., Houston, N.A., Valseth, K.J., Paulinski, S., Miller, L.D., Niswonger, R.G., Stewart, J.S., & Dieter, C.A. (2023). Public supply water use reanalysis for the 2000-2020 period by HUC12, month, and year for the conterminous United States. _U.S. Geological Survey data release_. https://doi.org/10.5066/P9FUL880
 
@@ -253,4 +253,4 @@ Reitz, M., Sanford, W. E., & Saxe, S. (2023b). Historical evapotranspiration for
 
 Suresh, S., Hossain, F., Mishra, V., & Hossain, N. (2026). GRAIN — a Global Registry of Agricultural Irrigation Networks. _Earth System Science Data_, _18_(3), 1855–1875. https://doi.org/10.5194/essd-18-1855-2026.
 
-WestWater Research. (2026). _Economic impact to the Central Arizona Project (CAP) of post-2026 Colorado River operations_. Central Arizona Project. https://library.cap-az.com/documents/public-information/Economic-Impact-to-CAP.pdf.
+WestWater Research. (2026). _Economic Impacts to Central Arizona of Reductions in CAP Deliveries_. Prepared for the Central Arizona Project. https://library.cap-az.com/documents/public-information/Economic-Impact-to-CAP.pdf.

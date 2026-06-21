@@ -5910,7 +5910,7 @@ Ketchum, D., Hoylman, Z. H., Huntington, J., Brinkerhoff, D., & Jencso, K. G. (2
 
 Ketchum, D., Jencso, K., Maneta, M. P., Melton, F., Jones, M. O., & Huntington, J. (2020). IrrMapper: A Machine Learning Approach for High Resolution Mapping of Irrigated Agriculture Across the Western U.S. _Remote Sensing_, _12_(14), 2328. https://doi.org/10.3390/rs12142328.
 
-Lisk, M. D., Grogan, D. S., Proctor, K. L., Naz, B. S., Farmer, W. H., & Bock, A. R. (2024). HarDWR — Harmonized Database of Western U.S. Water Rights (v2.0). _Zenodo_. https://doi.org/10.57931/2475303.
+Lisk, M. D., Grogan, D. S., Zuidema, S., Caccese, R., Peklak, D., Zheng, J., Fisher-Vanden, K., Lammers, R., Olmstead, S., & Fowler, L. (2024). HarDWR — Harmonized Database of Western U.S. Water Rights (v2.0). _MSD-LIVE Data Repository_. https://data.msdlive.org/records/z0h32-ne023.
 
 Lisk, M. D., Grogan, D. S., Zuidema, S., Zheng, J., Caccese, R., Peklak, D., Fisher-Vanden, K., Lammers, R. B., Olmstead, S. M., & Fowler, L. (2024). Harmonized Database of Western U.S. Water Rights (HarDWR) v.1. _Scientific Data_, _11_(1), 598. https://doi.org/10.1038/s41597-024-03434-6.
 
@@ -5936,7 +5936,7 @@ Melton, F., Huntington, J., Grimm, R., Herring, J., Hall, M., Rollison, D., Eric
 
 Muratoglu, A., Bilgen, G. K., Angin, I., & Kodal, S. (2023). Performance analyses of effective rainfall estimation methods for accurate quantification of agricultural water footprint. _Water Research_, _238_, 120011. https://doi.org/10.1016/j.watres.2023.120011.
 
-Noble, W. et al. (2015). A Case Study in Efficiency — Agriculture and Water Use in the Yuma, Arizona Area. _Yuma County Agriculture Water Coalition_. https://www.azwater.gov/sites/default/files/2022-11/Final%20Yuma%20Report%20021715.pdf.
+Noble, W. (2015). A Case Study in Efficiency – Agriculture and Water Use in the Yuma, Arizona Area. https://www.azwater.gov/sites/default/files/2022-11/Final%20Yuma%20Report%20021715.pdf.
 
 Reitz, M., Sanford, W. E., & Saxe, S. (2023). Ensemble Estimation of Historical Evapotranspiration for the Conterminous U.S. _Water Resources Research_, _59_(6). https://doi.org/10.1029/2022WR034012.
 
@@ -5968,6 +5968,6 @@ Volk, J. M., Huntington, J. L., Melton, F. S., Allen, R., Anderson, M., Fisher, 
 
 Volk, J., Dunkerly, C., Majumdar, S., Huntington, J., Minor, B., Kim, Y., Morton, C., ReVelle, P., Kilic, A., Melton, F., Allen, R., Pearson, C., Purdy, A., & Caldwell, T. (2026). CONUS Gridded Reference Evapotranspiration Bias Correction: Inputs, Station Validation, and Outputs (gridMET/OpenET) [Data set]. _Zenodo_. https://doi.org/10.5281/zenodo.18673484.
 
-WestWater Research. (2026). _Economic impact to the Central Arizona Project (CAP) of post-2026 Colorado River operations_. Central Arizona Project. https://library.cap-az.com/documents/public-information/Economic-Impact-to-CAP.pdf.
+WestWater Research. (2026). _Economic Impacts to Central Arizona of Reductions in CAP Deliveries_. Central Arizona Project. https://library.cap-az.com/documents/public-information/Economic-Impact-to-CAP.pdf.
 
 Walkinshaw, M., O’Geen, A. T., & Beaudette, D. E. (2022). Soil Properties. _California Soil Resource Lab_. https://casoilresource.lawr.ucdavis.edu/soil-properties/.

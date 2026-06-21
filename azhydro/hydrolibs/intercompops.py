@@ -1367,6 +1367,85 @@ def _plot_basin_diff_panels(
     plt.close(fig)
 
 
+def _plot_single_choropleth_diff(
+    plot_gdf: gpd.GeoDataFrame,
+    index_col: str,
+    diff: dict,
+    out_path: str,
+    *,
+    title: str,
+    panel_label: str = 'ML − NHM',
+    overlay_gdf: 'gpd.GeoDataFrame | None' = None,
+    overlay_name_col: 'str | None' = None,
+    ama_ina=None,
+    cmap: str = 'RdBu_r',
+    edgecolor: str = '#AAAAAA',
+    linewidth: float = 0.3,
+) -> None:
+    """Single-panel Δ-volume choropleth in the same portrait layout as the
+    pixel-level diff figures: title, AZ-clipped map (set to the overlay
+    bounds with equal aspect), a horizontal 10⁶ m³ colorbar with an AF
+    top axis, and the AMA/INA legend. Keeps basin- and HUC12-level CU diff
+    maps visually consistent with ``Spatial_Diff_Pixel_CU.png`` rather than
+    the wide single-cell output of the multi-panel grid helpers.
+    """
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
+    import matplotlib.ticker as _mtk
+
+    vals = [v for v in diff.values() if np.isfinite(v) and abs(v) > 1.0]
+    vmax = max(
+        abs(np.nanpercentile(vals, 2)),
+        abs(np.nanpercentile(vals, 98)),
+        1e-6,
+    ) if vals else 1.0
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.5, 6.8), constrained_layout=True)
+    fig.suptitle(title, fontsize=15, fontweight='bold')
+    ax.set_facecolor('#D5D5D5')
+
+    gdf = plot_gdf.set_index(index_col).copy()
+    gdf['diff'] = gdf.index.map(lambda b: diff.get(b, np.nan))
+    gdf.loc[gdf['diff'].abs() < 1e-3, 'diff'] = np.nan
+    gdf.plot(
+        ax=ax, column='diff', cmap=cmap, vmin=-vmax, vmax=vmax,
+        edgecolor=edgecolor, linewidth=linewidth,
+        legend=False, missing_kwds={'color': '#EEEEEE'},
+    )
+    if overlay_gdf is not None:
+        _overlay_boundaries(
+            ax, overlay_gdf, ama_ina, overlay_name_col,
+            label_fontsize=9, label_all=True,
+        )
+        _b = overlay_gdf.total_bounds
+        ax.set_xlim(_b[0], _b[2])
+        ax.set_ylim(_b[1], _b[3])
+        ax.set_aspect('equal')
+    ax.set_title(panel_label, fontweight='bold', fontsize=13)
+
+    sm = ScalarMappable(cmap=cmap, norm=Normalize(-vmax, vmax))
+    sm.set_array([])
+    cbar = fig.colorbar(
+        sm, ax=ax, shrink=0.5, pad=0.06,
+        orientation='horizontal', aspect=30, extend='both',
+    )
+    cbar.formatter = _mtk.FuncFormatter(lambda x, _: f'{x / 1e6:g}')
+    cbar.update_ticks()
+    cbar.set_label(
+        r'$\Delta$ Volume ($\times$10$^{6}$ m$^{3}$, ML $-$ NHM)',
+        fontsize=12, fontweight='bold',
+    )
+    cbar.ax.tick_params(labelsize=12)
+    secax = cbar.ax.secondary_xaxis(
+        'top', functions=(lambda x: x * M3_TO_AF, lambda x: x / M3_TO_AF),
+    )
+    secax.set_xlabel('Δ Volume (AF)', fontsize=12, fontweight='bold')
+    secax.tick_params(labelsize=12)
+    add_ama_ina_legend(ax, bbox_to_anchor=(0.0, -0.12))
+    fig.savefig(out_path, dpi=600, bbox_inches='tight')
+    plt.close(fig)
+
+
 def _plot_paired_choropleth_diff_grid(
     columns: list[tuple[str, list[dict]]],
     plot_gdf: gpd.GeoDataFrame,
@@ -3255,16 +3334,19 @@ def run_intercomparison(
         # ── HUC12-level scatter ──
         huc12_scatter_dir = os.path.join(huc12_dir, 'Scatter/')
         makedirs(huc12_scatter_dir)
+        # Order matches the HUC12 difference maps (ML−NHM, Reitz−NHM,
+        # ML−Reitz), stacked as one column × three rows.
         huc12_scatter_pairs = [
             ('ML', 'NHM', ml_huc_mean, nhm_huc_mean),
+            ('Reitz', 'NHM', reitz_huc_mean, nhm_huc_mean),
             ('ML', 'Reitz', ml_huc_mean, reitz_huc_mean),
-            ('NHM', 'Reitz', nhm_huc_mean, reitz_huc_mean),
         ]
         plot_intercomp_scatter(
             huc12_scatter_pairs, common_hucs, huc_areas,
             huc12_scatter_dir,
             title=f'Irrigation {cat} — HUC12-Level Scatter',
             filename=f'Scatter_HUC12_{cat}.png',
+            one_column=True,
         )
 
         # ── HUC12-level per-unit CSV ──
@@ -3794,24 +3876,24 @@ def run_cu_intercomparison(
         ml_basin_means_cu = ml_cu.get('mean', {})
         nhm_basin_means_cu = nhm_cu.get('mean', {})
         if ml_basin_means_cu and nhm_basin_means_cu:
-            _plot_basin_diff_panels(
-                panels=[{
-                    'basin_a_vols': ml_basin_means_cu,
-                    'basin_b_vols': nhm_basin_means_cu,
-                    'panel_title': 'ML \u2212 NHM',
-                    'label_a': 'ML',
-                    'label_b': 'NHM',
-                }],
-                basin_gdf=b_reproj_cu,
-                basin_col=basin_col,
-                title=(
-                    'Irrigation CU \u2014 Basin-Level Volume Diff '
-                    '(ML \u2212 NHM)'
-                ),
+            _af_to_m3_basincu = 1.0 / M3_TO_AF
+            basin_cu_diff = {
+                b: (ml_basin_means_cu.get(b, 0.0)
+                    - nhm_basin_means_cu.get(b, 0.0)) * _af_to_m3_basincu
+                for b in set(ml_basin_means_cu) | set(nhm_basin_means_cu)
+            }
+            _plot_single_choropleth_diff(
+                plot_gdf=b_reproj_cu,
+                index_col=basin_col,
+                diff=basin_cu_diff,
                 out_path=os.path.join(
                     spatial_diff_dir, 'Spatial_Diff_Basin_CU.png',
                 ),
-                shared_colorbar=True,
+                title='Irrigation CU \u2014 Basin-Level Volume Difference',
+                panel_label='ML \u2212 NHM',
+                overlay_gdf=b_reproj_cu,
+                overlay_name_col=basin_col,
+                ama_ina=get_ama_ina_basin_names(),
             )
             logger.info(
                 f'  Basin-level CU Δ volume figure saved to '
@@ -3835,82 +3917,61 @@ def run_cu_intercomparison(
         )
         _af_to_m3_cu = 1.0 / M3_TO_AF
         _mm_to_ft_cu = 1.0 / 304.8
-        huc_diff_vals = [
-            (ml_huc_mean.get(h, 0.0) - nhm_huc_mean.get(h, 0.0)) * _af_to_m3_cu
-            for h in common_hucs
+        # Restrict the choropleth to the same HUC12 footprint as the
+        # withdrawal diff maps. A HUC12 is shown only if it has non-zero
+        # CU in at least one source (ML or NHM) AND falls in the
+        # withdrawal footprint. The latter is needed because the NHM CU
+        # product (a different USGS dataset than NHM withdrawal) covers
+        # HUC12s beyond the irrigated-withdrawal footprint, which would
+        # otherwise appear here but not in the withdrawal maps. The
+        # withdrawal footprint = any source (ML / NHM / Reitz) non-zero,
+        # loaded from the withdrawal comparison's per-HUC12 Total CSV;
+        # if that comparison has not been run, fall back to the local
+        # ML/NHM CU footprint.
+        wd_footprint = None
+        _wd_csv = os.path.join(
+            os.path.dirname(output_dir), 'Withdrawal_Intercomparison',
+            'HUC12_Comparison', 'per_huc12_Total.csv',
+        )
+        if os.path.isfile(_wd_csv):
+            try:
+                _wd_df = pd.read_csv(_wd_csv, dtype={'HUC12': str})
+                _nz = (
+                    (_wd_df['ML_AF'] != 0)
+                    | (_wd_df['NHM_AF'] != 0)
+                    | (_wd_df['Reitz_AF'] != 0)
+                )
+                wd_footprint = set(_wd_df.loc[_nz, 'HUC12'])
+            except (KeyError, ValueError):
+                wd_footprint = None
+        nz_hucs = [
+            h for h in common_hucs
+            if (ml_huc_mean.get(h, 0.0) != 0.0
+                or nhm_huc_mean.get(h, 0.0) != 0.0)
+            and (wd_footprint is None or h in wd_footprint)
         ]
-        huc_diff_arr = np.array(huc_diff_vals)
-        huc_diff_nz = huc_diff_arr[np.abs(huc_diff_arr) > 1.0]
-        if huc_diff_nz.size:
-            huc12_vmax = max(
-                abs(np.nanpercentile(huc_diff_nz, 2)),
-                abs(np.nanpercentile(huc_diff_nz, 98)),
-                1e-6,
-            )
-            fig, ax = plt.subplots(
-                1, 1, figsize=(7.5, 6.8), constrained_layout=True,
-            )
-            fig.suptitle(
-                'Irrigation CU — HUC12-Level Volume Difference '
-                '(ML − NHM)',
-                fontsize=13, fontweight='bold',
-            )
-            ax.set_facecolor('#D5D5D5')
-            plot_gdf = (
-                huc_reproj[huc_reproj['huc12'].isin(common_hucs)]
-                .set_index('huc12').loc[common_hucs].copy()
-            )
-            plot_gdf['diff'] = huc_diff_vals
-            plot_gdf.loc[plot_gdf['diff'].abs() < 1e-3, 'diff'] = np.nan
-            plot_gdf.plot(
-                ax=ax, column='diff', cmap='RdBu_r',
-                vmin=-huc12_vmax, vmax=huc12_vmax,
-                edgecolor='#AAAAAA', linewidth=0.3,
-                legend=False, missing_kwds={'color': '#EEEEEE'},
-            )
-            _overlay_boundaries(
-                ax, b_reproj_cu, ama_ina_names_cu, b_name_cu,
-                label_fontsize=9, label_all=True,
-            )
-            ax.set_title(
-                'ML − NHM', fontweight='bold', fontsize=12,
-            )
-            sm = ScalarMappable(
-                cmap='RdBu_r',
-                norm=Normalize(-huc12_vmax, huc12_vmax),
-            )
-            sm.set_array([])
-            cbar = fig.colorbar(
-                sm, ax=ax, shrink=0.5, pad=0.06,
-                orientation='horizontal', aspect=30, extend='both',
-            )
-            cbar.formatter = mticker.FuncFormatter(
-                lambda x, _: f'{x / 1e6:g}',
-            )
-            cbar.update_ticks()
-            cbar.set_label(
-                r'$\Delta$ Volume ($\times$10$^{6}$ m$^{3}$, ML $-$ NHM)',
-                fontsize=12, fontweight='bold',
-            )
-            cbar.ax.tick_params(labelsize=12)
-            secax = cbar.ax.secondary_xaxis(
-                'top',
-                functions=(
-                    lambda x: x * M3_TO_AF, lambda x: x / M3_TO_AF,
-                ),
-            )
-            secax.set_xlabel(
-                'Δ Volume (AF)', fontsize=12, fontweight='bold',
-            )
-            secax.tick_params(labelsize=12)
-            add_ama_ina_legend(ax, fontsize=13, bbox_to_anchor=(0.0, -0.12))
-            fig.savefig(
-                os.path.join(
+        cu_diff_m3 = {
+            h: (ml_huc_mean.get(h, 0.0) - nhm_huc_mean.get(h, 0.0)) * _af_to_m3_cu
+            for h in nz_hucs
+        }
+        if cu_diff_m3:
+            # Portrait single-panel layout matching Spatial_Diff_Pixel_CU
+            # (and the basin CU map). AZ-bounds clipping keeps the Yuma
+            # border HUC12 consistent with the withdrawal maps; the
+            # footprint is the withdrawal-intersected nz_hucs.
+            _plot_single_choropleth_diff(
+                plot_gdf=huc_reproj[huc_reproj['huc12'].isin(nz_hucs)],
+                index_col='huc12',
+                diff=cu_diff_m3,
+                out_path=os.path.join(
                     spatial_diff_dir, 'Spatial_Diff_HUC12_CU.png',
                 ),
-                dpi=600, bbox_inches='tight',
+                title='Irrigation CU — HUC12-Level Volume Difference',
+                panel_label='ML − NHM',
+                overlay_gdf=b_reproj_cu,
+                overlay_name_col=b_name_cu,
+                ama_ina=ama_ina_names_cu,
             )
-            plt.close(fig)
             logger.info(
                 f'  HUC12-level CU Δ volume figure saved to '
                 f'{spatial_diff_dir}'
@@ -6598,6 +6659,7 @@ def run_ps_intercomparison(
     # ML needs zonal stats aggregation to HUC12
     huc12_ps_metrics = []
     ps_paired_accum: dict = {}
+    ps_vol_accum: dict = {}
     ps_scale_geom: dict = {}
     for cat_key, cat_name in cat_labels.items():
         logger.info(f'  HUC12-level comparison for {cat_name}...')
@@ -6777,6 +6839,19 @@ def run_ps_intercomparison(
                 'pixel_extent_ps': pixel_extent_ps,
                 'basin_diff_vals': basin_diff_vals,
             }
+            # HUC12 Δ-VOLUME (m³) for the volume-difference choropleths
+            # (mirrors the withdrawal / CU HUC12 volume diff maps).
+            # Restricted to HUC12s with non-zero PS in ML or USGS, like
+            # those products, so non-PS HUC12s are not drawn.
+            ps_voldiff_m3: dict[str, float] = {}
+            for _h in common_hucs_ps:
+                _va = ml_huc_mean_ps.get(_h, 0.0) * _af_to_m3_local
+                _vb = ps_huc_mean.get(_h, 0.0) * _af_to_m3_local
+                if _va != 0 or _vb != 0:
+                    ps_voldiff_m3[_h] = _va - _vb
+            ps_vol_accum[cat_key] = [
+                {'title': 'ML − PS', 'diff': ps_voldiff_m3}
+            ]
             if ps_scale_geom.get('huc_reproj_ps') is None:
                 ps_scale_geom.update({
                     'huc_reproj_ps': huc_reproj_ps,
@@ -6864,6 +6939,63 @@ def run_ps_intercomparison(
                 '  PS paired GW/SW depth-diff figure saved to %s',
                 ps_scale_geom['spatial_diff_dir'],
             )
+
+    # HUC12-level Δ-VOLUME choropleths (ML − PS), mirroring the withdrawal
+    # and CU HUC12 volume-difference maps: GW + SW paired on a shared
+    # colorbar; Non_Irrigation (Total) standalone.
+    if ps_vol_accum and ps_scale_geom.get('huc_reproj_ps') is not None:
+        _hg = ps_scale_geom
+        _huc = _hg['huc_reproj_ps']
+        _gw = ps_vol_accum.get('GW', [])
+        _sw = ps_vol_accum.get('SW', [])
+        if _gw or _sw:
+            _all = set()
+            for _pn in (_gw, _sw):
+                for _p in _pn:
+                    _all |= set(_p['diff'])
+            _plot_paired_choropleth_diff_grid(
+                columns=[('(a) GW', _gw), ('(b) SW', _sw)],
+                plot_gdf=_huc[_huc['huc12'].isin(_all)],
+                index_col='huc12',
+                title=(
+                    'Public Supply GW & SW — HUC12-Level Volume '
+                    'Difference (ML − PS)'
+                ),
+                out_path=os.path.join(
+                    _hg['spatial_diff_dir'],
+                    'Spatial_Diff_HUC12_PS_GW_SW_Volume.png',
+                ),
+                overlay_gdf=_hg['b_reproj_ps'],
+                overlay_name_col=_hg['b_name_ps'],
+                ama_ina=_hg['ama_ina_names_ps'],
+                edgecolor='#AAAAAA', linewidth=0.3,
+            )
+        _tot = ps_vol_accum.get('Total', [])
+        if _tot:
+            _allt = set()
+            for _p in _tot:
+                _allt |= set(_p['diff'])
+            _plot_paired_choropleth_diff_grid(
+                columns=[('', _tot)],
+                plot_gdf=_huc[_huc['huc12'].isin(_allt)],
+                index_col='huc12',
+                title=(
+                    'Public Supply (Total) — HUC12-Level Volume '
+                    'Difference (ML − PS)'
+                ),
+                out_path=os.path.join(
+                    _hg['spatial_diff_dir'],
+                    'Spatial_Diff_HUC12_PS_Total_Volume.png',
+                ),
+                overlay_gdf=_hg['b_reproj_ps'],
+                overlay_name_col=_hg['b_name_ps'],
+                ama_ina=_hg['ama_ina_names_ps'],
+                edgecolor='#AAAAAA', linewidth=0.3,
+            )
+        logger.info(
+            '  PS HUC12-level volume-diff figures saved to %s',
+            _hg['spatial_diff_dir'],
+        )
 
     if huc12_ps_metrics:
         pd.DataFrame(huc12_ps_metrics).to_csv(

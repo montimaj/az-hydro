@@ -4445,6 +4445,17 @@ def create_dual_metric_era_raster_maps(
             )
             sx.set_xlabel('Volume (AF)', fontsize=11, fontweight='bold')
             sx.tick_params(labelsize=11)
+        elif 'fraction' in unit_label.lower():
+            # Percent twin on top: a useful second reading of the capture
+            # fraction AND it gives this colorbar the same height as the
+            # dual-unit volume colorbar, so the two colorbar bars stay
+            # vertically aligned under constrained_layout.
+            sx = cbar.ax.secondary_xaxis(
+                'top',
+                functions=(lambda f: f * 100.0, lambda p: p / 100.0),
+            )
+            sx.set_xlabel('Capture (%)', fontsize=11, fontweight='bold')
+            sx.tick_params(labelsize=11)
 
     # One colorbar per column, placed under its own column.
     cbar_a = fig.colorbar(
@@ -5078,7 +5089,7 @@ def _draw_sigma_attribution_legend(
     if era == 'Projection':
         model_dom_patch = mpatches.Patch(
             facecolor='white', edgecolor='#00C853',
-            linewidth=2.0, label='σ_Model dominated',
+            linewidth=2.0, label=r'$\sigma_\mathrm{model}$ dominated',
         )
         handles.append(model_dom_patch)
     na_patch = mpatches.Patch(
@@ -5096,14 +5107,14 @@ def _draw_sigma_attribution_legend(
         ncol=ncol,
         bbox_to_anchor=(0.5, 0.01),
         frameon=False,
-        fontsize=11,
-        handlelength=1.4,
-        columnspacing=1.2,
+        fontsize=8.5,
+        handlelength=1.2,
+        columnspacing=0.9,
         title=(
             f'Management share of classifiable variance\n'
             f'({left_tag}  ←  Mixed (50 / 50)  →  {right_tag})'
         ),
-        title_fontsize=12,
+        title_fontsize=9.5,
     )
     leg._legend_box.align = 'center'
 
@@ -5141,14 +5152,14 @@ def _draw_sigma_attribution_disclosure_box(
     # would expand the tight bbox and blow the figure out sideways.
     import textwrap as _textwrap
     _line1 = (
-        f'σ_Model dominant in {n_model_dom}/{n_total} basins '
-        f'({n_model_dom / n_total * 100:.0f}%); median Model share '
+        f'$\\sigma_\\mathrm{{model}}$ dominant in {n_model_dom}/{n_total} '
+        f'basins ({n_model_dom / n_total * 100:.0f}%); median model share '
         f'{median_model:.0f}%.'
     )
     _line2 = (
         'Color axis classifies Management vs Climate within the '
         'remaining variance; basins outlined in lime green (see legend) '
-        'are Model-dominated overall.'
+        'are model-dominated overall.'
     )
     txt = '\n'.join(
         _textwrap.fill(s, width=48) for s in (_line1, _line2)
@@ -7547,6 +7558,7 @@ def plot_intercomp_scatter(
     af_unit_label: str = 'AF',
     annotate_basins: bool = False,
     log_scale: bool = False,
+    one_column: bool = False,
 ) -> None:
     """Generic intercomparison scatter plots with 1:1 line and linear fit.
 
@@ -7582,10 +7594,17 @@ def plot_intercomp_scatter(
     # matplotlib stretches the data limits to satisfy equal aspect,
     # which overrides our set_xlim/set_ylim and emits the
     # "Ignoring fixed y limits to fulfill fixed data aspect" warning.
-    fig, axes = plt.subplots(
-        n_units, n_pairs, figsize=(6 * n_pairs, 6),
-        constrained_layout=True, squeeze=False,
-    )
+    if one_column:
+        # Stack the pairs vertically: n_pairs rows × 1 column.
+        fig, axes = plt.subplots(
+            n_pairs, n_units, figsize=(6 * n_units, 6 * n_pairs),
+            constrained_layout=True, squeeze=False,
+        )
+    else:
+        fig, axes = plt.subplots(
+            n_units, n_pairs, figsize=(6 * n_pairs, 6),
+            constrained_layout=True, squeeze=False,
+        )
     fig.suptitle(title, fontsize=14, fontweight='bold')
 
     for col_i, (label_a, label_b, mean_a, mean_b) in enumerate(pairs):
@@ -7608,7 +7627,7 @@ def plot_intercomp_scatter(
             row_data = [(vals_a, vals_b, '')]
 
         for row_i, (vx, vy, unit) in enumerate(row_data):
-            ax = axes[row_i, col_i]
+            ax = axes[col_i, row_i] if one_column else axes[row_i, col_i]
             if vx.size == 0:
                 ax.set_title(f'{label_a} vs {label_b}')
                 continue
@@ -7744,6 +7763,23 @@ def plot_intercomp_scatter(
                 ax.set_yscale('log')
             ax.set_xlim(lo, hi)
             ax.set_ylim(lo, hi)
+            # Thin decade tick labels on log axes: an 8+-decade span
+            # (e.g. PS volumes) crowds the x-axis with overlapping
+            # labels, so show every Nth decade on both axes (and the
+            # AF/MAF twin below) once the span is wide.
+            _log_stride = 1
+            if log_scale and hi > 0 and lo > 0:
+                import math as _math
+                from matplotlib import ticker as _tkx
+                _dec = _math.log10(hi / lo)
+                _log_stride = 1 if _dec <= 6 else (2 if _dec <= 12 else 3)
+                if _log_stride > 1:
+                    ax.xaxis.set_major_locator(
+                        _tkx.LogLocator(base=10.0 ** _log_stride, numticks=20)
+                    )
+                    ax.yaxis.set_major_locator(
+                        _tkx.LogLocator(base=10.0 ** _log_stride, numticks=20)
+                    )
             # For volume mode, format primary axes as km³ and add an
             # AF twin on the right Y only so the same scatter can be
             # read in both unit systems.  Twiny on the top axis is
@@ -7793,6 +7829,10 @@ def plot_intercomp_scatter(
                 ax_right.yaxis.set_major_formatter(
                     _tk.FuncFormatter(_adaptive_fmt(1e6)),
                 )
+                if log_scale and _log_stride > 1:
+                    ax_right.yaxis.set_major_locator(
+                        _tk.LogLocator(base=10.0 ** _log_stride, numticks=20)
+                    )
                 _maf_suffix = '(MAF, log scale)' if log_scale else '(MAF)'
                 ax_right.set_ylabel(
                     f'{label_b} {_maf_suffix}',
