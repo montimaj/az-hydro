@@ -72,7 +72,7 @@ hydrologic ancillary vectors.
 | `CAP/CAP_Service_Area.geojson` | Central Arizona Project service area polygon (3 county sub-units: Maricopa / Pima / Pinal).  Drives the per-pixel CAP delivery perturbation in `apply_cap_delivery_perturbation`. |
 | `CAP/CAP Delivery Data DRI Request.xlsx` | Annual CAP delivery volumes by sub-contractor / category, supplied by CAP for the AZ-Hydro project (1985–2024). |
 | `GRAIN_v.1.0/GeoParquet/us-west_GRAIN_v.1.0.parquet` | Western-US subset of the GRAIN canal-network database from Suresh et al. (2026), *Earth System Science Data* 18(3), 1855–1875.  DOI: [10.5194/essd-18-1855-2026](https://doi.org/10.5194/essd-18-1855-2026).  Bundled here (~55 MB after extracting only the western-US tile) — used to build the `canal_density` predictor.  The full release is available at the source DOI; replace this folder with a fresh download if you need other regions. |
-| `Groundwater_Basin/` | Statewide GW basin polygons shapefile (52 basins) — primary basin aggregation unit. |
+| `Groundwater_Basin/` | Statewide GW basin polygons shapefile (52 basin/management-area polygons spanning Arizona's 51 ADWR groundwater basins) — primary basin aggregation unit. |
 | `Meter Data/GW_<year>.csv` | Per-year ADWR meter records (1984–2024, one CSV per year, 41 files).  Each row = one well-year with reported `AF Pumped`, lat/lon, basin, etc.  These are the primary training labels for the ML model. |
 | `SRP/SRP WATER DELVS HISTORY.xlsx` | Salt River Project annual delivery history (used to validate Phoenix AMA SW totals). |
 | `Streamflow/` | USGS gauge monthly streamflow for the Colorado River system (HCDN reference + USBR sites; 8 stations, 1896-present where available).  Used in σ_USBR and Lees Ferry inflow context. |

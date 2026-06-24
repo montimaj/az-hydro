@@ -521,7 +521,7 @@ The pipeline uses two distinct upload paths:
 | [`upload_to_gee.sh`](upload_to_gee.sh) | Batch raster upload.  Iterates every `metadata.csv`, runs `geeup upload --workers 10 --resume` on each.  Per-source logs in `gee/upload_logs/`.  Supports `--dry-run` and `--filter <pattern>`. |
 | [`pivot_to_csv.py`](pivot_to_csv.py) | Pivot the Well_Package long-format GeoParquet (170,137 wells × 204 years × 15 categories, ~2.1 GB) into 15 per-category CSVs at `gee/Data/Well_Package/csv/Well_Package__<Cat>.csv`.  Each row carries a `.geo` column (GeoJSON Point), `REGISTRY_I`, `WATER_USE`, plus year-stamped property columns (`<Cat>_AF_<year>`, `<Cat>_AF_sigma_<year>`) — ~412 properties / row.  Paths anchored to the script location, so it runs from any cwd.  ~5–10 min per category on 64 GB RAM. |
 | [`upload_well_package.sh`](upload_well_package.sh) | Loops the 15 CSVs: `gsutil cp` to `gs://azhydro/Well_Package__<Cat>.csv`, then `earthengine upload table --asset_id=projects/azhydro/assets/az-wu/Well_Package__<Cat>` to ingest each.  Per-stage log: `gee/upload_logs/Well_Package_upload.log`.  `--dry-run` and `--filter <pattern>` flags.  Cleanup hint at the end (`gsutil -m rm`). |
-| [`pivot_cap_cumulative.py`](pivot_cap_cumulative.py) | Pivot `Data/Outputs/.../CAP_Scenario/CAP_Scenario_Cumulative.csv` (long format, ~27 k rows) into a wide-format CSV with `.geo` column: 364 features (52 basins × 7 scenarios), `Cum_<year>` columns covering 2026–2099, basin centroid as the geometry. |
+| [`pivot_cap_cumulative.py`](pivot_cap_cumulative.py) | Pivot `Data/Outputs/.../CAP_Scenario/CAP_Scenario_Cumulative.csv` (long format, ~27 k rows) into a wide-format CSV with `.geo` column: 364 features (52 basin polygons × 7 scenarios), `Cum_<year>` columns covering 2026–2099, basin centroid as the geometry. |
 | [`upload_cap_cumulative.sh`](upload_cap_cumulative.sh) | Stage the CSV to `gs://azhydro/CAP_Scenario_Cumulative.csv` and ingest as `projects/azhydro/assets/az-wu/CAP_Scenario_Cumulative`.  The visualizer reads this asset on every CAP click to chart all 7 scenarios for the basin. |
 | [`cap_service_area_to_csv.py`](cap_service_area_to_csv.py) | Convert the CAP service-area polygon GeoJSON (3 polygons, MARICOPA / PIMA / PINAL) into `gee/Data/CAP/CAP.csv` with a `.geo` GeoJSON-string column (polygon geometry preserved exactly). |
 | [`upload_cap_service_area.sh`](upload_cap_service_area.sh) | Stage to `gs://azhydro/CAP.csv` and ingest as `projects/azhydro/assets/az-wu/CAP`.  Asset is consumed by the visualizer as the CAP-eligible county overlay layer. |
@@ -609,13 +609,13 @@ Augmented (`SW_Capture__*_Rasters`) follow the same 6-band convention and 4 unit
 | Asset | Contents |
 |---|---|
 | `Well_Package__<Cat>` (15) | One per category: ~170 k well features, each with `REGISTRY_I`, `WATER_USE`, `.geo` geometry, plus year-stamped `<Cat>_AF_<year>` and `<Cat>_AF_sigma_<year>` properties (1896–2099).  Capacity-disaggregated per-well values from the published parquet. |
-| `CAP_Scenario_Cumulative` | 364 features (52 basins × 7 scenarios), each with `Basin`, `Scenario`, `.geo` (basin centroid Point), and year-stamped `Cum_<year>` properties for 2026–2099.  Powers the per-basin × 7-scenario time-series chart in CAP click mode. |
+| `CAP_Scenario_Cumulative` | 364 features (52 basin polygons × 7 scenarios), each with `Basin`, `Scenario`, `.geo` (basin centroid Point), and year-stamped `Cum_<year>` properties for 2026–2099.  Powers the per-basin × 7-scenario time-series chart in CAP click mode. |
 
 #### Vector overlay layers
 
 | Asset | Contents |
 |---|---|
-| `Groundwater_Basin` | 52 GW-basin polygons (`BASIN_NAME` property).  Visualizer filters into AMA / INA / other groups by exact name match for distinct styling. |
+| `Groundwater_Basin` | 52 GW-basin polygons (`BASIN_NAME` property; spanning Arizona's 51 ADWR groundwater basins).  Visualizer filters into AMA / INA / other groups by exact name match for distinct styling. |
 | `ADWR_Groundwater_Subbasin` | 82 sub-basin polygons (`SUBBASIN_N` property) |
 | `Well_Registry_2024` | ADWR well-registry points; powers the nearest-well lookup on click |
 | `CAP` | 3 CAP-eligible county polygons (Maricopa, Pima, Pinal) with `NAME` property; rendered as dashed outlines in the visualizer |

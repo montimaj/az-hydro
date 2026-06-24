@@ -1351,7 +1351,7 @@ and sub-basin scales:
 
 | Spatial level | Categories included | File pattern |
 |---|---|---|
-| Basin (52 ADWR basins) | Total_Predicted, Total_GW, Total_SW, Irrigation_GW, Irrigation_SW, Non_Irrigation_GW, Non_Irrigation_SW, Irrigation_CU | `Basin_<category>.csv` |
+| Basin (52 polygons; AZ's 51 ADWR basins) | Total_Predicted, Total_GW, Total_SW, Irrigation_GW, Irrigation_SW, Non_Irrigation_GW, Non_Irrigation_SW, Irrigation_CU | `Basin_<category>.csv` |
 | Sub-basin (82 ADWR sub-basins) | same 8 categories | `Subbasin_<category>.csv` |
 
 Schema is identical to the per-basin / per-sub-basin `*_Annual.csv`
