@@ -2835,7 +2835,7 @@ baseline. Era-dependent overrides:
 
 | Era | Pixel condition | Rule | Rationale |
 |---|---|---|---|
-| `year ≤ 1980` | `uf < 0.3` (rural + LU halo) | `irr_frac = 0.95` flat | USGS shows ag was 89–97 % of AZ-total pumping through 1980 |
+| `year ≤ 1980` | `uf < 0.3` (rural + LU proximity band) | `irr_frac = 0.95` flat | USGS shows ag was 89–97 % of AZ-total pumping through 1980 |
 | `year ≤ 1980` | `uf ≥ 0.3` (urban core, any basin) | `irr_frac = 1 − uf` (clipped) | M&I share at urban cores routed to NonIrr regardless of AMA — Flagstaff / Lake Havasu / Bullhead / Phoenix-Tucson cores |
 | `1981 ≤ year ≤ 1985` (NON-AMA) | — | `irr_frac = 1 − uf` (clipped to ≥ 0.05) | CAP-startup transition; rural basins still mostly irrigation |
 | `1981+` AMA | — | natural `irr_capacity_fraction` (cf-floor) | M&I growth in urban AMAs |
@@ -2889,9 +2889,9 @@ gives near-zero Irr.
 **`URBAN_HIGH_THRESHOLD = 0.30`**: tightened from 0.20 to capture
 suburban-fringe ag (uf 0.20–0.30) as Irr rather than NonIrr.
 
-**AGRI-halo gate (`AG_HALO_AGRI = 0.10`)**: GEE LULC frequently
+**Cropland-proximity gate (`AG_HALO_AGRI = 0.10`)**: GEE LULC frequently
 misses patchy rural ag (especially in Willcox / Harquahala / Douglas).
-The smoothed `AGRI` band captures the ag halo — pixels with cf = 0
+The smoothed `AGRI` band captures the cropland-proximity band — pixels with cf = 0
 but AGRI > 0.10 are reclassified as `only_crop` so their full ML
 prediction goes to Irr instead of falling into the NonIrr-default
 or desert branch.
@@ -2939,13 +2939,13 @@ maps.
 Replacement mechanism (peak-year basin-MAX lift on well-density
 features — see "ML feature well_density override" below) preserves
 peak-year volumes via a different pathway that doesn't propagate
-the AGRI smoothing halo into the partition footprint.
+the AGRI cropland-proximity band into the partition footprint.
 
-**Post-1985 AGRI halo gate retained** (in the `1986+` LU-aware
+**Post-1985 cropland-proximity gate retained** (in the `1986+` LU-aware
 branch) — the post-1985 use never produced visual halos because the
 SW-smoothing kernel σ is fixed at 4.0 (vs the 1965-1984 ramp 1.0 → 4.0
-that was the actual halo amplifier). The post-1985 halo gate
-prevents NonIrr inflation at ag-halo pixels in URBAN_AMA basins
+that was the actual halo amplifier). The post-1985 cropland-proximity gate
+prevents NonIrr inflation at cropland-proximity pixels in URBAN_AMA basins
 (Phoenix / Tucson) where they would otherwise fall into
 `pure_desert_with_well` → 100 % NonIrr via density-ratio.
 
@@ -3655,7 +3655,7 @@ effect: 1940 ML TotGW lifted +275 kAF (USGS gap −17.4 % → −2.1 %);
   Carries USGS pre-1945 GW-only convention through the 1945-1947
   Gila Phase II ramp window.
 - 1986+ NON-URBAN-AMA partition (only_crop / both_lu / pure_desert
-  with AGRI-halo gate)
+  with cropland-proximity gate)
 - AGRI extension for retention (loose 0.02 / std 0.10 windows)
 - 1970–1985 NON-AMA `irr_frac = 1 − uf` override (year ≤ 1969 uses
   flat 0.95)
@@ -3683,13 +3683,13 @@ effect: 1940 ML TotGW lifted +275 kAF (USGS gap −17.4 % → −2.1 %);
   Pinal, Yuma, Willcox, Safford, Lower Gila, Harquahala, Tucson,
   McMullen, Hualapai) all have `cf_sum >> 5` so they pass the gate.
   Volume preserved (only routing changes; phantom Irr → NonIrr).
-- **Peak-year crop+urban edge halo** (1951–1957 and 1970–1980):
+- **Peak-year crop+urban edge dilation** (1951–1957 and 1970–1980):
   pixels NOT in the cf>0 mask but immediately adjacent (1- or 2-cell
   dilation) to high-cf cropland, AND with AGRI > 0.10, are added to
   the retention mask.  CDL/IrrMapper at peak years under-maps
-  field-edge ag at 2 km resolution.  Symmetric urban-edge halo
+  field-edge ag at 2 km resolution.  Symmetric urban-edge dilation
   (uf > 0.30 core, URBAN > 0.30 filter) extends retention at
-  metro-fringe pixels.  Halo pixels also get the basin-MAX wd lift
+  metro-fringe pixels.  Dilated pixels also get the basin-MAX wd lift
   so density-ratio routes them as basin-typical ag wells.  Lifts
   peak-year totals by 0.5–0.7 MAF without touching non-peak years.
 
@@ -3996,7 +3996,7 @@ duty estimates).
    weighting — their nominal SW rights have no canal infrastructure
    to actually deliver SW.
 
-8. **AGRI-halo gate (`AG_HALO_AGRI = 0.10`)** at 1986+ reclassifies
+8. **Cropland-proximity gate (`AG_HALO_AGRI = 0.10`)** at 1986+ reclassifies
    patchy-ag pixels (cf = 0 but smoothed AGRI > 0.10) from
    `pure_desert` to `only_crop`. GEE LULC misses substantial rural
    ag in Willcox / Harquahala / Douglas; AGRI smoothing recovers it.
@@ -4573,7 +4573,7 @@ The model produces **6.84 MAF total** / **70.3 % irrigation share** for
 calibration session documented in the Calibration subsection (peak-year
 basin-MAX well-density lift, per-basin GW caps at Colorado River
 direct basins, dual-gate basin-level canal-infrastructure gate, the
-auto-detect phantom-icap gate, and the restored AGRI halo gate at
+auto-detect phantom-icap gate, and the restored cropland-proximity gate at
 year ≥ 1986), the model now captures the full statewide pumping
 volume directly without requiring an external federal-delivery offset.
 2017 model total = **6.84 MAF** vs ADWR's **7.0 MAF** — a gap of
@@ -4618,7 +4618,7 @@ Independent USGS / ADWR cross-checks (current run):
 | 2019 | ADWR Irr% | 72 % | 69 % | −3 pp | |
 | 1980 | USGS Total | 8.93 MAF | 8.43 MAF | −0.50 (−6 %) | within 95 % CI; peak-year ML floor |
 | 1980 | ADWR Total | 9.50 MAF | 8.43 MAF | −1.07 (−11 %) | ADWR > USGS by 0.57 |
-| 1955 | USGS Total | 8.09 MAF | 7.59 MAF | −0.50 (−6 %) | peak-year basin-MAX wd lift + AGRI/URBAN halos closed −1.30 → −0.50 MAF |
+| 1955 | USGS Total | 8.09 MAF | 7.59 MAF | −0.50 (−6 %) | peak-year basin-MAX wd lift + AGRI/URBAN edge dilationos closed −1.30 → −0.50 MAF |
 | 1990 | USGS Total | 7.59 MAF | 7.33 MAF | −0.26 (−3 %) | |
 
 Peak years 1955 / 1957 / 1975 / 1980 are systematically under-predicted
@@ -4642,7 +4642,7 @@ tightening relative to the prior framing that required a +2.26 MAF
 federal-delivery offset to close the budget; the partition-side
 calibration (per-basin GW caps + dual-gate canal-infra gate +
 peak-year well-density lift + auto-detect phantom-icap gate +
-crop/urban edge halos) now folds the federal canal deliveries
+crop/urban edge dilations) now folds the federal canal deliveries
 directly into Total_SW via the density-ratio split.
 
 The USGS 2015 GW cross-check tells the same story from an
@@ -4822,7 +4822,7 @@ Key trends (current run):
   growth (1900–1950) reflects the build-out of well and canal
   infrastructure; mid-century growth (1950s–1980s) is driven by
   agricultural expansion (peak 1970–1980 ≈ 7.8–8.4 MAF after the
-  peak-year halo and basin-MAX wd lift); modern values stabilize at
+  peak-year edge dilation and basin-MAX wd lift); modern values stabilize at
   6.4–7.3 MAF (1985–2024); projected growth is driven by urbanization
   and increasing M&I demand.
 - **Irrigation** in the projections grows modestly (4.51 → 5.01 MAF,
