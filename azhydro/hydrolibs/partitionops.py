@@ -1631,14 +1631,21 @@ CAP_HINDCAST_FACTORS = CAP_DELIVERY_FACTORS
 # ratio).  Because ML prediction runs BEFORE this perturbation, the
 # total per-pixel pumping is preserved — only the GW/SW split shifts.
 #
-# Mapping from Tier severity to boost factor (k = target_gw_w / 0.2):
+# Mapping from Tier severity to boost factor (k = target_gw_w / 0.2).
+# NOTE: these central-run targets are calibrated to reproduce the
+# observed 2022-2024 shortage-year GW substitution and WestWater Fig 4
+# (below).  They reach at most the 1981-84 GMA-transition level
+# (gw_w = 2.0) and do NOT reach the recalibrated pre-CAP regimes
+# (GW_WEIGHT_1945_1970 = 10.0, GW_WEIGHT_PEAK = 15.0) — only the more
+# severe CAP_SCENARIO_GW_BOOSTS stress sweep does:
 #   Tier 0   → 1.0 (no boost; just DCP contribution to Lake Mead,
 #                   deliveries continue)
-#   Tier 1   → 5.0 (target gw_w = 1.0, pre-CAP 1945-1980 era when
-#                   AZ was GW-dominant at ~67% per USBR)
-#   Tier 2a  → 7.5 (target gw_w = 1.5, pre-CAP peak 1948-1955)
+#   Tier 1   → 5.0 (target gw_w = 1.0; between post-CAP 0.2 and the
+#                   1981-84 GMA transition 2.0)
+#   Tier 2a  → 7.5 (target gw_w = 1.5; approaching the 1981-84 GMA
+#                   transition)
 #   Tier 2b  → 7.5 (same tier band as 2a)
-#   Tier 3   → 10.0 (target gw_w = 2.0, approaching pre-1945 all-GW)
+#   Tier 3   → 10.0 (target gw_w = 2.0; the 1981-84 GMA transition)
 #
 # Projection 2027-2099 inherits the Tier 1 boost (5.0) since the
 # central CAP_DELIVERY_FACTORS for those years also represents
