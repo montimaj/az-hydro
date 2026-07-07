@@ -305,7 +305,7 @@ Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C.
 (2026).  *AZ-Hydro — Historical and Projected Arizona Annual Water
 Use: Software, Input Data, Models, Raster and Well Package
 Predictions, and Validation at 2 km Resolution (1896–2099).*
-**Zenodo.** [DOI: 10.5281/zenodo.19057936](https://doi.org/10.5281/zenodo.19057936)
+**Zenodo.** [DOI: 10.5281/zenodo.19057935](https://doi.org/10.5281/zenodo.19057935)
 
 **Companion papers:**
 

@@ -3,7 +3,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Google Earth Engine](https://img.shields.io/badge/Google%20Earth%20Engine-4285F4?logo=google-earth&logoColor=white)](https://earthengine.google.com/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-orange.svg)](https://opensource.org/licenses/BSD-3-Clause)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19057936.svg)](https://doi.org/10.5281/zenodo.19057936)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19057935.svg)](https://doi.org/10.5281/zenodo.19057935)
 
 Maintainer: [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majumdar/) [sayantan.majumdar@dri.edu]
 
@@ -13,7 +13,7 @@ Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Fr
 
 Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Where Arizona's Water Goes: Declining Agricultural Dominance and Rising Urban Demand Drive a Two-Century Shift in Withdrawal Patterns (1896–2099). _In prep. for AGU Earth's Future_.
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). AZ-Hydro — Historical and Projected Arizona Annual Water Use: Software, Input Data, Models, Raster and Well Package Predictions, and Validation at 2 km Resolution (1896–2099). _Zenodo_. https://doi.org/10.5281/zenodo.19057936.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). AZ-Hydro — Historical and Projected Arizona Annual Water Use: Software, Input Data, Models, Raster and Well Package Predictions, and Validation at 2 km Resolution (1896–2099). _Zenodo_. https://doi.org/10.5281/zenodo.19057935.
 
 ---
 
@@ -40,7 +40,7 @@ cd az-hydro
 ```
 
 The `Data/` folder is hosted separately on Zenodo: ~9 GB of pipeline-required inputs plus ~200 GB of generated outputs.  After the user also downloads the external USGS NHM / Reitz / PS reanalysis bundle from USGS ScienceBase, on-disk Inputs grows to ~20 GB (full disk requirement ~220 GB).  See [`Data/README.md`](../Data/README.md) for the full inventory and external-source citations.
-Download it from [https://doi.org/10.5281/zenodo.19057936](https://doi.org/10.5281/zenodo.19057936) and extract it at the repository root so that `Data/Inputs/` exists.
+Download it from [https://doi.org/10.5281/zenodo.19057935](https://doi.org/10.5281/zenodo.19057935) and extract it at the repository root so that `Data/Inputs/` exists.
 Unzip all zipped files — several input datasets are compressed and must be unzipped before running the pipeline.
 
 ### 3. Creating the conda environment and installing packages
@@ -67,7 +67,7 @@ python pipeline.py
 ```
 
 > **First-time run:** Ensure you have downloaded the `Data/` folder from
-> [Zenodo](https://doi.org/10.5281/zenodo.19057936) (see step 2). The default
+> [Zenodo](https://doi.org/10.5281/zenodo.19057935) (see step 2). The default
 > flags (`--skip-download`, `--load-files`) assume GEE tiles and intermediate
 > files already exist on disk. If you are starting from scratch, use
 > `--download --recreate` to fetch GEE data and build all intermediate files:
@@ -707,7 +707,7 @@ All paths and modeling parameters are defined once at the top of
 
 | Constant | Value | Description |
 |---|---|---|
-| `INPUT_DIR` | `../Data/Inputs/` | Root for all input datasets (downloaded from [Zenodo](https://doi.org/10.5281/zenodo.19057936)). |
+| `INPUT_DIR` | `../Data/Inputs/` | Root for all input datasets (downloaded from [Zenodo](https://doi.org/10.5281/zenodo.19057935)). |
 | `OUTPUT_DIR` | `../Data/Outputs/` | Root for all generated outputs. |
 | `WATER_USE` | `'All'` | Well filter (`'All'` or `'Irr_Wells'`). |
 | `MOSAIC_RASTER_RES` | `2000` | Raster pixel size (m). |

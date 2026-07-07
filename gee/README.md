@@ -3,7 +3,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Google Earth Engine](https://img.shields.io/badge/Google%20Earth%20Engine-4285F4?logo=google-earth&logoColor=white)](https://earthengine.google.com/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-orange.svg)](https://opensource.org/licenses/BSD-3-Clause)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19057936.svg)](https://doi.org/10.5281/zenodo.19057936)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19057935.svg)](https://doi.org/10.5281/zenodo.19057935)
 
 Pre-exports computationally expensive [Google Earth Engine](https://earthengine.google.com/) (GEE; [Gorelick et al., 2017](https://doi.org/10.1016/j.rse.2017.06.031), [Roy et al., 2025](https://doi.org/10.5281/zenodo.17641528)) collections as asset ImageCollections under `projects/azhydro/assets/`. These assets are consumed by `dataops.py` at tile-download time via simple `ee.ImageCollection(...)` loads and `filterDate()` calls, eliminating repeated on-the-fly computation.
 
@@ -626,7 +626,7 @@ Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Fr
 
 Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Where Arizona's Water Goes: Declining Agricultural Dominance and Rising Urban Demand Drive a Two-Century Shift in Withdrawal Patterns (1896–2099). _In prep. for AGU Earth's Future_.
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). AZ-Hydro — Historical and Projected Arizona Annual Water Use: Software, Input Data, Models, Raster and Well Package Predictions, and Validation at 2 km Resolution (1896–2099). _Zenodo_. https://doi.org/10.5281/zenodo.19057936.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). AZ-Hydro — Historical and Projected Arizona Annual Water Use: Software, Input Data, Models, Raster and Well Package Predictions, and Validation at 2 km Resolution (1896–2099). _Zenodo_. https://doi.org/10.5281/zenodo.19057935.
 
 ### Data References
 

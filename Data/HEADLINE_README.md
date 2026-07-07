@@ -10,7 +10,7 @@ deliverables highlighted in the paper, sized for reasonable download.
 | `az-hydro-data.7z` | ~74 GB | Full bit-identical reproducibility archive — raw inputs + Step 2 cross-validation + intermediate predictor stacks + per-component σ rasters |
 
 Both archives are deposited in the same Zenodo record:
-[10.5281/zenodo.19057936](https://doi.org/10.5281/zenodo.19057936).
+[10.5281/zenodo.19057935](https://doi.org/10.5281/zenodo.19057935).
 For the per-directory inventory, methodology, and external-dataset
 citations, see [`Data/README.md`](Data/README.md) inside this archive
 (or in the GitHub repository at https://github.com/montimaj/az-hydro).
@@ -21,7 +21,7 @@ Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C.
 (2026). *AZ-Hydro — Historical and Projected Arizona Annual Water
 Use: Software, Input Data, Models, Raster and Well Package
 Predictions, and Validation at 2 km Resolution (1896–2099).* Zenodo.
-[https://doi.org/10.5281/zenodo.19057936](https://doi.org/10.5281/zenodo.19057936)
+[https://doi.org/10.5281/zenodo.19057935](https://doi.org/10.5281/zenodo.19057935)
 
 ---
 
