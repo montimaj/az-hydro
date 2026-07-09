@@ -191,3 +191,9 @@ Data/Inputs*
 *.tmp
 gee/Data
 zenodo/*.md
+
+# Track the paper analysis scripts, figures, and derived result CSVs in the repo
+# (the manuscript .md and the preprint PDF under paper/ stay ignored via paper/*)
+#!paper/
+paper/*
+#!paper/analysis/
