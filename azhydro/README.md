@@ -430,9 +430,9 @@ an ML predictor capturing subsurface conditions that influence pumping
 patterns (e.g., shallow water table areas near rivers have different
 withdrawal characteristics than deep basin-fill aquifers).
 
-### Surface Water Capture Index
+### Stream Capture Index
 
-The pipeline produces a per-pixel, per-year **Surface Water Capture
+The pipeline produces a per-pixel, per-year **Stream Capture
 Index** quantifying what fraction of GW pumping likely depletes surface
 water.  The index combines hydraulic connectivity (exponential decay
 with water table depth) and surface water availability (focal-max
@@ -458,13 +458,13 @@ vol_upper   = gw_upper × cf_upper     (λ = 20 m, wide)
 
 so the Lower/Upper columns in `Capture_Time_Series.csv` are the
 combined 95 % CI on the capture volume, not a λ-only envelope.  A
-per-pixel σ_SW_capture is derived at the central λ as the half-width
+per-pixel σ_capture is derived at the central λ as the half-width
 of the propagated interval (`σ_cap = 0.5 × (vol_upper − vol_lower) /
 1.96`) and is shipped inside the 6-band augmented capture rasters
 (band 1 = prediction, band 2 = σ, bands 3–6 = CV, SNR, lower 95 % CI,
 upper 95 % CI) — the same schema used by every other output in the
 pipeline.  This means the existing per-well disaggregation in
-`wellops.py` automatically picks up SW-capture σ and CI columns for
+`wellops.py` automatically picks up stream-capture σ and CI columns for
 the three pools (`Total_Capture`, `Irrigation_Capture`,
 `Non_Irrigation_Capture`) with zero additional configuration.
 
@@ -607,7 +607,7 @@ this study:
    most large-scale studies fall back on with state-specific
    infrastructure observations.
 
-3. **Per-pixel, per-year surface-water capture quantification** — a
+3. **Per-pixel, per-year stream capture quantification** — a
    process-informed proxy
    ([Barlow & Leake 2012](https://doi.org/10.3133/cir1376),
    [Condon & Maxwell 2019](https://doi.org/10.1126/sciadv.aav4574))
@@ -697,7 +697,7 @@ three-era-harmonized GEE predictor stack and the infrastructure layers
 feed the Optuna-tuned XGBRF model trained on ADWR metered records
 (1984–2024, AMA/INA areas only); statewide annual predictions are
 post-processed through the conservation-consistent density-ratio
-partition, the CU = IE × Withdrawal calculation, and the Surface Water
+partition, the CU = IE × Withdrawal calculation, and the Stream
 Capture Index, with the six-component uncertainty framework propagated
 into every published product.  **(b)** Source timeline for the six
 harmonized predictor families across the hindcast (1896–1983),
@@ -1344,7 +1344,7 @@ four-panel publication figure:
   axes (m³ left, acre-ft right), and in-bar value labels.
 - **Panel (d)**: Key Contributions — five single-line bullets summarising
   the 2 km × 204-year coverage, the first statewide irrigation CU dataset,
-  out-of-distribution validation against ADWR and USGS, the novel SW
+  out-of-distribution validation against ADWR and USGS, the novel stream
   capture index, and the hybrid 6-component σ_total UQ framework
   (σ_MACA + σ_Model + σ_Irr + σ_LULC + σ_GW + σ_USBR).
 
@@ -2229,11 +2229,11 @@ Non_Irrigation_Capture).  Because the Stream Capture rasters are now
 with σ_GW propagation baked in), the disaggregation loop in
 `create_well_package` picks up their band-2 σ automatically through
 the same `src.count >= 6` branch that handles the withdrawal and CU
-categories — no SW-capture-specific code path is needed.  Every well
+categories — no stream-capture-specific code path is needed.  Every well
 therefore carries `{pool}_Capture_{unit}`,
 `{pool}_Capture_{unit}_sigma` columns in the parquet for all
 three capture pools.  The stream capture category names refer to the
-surface water captured by each GW pumping pool: e.g.
+streamflow captured by each GW pumping pool: e.g.
 `Total_Capture` is "streamflow captured by Total GW pumping" within the
 parent `Capture/` folder context.
 
@@ -3025,7 +3025,7 @@ avoids this issue: Willcox has many GW wells but zero SW rights and
 zero canal-weighted streamflow, so `gw_frac` → 1.0 without requiring
 any override.
 
-#### Surface Water Capture Index
+#### Stream Capture Index
 
 After partitioning, the pipeline computes a per-pixel, per-year capture
 index quantifying how much GW pumping likely depletes surface water,
@@ -4562,7 +4562,7 @@ Data/Outputs/
         │       ├── Basin_Trend_*.csv        #   Per-basin zonal trend statistics
         │       └── Subbasin_Trend_*.csv     #   Per-sub-basin zonal trend statistics
         ├── Visualizations/                  # Time series & era summary maps
-        ├── Capture/                      # Surface Water Capture Index
+        ├── Capture/                      # Stream Capture Index
         │   ├── {Cat}_Fraction/              #   3-band (lower/central/upper) capture fraction
         │   ├── {Cat}_Rasters/               #   Central capture volume (mm, ft, m³, AF)
         │   └── Capture_Time_Series.csv   #   AZ-wide annual capture totals
@@ -4905,7 +4905,7 @@ Key trends (current run):
   Known Limitations subsection on the irrigation efficiency paradox
   for the full discussion and the supporting [Grafton et al. (2018)](https://doi.org/10.1126/science.aat9314)
   citation.
-- **Surface Water Capture Index**: The statewide volume-weighted
+- **Stream Capture Index**: The statewide volume-weighted
   capture fraction is ~**0.60 %** during the 1984–2024 historical era
   (central estimate, λ = 10 m), translating to ~**0.020 MAF/yr** of GW
   pumping that physically captures surface water via stream depletion
@@ -5793,7 +5793,7 @@ from the methods.
    The ADWR Well Registry `WELL_DEPTH` column was evaluated as a
    potential alternative or supplement to `wtd_m` in the connectivity
    term. It is reasonably complete (74.8 % overall, 97.2 % post-1980,
-   67–76 % in the eight SW-capture river-corridor basins), but the
+   67–76 % in the eight stream-capture river-corridor basins), but the
    mean well depth exceeds mean `wtd_m` by a factor of 2.1–9.6× in
    every river-corridor basin — wells are drilled *into* the
    saturated zone rather than *to the top of* it — so substituting

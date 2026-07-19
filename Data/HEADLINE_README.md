@@ -92,7 +92,7 @@ Load in Python with `geopandas.read_parquet(...)` or in R with
 
 ### 4. Stream Capture Index (`Capture/`)
 
-Pumping-induced surface-water-capture analysis with σ propagation:
+Pumping-induced stream-capture analysis with σ propagation:
 
 - `Total_Fraction/`, `Irrigation_Fraction/`, `Non_Irrigation_Fraction/` — per-year augmented capture-fraction TIFs
 - `Total_Rasters/`, `Irrigation_Rasters/`, `Non_Irrigation_Rasters/` — per-year capture rasters in 4 unit conventions (Depth_mm, Depth_ft, Volume_m3, Volume_AF)
