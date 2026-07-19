@@ -16,8 +16,8 @@
  *     boundaries.
  *   • A category dropdown picks the variable (Total Predicted, Total
  *     GW, Total SW, Irrigation/Non-Irrigation × GW/SW, Irrigation CU,
- *     SW Capture (Total / Irrigation / Non-Irrigation, augmented),
- *     SW Capture Fraction (Total / Irrigation / Non-Irrigation,
+ *     Capture (Total / Irrigation / Non-Irrigation, augmented),
+ *     Capture Fraction (Total / Irrigation / Non-Irrigation,
  *     dimensionless 0–1 share), OOD Probability, CAP scenarios).
  *   • A unit-convention dropdown picks Depth_mm / Depth_ft /
  *     Volume_m3 / Volume_AF where available.
@@ -99,26 +99,26 @@ var CATEGORIES = [
   {key: 'Irrigation_GW_CU_Rasters',  label: 'Irrigation GW CU',          augmented: true},
   {key: 'Irrigation_SW_CU_Rasters',  label: 'Irrigation SW CU',          augmented: true},
 
-  // SW Capture — augmented per-pixel pumping-induced SW capture
+  // Capture — augmented per-pixel pumping-induced SW capture
   // volumes, in mm/ft/m³/AF.  Same 6-band stack as the other
   // augmented categories.
-  {key: 'SW_Capture__Total_SW_Capture_Rasters',
-    label: 'SW Capture (Total)',                                          augmented: true},
-  {key: 'SW_Capture__Irrigation_SW_Capture_Rasters',
-    label: 'SW Capture — Irrigation',                                     augmented: true},
-  {key: 'SW_Capture__Non_Irrigation_SW_Capture_Rasters',
-    label: 'SW Capture — Non-Irrigation',                                 augmented: true},
+  {key: 'Capture__Total_Rasters',
+    label: 'Capture (Total)',                                          augmented: true},
+  {key: 'Capture__Irrigation_Rasters',
+    label: 'Capture — Irrigation',                                     augmented: true},
+  {key: 'Capture__Non_Irrigation_Rasters',
+    label: 'Capture — Non-Irrigation',                                 augmented: true},
 
-  // SW Capture Fraction — dimensionless 0–1 share of pumping that
+  // Capture Fraction — dimensionless 0–1 share of pumping that
   // captures surface water (single band, no unit conventions).
-  {key: 'SW_Capture__Total_SW_Capture_Fraction',
-    label: 'SW Capture Fraction (Total)',                                 augmented: false,
+  {key: 'Capture__Total_Fraction',
+    label: 'Capture Fraction (Total)',                                 augmented: false,
     units: false, fraction: true},
-  {key: 'SW_Capture__Irrigation_SW_Capture_Fraction',
-    label: 'SW Capture Fraction — Irrigation',                            augmented: false,
+  {key: 'Capture__Irrigation_Fraction',
+    label: 'Capture Fraction — Irrigation',                            augmented: false,
     units: false, fraction: true},
-  {key: 'SW_Capture__Non_Irrigation_SW_Capture_Fraction',
-    label: 'SW Capture Fraction — Non-Irrigation',                        augmented: false,
+  {key: 'Capture__Non_Irrigation_Fraction',
+    label: 'Capture Fraction — Non-Irrigation',                        augmented: false,
     units: false, fraction: true},
 
   {key: 'OOD_Rasters',               label: 'OOD Probability',           augmented: false,
@@ -171,13 +171,13 @@ function wellPackageCategoryFor(catKey) {
     'Irrigation_CU_Rasters':     'Irrigation_CU',
     'Irrigation_GW_CU_Rasters':  'Irrigation_GW_CU',
     'Irrigation_SW_CU_Rasters':  'Irrigation_SW_CU',
-    // SW Capture (augmented rasters only — fractions have no
+    // Capture (augmented rasters only — fractions have no
     // well-level analog in the parquet)
-    'SW_Capture__Total_SW_Capture_Rasters':         'Total_SW_Capture',
-    'SW_Capture__Irrigation_SW_Capture_Rasters':    'Irrigation_SW_Capture',
-    'SW_Capture__Non_Irrigation_SW_Capture_Rasters': 'Non_Irrigation_SW_Capture',
+    'Capture__Total_Rasters':         'Total_Capture',
+    'Capture__Irrigation_Rasters':    'Irrigation_Capture',
+    'Capture__Non_Irrigation_Rasters': 'Non_Irrigation_Capture',
   };
-  return map[catKey] || null;  // null for OOD / CAP / SW Capture Fraction
+  return map[catKey] || null;  // null for OOD / CAP / Capture Fraction
 }
 
 // Search radius for the nearest-well lookup (m).  20 km is generous on
@@ -239,7 +239,7 @@ var VIS_DEFAULTS = {
   snr:           {min: 0, max: 5, palette: PALETTE_SIGMA},
   ood:           {min: 0, max: 1, palette: ['blue', 'cyan', 'green',
                                              'yellow', 'orange', 'red']},
-  // SW Capture Fraction — dimensionless 0–1 share, same scale +
+  // Capture Fraction — dimensionless 0–1 share, same scale +
   // palette family as OOD probability.
   fraction:      {min: 0, max: 1, palette: ['ffffe0', 'fed976', 'feb24c',
                                              'fd8d3c', 'fc4e2a', 'b10026']},

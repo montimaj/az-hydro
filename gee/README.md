@@ -525,7 +525,7 @@ The pipeline uses two distinct upload paths:
 | [`upload_cap_cumulative.sh`](upload_cap_cumulative.sh) | Stage the CSV to `gs://azhydro/CAP_Scenario_Cumulative.csv` and ingest as `projects/azhydro/assets/az-wu/CAP_Scenario_Cumulative`.  The visualizer reads this asset on every CAP click to chart all 7 scenarios for the basin. |
 | [`cap_service_area_to_csv.py`](cap_service_area_to_csv.py) | Convert the CAP service-area polygon GeoJSON (3 polygons, MARICOPA / PIMA / PINAL) into `gee/Data/CAP/CAP.csv` with a `.geo` GeoJSON-string column (polygon geometry preserved exactly). |
 | [`upload_cap_service_area.sh`](upload_cap_service_area.sh) | Stage to `gs://azhydro/CAP.csv` and ingest as `projects/azhydro/assets/az-wu/CAP`.  Asset is consumed by the visualizer as the CAP-eligible county overlay layer. |
-| [`azhydro-visualizer.js`](azhydro-visualizer.js) | GEE Apps interactive visualizer.  Year slider 1896–2099, category / unit / band dropdowns, manual color-stretch override (auto-fills with the 2nd / 98th percentile of the current image), click-driven pixel + basin + sub-basin time series with **prediction + 95 % CI envelope** on every chart, plus a **nearest-well** chart pulled from the Well_Package FeatureCollections (capacity-disaggregated per-well values; AF → selected unit converted client-side).  **Side-by-side comparison** via the Compare toggle: `ui.SplitPanel` with linked zoom/pan + draggable wipe divider; each map has its own category dropdown AND its own CAP scenario / window dropdowns so two CAP scenarios can be compared on the wipe.  Vector overlays include AMA / INA / regular basins in distinct colours, sub-basins, ADWR wells, and the **CAP-eligible counties** (Maricopa / Pima / Pinal as dashed outlines).  Special UX for OOD (single band, no unit), **SW Capture Fraction** (dimensionless 0–1, OOD-style palette), and **CAP scenarios** (scenario × window dropdowns + cumulative ΔGW readout + per-basin × 7-scenario time-series chart). |
+| [`azhydro-visualizer.js`](azhydro-visualizer.js) | GEE Apps interactive visualizer.  Year slider 1896–2099, category / unit / band dropdowns, manual color-stretch override (auto-fills with the 2nd / 98th percentile of the current image), click-driven pixel + basin + sub-basin time series with **prediction + 95 % CI envelope** on every chart, plus a **nearest-well** chart pulled from the Well_Package FeatureCollections (capacity-disaggregated per-well values; AF → selected unit converted client-side).  **Side-by-side comparison** via the Compare toggle: `ui.SplitPanel` with linked zoom/pan + draggable wipe divider; each map has its own category dropdown AND its own CAP scenario / window dropdowns so two CAP scenarios can be compared on the wipe.  Vector overlays include AMA / INA / regular basins in distinct colours, sub-basins, ADWR wells, and the **CAP-eligible counties** (Maricopa / Pima / Pinal as dashed outlines).  Special UX for OOD (single band, no unit), **Stream Capture Fraction** (dimensionless 0–1, OOD-style palette), and **CAP scenarios** (scenario × window dropdowns + cumulative ΔGW readout + per-basin × 7-scenario time-series chart). |
 
 ### Workflow (one-time, after the modeling pipeline finishes)
 
@@ -584,18 +584,18 @@ Each is a 6-band stack: prediction + σ + CV + SNR + lower 95 % CI + upper 95 % 
 | `Irrigation_GW_CU_Rasters` | Irrigation CU, GW component |
 | `Irrigation_SW_CU_Rasters` | Irrigation CU, SW component |
 
-#### SW Capture rasters (3 augmented + 3 fractions)
+#### Stream Capture rasters (3 augmented + 3 fractions)
 
-Augmented (`SW_Capture__*_Rasters`) follow the same 6-band convention and 4 unit conventions as above.  Fractions (`SW_Capture__*_Fraction`) are single-band, dimensionless 0–1.
+Augmented (`Capture__*_Rasters`) follow the same 6-band convention and 4 unit conventions as above.  Fractions (`Capture__*_Fraction`) are single-band, dimensionless 0–1.
 
 | Asset | Category |
 |---|---|
-| `SW_Capture__Total_SW_Capture_Rasters` | Total SW captured by GW pumping (volume) |
-| `SW_Capture__Irrigation_SW_Capture_Rasters` | Irrigation share of SW capture |
-| `SW_Capture__Non_Irrigation_SW_Capture_Rasters` | Non-irrigation share of SW capture |
-| `SW_Capture__Total_SW_Capture_Fraction` | Total SW capture fraction (0–1) |
-| `SW_Capture__Irrigation_SW_Capture_Fraction` | Irrigation SW capture fraction |
-| `SW_Capture__Non_Irrigation_SW_Capture_Fraction` | Non-irrigation SW capture fraction |
+| `Capture__Total_Rasters` | Total streamflow captured by GW pumping (volume) |
+| `Capture__Irrigation_Rasters` | Irrigation share of stream capture |
+| `Capture__Non_Irrigation_Rasters` | Non-irrigation share of stream capture |
+| `Capture__Total_Fraction` | Total stream capture fraction (0–1) |
+| `Capture__Irrigation_Fraction` | Irrigation stream capture fraction |
+| `Capture__Non_Irrigation_Fraction` | Non-irrigation stream capture fraction |
 
 #### Other raster assets
 

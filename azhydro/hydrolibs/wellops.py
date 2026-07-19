@@ -273,7 +273,17 @@ def create_well_package(
         cat_mm_info.append((cat, cat_raster_dirs[cat]['mm'], cat))
     if cu_raster_dirs:
         for cu_cat, unit_dirs in cu_raster_dirs.items():
-            cat_mm_info.append((cu_cat, unit_dirs['mm'], cu_cat))
+            mm_dir = unit_dirs['mm']
+            # The on-disk file prefix follows the ``<pool>_Rasters`` directory
+            # — deduped capture dirs like ``Total_Rasters`` hold ``Total_*``
+            # files — while the output column keeps the full category
+            # (``Total_Capture``).  Derive the prefix from the directory so the
+            # two can differ; fall back to the category for CU dirs where the
+            # file prefix equals the category (``Irrigation_CU``).
+            parent = os.path.basename(os.path.dirname(mm_dir))
+            prefix = (parent[:-len('_Rasters')]
+                      if parent.endswith('_Rasters') else cu_cat)
+            cat_mm_info.append((cu_cat, mm_dir, prefix))
 
     n_cats = len(cat_mm_info)  # 9 (withdrawal) + up to 3 (CU)
     n_years = end_year - start_year + 1

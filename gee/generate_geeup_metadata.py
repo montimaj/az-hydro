@@ -94,11 +94,11 @@ def asset_id_for_dir(dir_path: Path, root: Path, asset_prefix: str) -> str:
     Total_GW_Rasters/  (unit-parent)
         → projects/azhydro/assets/az-wu/Total_GW_Rasters
 
-    SW_Capture/Total_SW_Capture_Rasters/  (nested unit-parent)
-        → projects/azhydro/assets/az-wu/SW_Capture__Total_SW_Capture_Rasters
+    Capture/Total_Rasters/  (nested unit-parent)
+        → projects/azhydro/assets/az-wu/Capture__Total_Rasters
 
-    SW_Capture/Total_SW_Capture_Fraction/  (flat, no units)
-        → projects/azhydro/assets/az-wu/SW_Capture__Total_SW_Capture_Fraction
+    Capture/Total_Fraction/  (flat, no units)
+        → projects/azhydro/assets/az-wu/Capture__Total_Fraction
 
     OOD_Rasters/
         → projects/azhydro/assets/az-wu/OOD_Rasters

@@ -78,7 +78,7 @@ SRC=(
   "$PRED/Well_Package"
 
   # ----- SW Capture Index outputs (full set: fraction + per-unit rasters)
-  "$PRED/SW_Capture"
+  "$PRED/Capture"
 
   # ----- Aggregated summaries and time series
   "$PRED/Annual_Summaries"

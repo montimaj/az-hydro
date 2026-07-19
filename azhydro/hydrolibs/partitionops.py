@@ -12,9 +12,11 @@ Categories produced by ``partition_predictions``:
 """
 
 import logging
+import os
 
 import numpy as np
 import pandas as pd
+import rasterio as rio
 from scipy.ndimage import gaussian_filter, maximum_filter, uniform_filter
 
 logger = logging.getLogger(__name__)
@@ -3211,7 +3213,7 @@ def compute_sw_capture_index(
             ``Capture_Fraction_Upper`` — dimensionless [0, 1]
             ``Capture_Volume_Lower``, ``Capture_Volume_Central``,
             ``Capture_Volume_Upper`` — captured SW volume in mm
-            (named ``Capture_Volume`` rather than ``SW_Capture`` so that
+            (named ``Capture_Volume`` rather than ``Capture`` so that
             downstream consumers prefixing the key with a category like
             ``Total_SW`` don't end up with a duplicated ``SW`` token)
 
@@ -3258,6 +3260,445 @@ def compute_sw_capture_index(
         'Capture_Volume_Central': vol_central,
         'Capture_Volume_Upper': vol_upper,
     }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SW Capture Index — connectivity-kernel robustness diagnostic
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Kernels swept in the connectivity-form robustness test.  Each is a
+# monotone-decreasing function of water table depth normalized so that all
+# reach 1/e at d = LAMBDA_CENTRAL (the same e-folding depth as the production
+# exponential), isolating kernel *shape* from *scale*.  ``power_p15`` uses the
+# steepness (p ≈ 15) independently fitted to field ET_GW–WTD data by
+# Tan et al. (2025, J. Hydrol. 658:133100), providing a published-literature
+# anchor for the steep-decay family the exponential belongs to.
+CAPTURE_KERNEL_NAMES = (
+    'exp', 'gauss', 'power_p15', 'power_p3', 'recip', 'linear',
+)
+
+
+def capture_connectivity_kernels(
+        lam_central: float = LAMBDA_CENTRAL,
+) -> dict:
+    """Return the scale-matched connectivity-kernel family.
+
+    Every kernel is a monotone-decreasing function of water table depth
+    ``d`` (metres) that equals 1 at the surface and ``1/e`` at
+    ``d = lam_central``, so the kernels differ only in *shape*, not in
+    characteristic (e-folding) depth.  The exponential (``'exp'``) is the
+    production kernel used by :func:`compute_sw_capture_index`; the others
+    are alternatives spanning the plausible monotone family:
+
+    - ``exp``       : ``exp(-d / L)``                (production)
+    - ``gauss``     : ``exp(-(d / L)**2)``           (thinner tail)
+    - ``power_p15`` : ``max(1 - d/dext, 0)**15``     (Tan et al. 2025 steepness)
+    - ``power_p3``  : ``max(1 - d/dext, 0)**3``      (gentle power law)
+    - ``recip``     : ``1 / (1 + d/a)``              (heavy algebraic tail)
+    - ``linear``    : ``max(1 - d/dext, 0)``         (MODFLOW ETS / Averianov p=1)
+
+    where ``L = lam_central`` and the ``dext`` / ``a`` scale parameters are
+    solved analytically so that each kernel passes through ``1/e`` at
+    ``d = L``.
+
+    Args:
+        lam_central: Central e-folding depth in metres (defaults to the
+            production :data:`LAMBDA_CENTRAL`, 10 m).
+
+    Returns:
+        Ordered ``{name: callable(d)}`` mapping, with ``'exp'`` first so
+        callers can treat it as the reference kernel.
+    """
+    L = float(lam_central)
+    inv_e = 1.0 / np.e
+    # Solve each kernel's scale so connectivity(d=L) == 1/e:
+    #   linear:  1 - L/dext = 1/e            -> dext = L / (1 - 1/e)
+    #   power p: (1 - L/dext)**p = 1/e       -> dext = L / (1 - e**(-1/p))
+    #   recip:   1 / (1 + L/a) = 1/e         -> a    = L / (e - 1)
+    dext_lin = L / (1.0 - inv_e)
+    dext_p15 = L / (1.0 - np.exp(-1.0 / 15.0))
+    dext_p3 = L / (1.0 - np.exp(-1.0 / 3.0))
+    a_recip = L / (np.e - 1.0)
+
+    def _lin(d):
+        return np.clip(1.0 - d / dext_lin, 0.0, None)
+
+    return {
+        'exp': lambda d: np.exp(-d / L),
+        'gauss': lambda d: np.exp(-((d / L) ** 2)),
+        'power_p15': lambda d: np.clip(1.0 - d / dext_p15, 0.0, None) ** 15,
+        'power_p3': lambda d: np.clip(1.0 - d / dext_p3, 0.0, None) ** 3,
+        'recip': lambda d: 1.0 / (1.0 + d / a_recip),
+        'linear': _lin,
+    }
+
+
+def capture_kernel_sensitivity(
+        total_gw: np.ndarray,
+        wtd_m: np.ndarray,
+        cw_streamflow: np.ndarray,
+        basin_labels: np.ndarray,
+        raster_shape: tuple,
+        valid_mask: np.ndarray,
+        lam_central: float = LAMBDA_CENTRAL,
+) -> list[dict]:
+    """Connectivity-kernel robustness metrics for one year's capture field.
+
+    Holds the surface-water-availability term (``cw_norm``, the focal-max
+    normalized canal-weighted streamflow) and the water table depth fixed,
+    and swaps the connectivity kernel among the scale-matched family from
+    :func:`capture_connectivity_kernels`.  For each kernel it measures how
+    closely the resulting capture field tracks the production exponential:
+
+    - **pixel_rank_rho** — Spearman rank correlation of the per-pixel
+      capture *fraction* against the exponential, over pixels where capture
+      is possible (exponential fraction > 0 and ``cw_norm`` > 0).  Tests
+      whether the *spatial pattern* depends on the kernel.
+    - **basin_vol_rank_rho** — Spearman rank correlation of the per-basin
+      capture *volume* against the exponential.  Tests whether the *basin
+      ranking* (the face-validity claim) depends on the kernel.
+    - **statewide_vol_ratio** — total captured volume under the kernel
+      divided by the exponential total.  Quantifies how much the *absolute
+      magnitude* depends on the kernel (expected to vary — the index is
+      reported as ordinal, not a calibrated volume).
+
+    Args:
+        total_gw: 1-D Total_GW withdrawal (mm) for valid pixels.
+        wtd_m: 1-D water table depth (m) for valid pixels.
+        cw_streamflow: 1-D canal-weighted streamflow (mm) for valid pixels.
+        basin_labels: 1-D basin identifier for valid pixels (same order as
+            ``total_gw``); used to aggregate per-basin volumes.
+        raster_shape: (rows, cols) of the full raster grid.
+        valid_mask: Boolean mask of valid pixels (ravelled).
+        lam_central: Central e-folding depth in metres.
+
+    Returns:
+        One dict per kernel with keys ``kernel``, ``pixel_rank_rho``,
+        ``basin_vol_rank_rho``, ``statewide_vol_ratio``, ``n_active_pixels``.
+        The exponential row is included (self-correlation 1.0) as the
+        reference.
+    """
+    from scipy.stats import spearmanr
+
+    cw_norm = compute_sw_fraction(cw_streamflow, raster_shape, valid_mask)
+    wtd = np.clip(np.nan_to_num(wtd_m, nan=0.0), 0, None)
+    gw = np.maximum(np.nan_to_num(total_gw, nan=0.0), 0.0)
+
+    kernels = capture_connectivity_kernels(lam_central)
+    cf = {name: fn(wtd) * cw_norm for name, fn in kernels.items()}
+
+    ref = cf['exp']
+    active = (ref > 0) & (cw_norm > 0)
+    ref_active = ref[active]
+
+    # Per-basin volume aggregation (shared basin ordering across kernels)
+    basin_series = pd.Series(basin_labels)
+    valid_basin = basin_series.notna().to_numpy() & (basin_series != 0).to_numpy()
+    basin_ids = np.sort(basin_series[valid_basin].unique())
+
+    def _basin_vols(capfrac):
+        vol = capfrac * gw
+        df = pd.DataFrame({'basin': basin_labels, 'vol': vol})
+        df = df[valid_basin]
+        sums = df.groupby('basin')['vol'].sum()
+        return sums.reindex(basin_ids, fill_value=0.0).to_numpy()
+
+    ref_bvol = _basin_vols(ref)
+    ref_state = float((ref * gw).sum())
+
+    rows = []
+    for name in CAPTURE_KERNEL_NAMES:
+        arr = cf[name]
+        if name == 'exp':
+            pix_rho, bvol_rho = 1.0, 1.0
+        else:
+            pix_rho = float(spearmanr(ref_active, arr[active]).statistic)
+            bvol_rho = float(spearmanr(ref_bvol, _basin_vols(arr)).statistic)
+        state_ratio = (
+            float((arr * gw).sum()) / ref_state if ref_state > 0 else np.nan
+        )
+        rows.append({
+            'kernel': name,
+            'pixel_rank_rho': pix_rho,
+            'basin_vol_rank_rho': bvol_rho,
+            'statewide_vol_ratio': state_ratio,
+            'n_active_pixels': int(active.sum()),
+        })
+    return rows
+
+
+def run_capture_kernel_sensitivity(
+        prediction_dir: str,
+        pred_data_dir: str,
+        start_year: int,
+        end_year: int,
+        year_list: list[int],
+        diagnostic_years: list[int] | None = None,
+        n_sample_years: int = 9,
+        az_df: pd.DataFrame | None = None,
+) -> pd.DataFrame | None:
+    """Functional-form robustness diagnostic for the SW Capture Index.
+
+    Re-derives the capture field under a family of scale-matched monotone
+    connectivity kernels (:func:`capture_connectivity_kernels`) for a
+    representative subset of prediction years, holding the production
+    ``cw_norm`` and water table depth fixed, and reports how closely each
+    kernel reproduces the production exponential's spatial pattern and
+    basin ranking.  This demonstrates that the reported capture pattern and
+    basin ordering do not depend on the specific choice of the exponential
+    connectivity kernel (only the absolute volume magnitude does — hence the
+    index is reported as an ordinal screen).
+
+    All inputs are read from the same rasterized predictor grid the
+    production index is built on, and every array is indexed by a single
+    basin-derived ``valid_mask`` so the withdrawal, water-table-depth,
+    canal-weighted-streamflow, and basin-label arrays are aligned by
+    construction (avoiding any dependence on ``az_df`` row ordering):
+
+    - ``Total_GW`` Depth_mm raster (band 1) — the withdrawal field, from
+      ``prediction_dir``.
+    - ``WTD.tif`` (static) and per-year ``Canal_Weighted_Streamflow_{year}``
+      and ``GW_Basin_{year}`` rasters — from ``pred_data_dir``.
+
+    It runs only the cheap post-partition array arithmetic — no ML
+    prediction — so it is inexpensive.
+
+    Writes ``Capture/Capture_Kernel_Sensitivity.csv`` (one row per
+    diagnostic year × kernel), a bar chart of the across-year mean rank
+    correlations, and the connectivity-kernel curve-comparison figure.
+
+    Args:
+        prediction_dir: ``Full_Prediction_{model}`` directory containing
+            ``Total_GW_Rasters/Depth_mm/`` and ``Capture/``.
+        pred_data_dir: Directory with the rasterized predictor grid
+            (``GW_Basin_{year}.tif``, ``WTD.tif``,
+            ``Canal_Weighted_Streamflow_{year}.tif``).
+        start_year: First prediction year.
+        end_year: Last prediction year.
+        year_list: Full prediction year list (``year_list[0]`` selects the
+            reference basin raster for ``valid_mask`` / ``raster_shape``).
+        diagnostic_years: Explicit years to evaluate.  When ``None``,
+            ``n_sample_years`` evenly spaced years spanning
+            ``[start_year, end_year]`` are chosen automatically.
+        n_sample_years: Number of evenly spaced years to sample when
+            ``diagnostic_years`` is not given.
+        az_df: Unused; accepted for call-site compatibility with the other
+            UQ diagnostics.
+
+    Returns:
+        The per-year × kernel results DataFrame, or ``None`` if no year
+        could be evaluated.
+    """
+    del az_df  # inputs are read from rasters; kept only for signature parity
+    from hydrolibs.rasterops import read_raster_as_arr
+    from hydrolibs.sysops import makedirs
+
+    logger.info('=' * 60)
+    logger.info('SW Capture Index — connectivity-kernel robustness diagnostic')
+    logger.info('=' * 60)
+
+    # Reference basin raster → valid_mask, raster_shape (same pattern as
+    # compute_sw_capture_with_sigma).
+    ref_basin_file = os.path.join(pred_data_dir, f'GW_Basin_{year_list[0]}.tif')
+    if not os.path.exists(ref_basin_file):
+        logger.warning('  Reference basin raster missing (%s) — skipping.',
+                       ref_basin_file)
+        return None
+    basin_arr, bfile = read_raster_as_arr(ref_basin_file, get_file=True)
+    basin_flat = basin_arr.ravel()
+    valid_mask = ~np.isnan(basin_flat) & (basin_flat != 0)
+    raster_shape = basin_arr.shape
+    bfile.close()
+
+    wtd_file = os.path.join(pred_data_dir, 'WTD.tif')
+    if not os.path.exists(wtd_file):
+        logger.warning('  WTD raster missing (%s) — skipping.', wtd_file)
+        return None
+    with rio.open(wtd_file) as src:
+        wtd_flat = src.read(1).ravel()[valid_mask]
+
+    if diagnostic_years is None:
+        span = np.linspace(start_year, end_year, num=max(1, n_sample_years))
+        diagnostic_years = sorted({int(round(y)) for y in span})
+
+    def _read_masked(path):
+        """Read band 1 of *path*, align to the reference grid, mask."""
+        with rio.open(path) as src:
+            arr = src.read(1).astype(np.float64)
+        if arr.shape != raster_shape:
+            aligned = np.full(raster_shape, np.nan)
+            r = min(arr.shape[0], raster_shape[0])
+            c = min(arr.shape[1], raster_shape[1])
+            aligned[:r, :c] = arr[:r, :c]
+            arr = aligned
+        return arr.ravel()[valid_mask]
+
+    all_rows = []
+    for year in diagnostic_years:
+        if not (start_year <= year <= end_year):
+            continue
+
+        gw_file = os.path.join(
+            prediction_dir, 'Total_GW_Rasters', 'Depth_mm',
+            f'Total_GW_{year}_mm.tif',
+        )
+        cw_file = os.path.join(
+            pred_data_dir, f'Canal_Weighted_Streamflow_{year}.tif')
+        basin_file = os.path.join(pred_data_dir, f'GW_Basin_{year}.tif')
+        missing = [f for f in (gw_file, cw_file, basin_file)
+                   if not os.path.exists(f)]
+        if missing:
+            logger.warning('  Year %d: missing %s — skipping.',
+                           year, ', '.join(os.path.basename(m)
+                                           for m in missing))
+            continue
+
+        rows = capture_kernel_sensitivity(
+            total_gw=_read_masked(gw_file),
+            wtd_m=wtd_flat,
+            cw_streamflow=_read_masked(cw_file),
+            basin_labels=_read_masked(basin_file),
+            raster_shape=raster_shape,
+            valid_mask=valid_mask,
+        )
+        for r in rows:
+            r['Year'] = year
+        all_rows.extend(rows)
+        logger.info('  Year %d evaluated (%d kernels).', year, len(rows))
+
+    if not all_rows:
+        logger.warning('  No diagnostic years could be evaluated.')
+        return None
+
+    df = pd.DataFrame(all_rows)[
+        ['Year', 'kernel', 'pixel_rank_rho', 'basin_vol_rank_rho',
+         'statewide_vol_ratio', 'n_active_pixels']
+    ]
+
+    sw_cap_dir = os.path.join(prediction_dir, 'Capture')
+    makedirs(sw_cap_dir)
+    csv_path = os.path.join(sw_cap_dir, 'Capture_Kernel_Sensitivity.csv')
+    df.to_csv(csv_path, index=False)
+    logger.info('  Wrote %s', csv_path)
+
+    # Across-year summary (mean ± std per kernel), ordered by the canonical
+    # kernel sequence.
+    summary = (
+        df.groupby('kernel')[
+            ['pixel_rank_rho', 'basin_vol_rank_rho', 'statewide_vol_ratio']
+        ].agg(['mean', 'std'])
+    )
+    summary = summary.reindex(list(CAPTURE_KERNEL_NAMES))
+    for name in CAPTURE_KERNEL_NAMES:
+        logger.info(
+            '  %-10s pixel_rho=%.3f  basin_rho=%.3f  vol_ratio=%.2f',
+            name,
+            summary.loc[name, ('pixel_rank_rho', 'mean')],
+            summary.loc[name, ('basin_vol_rank_rho', 'mean')],
+            summary.loc[name, ('statewide_vol_ratio', 'mean')],
+        )
+
+    _plot_capture_kernel_sensitivity(summary, sw_cap_dir)
+    _plot_capture_kernel_curves(sw_cap_dir)
+    return df
+
+
+# Display styling for the connectivity-kernel family (name → label, color,
+# linestyle, linewidth).  ``exp`` is drawn boldest as the production kernel.
+_CAPTURE_KERNEL_STYLE = {
+    'exp':       ('Exponential (this study)',            '#1b9e77', '-',  2.6),
+    'gauss':     ('Gaussian',                            '#e41a1c', '--', 1.7),
+    'power_p15': ('Power law, p=15 (Tan et al. 2025)',   '#7e3ff2', '-.', 2.0),
+    'power_p3':  ('Power law, p=3',                      '#ff7f00', '-.', 1.5),
+    'recip':     ('Reciprocal',                          '#1f9ed1', ':',  1.9),
+    'linear':    ('Linear (MODFLOW ETS / Averianov p=1)', '#999999', '--', 1.5),
+}
+
+
+def _plot_capture_kernel_curves(out_dir: str,
+                                lam_central: float = LAMBDA_CENTRAL) -> None:
+    """Connectivity vs. water-table-depth curves for the kernel family.
+
+    Analogous to the extinction-depth model-comparison figure in the
+    nmose-gw-et project: overlays each scale-matched connectivity kernel as
+    ``connectivity = f(wtd)``, with a guide marking the shared ``1/e``
+    crossing at ``d = lam_central`` that all kernels pass through by
+    construction.  Makes visually explicit that the kernels differ only in
+    shape, not in characteristic (e-folding) depth.
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # pragma: no cover - plotting is best-effort
+        logger.warning('  Kernel-curve plot skipped (%s)', exc)
+        return
+
+    kernels = capture_connectivity_kernels(lam_central)
+    d = np.linspace(0, 6 * lam_central, 600)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for name in CAPTURE_KERNEL_NAMES:
+        label, color, ls, lw = _CAPTURE_KERNEL_STYLE[name]
+        ax.plot(d, kernels[name](d), color=color, ls=ls, lw=lw, label=label)
+
+    inv_e = 1.0 / np.e
+    ax.axhline(inv_e, color='0.5', lw=0.8, ls=':')
+    ax.axvline(lam_central, color='0.5', lw=0.8, ls=':')
+    ax.text(lam_central, 1.02, r'$1/e$ depth $=\lambda$',
+            ha='center', fontsize=9, color='0.35')
+    ax.text(6 * lam_central, inv_e + 0.015, r'$1/e$', ha='right',
+            fontsize=9, color='0.35')
+
+    ax.set_xlim(0, 6 * lam_central)
+    ax.set_ylim(0, 1.05)
+    ax.set_xlabel('Water table depth (m below surface)')
+    ax.set_ylabel(r'Hydraulic connectivity  $f(d)$')
+    ax.set_title('SW Capture Index connectivity kernels\n'
+                 f'(scale-matched at $1/e$ depth $\\lambda={lam_central:g}$ m)')
+    ax.legend(loc='upper right', fontsize=9, framealpha=0.9,
+              title='Connectivity kernel')
+    fig.tight_layout()
+    out_path = os.path.join(out_dir, 'Capture_Kernel_Curves.png')
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+    logger.info('  Wrote %s', out_path)
+
+
+def _plot_capture_kernel_sensitivity(summary: pd.DataFrame,
+                                     out_dir: str) -> None:
+    """Bar chart of across-year mean kernel rank correlations vs exponential."""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # pragma: no cover - plotting is best-effort
+        logger.warning('  Kernel-sensitivity plot skipped (%s)', exc)
+        return
+
+    names = [n for n in CAPTURE_KERNEL_NAMES if n in summary.index]
+    pix = [summary.loc[n, ('pixel_rank_rho', 'mean')] for n in names]
+    bas = [summary.loc[n, ('basin_vol_rank_rho', 'mean')] for n in names]
+
+    x = np.arange(len(names))
+    w = 0.38
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.bar(x - w / 2, pix, w, label='Per-pixel fraction (rank ρ)')
+    ax.bar(x + w / 2, bas, w, label='Per-basin volume (rank ρ)')
+    ax.axhline(0.9, ls='--', lw=0.8, color='0.4')
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, rotation=20, ha='right')
+    ax.set_ylabel('Spearman rank correlation vs. exponential')
+    ax.set_ylim(0, 1.02)
+    ax.set_title('SW Capture Index: connectivity-kernel robustness\n'
+                 '(kernels scale-matched at 1/e depth = '
+                 f'{LAMBDA_CENTRAL:g} m)')
+    ax.legend(loc='lower left', fontsize=8)
+    fig.tight_layout()
+    out_path = os.path.join(out_dir, 'Capture_Kernel_Sensitivity.png')
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+    logger.info('  Wrote %s', out_path)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

@@ -112,7 +112,7 @@ UQ components (Step 3b) support `--skip-uq`:
 python pipeline.py --steps 3b --skip-uq sigma-maca,sigma-lulc   # skip GEE-dependent components
 python pipeline.py --steps 3b --skip-uq sigma-maca              # skip only inter-GCM spread
 python pipeline.py --steps 3b --skip-uq sigma-model,density-sensitivity # skip seed ensemble + partition sensitivity
-python pipeline.py --steps 3b --skip-uq sw-capture-sigma         # skip SW Capture Index w/ σ_GW propagation
+python pipeline.py --steps 3b --skip-uq sw-capture-sigma         # skip Stream Capture Index w/ σ_GW propagation
 ```
 
 Step 3g map families support `--skip-maps`:
@@ -142,8 +142,8 @@ Step 3h is excluded from `--steps all` because Step 3g already produces the grap
 | `2c-seed` | Evaluate seeded LOO spatial holdout (10% local calibration) |
 | `2s` | Cross-strategy summary (can run standalone from saved results) |
 | `3`  | Full-period XGBRF prediction (1896–2099) |
-| `3b` | Hybrid uncertainty quantification (incl. σ-propagated SW Capture Index and per-well σ disaggregation) |
-| `3e` | Well Package (per-well GeoParquet predictions in 4 unit conventions: mm / ft / m³ / AF, ~34.7 M well-year rows × 34 columns each, with σ + SW Capture bands) |
+| `3b` | Hybrid uncertainty quantification (incl. σ-propagated Stream Capture Index and per-well σ disaggregation) |
+| `3e` | Well Package (per-well GeoParquet predictions in 4 unit conventions: mm / ft / m³ / AF, ~34.7 M well-year rows × 34 columns each, with σ + Stream Capture bands) |
 | `3g` | Raster maps, actual vs predicted, and trend analysis for all output categories |
 | `3h` | Graphical abstract / Figure 1 only (lightweight; reads `Annual_Summaries/` from disk). Must be explicitly requested — excluded from `--steps all` because `3g` already produces this figure. Intended for iterating on the Figure 1 layout in ~30 s without re-running anything else. |
 | `3i` | ADWR partner CSV delivery: 16 long-format CSVs + a `readme.txt` at `Data/Outputs/.../Full_Prediction_XGBRF/ADWR/` — per-basin and per-sub-basin time series for 7 partition categories (Total_GW, Total_SW, Irrigation_GW/SW, Non_Irrigation_GW/SW, Irrigation_CU) plus Total_Predicted.  Aggregated from per-basin/subbasin `<cat>/Basin_Time_Series/*_Annual.csv` and `<cat>/Subbasin_Time_Series/*_Annual.csv` files plus `Annual_Summaries/{Basin,Subbasin}_Total.csv`; `readme.txt` is refreshed from `azhydro/templates/adwr_readme.txt`.  Lightweight (~0.5 s) and idempotent — fully reproducible from a clean `Outputs/` wipe.  Lives under `Data/Outputs/` so it auto-bundles into both Zenodo `.7z` archives.  Included in `--steps all`. |
@@ -193,14 +193,15 @@ Step 3h is excluded from `--steps all` because Step 3g already produces the grap
 | `sigma-total` | Skip σ_total quadrature, basin σ, visualizations, and raster augmentation |
 | `time-series-plots` | Skip the AZ-wide and basin/sub-basin σ time-series plots produced after `sigma-total` (`_plot_basin_sigma_time_series`, `_plot_uncertainty_time_series`). Underlying CSVs (`Basin_Sigma_Total.csv`, `Uncertainty_Summary_*.csv`) are still produced; only the matplotlib renders are skipped. Useful when iterating on raster augmentation or downstream analyses without spending the ~5-10 minute plotting cost. Requires `sigma-total` to have run; no-op if `sigma-total` is also skipped. |
 | `sigma-cu` | Skip σ_CU — consumptive use uncertainty (IE × Withdrawal error propagation) |
-| `sw-capture-sigma` | Skip SW Capture Index computation with σ_GW propagation. Produces the per-pool SW capture rasters (fraction, depth, volume) with combined λ + σ_total 95 % CI bounds plus per-well σ_capture disaggregation in `Well_Package.gpkg`. Depends on `sigma-total`; skipping means no SW capture outputs are produced (there is no σ-less fallback path). |
+| `sw-capture-sigma` | Skip Stream Capture Index computation with σ_GW propagation. Produces the per-pool stream capture rasters (fraction, depth, volume) with combined λ + σ_total 95 % CI bounds plus per-well σ_capture disaggregation in `Well_Package.gpkg`. Depends on `sigma-total`; skipping means no stream capture outputs are produced (there is no σ-less fallback path). |
+| `kernel-sensitivity` | Skip the Stream Capture Index connectivity-kernel robustness diagnostic (`partitionops.run_capture_kernel_sensitivity`). Re-derives the capture field under six scale-matched monotone connectivity kernels (exponential, Gaussian, power law p = 15 / p = 3, reciprocal, linear) to show the capture pattern and basin ranking do not depend on the exponential kernel — only the absolute volume magnitude does (hence the index is reported as an ordinal screen). Writes `Capture/Capture_Kernel_Sensitivity.{csv,png}` and `Capture_Kernel_Curves.png`. Cheap post-partition array arithmetic (no ML prediction); independent of the other σ steps. |
 | `cap-scenario` | Skip CAP delivery scenario sweep (`uncertaintyops.run_cap_scenario_analysis`). Re-partitions every projection-era year (2026–2099) under eight CAP delivery scenarios (Baseline_900kAF, DCP Tier 0/1/2a/2b/3, WestWater Basic Coordination, Extreme Shortage) using scenario-specific SW factors and GW boost factors at CAP-service-area pixels. Produces statewide and per-basin time series of GW/SW reapportionment plus cumulative drawdown comparisons against WestWater 2026 Figures 4 and 5 (`CAP_Scenario_Statewide.csv`, `CAP_Scenario_Basin.csv`, `CAP_Scenario_Cumulative.csv`, plus DCP-tier / WestWater / cumulative-drawdown PNG figures). |
 
 #### Step 3g map sub-steps
 
 | Sub-step | Description |
 |----------|-------------|
-| `trends` | Skip the full Mann-Kendall + Sen's slope trend-map suite (withdrawals, CU, SW capture depth/volume/fraction, per-basin and per-sub-basin trend CSVs). This is the slowest sub-step in Step 3g — per-pixel MK + Sen on 204 annual rasters × ~15 product families × 4 periods takes the bulk of the step's runtime, so skipping is useful when iterating on the era-mean raster maps or the graphical abstract. Era-mean raster maps, σ-component CV maps, Prediction CV/SNR maps, actual-vs-predicted figures, and the graphical abstract are still produced. |
+| `trends` | Skip the full Mann-Kendall + Sen's slope trend-map suite (withdrawals, CU, stream capture depth/volume/fraction, per-basin and per-sub-basin trend CSVs). This is the slowest sub-step in Step 3g — per-pixel MK + Sen on 204 annual rasters × ~15 product families × 4 periods takes the bulk of the step's runtime, so skipping is useful when iterating on the era-mean raster maps or the graphical abstract. Era-mean raster maps, σ-component CV maps, Prediction CV/SNR maps, actual-vs-predicted figures, and the graphical abstract are still produced. |
 
 > **Note on skipping individual σ components:** Per-category σ at the *pixel* level (e.g., the per-pixel σ_model array for Irrigation, Non_Irrigation, etc.) is only held in memory during computation and is never written to disk as a separate per-category raster. Per-category σ at the *basin* level, by contrast, **is** persisted to disk as `Uncertainty/{component}/Basin_Sigma_{component}_{category}.csv` (six components × eight partition categories = 48 new CSVs per full Step 3b run), where it is consumed by the σ attribution diagnostic suite in Step 3g; those files are additive and leave the existing total-level `Basin_Sigma_{component}.csv` and `SubBasin_Sigma_{component}.csv` untouched. When `sigma-total` runs, it can reload *total-level* per-component σ from disk (e.g., `Sigma_Model_mm_{year}.tif`), but the per-category σ_total rasters (`Sigma_Total_{cat}_mm_{year}.tif`) will be zero if the individual σ steps were skipped because the per-category pixel arrays they depend on are not on disk. This causes downstream augmented category rasters to have zero σ, which in turn makes σ_CU zero. To get correct per-category uncertainty in the augmented rasters *and* correct per-category basin CSVs for the σ attribution suite, run all individual σ components (σ_MACA through σ_USBR) without skipping. Only `density-sensitivity` (the partition-level diagnostic) can be safely skipped without affecting downstream products.
 
@@ -455,7 +456,7 @@ vol_central = gw × cf_central         (λ = 10 m)
 vol_upper   = gw_upper × cf_upper     (λ = 20 m, wide)
 ```
 
-so the Lower/Upper columns in `SW_Capture_Time_Series.csv` are the
+so the Lower/Upper columns in `Capture_Time_Series.csv` are the
 combined 95 % CI on the capture volume, not a λ-only envelope.  A
 per-pixel σ_SW_capture is derived at the central λ as the half-width
 of the propagated interval (`σ_cap = 0.5 × (vol_upper − vol_lower) /
@@ -464,32 +465,32 @@ of the propagated interval (`σ_cap = 0.5 × (vol_upper − vol_lower) /
 upper 95 % CI) — the same schema used by every other output in the
 pipeline.  This means the existing per-well disaggregation in
 `wellops.py` automatically picks up SW-capture σ and CI columns for
-the three pools (`Total_SW_Capture`, `Irrigation_SW_Capture`,
-`Non_Irrigation_SW_Capture`) with zero additional configuration.
+the three pools (`Total_Capture`, `Irrigation_Capture`,
+`Non_Irrigation_Capture`) with zero additional configuration.
 
 The computation runs as part of Step 3b's
 `run_uncertainty_quantification` (after the per-category rasters have
 been augmented with band-2 σ_total), not inside the Step 3 prediction
 loop, because the σ needed for the propagation does not exist until
 Step 3b finishes.  The skip token `--skip-uq sw-capture-sigma` turns
-the whole SW capture step off (no capture outputs are produced in that
+the whole stream capture step off (no capture outputs are produced in that
 case; users who want the old λ-only bounds can run an earlier commit).
 
 Output rasters are organized by GW pumping pool — Total, Irrigation,
-Non-Irrigation — under `SW_Capture/{Total,Irrigation,Non_Irrigation}_SW_Capture_Fraction/`
+Non-Irrigation — under `Capture/{Total,Irrigation,Non_Irrigation}_Fraction/`
 (3-band, dimensionless [0, 1] for λ = 5/10/20 m) and
-`SW_Capture/{Total,Irrigation,Non_Irrigation}_SW_Capture_Rasters/{Depth_mm,Depth_ft,Volume_m3,Volume_AF}/`
+`Capture/{Total,Irrigation,Non_Irrigation}_Rasters/{Depth_mm,Depth_ft,Volume_m3,Volume_AF}/`
 (6-band augmented: central capture volume + σ_cap + CV + SNR + lower
 95 % CI + upper 95 % CI, in mm/ft/m³/AF).  Reading the directory names:
-`Total_SW_Capture_Fraction` is "the fraction of Total GW pumping that
+`Total_Fraction` is "the fraction of Total GW pumping that
 captures surface water," and so on for the irrigation and non-irrigation
 splits.  The time series CSV
-(`SW_Capture/SW_Capture_Time_Series.csv`) carries the same
+(`Capture/Capture_Time_Series.csv`) carries the same
 Lower/Central/Upper schema as before plus three new explicit σ columns
 per pool (`{pool}_Capture_Volume_Sigma_AF`).  Era-mean maps are also
 produced.
 
-**What "SW capture" actually means in this model.** The index measures
+**What "stream capture" actually means in this model.** The index measures
 only one specific pathway: well-mediated stream depletion in pixels the
 partition step has labeled as `_GW`. Four categories of well/canal
 interaction are *not* counted in the capture numerator: (1) direct
@@ -522,6 +523,37 @@ use is being delivered through canals, through SW-righted wells
 already counted in `Total_SW`, or through engineered drain
 infrastructure that this index does not represent — not that wells
 are causing little impact.
+
+**Connectivity-kernel robustness.** Because the exponential
+connectivity term `exp(-wtd_m / λ)` is a modeling choice rather than a
+calibrated physical law, Step 3b runs a functional-form robustness
+diagnostic (`partitionops.run_capture_kernel_sensitivity`, skip token
+`--skip-uq kernel-sensitivity`) that re-derives the capture field under
+a family of six monotone-decreasing connectivity kernels — exponential
+(production), Gaussian, steep power law (p = 15, matching the field
+steepness fitted by [Tan et al., 2025](https://doi.org/10.1016/j.jhydrol.2025.133100)),
+gentle power law (p = 3), reciprocal, and linear (MODFLOW ETS /
+Averianov p = 1). Every kernel is *scale-matched* so that connectivity
+reaches `1/e` at the same characteristic depth (λ = 10 m), isolating
+kernel **shape** from **scale**. Holding the surface-water-availability
+term (`cw_norm`) and water table depth fixed, the diagnostic reports,
+for a representative set of prediction years, the Spearman rank
+correlation of each kernel's per-pixel capture fraction and per-basin
+capture volume against the production exponential, plus the statewide
+volume ratio. The result: the **basin ranking is robust across all
+smooth kernels** (rank ρ ≥ 0.93; the lone outlier is the hard-truncated
+linear kernel at ρ ≈ 0.73, which is unphysical because it forces
+connectivity to exactly zero at a knife-edge depth), and the
+exponential is **rank-equivalent to the Tan et al. p = 15 kernel**
+(pixel ρ ≈ 0.996, basin ρ ≈ 0.999). Only the absolute volume magnitude
+depends on the kernel (statewide ratio 0.7–2.5×), which is precisely why
+the index is reported as an **ordinal screen** rather than a calibrated
+depletion volume. Outputs land in
+`Capture/Capture_Kernel_Sensitivity.csv`,
+`Capture_Kernel_Sensitivity.png` (per-kernel mean rank correlations),
+and `Capture_Kernel_Curves.png` (the scale-matched kernel curves). The
+full analysis, tables, and literature context are in
+[`paper/capture_kernel_sensitivity.md`](../paper/capture_kernel_sensitivity.md).
 
 **What is novel here, and what is not.** The base ML method
 (XGBoost trained on metered well records with remote-sensing-derived
@@ -684,15 +716,15 @@ Step 0   ─  Data Preparation
 Step 1   ─  Create AZ Predictor DataFrame
 Step 2   ─  Model Evaluation (5 strategies: Random, Pixel Holdout, Temporal LOO, Spatial LOO, Seeded Spatial LOO)
 Step 3   ─  Full-Period XGBRF Prediction (1896–2099)
-Step 3b  ─  Hybrid 6-component σ_total UQ, raster augmentation, σ-propagated SW Capture Index
-Step 3e  ─  Well Package (per-well GeoParquet predictions in 4 unit conventions with uncertainty, incl. SW capture + σ)
+Step 3b  ─  Hybrid 6-component σ_total UQ, raster augmentation, σ-propagated Stream Capture Index
+Step 3e  ─  Well Package (per-well GeoParquet predictions in 4 unit conventions with uncertainty, incl. stream capture + σ)
 Step 3g  ─  Raster Maps & Trend Analysis for All Output Categories
 Step 3h  ─  Graphical Abstract / Figure 1 only (~30 s; explicit opt-in)
 Step 3i  ─  ADWR partner CSV delivery (16 long-format CSVs to Data/Outputs/.../Full_Prediction_XGBRF/ADWR/)
 Step 4   ─  USGS Intercomparison (Withdrawals, CU, Peff)
 ```
 
-The SW Capture Index with σ_GW propagation runs **inside** Step 3b
+The Stream Capture Index with σ_GW propagation runs **inside** Step 3b
 (`run_uncertainty_quantification → compute_sw_capture_with_sigma`)
 right after the per-category rasters have been augmented with σ_total
 band 2. Skip with `--skip-uq sw-capture-sigma` to turn the whole
@@ -2039,7 +2071,7 @@ per-era).  Each figure shows:
 - Basin boundaries and AMA/INA labels overlaid.
 
 Trend maps are generated for: total predicted withdrawal, 8 partition
-categories, 3 CU categories, and 3 SW capture categories — each with
+categories, 3 CU categories, and 3 stream capture categories — each with
 up to 5 periods (full + 3 eras).
 
 **Basin-level trend choropleth** — For each category × period, a
@@ -2162,7 +2194,7 @@ python pipeline.py --steps 3g --skip-maps trends
 ```
 
 All era-mean maps, Prediction CV / SNR maps, σ-component CV maps,
-actual-vs-predicted maps, SW Capture era maps, and the graphical
+actual-vs-predicted maps, Stream Capture era maps, and the graphical
 abstract are still produced.  The `Trend_Analysis/` directory is
 simply not touched, so existing trend maps from previous runs remain
 in place.  If you only want the graphical abstract, Step 3h is the
@@ -2191,19 +2223,19 @@ per-well uncertainty columns are included:
 
 Categories include 9 withdrawal categories (Total + 8 partitions),
 3 CU categories (Irrigation_CU, Irrigation_GW_CU, Irrigation_SW_CU),
-and 3 SW capture categories (Total_SW_Capture, Irrigation_SW_Capture,
-Non_Irrigation_SW_Capture).  Because the SW Capture rasters are now
+and 3 stream capture categories (Total_Capture, Irrigation_Capture,
+Non_Irrigation_Capture).  Because the Stream Capture rasters are now
 6-band augmented (written by Step 3b's `compute_sw_capture_with_sigma`
 with σ_GW propagation baked in), the disaggregation loop in
 `create_well_package` picks up their band-2 σ automatically through
 the same `src.count >= 6` branch that handles the withdrawal and CU
 categories — no SW-capture-specific code path is needed.  Every well
-therefore carries `{pool}_Capture_Volume_{unit}`,
-`{pool}_Capture_Volume_{unit}_sigma` columns in the parquet for all
-three capture pools.  The SW capture category names refer to the
+therefore carries `{pool}_Capture_{unit}`,
+`{pool}_Capture_{unit}_sigma` columns in the parquet for all
+three capture pools.  The stream capture category names refer to the
 surface water captured by each GW pumping pool: e.g.
-`Total_SW_Capture` is "SW captured by Total GW pumping" within the
-parent `SW_Capture/` folder context.
+`Total_Capture` is "streamflow captured by Total GW pumping" within the
+parent `Capture/` folder context.
 
 **Per-well σ disaggregation rule.** The well package applies the
 **correlated-sum rule** `σ_well_i = w_i × σ_pixel` (not quadrature),
@@ -3338,7 +3370,7 @@ plus the explicit "Shortage Year(s)" assignment.  Also cross-cited:
 | 2023 | Tier 2a | 0.61 | Mandatory 592 kAF; AZ also made a 355 kAF *voluntary* contribution to Lake Mead, not folded into this factor |
 | 2024 | Tier 1 | 0.66 | "Lower Basin returns to a Tier 1 shortage" per ADWR |
 | 2025 | Tier 1 | 0.66 | 512 kAF = "~30 % of CAP normal supply" per CAP/CAWCD (rounded from 34.1 %) |
-| 2026 | Tier 1 | 0.66 | Confirmed by USBR August 24-month study; 512 kAF = 320 Interim Guidelines + 192 LBDCP per [AWBA 2026 Plan of Operation](../Data/Inputs/USGS%20WU/2025.12.04_AWBA-2026-Plan-of-Operation-FINAL_0.pdf). Last year of the 2007 IG + 2019 DCP framework |
+| 2026 | Tier 1 | 0.66 | Confirmed by USBR August 24-month study; 512 kAF = 320 Interim Guidelines + 192 LBDCP per [AWBA 2026 Plan of Operation](../Data/Inputs/USGS%20WU/Misc/2025.12.04_AWBA-2026-Plan-of-Operation-FINAL_0.pdf). Last year of the 2007 IG + 2019 DCP framework |
 
 These are **mandatory-Tier-cut factors only** (Option A).  Voluntary
 conservation contributions are discretionary water held back in Lake
@@ -3352,7 +3384,7 @@ cannot anticipate from climate / LULC predictors, so they are
 applied as a partition-time perturbation at CAP-served pixels
 (directly reflecting the "borne by CAP users" attribution from
 CAP/CAWCD).  Under Tier 1 the
-[AWBA 2026 Plan of Operation](../Data/Inputs/USGS%20WU/2025.12.04_AWBA-2026-Plan-of-Operation-FINAL_0.pdf)
+[AWBA 2026 Plan of Operation](../Data/Inputs/USGS%20WU/Misc/2025.12.04_AWBA-2026-Plan-of-Operation-FINAL_0.pdf)
 confirms the reduction "will not impact supplies for CAP M&I
 Priority subcontractors or on-River M&I contractors" — the full
 cut falls on the CAP NIA pool — which validates localizing the
@@ -3760,7 +3792,7 @@ against USGS Total_GW pre-1950 and USGS/ADWR aggregate breakdowns
 - **`compute_sw_fraction()`** — normalizes a density array to [0, 1] using a
   local-maximum filter (`maximum_filter(size=5)`). Used for focal-max
   normalization of canal-weighted streamflow (`cw_norm`).
-- **`compute_sw_capture_index()`** — computes per-pixel SW capture fraction
+- **`compute_sw_capture_index()`** — computes per-pixel stream capture fraction
   and volume at three λ values with uncertainty bounds.
 - **`partition_predictions()`** — orchestrates all splits (era ramps,
   density-ratio + canal boost, zero-SW constraint, residual recovery,
@@ -4530,10 +4562,10 @@ Data/Outputs/
         │       ├── Basin_Trend_*.csv        #   Per-basin zonal trend statistics
         │       └── Subbasin_Trend_*.csv     #   Per-sub-basin zonal trend statistics
         ├── Visualizations/                  # Time series & era summary maps
-        ├── SW_Capture/                      # Surface Water Capture Index
-        │   ├── {Cat}_Capture_Fraction/      #   3-band (lower/central/upper) capture fraction
-        │   ├── {Cat}_Capture_Rasters/       #   Central capture volume (mm, ft, m³, AF)
-        │   └── SW_Capture_Time_Series.csv   #   AZ-wide annual capture totals
+        ├── Capture/                      # Surface Water Capture Index
+        │   ├── {Cat}_Fraction/              #   3-band (lower/central/upper) capture fraction
+        │   ├── {Cat}_Rasters/               #   Central capture volume (mm, ft, m³, AF)
+        │   └── Capture_Time_Series.csv   #   AZ-wide annual capture totals
         ├── Well_Package/                    # Step 3e — per-well package
         │   ├── Well_Package_mm.parquet     #   GeoParquet: 15 categories (mm + σ_mm)
         │   ├── Well_Package_ft.parquet     #   GeoParquet: 15 categories (ft + σ_ft)
@@ -4894,7 +4926,7 @@ Key trends (current run):
   rivers and canal infrastructure.  Basin-level GW volume, SW volume, capture
   volume, volume-weighted capture fractions, and WTD (2017, central λ=10 m):
 
-  | Basin | GW Pumping Volume | SW Withdrawal Volume | SW Capture Volume | Capture Fraction | Mean WTD (m) | Context |
+  | Basin | GW Pumping Volume | SW Withdrawal Volume | Stream Capture Volume | Capture Fraction | Mean WTD (m) | Context |
   |-------|-------------------|----------------------|-------------------|-----------------|-------------|---------|
   | Yuma          |   7.0 kAF (8.6 Mm³)   | 440.4 kAF (543.3 Mm³) |    551 AF (0.68 Mm³)  | **7.9 %** | 42 | Colorado River alluvial aquifer; per-basin GW cap = 0.10 routes federal/tribal deliveries to SW |
   | Lower Gila    | 101.2 kAF (124.8 Mm³) | 507.2 kAF (625.7 Mm³) | 6,853 AF (8.5 Mm³)    | **6.8 %** | 55 | Gila River corridor; auto-detect phantom-icap gate clears desert pixels |
@@ -5829,9 +5861,9 @@ rather than as validated point estimates.
 
 ### Withdrawal Predictions (Era Mean Volume)
 
-| Total Predicted Withdrawal | Total GW Withdrawal | Total SW Withdrawal |
-|:---:|:---:|:---:|
-| ![Total Predicted](../docs/images/Era_Maps_Total_Predicted_Annual_Withdrawal_Volume.png) | ![Total GW](../docs/images/Era_Maps_Total_GW_Volume.png) | ![Total SW](../docs/images/Era_Maps_Total_SW_Volume.png) |
+| Total Predicted Withdrawal | Total GW & SW Withdrawal (paired) |
+|:---:|:---:|
+| ![Total Predicted](../docs/images/Era_Maps_Total_Predicted_Annual_Withdrawal_Volume.png) | ![Total GW & SW](../docs/images/Era_Maps_Total_Volume_GW_SW.png) |
 
 ### Consumptive Use and Actual vs Predicted
 
@@ -5845,11 +5877,11 @@ rather than as validated point estimates.
 |:---:|:---:|:---:|
 | ![CV](../docs/images/Era_Maps_Prediction_CV.png) | ![SNR](../docs/images/Era_Maps_Prediction_SNR.png) | ![OOD](../docs/images/Era_Maps_Out-of-Distribution_Probability.png) |
 
-### SW Capture Index
+### Stream Capture Index
 
-| Total SW Capture (Volume) | Total SW Capture Fraction (λ=10m) |
-|:---:|:---:|
-| ![SW Capture Volume](../docs/images/Era_Maps_Total_SW_Capture_Volume.png) | ![SW Capture Fraction](../docs/images/Era_Maps_Total_SW_Capture_Fraction_(λ=10m).png) |
+| Total Capture — Fraction (λ=10m) + Volume (paired) |
+|:---:|
+| ![Total Capture](../docs/images/Era_Maps_Total_Capture_Frac_Vol.png) |
 
 ### σ Attribution Diagnostic Suite (Projection Era)
 

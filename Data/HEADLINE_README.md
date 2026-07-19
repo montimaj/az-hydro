@@ -12,7 +12,7 @@ deliverables highlighted in the paper, sized for reasonable download.
 Both archives are deposited in the same Zenodo record:
 [10.5281/zenodo.19057935](https://doi.org/10.5281/zenodo.19057935).
 For the per-directory inventory, methodology, and external-dataset
-citations, see [`Data/README.md`](Data/README.md) inside this archive
+citations, see [`Data/README.md`](README.md) inside this archive
 (or in the GitHub repository at https://github.com/montimaj/az-hydro).
 
 ## Citation
@@ -83,20 +83,20 @@ Columns: `REGISTRY_I`, `Year`, `WATER_USE`, `geometry`, plus
 prediction + σ for the 11 categories (Total, Total_GW, Total_SW,
 Irrigation, Irrigation_GW, Irrigation_SW, Non_Irrigation,
 Non_Irrigation_GW, Non_Irrigation_SW, Irrigation_CU,
-Irrigation_GW_CU, Irrigation_SW_CU) and the 3 SW Capture bands
+Irrigation_GW_CU, Irrigation_SW_CU) and the 3 Stream Capture bands
 (Total, Irrigation, Non_Irrigation).  Headline product for
 well-level analysis.
 
 Load in Python with `geopandas.read_parquet(...)` or in R with
 `arrow` + `sfarrow`.
 
-### 4. SW Capture Index (`SW_Capture/`)
+### 4. Stream Capture Index (`Capture/`)
 
 Pumping-induced surface-water-capture analysis with σ propagation:
 
-- `Total_SW_Capture_Fraction/`, `Irrigation_SW_Capture_Fraction/`, `Non_Irrigation_SW_Capture_Fraction/` — per-year augmented capture-fraction TIFs
-- `Total_SW_Capture_Rasters/`, `Irrigation_SW_Capture_Rasters/`, `Non_Irrigation_SW_Capture_Rasters/` — per-year capture rasters in 4 unit conventions (Depth_mm, Depth_ft, Volume_m3, Volume_AF)
-- `Basin_Capture_Fraction.csv`, `Subbasin_Capture_Fraction.csv`, `SW_Capture_Time_Series.csv` — aggregated time series
+- `Total_Fraction/`, `Irrigation_Fraction/`, `Non_Irrigation_Fraction/` — per-year augmented capture-fraction TIFs
+- `Total_Rasters/`, `Irrigation_Rasters/`, `Non_Irrigation_Rasters/` — per-year capture rasters in 4 unit conventions (Depth_mm, Depth_ft, Volume_m3, Volume_AF)
+- `Basin_Capture_Fraction.csv`, `Subbasin_Capture_Fraction.csv`, `Capture_Time_Series.csv` — aggregated time series
 
 ### 5. Aggregated time series
 

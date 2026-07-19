@@ -17,6 +17,7 @@ import os
 from typing import Any
 
 import geopandas as gpd
+import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
@@ -160,13 +161,13 @@ def _add_dual_volume_axes(ax, label: str = ''):
     ax_m3.set_ylim(lo * _AF_TO_M3, hi * _AF_TO_M3)
     ax_m3.yaxis.set_label_position('left')
     ax_m3.yaxis.tick_left()
-    ax_m3.set_ylabel(prefix + r'(×10$^6$ m$^3$)', fontweight='bold')
+    ax_m3.set_ylabel(prefix + r'(×10$^6$ m$^3$ yr$^{-1}$)', fontweight='bold')
     ax_m3.yaxis.set_major_formatter(
         ticker.FuncFormatter(lambda x, _: f'{x / 1e6:,.1f}'))
     # Right axis: AF (×1000)
     ax.yaxis.set_label_position('right')
     ax.yaxis.tick_right()
-    ax.set_ylabel(prefix + '(×1000 acre-ft)', fontweight='bold')
+    ax.set_ylabel(prefix + r'(×1000 acre-ft yr$^{-1}$)', fontweight='bold')
     ax.yaxis.set_major_formatter(
         ticker.FuncFormatter(lambda x, _: f'{x / 1e3:,.0f}'))
     return ax_m3
@@ -2397,6 +2398,8 @@ def create_full_period_time_series(
         actual_data: dict | None = None,
         title_prefix: str = '',
         sigma_data: dict | None = None,
+        sigma_z: float = 1.96,
+        sigma_label: str = '95% CI',
 ) -> None:
     """Time series of predicted AMA/INA pumping with era shading.
 
@@ -2441,7 +2444,10 @@ def create_full_period_time_series(
     _format_volume_axis(ax2, unit='m3', label='Total Volume')
     ax2.grid(True, alpha=0.3, linestyle='--')
 
-    # 95% CI from model uncertainty
+    # Uncertainty band from model σ (width = sigma_z × σ).  Default is a
+    # 95% CI (sigma_z=1.96); callers can pass sigma_z=1.0 with
+    # sigma_label='±1σ_total' to draw a ±1σ_total band matching the
+    # graphical abstract.
     if sigma_data:
         ci_years = [y for y in years if y in sigma_data]
         ci_depth = np.array([yearly_predictions[y]['Mean_Depth_mm']
@@ -2454,15 +2460,15 @@ def create_full_period_time_series(
                              sigma_data[y]['Volume_AF'] * _AF_TO_M3)
                              for y in ci_years])
         ax1.fill_between(ci_years,
-                         np.maximum(ci_depth - 1.96 * s_depth, 0),
-                         ci_depth + 1.96 * s_depth,
+                         np.maximum(ci_depth - sigma_z * s_depth, 0),
+                         ci_depth + sigma_z * s_depth,
                          alpha=0.35, color=COLORS['ci_predicted'],
-                         label='95% CI', zorder=1)
+                         label=sigma_label, zorder=1)
         ax2.fill_between(ci_years,
-                         np.maximum(ci_vol_m3 - 1.96 * s_vol_m3, 0),
-                         ci_vol_m3 + 1.96 * s_vol_m3,
+                         np.maximum(ci_vol_m3 - sigma_z * s_vol_m3, 0),
+                         ci_vol_m3 + sigma_z * s_vol_m3,
                          alpha=0.35, color=COLORS['ci_predicted'],
-                         label='95% CI', zorder=1)
+                         label=sigma_label, zorder=1)
 
     # Overlay actual meter data for available years
     if actual_data:
@@ -2482,7 +2488,7 @@ def create_full_period_time_series(
         for e in ERA_PERIODS
     ]
     ax1.legend(handles=ax1.get_legend_handles_labels()[0] + handles,
-               loc='upper left', framealpha=0.7)
+               loc='upper right', framealpha=0.7)
     ax2.set_xlim(start_year - 1, end_year + 1)
 
     _add_ft_twinx(ax1)
@@ -2525,6 +2531,7 @@ def create_era_summary_maps(
         output_dir: str,
         title_prefix: str = '',
         scenario_volumes: dict | None = None,
+        sigma_yearly: dict | None = None,
 ) -> None:
     """Bar chart of mean annual pumping per era with 95% confidence bars.
 
@@ -2553,7 +2560,18 @@ def create_era_summary_maps(
         era_vals = [yearly_predictions[y]['Volume_AF']
                     for y in range(s, e + 1) if y in yearly_predictions]
         era_means[era] = np.mean(era_vals) if era_vals else 0
-        era_stds[era] = 1.96 * np.std(era_vals) / np.sqrt(len(era_vals)) if len(era_vals) > 1 else 0
+        if sigma_yearly:
+            # ±1σ_total: era-mean of the per-year UQ σ_total (systematic,
+            # correlated across years → σ of the mean ≈ mean of the annual
+            # σ).  Matches the graphical-abstract era bars and σ band.
+            svals = [sigma_yearly[y].get('Volume_AF', np.nan)
+                     for y in range(s, e + 1) if y in sigma_yearly]
+            svals = [v for v in svals if np.isfinite(v)]
+            era_stds[era] = float(np.mean(svals)) if svals else 0.0
+        else:
+            # Fallback: 95% CI of the era mean from inter-annual variability.
+            era_stds[era] = (1.96 * np.std(era_vals) / np.sqrt(len(era_vals))
+                             if len(era_vals) > 1 else 0)
 
     fig, ax = plt.subplots(figsize=(8, 5))
     bars = ax.bar(
@@ -2566,6 +2584,13 @@ def create_era_summary_maps(
         linewidth=0.8,
         error_kw={'linewidth': 1.5, 'color': 'black'},
     )
+
+    legend_handles = []
+    if sigma_yearly:
+        legend_handles.append(mlines.Line2D(
+            [], [], color='black', marker='|', linestyle='none',
+            markersize=9, markeredgewidth=1.6,
+            label=r'$\pm1\sigma_{\mathrm{total}}$'))
 
     # Scenario range on the Projection bar
     if scenario_volumes and 'Projection' in era_means:
@@ -2582,12 +2607,14 @@ def create_era_summary_maps(
             proj_bar = bars[proj_idx]
             bx = proj_bar.get_x()
             bw = proj_bar.get_width()
-            ax.fill_between(
+            band = ax.fill_between(
                 [bx, bx + bw], sc_lo, sc_hi,
                 alpha=0.25, color='gray', hatch='///',
                 label=f'Scenario range ({len(sc_means)} LULC)',
             )
-            ax.legend(fontsize=9, loc='upper right')
+            legend_handles.append(band)
+    if legend_handles:
+        ax.legend(handles=legend_handles, fontsize=9, loc='upper left')
 
     for bar, val in zip(bars, era_means.values()):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() / 2,
@@ -3072,6 +3099,7 @@ def create_graphical_abstract(
         yearly_predictions: dict | None = None,
         basin_yearly: dict | None = None,
         sigma_yearly: dict | None = None,
+        category_yearly: dict | None = None,
         **_kwargs,
 ) -> None:
     """Create a publication-quality Figure 1 / graphical abstract.
@@ -3103,6 +3131,12 @@ def create_graphical_abstract(
             ``{year: {'Volume_AF': ...}}`` — per-year UQ-derived σ_total
             in Volume_AF.  When provided, used for the ±1σ confidence
             band instead of inter-basin variability.
+        category_yearly (dict or None):
+            ``{category: {year: {'Volume_AF': ...}}}`` for the source
+            (``Total_GW`` / ``Total_SW``) and use (``Irrigation`` /
+            ``Non_Irrigation``) breakdowns.  When present, panel (b) is
+            drawn as a GW/SW stacked area under the total line, and panel
+            (c) era bars are stacked by Irrigation / Non-Irrigation use.
 
     Returns:
         None.
@@ -3205,14 +3239,16 @@ def create_graphical_abstract(
 
     cbar = fig.colorbar(im, ax=ax_map, shrink=0.45, pad=0.08, extend='both')
     cbar_fontsize = 10
-    cbar.set_label('Depth (mm)', fontweight='bold', fontsize=cbar_fontsize)
+    cbar.set_label(r'Total withdrawals (mm yr$^{-1}$)',
+                   fontweight='bold', fontsize=cbar_fontsize)
     cbar.ax.tick_params(labelsize=cbar_fontsize)
     cbar.ax.yaxis.set_label_position('left')
     cbar.ax.yaxis.tick_left()
     cb_ax2 = cbar.ax.twinx()
     cb_lo, cb_hi = cbar.ax.get_ylim()
     cb_ax2.set_ylim(cb_lo * _MM_TO_FT, cb_hi * _MM_TO_FT)
-    cb_ax2.set_ylabel('Depth (ft)', fontsize=cbar_fontsize, fontweight='bold')
+    cb_ax2.set_ylabel(r'Total withdrawals (ft yr$^{-1}$)',
+                      fontsize=cbar_fontsize, fontweight='bold')
     cb_ax2.tick_params(labelsize=cbar_fontsize)
     cb_ax2.yaxis.set_label_position('right')
     cb_ax2.yaxis.tick_right()
@@ -3227,6 +3263,22 @@ def create_graphical_abstract(
         years = sorted(yearly_predictions.keys())
         vol_af = np.array([yearly_predictions[y]['Volume_AF'] for y in years])
 
+        # Source (GW/SW) and use (Irr/Non-Irr) palettes for the breakdowns
+        SRC_COLORS = {'GW': '#B5793B', 'SW': '#2E86C1'}
+        USE_COLORS = {'Irrigation': '#0F9B8E', 'Non-Irrigation': '#6B7280'}
+
+        def _cat_series(cat):
+            src = (category_yearly or {}).get(cat, {})
+            return np.array([src.get(y, {}).get('Volume_AF', np.nan)
+                             for y in years], dtype=float)
+
+        gw_af = _cat_series('Total_GW')
+        sw_af = _cat_series('Total_SW')
+        irr_af = _cat_series('Irrigation')
+        nonirr_af = _cat_series('Non_Irrigation')
+        has_src = bool(np.isfinite(gw_af).any() and np.isfinite(sw_af).any())
+        has_use = bool(np.isfinite(irr_af).any() and np.isfinite(nonirr_af).any())
+
         vol_std = np.zeros(len(years))
         std_label = None
         if sigma_yearly:
@@ -3234,7 +3286,7 @@ def create_graphical_abstract(
                 if y in sigma_yearly:
                     val = sigma_yearly[y].get('Volume_AF', 0)
                     vol_std[i] = val if np.isfinite(val) else 0
-            std_label = '\u00b11\u03c3 (UQ)'
+            std_label = r'$\pm1\sigma_{\mathrm{total}}$'
         elif basin_yearly:
             for i, y in enumerate(years):
                 if y in basin_yearly:
@@ -3247,29 +3299,67 @@ def create_graphical_abstract(
         for era, (s, e) in ERA_PERIODS.items():
             ax_ts.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
 
+        # Source (GW/SW) stacked area beneath the total line
+        if has_src:
+            gw_f = np.nan_to_num(gw_af)
+            sw_f = np.nan_to_num(sw_af)
+            ax_ts.fill_between(years, 0, gw_f, color=SRC_COLORS['GW'],
+                               alpha=0.55, linewidth=0, zorder=1,
+                               label='Groundwater (GW)')
+            ax_ts.fill_between(years, gw_f, gw_f + sw_f, color=SRC_COLORS['SW'],
+                               alpha=0.55, linewidth=0, zorder=1,
+                               label='Surface water (SW)')
+
         if vol_std.any():
             ax_ts.fill_between(
                 years,
                 np.maximum(vol_af - vol_std, 0),
                 vol_af + vol_std,
-                alpha=0.2, color=COLORS['predicted'], label=std_label,
+                alpha=0.25, color=COLORS['predicted'], label=std_label,
+                zorder=2,
             )
 
         ax_ts.plot(years, vol_af, color=COLORS['predicted'],
-                   linewidth=1.2, marker='.', markersize=2)
+                   linewidth=1.2, marker='.', markersize=2, zorder=3,
+                   label='Total')
         ax_ts.set_xlabel('Year', fontweight='bold')
         ax_ts.set_title(
-            '(b) Arizona Annual Withdrawal',
+            '(b) Arizona Annual Withdrawal by Source' if has_src
+            else '(b) Arizona Annual Withdrawal',
             fontweight='bold', fontsize=13,
         )
         ax_ts.set_xlim(start_year - 2, end_year + 2)
 
-        handles = [
+        era_handles = [
             mpatches.Patch(color=ERA_COLORS[e], alpha=0.4,
                            label=f'{e} ({ERA_PERIODS[e][0]}\u2013{ERA_PERIODS[e][1]})')
             for e in ERA_PERIODS
         ]
-        ax_ts.legend(handles=handles, loc='upper left', fontsize=9, framealpha=0.7)
+        if has_src:
+            src_handles = [
+                mpatches.Patch(color=SRC_COLORS['GW'], alpha=0.55,
+                               label='Groundwater (GW)'),
+                mpatches.Patch(color=SRC_COLORS['SW'], alpha=0.55,
+                               label='Surface water (SW)'),
+                mlines.Line2D([0], [0], color=COLORS['predicted'], lw=1.2,
+                              marker='.', label='Total'),
+            ]
+            if std_label:
+                src_handles.append(mpatches.Patch(color=COLORS['predicted'],
+                                                  alpha=0.25, label=std_label))
+            # Source legend (upper-left) and era legend (upper-right) as two
+            # separate artists so both stay visible.
+            leg_src = ax_ts.legend(handles=src_handles, loc='upper left',
+                                   fontsize=8, ncol=2, framealpha=0.7)
+            ax_ts.add_artist(leg_src)
+            # Era legend stacked directly beneath the source legend in the
+            # open upper-left space.
+            ax_ts.legend(handles=era_handles, loc='upper left',
+                         bbox_to_anchor=(0.0, 0.84), fontsize=8,
+                         framealpha=0.7)
+        else:
+            ax_ts.legend(handles=era_handles, loc='upper left', fontsize=9,
+                         framealpha=0.7)
 
         _add_dual_volume_axes(ax_ts, label='Total Annual Withdrawal')
 
@@ -3280,28 +3370,97 @@ def create_graphical_abstract(
             era_vals = [yearly_predictions[y]['Volume_AF']
                         for y in range(s, e + 1) if y in yearly_predictions]
             era_means[era] = np.mean(era_vals) if era_vals else 0
-            era_stds[era] = 1.96 * np.std(era_vals) / np.sqrt(len(era_vals)) if len(era_vals) > 1 else 0
+            if sigma_yearly:
+                # Era error bar = ±1σ_total: the mean of the per-year UQ
+                # σ_total over the era.  σ_total is systematic (shared
+                # model/forcing biases), so it is correlated across years
+                # and the σ of the era mean ≈ the mean of the annual σ,
+                # not σ/√N.  This matches the ±1σ_total band in panel (b).
+                svals = [sigma_yearly[y].get('Volume_AF', np.nan)
+                         for y in range(s, e + 1) if y in sigma_yearly]
+                svals = [v for v in svals if np.isfinite(v)]
+                era_stds[era] = float(np.mean(svals)) if svals else 0.0
+            else:
+                # Fallback when UQ has not run: 95% CI of the era mean from
+                # inter-annual variability.
+                era_stds[era] = (1.96 * np.std(era_vals) / np.sqrt(len(era_vals))
+                                 if len(era_vals) > 1 else 0)
         era_names = list(era_means.keys())
         era_vals_list = list(era_means.values())
         era_errs = list(era_stds.values())
         x_pos = np.arange(len(era_names))
-        bars = ax_bar.bar(
-            x_pos, era_vals_list, yerr=era_errs, capsize=5,
-            color=[ERA_COLORS[e] for e in era_names],
-            edgecolor='black', linewidth=0.8,
-            error_kw={'linewidth': 1.5, 'color': 'black'},
-        )
-        ax_bar.set_xticks(x_pos)
-        ax_bar.set_xticklabels(era_names, fontsize=10)
-        for bar, val in zip(bars, era_vals_list):
-            ax_bar.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() / 2, f'{val / 1e3:,.0f}k',
-                ha='center', va='center', fontsize=10, fontweight='bold',
-                color='white',
+
+        def _era_mean(series):
+            out = []
+            for _, (s, e) in ERA_PERIODS.items():
+                vals = [series[i] for i, y in enumerate(years)
+                        if s <= y <= e and np.isfinite(series[i])]
+                out.append(float(np.mean(vals)) if vals else 0.0)
+            return out
+
+        if has_use:
+            # Stacked bars by use: Irrigation (bottom) + Non-Irrigation (top);
+            # the two segments sum to the era total, with the ±1σ_total
+            # error bar drawn on the total height.
+            irr_vals = _era_mean(irr_af)
+            nonirr_vals = _era_mean(nonirr_af)
+            ax_bar.bar(
+                x_pos, irr_vals, color=USE_COLORS['Irrigation'],
+                edgecolor='black', linewidth=0.6, label='Irrigation',
             )
-        ax_bar.set_title('(c) Era Averages', fontsize=13, fontweight='bold')
-        ax_bar.grid(axis='y', alpha=0.3, linestyle='--')
+            ax_bar.bar(
+                x_pos, nonirr_vals, bottom=irr_vals,
+                color=USE_COLORS['Non-Irrigation'],
+                edgecolor='black', linewidth=0.6, label='Non-Irrigation',
+            )
+            totals = [i + n for i, n in zip(irr_vals, nonirr_vals)]
+            ax_bar.errorbar(
+                x_pos, totals, yerr=era_errs, fmt='none',
+                ecolor='black', elinewidth=1.5, capsize=5,
+            )
+            ax_bar.set_xticks(x_pos)
+            ax_bar.set_xticklabels(era_names, fontsize=10)
+            for x, tot in zip(x_pos, totals):
+                # Offset the total label to the left of the bar centre so it
+                # does not overlap the centred ±1σ_total error bar.
+                ax_bar.text(
+                    x - 0.26, tot, f'{tot / 1e3:,.0f}k',
+                    ha='center', va='bottom', fontsize=9, fontweight='bold',
+                )
+            ax_bar.set_title('(c) Era Averages by Use',
+                             fontsize=13, fontweight='bold')
+            ax_bar.grid(axis='y', alpha=0.3, linestyle='--')
+            use_handles = [
+                mpatches.Patch(color=USE_COLORS['Irrigation'],
+                               label='Irrigation'),
+                mpatches.Patch(color=USE_COLORS['Non-Irrigation'],
+                               label='Non-Irrigation'),
+            ]
+            if sigma_yearly:
+                use_handles.append(mlines.Line2D(
+                    [], [], color='black', marker='|', linestyle='none',
+                    markersize=9, markeredgewidth=1.6,
+                    label=r'$\pm1\sigma_{\mathrm{total}}$'))
+            ax_bar.legend(handles=use_handles, loc='upper left',
+                          fontsize=8, framealpha=0.7)
+        else:
+            bars = ax_bar.bar(
+                x_pos, era_vals_list, yerr=era_errs, capsize=5,
+                color=[ERA_COLORS[e] for e in era_names],
+                edgecolor='black', linewidth=0.8,
+                error_kw={'linewidth': 1.5, 'color': 'black'},
+            )
+            ax_bar.set_xticks(x_pos)
+            ax_bar.set_xticklabels(era_names, fontsize=10)
+            for bar, val in zip(bars, era_vals_list):
+                ax_bar.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() / 2, f'{val / 1e3:,.0f}k',
+                    ha='center', va='center', fontsize=10, fontweight='bold',
+                    color='white',
+                )
+            ax_bar.set_title('(c) Era Averages', fontsize=13, fontweight='bold')
+            ax_bar.grid(axis='y', alpha=0.3, linestyle='--')
         _add_dual_volume_axes(ax_bar, label='Mean Annual Withdrawal')
 
     # ---- Panel D: Key contributions text panel (bottom row) ----
@@ -3327,8 +3486,8 @@ def create_graphical_abstract(
 
         bullets = [
             '2 km \u00d7 204-yr coverage \u2014 first statewide annual '
-            'withdrawals, irrigation CU, and SW capture index, 1896\u20132099, '
-            'in one self-consistent framework.',
+            'withdrawals, irrigation CU, and stream capture index, '
+            '1896\u20132099, in one self-consistent framework.',
 
             'First Arizona-wide irrigation CU dataset at 2 km annual '
             'resolution \u2014 no public alternative at this resolution and '
@@ -3341,13 +3500,16 @@ def create_graphical_abstract(
             'Statewide shares \u2014 GW/SW within \u00b12 pp of USGS, Irr/'
             'Non-Irr within \u00b12 pp of ADWR.',
 
-            'Novel SW capture index \u2014 apportions GW pumping into '
+            'Novel stream capture index \u2014 apportions GW pumping into '
             'stream-depletion vs. storage-mining at 2 km annual, work that '
             'normally requires per-basin MODFLOW\u2013SFR.',
 
-            'Hybrid 6-component \u03c3_total UQ (\u03c3_MACA + \u03c3_Model + '
-            '\u03c3_Irr + \u03c3_LULC + \u03c3_GW + \u03c3_USBR) with physics-'
-            'based CU error propagation; 6-band augmented rasters per product.',
+            r'Hybrid 6-component $\sigma_{\mathrm{total}}$ uncertainty '
+            r'($\sigma_{\mathrm{MACA}}$ + $\sigma_{\mathrm{Model}}$ + '
+            r'$\sigma_{\mathrm{Irr}}$ + $\sigma_{\mathrm{LULC}}$ + '
+            r'$\sigma_{\mathrm{GW}}$ + $\sigma_{\mathrm{USBR}}$) with '
+            r'physics-based CU error propagation; 6-band augmented '
+            r'rasters per product.',
         ]
 
         bullet_top = 0.74
@@ -3791,6 +3953,7 @@ def create_era_raster_maps(
     *,
     title: str = 'Predicted Annual Withdrawal',
     unit_label: str = 'Depth (mm)',
+    variable_label: str | None = None,
     cmap: str = 'Spectral_r',
     out_filename: str | None = None,
     vmin: float | None = None,
@@ -3932,6 +4095,12 @@ def create_era_raster_maps(
         n_eras, 1, figsize=(5.2, 4.3 * n_eras), constrained_layout=True,
     )
     fig.suptitle(f'{title} — Era Mean', fontsize=16, fontweight='bold')
+    # Extra top/inter-panel padding so the suptitle never collides with the
+    # first panel's "(a) …" title in the tall stacked layout.
+    try:
+        fig.get_layout_engine().set(h_pad=0.14, hspace=0.06)
+    except (AttributeError, TypeError):
+        pass
     if n_eras == 1:
         axes = [axes]
 
@@ -4003,7 +4172,8 @@ def create_era_raster_maps(
     is_volume_m3 = 'm$^3$' in unit_label or 'm3' in unit_label.lower()
     if is_volume_m3:
         import matplotlib.ticker as mticker
-        volume_label = r'Volume ($\times$10$^{6}$ m$^3$)'
+        _vlead = variable_label if variable_label else 'Volume'
+        volume_label = _vlead + r' ($\times$10$^{6}$ m$^3$ yr$^{-1}$)'
         cbar.set_label(
             volume_label, fontsize=era_cbar_fontsize, fontweight='bold',
         )
@@ -4078,8 +4248,12 @@ def create_era_raster_maps(
                 lambda ft: ft / _MM_TO_FT,
             ),
         )
+        # Mirror the primary label in feet, preserving whatever variable
+        # the primary axis names (e.g. σ_GW) rather than hardcoding
+        # "Depth" — for a plain depth map this still yields "Depth (ft)".
         secax.set_xlabel(
-            'Depth (ft)', fontsize=era_cbar_fontsize, fontweight='bold',
+            unit_label.replace('mm', 'ft'),
+            fontsize=era_cbar_fontsize, fontweight='bold',
         )
         secax.tick_params(labelsize=era_cbar_fontsize)
     elif is_volume_m3:
@@ -4091,7 +4265,9 @@ def create_era_raster_maps(
             ),
         )
         secax.set_xlabel(
-            'Volume (AF)', fontsize=era_cbar_fontsize, fontweight='bold',
+            (fr'{variable_label} (AF yr$^{{-1}}$)' if variable_label
+             else r'Volume (AF yr$^{-1}$)'),
+            fontsize=era_cbar_fontsize, fontweight='bold',
         )
         secax.tick_params(labelsize=era_cbar_fontsize)
 
@@ -4112,6 +4288,7 @@ def create_gw_sw_era_raster_maps(
     *,
     title: str,
     unit_label: str,
+    variable_label: str | None = None,
     col_labels: tuple[str, str] = ('Groundwater', 'Surface Water'),
     out_tag: str = 'GW_SW',
     cmap: str = 'Spectral_r',
@@ -4254,8 +4431,9 @@ def create_gw_sw_era_raster_maps(
     is_volume_m3 = 'm$^3$' in unit_label or 'm3' in unit_label.lower()
     if is_volume_m3:
         import matplotlib.ticker as mticker
+        _vlead = variable_label if variable_label else 'Volume'
         cbar.set_label(
-            r'Volume ($\times$10$^{6}$ m$^3$)',
+            _vlead + r' ($\times$10$^{6}$ m$^3$ yr$^{-1}$)',
             fontsize=era_cbar_fontsize, fontweight='bold',
         )
         cbar.formatter = mticker.FuncFormatter(lambda x, _: f'{x / 1e6:g}')
@@ -4280,7 +4458,9 @@ def create_gw_sw_era_raster_maps(
             functions=(lambda m3: m3 / _AF_TO_M3, lambda af: af * _AF_TO_M3),
         )
         secax.set_xlabel(
-            'Volume (AF)', fontsize=era_cbar_fontsize, fontweight='bold',
+            (fr'{variable_label} (AF yr$^{{-1}}$)' if variable_label
+             else r'Volume (AF yr$^{-1}$)'),
+            fontsize=era_cbar_fontsize, fontweight='bold',
         )
         secax.tick_params(labelsize=era_cbar_fontsize)
 
@@ -4303,6 +4483,7 @@ def create_dual_metric_era_raster_maps(
     out_tag: str = 'dual',
     cbar_extend: str = 'both',
     out_filename: str | None = None,
+    variable_label: str | None = None,
 ) -> None:
     """Paired era-mean maps of two DIFFERENT metrics, one colorbar each.
 
@@ -4419,9 +4600,10 @@ def create_dual_metric_era_raster_maps(
 
     def _apply_units(cbar, unit_label):
         is_vol = 'm$^3$' in unit_label or 'm3' in unit_label.lower()
+        _vlead = variable_label if variable_label else 'Volume'
         if is_vol:
             cbar.set_label(
-                r'Volume ($\times$10$^{6}$ m$^3$)',
+                _vlead + r' ($\times$10$^{6}$ m$^3$ yr$^{-1}$)',
                 fontsize=11, fontweight='bold',
             )
             cbar.formatter = mticker.FuncFormatter(lambda x, _: f'{x / 1e6:g}')
@@ -4443,7 +4625,10 @@ def create_dual_metric_era_raster_maps(
                 functions=(lambda m3: m3 / _AF_TO_M3,
                            lambda af: af * _AF_TO_M3),
             )
-            sx.set_xlabel('Volume (AF)', fontsize=11, fontweight='bold')
+            sx.set_xlabel(
+                (fr'{variable_label} (AF yr$^{{-1}}$)' if variable_label
+                 else r'Volume (AF yr$^{-1}$)'),
+                fontsize=11, fontweight='bold')
             sx.tick_params(labelsize=11)
         elif 'fraction' in unit_label.lower():
             # Percent twin on top: a useful second reading of the capture
@@ -4613,6 +4798,12 @@ def create_ood_era_raster_maps(
         n_eras, 1, figsize=(5.2, 4.3 * n_eras), constrained_layout=True,
     )
     fig.suptitle(f'{title} — Era Mean', fontsize=16, fontweight='bold')
+    # Extra top/inter-panel padding so the suptitle never collides with the
+    # first panel's "(a) …" title in the tall stacked layout.
+    try:
+        fig.get_layout_engine().set(h_pad=0.14, hspace=0.06)
+    except (AttributeError, TypeError):
+        pass
     if n_eras == 1:
         axes = [axes]
     axes_flat = list(axes) if isinstance(axes, np.ndarray) else axes
@@ -6209,6 +6400,7 @@ def create_actual_vs_predicted_maps(
     *,
     title: str = 'Annual Withdrawal',
     unit_label: str = 'Depth (mm)',
+    variable_label: str = 'Total withdrawals',
     cmap: str = 'Spectral_r',
     diff_cmap: str = 'RdBu_r',
     start_year: int = 1984,
@@ -6404,8 +6596,9 @@ def create_actual_vs_predicted_maps(
         if is_volume:
             import matplotlib.ticker as mticker
             vol_formatter = mticker.FuncFormatter(lambda x, _: f'{x / 1e6:g}')
-            vol_label = r'Volume ($\times$10$^{6}$ m$^3$)'
-            dvol_label = r'$\Delta$ Volume ($\times$10$^{6}$ m$^3$)'
+            vol_label = variable_label + r' ($\times$10$^{6}$ m$^3$ yr$^{-1}$)'
+            dvol_label = (r'$\Delta$ ' + variable_label
+                          + r' ($\times$10$^{6}$ m$^3$ yr$^{-1}$)')
 
         im_shared = None
         im_diff = None
@@ -6430,9 +6623,10 @@ def create_actual_vs_predicted_maps(
             else:
                 im_shared = im
             if idx == 0:
-                # Two-column, no-box legend in the SW-corner no-data
-                # triangle of the first map.
-                handles = [
+                # Handles collected here; the legend is drawn once at the
+                # figure bottom (below the colorbars) so it never overlaps
+                # the in-map basin labels.
+                legend_handles = [
                     unmetered_handle,
                     Line2D([0], [0], color=BASIN_BORDER_COLOR, lw=0.8,
                            label='GW basin'),
@@ -6441,12 +6635,6 @@ def create_actual_vs_predicted_maps(
                     Line2D([0], [0], color=INA_BORDER_COLOR, lw=1.4,
                            label='INA'),
                 ]
-                ax.legend(
-                    handles=handles, loc='lower left',
-                    bbox_to_anchor=(0.0, -0.06), ncol=2,
-                    columnspacing=1.0, handlelength=1.2,
-                    fontsize=avp_fontsize, frameon=False,
-                )
 
         def _cbar_units(cbar, plabel, slabel, vlabel):
             if is_volume:
@@ -6481,6 +6669,15 @@ def create_actual_vs_predicted_maps(
         _cbar_units(cb_diff, f'Δ {primary_label}',
                     f'Δ {secondary_label}', dvol_label)
 
+        # Legend as a single horizontal row at the very bottom of the
+        # figure (below the colorbars), well clear of every in-map basin
+        # label.  bbox_inches='tight' expands to include it.
+        fig.legend(
+            handles=legend_handles, loc='upper center',
+            bbox_to_anchor=(0.5, 0.0), ncol=4,
+            frameon=False, fontsize=avp_fontsize,
+        )
+
         out_path = os.path.join(output_dir, out_file)
         fig.savefig(out_path, dpi=600, bbox_inches='tight')
         plt.close(fig)
@@ -6498,7 +6695,8 @@ def create_actual_vs_predicted_maps(
     _make_figure(
         depth_panels,
         f'{title} \u2014 Actual vs Predicted Depth ({start_year}\u2013{end_year} Mean)',
-        'Depth (mm)', 'Depth (ft)', _MM_TO_FT,
+        variable_label + r' (mm yr$^{-1}$)', variable_label + r' (ft yr$^{-1}$)',
+        _MM_TO_FT,
         out_filename,
         v_min, v_max, -d_abs, d_abs,
     )
@@ -6540,7 +6738,8 @@ def create_actual_vs_predicted_maps(
     _make_figure(
         vol_panels,
         f'{title} \u2014 Actual vs Predicted Volume ({start_year}\u2013{end_year} Mean)',
-        r'Volume (m$^3$)', 'Volume (AF)', m3_to_af,
+        variable_label + r' (m$^3$ yr$^{-1}$)',
+        variable_label + r' (AF yr$^{-1}$)', m3_to_af,
         vol_filename,
         vol_min, vol_max, -dvol_abs, dvol_abs,
     )
@@ -7224,8 +7423,11 @@ def create_trend_maps(
             basin_eras_scale, basin_eras_prefix = _slope_display_scale(
                 b_abs_eras,
             )
+            # Match the per-panel size of the single-panel full-period
+            # basin figure (7.5 × 6.8) so the per-basin value labels are
+            # legible; the narrower 5.2-wide composite made them overlap.
             fig_b, axes_b = plt.subplots(
-                n_eras, 1, figsize=(5.2, 4.3 * n_eras),
+                n_eras, 1, figsize=(7.5, 6.8 * n_eras),
                 constrained_layout=True,
             )
             if n_eras == 1:

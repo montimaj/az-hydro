@@ -3673,7 +3673,7 @@ def _plot_cap_scenario_basin_drawdown(
     # 2 × 4 grid: 7 scenario panels + 1 legend cell
     fig, axes = plt.subplots(2, 4, figsize=(22, 12), constrained_layout=True)
     fig.suptitle(
-        f'CAP Scenario — Cumulative Additional GW Volume vs Baseline '
+        f'CAP Scenario — Cumulative Additional GW Withdrawals vs Baseline '
         f'({year_window[0]}–{year_window[1]})',
         fontsize=16, fontweight='bold',
     )
@@ -3746,7 +3746,7 @@ def _plot_cap_scenario_basin_drawdown(
     )
     cbar.update_ticks()
     cbar.set_label(
-        r'Cumulative $\Delta$ GW Volume ($\times$10$^{6}$ m$^{3}$)',
+        r'Cumulative additional GW withdrawals ($\times$10$^{6}$ m$^{3}$)',
         fontsize=12, fontweight='bold',
     )
     cbar.ax.tick_params(labelsize=11)
@@ -3759,7 +3759,7 @@ def _plot_cap_scenario_basin_drawdown(
         mticker.FuncFormatter(lambda x, _: f'{x / 1e3:,.0f}'),
     )
     secax.set_ylabel(
-        'Cumulative Δ GW Volume (kAF)',
+        'Cumulative additional GW withdrawals (kAF)',
         fontsize=12, fontweight='bold',
     )
     secax.tick_params(labelsize=11)
@@ -4046,9 +4046,9 @@ def _plot_cap_scenario_pixel_drawdown(
         constrained_layout=True,
     )
     fig.suptitle(
-        f'CAP Scenario — Pixel-Level Cumulative ΔGW Volume vs '
+        f'CAP Scenario — Pixel-Level Cumulative Additional GW Withdrawals vs '
         f'Baseline ({year_window[0]}–{year_window[1]})\n'
-        f'(per-pixel volume = basin Δ × pixel ML Total_GW share — '
+        f'(per-pixel volume = basin Δ × pixel ML Total GW share — '
         f'pro-rata, NOT a hydraulic-head response)',
         fontsize=13, fontweight='bold',
     )
@@ -4116,7 +4116,7 @@ def _plot_cap_scenario_pixel_drawdown(
     cbar.formatter = mticker.FuncFormatter(lambda x, _: f'{x / 1e6:,.1f}')
     cbar.update_ticks()
     cbar.set_label(
-        r'Per-Pixel Cumulative $\Delta$ GW Volume ($\times$10$^{6}$ m$^{3}$)',
+        r'Per-pixel cumulative additional GW withdrawals ($\times$10$^{6}$ m$^{3}$)',
         fontsize=15, fontweight='bold',
     )
     cbar.ax.tick_params(labelsize=13)
@@ -4128,7 +4128,7 @@ def _plot_cap_scenario_pixel_drawdown(
         mticker.FuncFormatter(lambda x, _: f'{x:,.0f}'),
     )
     secax.set_xlabel(
-        'Per-Pixel Cumulative Δ GW Volume (AF)',
+        'Per-pixel cumulative additional GW withdrawals (AF)',
         fontsize=15, fontweight='bold',
     )
     secax.tick_params(labelsize=13)
@@ -4587,8 +4587,8 @@ def _plot_cap_scenario_sigma_combined(
 
     fig, axes = plt.subplots(1, 2, figsize=(20, 10), constrained_layout=True)
     fig.suptitle(
-        f'Cumulative σ_total on Total_GW over CAP service area '
-        f'({year_window[0]}–{year_window[1]}) — '
+        r'Cumulative $\sigma_{\mathrm{total}}$ on Total GW over CAP '
+        f'service area ({year_window[0]}–{year_window[1]}) — '
         f'same uncertainty applies to every CAP scenario; '
         f'basin and pixel panels share the CAP-restricted scope.',
         fontsize=20, fontweight='bold',
@@ -4655,8 +4655,9 @@ def _plot_cap_scenario_sigma_combined(
         ax_basin.set_ylim(ext_bottom, ext_top)
     az_basin_total = sum(basin_sigma_cum.values()) * af_to_m3
     ax_basin.set_title(
-        f'(a) Basin σ_cum\nAZ total: {az_basin_total / 1e9:.2f} km³ '
-        f'({sum(basin_sigma_cum.values()) / 1e6:.2f} MAF)',
+        r'(a) Basin $\sigma_{\mathrm{cum}}$' + '\n'
+        + f'AZ total: {az_basin_total / 1e9:.2f} km³ '
+        + f'({sum(basin_sigma_cum.values()) / 1e6:.2f} MAF)',
         fontsize=18, fontweight='bold',
     )
     sm_b = ScalarMappable(cmap=cmap_basin, norm=norm_basin)
@@ -4672,7 +4673,7 @@ def _plot_cap_scenario_sigma_combined(
     )
     cbar_b.update_ticks()
     cbar_b.set_label(
-        r'Basin Cumulative σ_total ($\times$10$^{6}$ m$^{3}$)',
+        r'Basin Cumulative $\sigma_{\mathrm{total}}$ ($\times$10$^{6}$ m$^{3}$)',
         fontsize=17, fontweight='bold',
     )
     secax_b = cbar_b.ax.secondary_xaxis(
@@ -4682,7 +4683,7 @@ def _plot_cap_scenario_sigma_combined(
     secax_b.xaxis.set_major_formatter(
         mticker.FuncFormatter(lambda x, _: f'{x / 1e3:,.0f}'),
     )
-    secax_b.set_xlabel('Basin Cumulative σ_total (kAF)',
+    secax_b.set_xlabel(r'Basin Cumulative $\sigma_{\mathrm{total}}$ (kAF)',
                        fontsize=17, fontweight='bold')
 
     # --- Panel (b): pixel σ raster ---
@@ -4716,9 +4717,10 @@ def _plot_cap_scenario_sigma_combined(
         )
         az_pix_total = float(np.nansum(pixel_sigma_cum))
         ax_pix.set_title(
-            f'(b) Pixel σ_cum\nAZ total (sum of pixels): '
-            f'{az_pix_total * af_to_m3 / 1e9:.2f} km³ '
-            f'({az_pix_total / 1e6:.2f} MAF)',
+            r'(b) Pixel $\sigma_{\mathrm{cum}}$' + '\n'
+            + f'AZ total (sum of pixels): '
+            + f'{az_pix_total * af_to_m3 / 1e9:.2f} km³ '
+            + f'({az_pix_total / 1e6:.2f} MAF)',
             fontsize=18, fontweight='bold',
         )
     else:
@@ -4739,7 +4741,7 @@ def _plot_cap_scenario_sigma_combined(
     )
     cbar_p.update_ticks()
     cbar_p.set_label(
-        r'Pixel Cumulative σ_total ($\times$10$^{6}$ m$^{3}$)',
+        r'Pixel Cumulative $\sigma_{\mathrm{total}}$ ($\times$10$^{6}$ m$^{3}$)',
         fontsize=17, fontweight='bold',
     )
     secax_p = cbar_p.ax.secondary_xaxis(
@@ -4749,7 +4751,7 @@ def _plot_cap_scenario_sigma_combined(
     secax_p.xaxis.set_major_formatter(
         mticker.FuncFormatter(lambda x, _: f'{x:,.0f}'),
     )
-    secax_p.set_xlabel('Pixel Cumulative σ_total (AF)',
+    secax_p.set_xlabel(r'Pixel Cumulative $\sigma_{\mathrm{total}}$ (AF)',
                        fontsize=17, fontweight='bold')
 
     add_ama_ina_legend(ax_basin, include_cap=True)
@@ -4832,11 +4834,12 @@ def _plot_cap_scenario_basin_snr(
         basins_clipped if basins_clipped is not None else basins_gdf
     )
 
-    fig, axes = plt.subplots(2, 4, figsize=(17, 10), constrained_layout=True)
+    fig, axes = plt.subplots(2, 4, figsize=(22, 11), constrained_layout=True)
     fig.suptitle(
-        f'CAP Scenario — Basin Signal-to-Noise '
-        f'(SNR = |ΔGW_cum| / σ_cum, {year_window[0]}–{year_window[1]}). '
-        f'SNR ≥ 1 → signal exceeds central-pipeline 1σ noise.',
+        r'CAP Scenario — Basin Signal-to-Noise '
+        r'(SNR = |$\Delta$GW$_{\mathrm{cum}}$| / $\sigma_{\mathrm{cum}}$, '
+        + f'{year_window[0]}–{year_window[1]}). '
+        + 'SNR ≥ 1 → signal exceeds central-pipeline 1σ noise.',
         fontsize=20, fontweight='bold',
     )
     axes_flat = axes.flatten()
@@ -4885,7 +4888,7 @@ def _plot_cap_scenario_basin_snr(
         ax.set_title(
             f'{panel_labels[i]} {title_pretty}\n'
             f'{n_robust}/{n_total} basins with SNR ≥ 1',
-            fontsize=17, fontweight='bold',
+            fontsize=11, fontweight='bold',
         )
 
     ax_legend = axes_flat[7]
@@ -4898,7 +4901,8 @@ def _plot_cap_scenario_basin_snr(
         boundaries=boundaries, ticks=boundaries, extend='both',
     )
     cbar.set_label(
-        '|Cumulative ΔGW| / σ_total (signal-to-noise)',
+        r'|Cumulative $\Delta$GW| / $\sigma_{\mathrm{total}}$ '
+        r'(signal-to-noise)',
         fontsize=18, fontweight='bold',
     )
     cbar.ax.tick_params(labelsize=17)
@@ -4981,12 +4985,14 @@ def _plot_cap_scenario_pixel_snr(
         pixel_sigma_cum, np.nan,
     )
 
-    fig, axes = plt.subplots(2, 4, figsize=(17, 10), constrained_layout=True)
+    fig, axes = plt.subplots(2, 4, figsize=(22, 11), constrained_layout=True)
     fig.suptitle(
-        f'CAP Scenario — Pixel Signal-to-Noise '
-        f'(SNR = |ΔGW_cum| / σ_cum, {year_window[0]}–{year_window[1]}). '
-        f'SNR ≥ 1 → signal exceeds local 1σ noise. '
-        f'Per-pixel ΔGW is a pro-rata distribution (not a hydraulic-head response).',
+        r'CAP Scenario — Pixel Signal-to-Noise '
+        r'(SNR = |$\Delta$GW$_{\mathrm{cum}}$| / $\sigma_{\mathrm{cum}}$, '
+        + f'{year_window[0]}–{year_window[1]}). '
+        + 'SNR ≥ 1 → signal exceeds local 1σ noise. '
+        + r'Per-pixel $\Delta$GW is a pro-rata distribution '
+        + '(not a hydraulic-head response).',
         fontsize=20, fontweight='bold',
     )
     axes_flat = axes.flatten()
@@ -5035,7 +5041,7 @@ def _plot_cap_scenario_pixel_snr(
         ax.set_title(
             f'{panel_labels[i]} {title_pretty}\n'
             f'{pct_robust:.1f}% of pixels with SNR ≥ 1',
-            fontsize=17, fontweight='bold',
+            fontsize=11, fontweight='bold',
         )
 
     ax_legend = axes_flat[7]
@@ -5048,7 +5054,8 @@ def _plot_cap_scenario_pixel_snr(
         boundaries=boundaries, ticks=boundaries, extend='both',
     )
     cbar.set_label(
-        '|Cumulative ΔGW| / σ_total (signal-to-noise)',
+        r'|Cumulative $\Delta$GW| / $\sigma_{\mathrm{total}}$ '
+        r'(signal-to-noise)',
         fontsize=18, fontweight='bold',
     )
     cbar.ax.tick_params(labelsize=17)
@@ -6100,6 +6107,27 @@ def run_uncertainty_quantification(
     else:
         logger.info('  SW Capture Index with σ_GW propagation skipped.')
 
+    # ── SW Capture Index connectivity-kernel robustness diagnostic ──
+    #
+    # Re-derives the capture field under a family of scale-matched monotone
+    # connectivity kernels (exponential, Gaussian, steep/gentle power laws,
+    # reciprocal, linear) to show that the reported capture pattern and
+    # basin ranking do not depend on the specific exponential kernel — only
+    # the absolute volume magnitude does, which is why the index is reported
+    # as an ordinal screen.  Cheap post-partition array arithmetic (no ML
+    # prediction), writes Capture/Capture_Kernel_Sensitivity.{csv,png}.
+    if 'kernel-sensitivity' not in skip:
+        import hydrolibs.partitionops as _partops
+        _partops.run_capture_kernel_sensitivity(
+            prediction_dir=full_pred_dir,
+            pred_data_dir=pred_data_dir,
+            start_year=start_year,
+            end_year=end_year,
+            year_list=year_list,
+        )
+    else:
+        logger.info('  SW Capture kernel-sensitivity diagnostic skipped.')
+
     # ── σ_CU (error propagation: CU = IE × Withdrawal) ──
     if 'sigma-cu' not in skip:
         compute_sigma_cu(
@@ -6462,22 +6490,22 @@ def compute_sw_capture_with_sigma(
        orthogonal to the λ dimension so downstream users can decompose
        the two uncertainty sources.
     4. Writes a 3-band capture-fraction raster (λ = 5/10/20) under
-       ``{cap_cat}_Capture_Fraction/`` (unchanged convention).
+       ``{cap_cat}_Fraction/`` (unchanged convention).
     5. Writes the central capture volume in four units (mm, ft, m³, AF)
        as a **6-band augmented raster** (band 1 = pred, band 2 = σ_cap,
        bands 3–6 = CV, SNR, lower 95 % CI, upper 95 % CI) under the
-       existing ``{cap_cat}_Capture_Rasters/{Depth_mm, Depth_ft,
+       existing ``{cap_cat}_Rasters/{Depth_mm, Depth_ft,
        Volume_m3, Volume_AF}/`` convention.  This mirrors the 6-band
        layout already used for Total_GW, Irrigation_GW, CU rasters, etc.
        so the existing per-well disaggregation in ``wellops.py`` picks
        up the new σ columns automatically via its ``src.count >= 6``
        branch.
-    6. Writes ``SW_Capture_Time_Series.csv``, ``Basin_Capture_Fraction.csv``,
+    6. Writes ``Capture_Time_Series.csv``, ``Basin_Capture_Fraction.csv``,
        and ``Subbasin_Capture_Fraction.csv`` using the existing schema
        plus three new per-pool σ columns
        (``{cap_cat}_Capture_Volume_Sigma_AF``).
 
-    The existing ``SW_Capture_Time_Series.csv`` Lower/Central/Upper
+    The existing ``Capture_Time_Series.csv`` Lower/Central/Upper
     column names are preserved; the meaning of Lower/Upper changes from
     "λ envelope" to "combined σ + λ envelope" as computed by the
     asymmetric bounds in ``compute_sw_capture_index``.
@@ -6485,7 +6513,7 @@ def compute_sw_capture_with_sigma(
     Args:
         prediction_dir (str): Base directory
             (``Full_Prediction_{model}``) containing ``{pool}_Rasters/``
-            (augmented by ``augment_category_rasters``), ``SW_Capture/``,
+            (augmented by ``augment_category_rasters``), ``Capture/``,
             and ``Annual_Summaries/``.
         az_df (pd.DataFrame): Arizona training DataFrame with
             per-year ``GW_Basin``, ``GW_Subbasin``, ``wtd_m``, and
@@ -6544,12 +6572,12 @@ def compute_sw_capture_with_sigma(
 
     # Map pumping pool → capture-category name.  The capture category
     # names the *captured* SW pool; the pool names the GW pumping that
-    # drives it.  Reading the directory layout: ``Total_SW_Capture`` =
+    # drives it.  Reading the directory layout: ``Total_Capture`` =
     # "fraction of Total_GW pumping that captures surface water".
     pool_to_cap_cat = {
-        'Total_GW': 'Total_SW',
-        'Irrigation_GW': 'Irrigation_SW',
-        'Non_Irrigation_GW': 'Non_Irrigation_SW',
+        'Total_GW': 'Total',
+        'Irrigation_GW': 'Irrigation',
+        'Non_Irrigation_GW': 'Non_Irrigation',
     }
 
     # All AZ basin names (filter DROP_GW_BASINS — same convention as
@@ -6565,7 +6593,7 @@ def compute_sw_capture_with_sigma(
         if 'GW_Subbasin' in az_df.columns else []
     )
 
-    sw_cap_dir = os.path.join(prediction_dir, 'SW_Capture')
+    sw_cap_dir = os.path.join(prediction_dir, 'Capture')
     makedirs(sw_cap_dir)
 
     sw_capture_yearly: dict[str, dict] = {}
@@ -6637,7 +6665,7 @@ def compute_sw_capture_with_sigma(
 
             # ── 3-band capture fraction raster (λ = 5/10/20) ──
             frac_dir = os.path.join(
-                sw_cap_dir, f'{cap_cat}_Capture_Fraction'
+                sw_cap_dir, f'{cap_cat}_Fraction'
             )
             makedirs(frac_dir)
             cf_grid = np.stack([
@@ -6650,7 +6678,7 @@ def compute_sw_capture_with_sigma(
             profile.update(count=3, dtype='float32', nodata=np.nan)
             with rio.open(
                 os.path.join(frac_dir,
-                             f'{cap_cat}_Capture_Fraction_{year}.tif'),
+                             f'{cap_cat}_Fraction_{year}.tif'),
                 'w', **profile,
             ) as dst:
                 for bi in range(3):
@@ -6674,11 +6702,11 @@ def compute_sw_capture_with_sigma(
             for unit, subdir in unit_subdirs.items():
                 scale = unit_scales[unit]
                 out_dir = os.path.join(
-                    sw_cap_dir, f'{cap_cat}_Capture_Rasters', subdir,
+                    sw_cap_dir, f'{cap_cat}_Rasters', subdir,
                 )
                 makedirs(out_dir)
                 out_path = os.path.join(
-                    out_dir, f'{cap_cat}_Capture_{year}_{unit}.tif',
+                    out_dir, f'{cap_cat}_{year}_{unit}.tif',
                 )
 
                 pred_scaled = (cap_central_mm * scale).astype(np.float32)
@@ -6754,10 +6782,10 @@ def compute_sw_capture_with_sigma(
 
         if year % 20 == 0 or year == end_year:
             central_af = sw_capture_yearly.get(
-                'Total_SW_Capture_Volume_Central', {},
+                'Total_Capture_Volume_Central', {},
             ).get(year, 0.0)
             sigma_af = sw_capture_yearly.get(
-                'Total_SW_Capture_Volume_Sigma', {},
+                'Total_Capture_Volume_Sigma', {},
             ).get(year, 0.0)
             logger.info(
                 '  Year %d: statewide capture = %.4f MAF, σ_cap = %.4f MAF',
@@ -6791,7 +6819,7 @@ def _write_sw_capture_csvs(
     """Write the three SW capture CSVs from the per-year scalar dict.
 
     Produces:
-      - ``SW_Capture_Time_Series.csv`` — statewide per-year scalars
+      - ``Capture_Time_Series.csv`` — statewide per-year scalars
         (fractions, volumes, and explicit σ columns).
       - ``Basin_Capture_Fraction.csv`` — flat per-basin VW fractions.
       - ``Subbasin_Capture_Fraction.csv`` — flat per-sub-basin VW
@@ -6816,7 +6844,7 @@ def _write_sw_capture_csvs(
                 row[f'{key}{suffix}'] = ydict.get(y, 0)
             rows.append(row)
         pd.DataFrame(rows).to_csv(
-            os.path.join(sw_cap_dir, 'SW_Capture_Time_Series.csv'),
+            os.path.join(sw_cap_dir, 'Capture_Time_Series.csv'),
             index=False,
         )
 
@@ -7264,7 +7292,7 @@ def _replot_from_augmented_rasters(
     # ── process one depth/volume raster group ─────────────────────────────
 
     def _process_group(label, raster_dir, file_pattern, out_subdir,
-                       title_prefix=''):
+                       title_prefix='', sigma_z=1.96, sigma_label='95% CI'):
         """Zonal stats → time-series plots (depth / volume products)."""
         yearly_preds = {}
         sigma_data = {}
@@ -7320,6 +7348,8 @@ def _replot_from_augmented_rasters(
             actual_data=actual,
             title_prefix=title_prefix,
             sigma_data=sigma_data,
+            sigma_z=sigma_z,
+            sigma_label=sigma_label,
         )
 
         if basin_yearly:
@@ -7436,6 +7466,8 @@ def _replot_from_augmented_rasters(
         os.path.join(prediction_dir, 'Predicted_Rasters/Depth_mm'),
         'Total_Predicted_{year}_mm.tif',
         '',
+        sigma_z=1.0,
+        sigma_label=r'$\pm1\sigma_{\mathrm{total}}$',
     )
 
     # ══════════════════════════════════════════════════════════════════════
@@ -7629,7 +7661,7 @@ def _plot_component_basin_sigma(
             for era, (s, e) in ERA_PERIODS.items():
                 ax2.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
             ax2.plot(years, sigma_m3, color='#E74C3C', linewidth=1.5,
-                     marker='.', markersize=2, label=f'σ_{comp_name}')
+                     marker='.', markersize=2, label=r'$\sigma_{\mathrm{' + comp_name + '}}$')
             ax2.set_xlabel('Year', fontweight='bold')
             _format_volume_axis(ax2, unit='m3', label='σ')
             ax2.grid(True, alpha=0.3, linestyle='--')
@@ -7665,7 +7697,7 @@ def _plot_component_basin_sigma(
                      label=region)
             ax2.plot(years, rdf['CV'].values, linewidth=1, label=region)
 
-        _format_volume_axis(ax1, unit='m3', label=f'σ_{comp_name}')
+        _format_volume_axis(ax1, unit='m3', label=r'$\sigma_{\mathrm{' + comp_name + '}}$')
         ax1.set_title(
             f'All {level}s — {comp_title}',
             fontweight='bold', fontsize=14,
@@ -7677,7 +7709,7 @@ def _plot_component_basin_sigma(
             ax1.get_ylim()[0] * M3_TO_AF,
             ax1.get_ylim()[1] * M3_TO_AF,
         )
-        _format_volume_axis(ax1r, unit='AF', label=f'σ_{comp_name}')
+        _format_volume_axis(ax1r, unit='AF', label=r'$\sigma_{\mathrm{' + comp_name + '}}$')
 
         ax2.set_xlabel('Year', fontweight='bold')
         ax2.set_ylabel('CV', fontweight='bold')
@@ -7787,7 +7819,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
             for era, (s, e) in ERA_PERIODS.items():
                 ax2.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
             ax2.plot(years, sigma_m3, color='#E74C3C', linewidth=1.5,
-                     marker='.', markersize=2, label='σ_total')
+                     marker='.', markersize=2, label=r'$\sigma_{\mathrm{total}}$')
             ax2.set_xlabel('Year', fontweight='bold')
             _format_volume_axis(ax2, unit='m3', label='σ')
             ax2.grid(True, alpha=0.3, linestyle='--')
@@ -7823,7 +7855,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
                      label=region)
             ax2.plot(years, rdf['CV'].values, linewidth=1, label=region)
 
-        _format_volume_axis(ax1, unit='m3', label='σ_total')
+        _format_volume_axis(ax1, unit='m3', label=r'$\sigma_{\mathrm{total}}$')
         ax1.set_title(
             f'All {level}s — σ_total Time Series',
             fontweight='bold', fontsize=14,
@@ -7835,7 +7867,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
             ax1.get_ylim()[0] * M3_TO_AF,
             ax1.get_ylim()[1] * M3_TO_AF,
         )
-        _format_volume_axis(ax1r, unit='AF', label='σ_total')
+        _format_volume_axis(ax1r, unit='AF', label=r'$\sigma_{\mathrm{total}}$')
 
         ax2.set_xlabel('Year', fontweight='bold')
         ax2.set_ylabel('CV', fontweight='bold')
@@ -7932,7 +7964,7 @@ def _plot_basin_sigma_time_series(unc_dir: str) -> None:
             for era, (s, e) in ERA_PERIODS.items():
                 ax2.axvspan(s, e, color=ERA_COLORS[era], alpha=0.10)
             ax2.plot(years, sigma_m3, color='#E74C3C', linewidth=1.5,
-                     marker='.', markersize=2, label='\u03c3_total')
+                     marker='.', markersize=2, label=r'$\sigma_{\mathrm{total}}$')
             ax2.set_xlabel('Year', fontweight='bold')
             _format_volume_axis(ax2, unit='m3', label='\u03c3')
             ax2.grid(True, alpha=0.3, linestyle='--')

@@ -102,9 +102,9 @@ CATEGORIES: list[str] = [
     'Irrigation_CU',
     'Irrigation_GW_CU',
     'Irrigation_SW_CU',
-    'Total_SW_Capture',
-    'Irrigation_SW_Capture',
-    'Non_Irrigation_SW_Capture',
+    'Total_Capture',
+    'Irrigation_Capture',
+    'Non_Irrigation_Capture',
 ]
 
 

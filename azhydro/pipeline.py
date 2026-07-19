@@ -2234,7 +2234,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
         # through the capture volume bounds.  That step reads the
         # augmented per-category GW rasters (band 1 = pred, band 2 = σ)
         # and writes 6-band augmented SW capture rasters in place, plus
-        # SW_Capture_Time_Series.csv / Basin_Capture_Fraction.csv /
+        # Capture_Time_Series.csv / Basin_Capture_Fraction.csv /
         # Subbasin_Capture_Fraction.csv.
 
         # AZ-wide annual total (all valid pixels)
@@ -2485,10 +2485,11 @@ def create_well_package_step() -> None:
             'AF': os.path.join(base, 'Volume_AF'),
         }
     # SW capture volume rasters (same unit structure as CU)
-    sw_cap_base = os.path.join(prediction_dir, 'SW_Capture')
-    for cap_cat in ('Total_SW_Capture', 'Irrigation_SW_Capture',
-                    'Non_Irrigation_SW_Capture'):
-        base = os.path.join(sw_cap_base, f'{cap_cat}_Rasters')
+    sw_cap_base = os.path.join(prediction_dir, 'Capture')
+    for cap_cat, pool in (('Total_Capture', 'Total'),
+                          ('Irrigation_Capture', 'Irrigation'),
+                          ('Non_Irrigation_Capture', 'Non_Irrigation')):
+        base = os.path.join(sw_cap_base, f'{pool}_Rasters')
         if os.path.isdir(os.path.join(base, 'Depth_mm')):
             cu_raster_dirs[cap_cat] = {
                 'mm': os.path.join(base, 'Depth_mm'),
@@ -2598,30 +2599,33 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
     _paired_pool_folders = {c[0] for c in _PAIRED_CATEGORIES}
     _paired_pool_folders |= {c[1] for c in _PAIRED_CATEGORIES}
 
+    # Concise colorbar variable name (drops the verbose era-map title
+    # words); the colorbar reads "{variable} (×10⁶ m³)" + "{variable} (AF)".
+    def _cbar_var(t):
+        return {
+            'Total Predicted Annual Withdrawal': 'Total withdrawals',
+            'Total': 'Total withdrawals',
+            'Irrigation': 'Irrigation withdrawals',
+            'Non-Irrigation': 'Non-Irrigation withdrawals',
+            'Total GW': 'Total GW withdrawals',
+            'Total SW': 'Total SW withdrawals',
+        }.get(t, t)
+
     # Single-pool era maps (non-paired products): ONE map per product
-    # with a dual depth (mm) + volume (×10⁶ m³) colorbar — depth and
-    # volume are the same field on a constant-area grid, so a single map
-    # carries both unit scales instead of two identical figures.
+    # with a dual-volume colorbar — ×10⁶ m³ (primary) + AF (secondary),
+    # both labeled with the variable name.  Rendered from the Volume_m3
+    # raster so the tick values are true volumes.
     for folder, title in depth_categories:
         if folder in _paired_pool_folders:
             continue
-        depth_dir = os.path.join(prediction_dir, folder, 'Depth_mm')
-        if os.path.isdir(depth_dir):
+        vol_dir = os.path.join(prediction_dir, folder, 'Volume_m3')
+        if os.path.isdir(vol_dir):
             vizops.create_era_raster_maps(
-                raster_dir=depth_dir, basin_shp=AZ_GW_BASIN,
+                raster_dir=vol_dir, basin_shp=AZ_GW_BASIN,
                 output_dir=maps_dir, title=title,
-                unit_label='Depth (mm)', cmap='Spectral_r',
-                dual_depth_volume=True,
+                unit_label=r'Volume (m$^3$)',
+                variable_label=_cbar_var(title), cmap='Spectral_r',
             )
-        else:
-            # Volume-only fallback when no depth raster exists.
-            vol_dir = os.path.join(prediction_dir, folder, 'Volume_m3')
-            if os.path.isdir(vol_dir):
-                vizops.create_era_raster_maps(
-                    raster_dir=vol_dir, basin_shp=AZ_GW_BASIN,
-                    output_dir=maps_dir, title=f'{title} Volume',
-                    unit_label=r'Volume (m$^3$)', cmap='Spectral_r',
-                )
 
     # Single-pool volume-sigma (band 2) era maps (non-paired products only).
     for folder, title in depth_categories:
@@ -2633,19 +2637,20 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
         vizops.create_era_raster_maps(
             raster_dir=raster_dir, basin_shp=AZ_GW_BASIN,
             output_dir=maps_dir, title=f'{title} Volume — Std Dev',
-            unit_label=r'Volume (m$^3$)', cmap='Purples', band=2,
+            unit_label=r'Volume (m$^3$)',
+            variable_label=r'$\sigma_{\mathrm{total}}$', cmap='Purples', band=2,
         )
 
     # Paired GW/SW era figures (depth, volume, sigma-volume) per category.
+    # (subdir, title-suffix, unit, cmap, band, is_sigma)
     _PAIRED_PRODUCTS = [
-        ('Depth_mm', '', 'Depth (mm)', 'Spectral_r', 1),
-        ('Volume_m3', 'Volume', r'Volume (m$^3$)', 'Spectral_r', 1),
+        ('Volume_m3', 'Volume', r'Volume (m$^3$)', 'Spectral_r', 1, False),
         ('Volume_m3', 'Volume — Std Dev', r'Volume (m$^3$)',
-         'Purples', 2),
+         'Purples', 2, True),
     ]
     for left_folder, right_folder, base, col_labels, out_tag in \
             _PAIRED_CATEGORIES:
-        for subdir, suffix, unit, cmap_, band_ in _PAIRED_PRODUCTS:
+        for subdir, suffix, unit, cmap_, band_, is_sigma in _PAIRED_PRODUCTS:
             left_dir = os.path.join(prediction_dir, left_folder, subdir)
             right_dir = os.path.join(prediction_dir, right_folder, subdir)
             if not (os.path.isdir(left_dir) and os.path.isdir(right_dir)):
@@ -2654,6 +2659,7 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
                 gw_raster_dir=left_dir, sw_raster_dir=right_dir,
                 basin_shp=AZ_GW_BASIN, output_dir=maps_dir,
                 title=f'{base} {suffix}'.strip(), unit_label=unit,
+                variable_label=(r'$\sigma_{\mathrm{total}}$' if is_sigma else _cbar_var(base)),
                 col_labels=col_labels, out_tag=out_tag,
                 cmap=cmap_, band=band_,
             )
@@ -2705,7 +2711,10 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
             basin_shp=AZ_GW_BASIN,
             output_dir=maps_dir,
             title=f'{pretty} — Std Dev',
-            unit_label='σ (mm)',
+            unit_label=(r'$\sigma_{\mathrm{'
+                        + ('total' if comp == 'Sigma_Total'
+                           else comp.replace('Sigma_', ''))
+                        + r'}}$ (mm yr$^{-1}$)'),
             cmap='Purples',
             band=1,
         )
@@ -2780,17 +2789,17 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
         )
 
     # ── SW Capture Index era maps ───────────────────────────────────
-    # The category names on disk are Total_SW_Capture,
-    # Irrigation_SW_Capture, Non_Irrigation_SW_Capture — the full
+    # The category names on disk are Total_Capture,
+    # Irrigation_Capture, Non_Irrigation_Capture — the full
     # capture-category strings.  Titles strip the "SW" token so the
     # slug reads "Total Capture", "Irrigation Capture", and
     # "Non-Irrigation Capture" rather than "Total SW SW Capture".
-    sw_cap_base = os.path.join(prediction_dir, 'SW_Capture')
+    sw_cap_base = os.path.join(prediction_dir, 'Capture')
     # Total SW capture is rendered as individual era maps; the
     # Irrigation vs Non-Irrigation split is rendered as paired figures
     # (columns a = Irrigation, b = Non-Irrigation) further below.
     _cap_pretty = {
-        'Total_SW_Capture': 'Total SW Capture',
+        'Total': 'Total Capture',
     }
     for cap_cat, pretty in _cap_pretty.items():
         # Capture fraction (band 2 = central λ=10m).  The default
@@ -2812,43 +2821,16 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
         # and σ are ≥ 0 by construction) but keeping it present
         # across every family gives the era-map suite a uniform
         # colorbar shape.
-        frac_dir = os.path.join(sw_cap_base, f'{cap_cat}_Fraction')
-        if os.path.isdir(frac_dir):
-            vizops.create_era_raster_maps(
-                raster_dir=frac_dir,
-                basin_shp=AZ_GW_BASIN,
-                output_dir=maps_dir,
-                title=f'{pretty} Fraction (\u03bb=10m)',
-                unit_label='Capture Fraction',
-                cmap='YlOrRd',
-                band=2,
-            )
+        # NOTE: The standalone Total Capture *fraction* (band 2, \u03bb=10m)
+        # era map is intentionally NOT rendered here \u2014 it is shown
+        # side-by-side with the capture volume in the paired
+        # "Total Capture" fraction+volume figure (Frac_Vol) below, so a
+        # single-metric fraction map would be redundant.
         # 6-band augmented capture depth rasters: band 1 = central,
         # band 2 = σ, band 3 = CV, bands 5/6 = lower/upper 95 % CI.
         depth_dir = os.path.join(sw_cap_base, f'{cap_cat}_Rasters',
                                  'Depth_mm')
         if os.path.isdir(depth_dir):
-            # Band 1: central capture depth
-            vizops.create_era_raster_maps(
-                raster_dir=depth_dir,
-                basin_shp=AZ_GW_BASIN,
-                output_dir=maps_dir,
-                title=pretty,
-                unit_label='Capture (mm)',
-                cmap='YlOrRd',
-                band=1,
-            )
-            # Band 2: σ_cap — uses σ-friendly Purples colormap to
-            # match the other σ era maps.
-            vizops.create_era_raster_maps(
-                raster_dir=depth_dir,
-                basin_shp=AZ_GW_BASIN,
-                output_dir=maps_dir,
-                title=f'{pretty} — Std Dev',
-                unit_label='σ (mm)',
-                cmap='Purples',
-                band=2,
-            )
             # Band 3: CV — same hard [0, 1] clamp as the
             # Prediction CV map, so the informative portion of the
             # SW capture CV distribution is legible and anything
@@ -2876,43 +2858,38 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
         vol_dir = os.path.join(sw_cap_base, f'{cap_cat}_Rasters',
                                'Volume_m3')
         if os.path.isdir(vol_dir):
-            # Band 1: central capture volume
-            vizops.create_era_raster_maps(
-                raster_dir=vol_dir,
-                basin_shp=AZ_GW_BASIN,
-                output_dir=maps_dir,
-                title=f'{pretty} Volume',
-                unit_label=r'Volume (m$^3$)',
-                cmap='YlOrRd',
-                band=1,
-            )
+            # Band 1 (central capture volume) is intentionally NOT
+            # rendered standalone — it is the right panel of the paired
+            # "Total Capture" fraction+volume figure (Frac_Vol) below.
             # Band 2: σ capture volume (Purples, matches other
             # σ volume era maps)
             vizops.create_era_raster_maps(
                 raster_dir=vol_dir,
                 basin_shp=AZ_GW_BASIN,
                 output_dir=maps_dir,
-                title=f'{pretty} Volume \u2014 Std Dev',
+                title=f'{pretty} \u2014 Std Dev',
                 unit_label=r'Volume (m$^3$)',
+                variable_label=r'$\sigma_{\mathrm{total}}$',
                 cmap='Purples',
                 band=2,
             )
 
     # ── Paired Total SW capture: fraction (a) + volume (b) ──────────
     # Two different metrics in one figure, each with its own colorbar.
-    _tot_frac = os.path.join(sw_cap_base, 'Total_SW_Capture_Fraction')
+    _tot_frac = os.path.join(sw_cap_base, 'Total_Fraction')
     _tot_vol = os.path.join(
-        sw_cap_base, 'Total_SW_Capture_Rasters', 'Volume_m3')
+        sw_cap_base, 'Total_Rasters', 'Volume_m3')
     if os.path.isdir(_tot_frac) and os.path.isdir(_tot_vol):
         vizops.create_dual_metric_era_raster_maps(
             basin_shp=AZ_GW_BASIN, output_dir=maps_dir,
-            title='Total SW Capture',
+            title='Total Capture',
             left={'raster_dir': _tot_frac,
                   'label': 'Capture Fraction (λ=10m)',
                   'unit': 'Capture Fraction', 'cmap': 'YlOrRd', 'band': 2},
             right={'raster_dir': _tot_vol, 'label': 'Capture Volume',
                    'unit': r'Volume (m$^3$)', 'cmap': 'YlOrRd', 'band': 1},
             out_tag='Frac_Vol',
+            variable_label='Total Capture',
         )
 
 
@@ -2925,32 +2902,30 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
     # figure would show the same map twice — the single Total fraction
     # map above already represents it.
     # (subpath_template, title, unit_label, cmap, band, extra_kwargs)
+    # (subpath_template, title, unit_label, cmap, band, variable_label, extra)
     _CAP_PAIRED_PRODUCTS = [
-        ('{c}_Rasters/Depth_mm', 'SW Capture', 'Capture (mm)',
-         'YlOrRd', 1, {}),
-        ('{c}_Rasters/Depth_mm', 'SW Capture — Std Dev', 'σ (mm)',
-         'Purples', 2, {}),
-        ('{c}_Rasters/Depth_mm', 'SW Capture — CV',
-         'CV (σ / |capture|)', 'inferno', 3,
+        ('{c}_Rasters/Depth_mm', 'Capture — CV',
+         'CV (σ / |capture|)', 'inferno', 3, None,
          {'mask_nan_only': True, 'vmin': 0.0, 'vmax': 1.0}),
-        ('{c}_Rasters/Volume_m3', 'SW Capture Volume', r'Volume (m$^3$)',
-         'YlOrRd', 1, {}),
-        ('{c}_Rasters/Volume_m3', 'SW Capture Volume — Std Dev',
-         r'Volume (m$^3$)', 'Purples', 2, {}),
+        ('{c}_Rasters/Volume_m3', 'Capture', r'Volume (m$^3$)',
+         'YlOrRd', 1, 'Capture', {}),
+        ('{c}_Rasters/Volume_m3', 'Capture — Std Dev',
+         r'Volume (m$^3$)', 'Purples', 2, r'$\sigma_{\mathrm{total}}$', {}),
     ]
-    for subpath, ptitle, unit, cmap_, band_, extra in _CAP_PAIRED_PRODUCTS:
+    for subpath, ptitle, unit, cmap_, band_, varlbl, extra in \
+            _CAP_PAIRED_PRODUCTS:
         left_dir = os.path.join(
             sw_cap_base,
-            *subpath.format(c='Irrigation_SW_Capture').split('/'))
+            *subpath.format(c='Irrigation').split('/'))
         right_dir = os.path.join(
             sw_cap_base,
-            *subpath.format(c='Non_Irrigation_SW_Capture').split('/'))
+            *subpath.format(c='Non_Irrigation').split('/'))
         if not (os.path.isdir(left_dir) and os.path.isdir(right_dir)):
             continue
         vizops.create_gw_sw_era_raster_maps(
             gw_raster_dir=left_dir, sw_raster_dir=right_dir,
             basin_shp=AZ_GW_BASIN, output_dir=maps_dir,
-            title=ptitle, unit_label=unit,
+            title=ptitle, unit_label=unit, variable_label=varlbl,
             col_labels=('Irrigation', 'Non-Irrigation'),
             out_tag='Irr_NonIrr', cmap=cmap_, band=band_, **extra,
         )
@@ -3015,10 +2990,10 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
             )
 
         # SW Capture Index categories — depth, volume, and fraction
-        sw_cap_base = os.path.join(prediction_dir, 'SW_Capture')
-        for cap_cat in ('Total_SW_Capture', 'Irrigation_SW_Capture',
-                        'Non_Irrigation_SW_Capture'):
-            pretty = cap_cat.replace('_', ' ')
+        sw_cap_base = os.path.join(prediction_dir, 'Capture')
+        for cap_cat, pretty in (('Total', 'Total Capture'),
+                                ('Irrigation', 'Irrigation Capture'),
+                                ('Non_Irrigation', 'Non Irrigation Capture')):
 
             # Depth trends (mm raster source, mm/ft colorbar)
             depth_dir = os.path.join(sw_cap_base, f'{cap_cat}_Rasters',
@@ -3240,11 +3215,23 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
 
     total_sc_vols = _load_scenario_volumes('Total')
 
+    # Load UQ-derived σ_total volume time series (if 3b has run) so the
+    # aggregate era bar chart and graphical abstract can draw ±1σ_total.
+    sigma_yearly = {}
+    sigma_csv = os.path.join(prediction_dir, 'Uncertainty', 'Sigma_Total',
+                             'Uncertainty_Summary_Total.csv')
+    if os.path.isfile(sigma_csv):
+        sdf = pd.read_csv(sigma_csv)
+        for _, row in sdf.iterrows():
+            sigma_yearly[int(row['Year'])] = {
+                k: row[k] for k in row.index if k != 'Year'}
+
     # ── Era summary bar charts ─────────────────────────────────────────
     if yearly_predictions:
         vizops.create_era_summary_maps(
             yearly_predictions, prediction_dir,
-            scenario_volumes=total_sc_vols)
+            scenario_volumes=total_sc_vols,
+            sigma_yearly=sigma_yearly or None)
     for cat, title in CAT_TITLES.items():
         if cat_yearly[cat]:
             cat_dir = os.path.join(prediction_dir, cat)
@@ -3258,16 +3245,6 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
             vizops.create_era_summary_maps(
                 cu_yearly[cu_cat], cu_dir, title_prefix=title)
 
-    # Load UQ-derived σ_total volume time series (if 3b has run)
-    sigma_yearly = {}
-    sigma_csv = os.path.join(prediction_dir, 'Uncertainty', 'Sigma_Total',
-                             'Uncertainty_Summary_Total.csv')
-    if os.path.isfile(sigma_csv):
-        sdf = pd.read_csv(sigma_csv)
-        for _, row in sdf.iterrows():
-            sigma_yearly[int(row['Year'])] = {
-                k: row[k] for k in row.index if k != 'Year'}
-
     # ── Graphical abstract / Figure 1 ──────────────────────────────────
     if yearly_predictions:
         vizops.create_graphical_abstract(
@@ -3279,6 +3256,12 @@ def create_all_raster_maps(skip_maps: set[str] | None = None) -> None:
             yearly_predictions=yearly_predictions,
             basin_yearly=basin_yearly,
             sigma_yearly=sigma_yearly or None,
+            category_yearly={
+                k: cat_yearly[k]
+                for k in ('Total_GW', 'Total_SW',
+                          'Irrigation', 'Non_Irrigation')
+                if cat_yearly.get(k)
+            },
         )
 
     # ── CAP scenario spatial maps ──────────────────────────────────
@@ -3610,6 +3593,21 @@ def create_graphical_abstract_only() -> None:
                 k: row[k] for k in row.index if k != 'Year'
             }
 
+    # Load the source (GW/SW) and use (Irr/Non-Irr) yearly summaries for
+    # the graphical-abstract breakdown panels (optional; skipped silently
+    # if a category CSV is missing).
+    category_yearly: dict = {}
+    for cat in ('Total_GW', 'Total_SW', 'Irrigation', 'Non_Irrigation'):
+        cat_csv = os.path.join(summary_dir, f'{cat}.csv')
+        if os.path.isfile(cat_csv):
+            cdf = pd.read_csv(cat_csv)
+            category_yearly[cat] = {
+                int(row['Year']): {
+                    k: row[k] for k in row.index if k != 'Year'
+                }
+                for _, row in cdf.iterrows()
+            }
+
     vizops.create_graphical_abstract(
         raster_dir=os.path.join(
             prediction_dir, 'Predicted_Rasters', 'Depth_mm',
@@ -3621,6 +3619,7 @@ def create_graphical_abstract_only() -> None:
         yearly_predictions=yearly_predictions,
         basin_yearly=basin_yearly,
         sigma_yearly=sigma_yearly or None,
+        category_yearly=category_yearly or None,
     )
     logger.info(
         f'Graphical abstract saved to {prediction_dir}/Graphical_Abstract_Fig1.png',
@@ -4067,6 +4066,13 @@ UQ sub-steps (use with --skip-uq to skip individual σ components):
                    combined λ + σ_total 95 % CI bounds and the per-well σ_capture
                    disaggregation.  Depends on sigma-total; skipping means no SW
                    capture outputs are produced.
+  kernel-sensitivity Skip the SW Capture Index connectivity-kernel robustness
+                   diagnostic (re-derives the capture field under a family of
+                   scale-matched monotone kernels — exponential, Gaussian,
+                   power laws, reciprocal, linear — to show the pattern and
+                   basin ranking do not depend on the exponential kernel).
+                   Writes Capture/Capture_Kernel_Sensitivity.{csv,png} and
+                   Capture_Kernel_Curves.png.
 
 Step 3g sub-steps (use with --skip-maps to skip individual map families):
   trends           Skip the full Mann-Kendall + Sen's slope trend-map suite
@@ -4156,7 +4162,7 @@ def main() -> None:
             'Comma-separated UQ sub-steps to skip: '
             'sigma-maca, sigma-model, sigma-irr, sigma-lulc, '
             'sigma-gw, sigma-usbr, density-sensitivity, cap-scenario, '
-            'sigma-total, sigma-cu, sw-capture-sigma.'
+            'sigma-total, sigma-cu, sw-capture-sigma, kernel-sensitivity.'
         ),
     )
     parser.add_argument(
