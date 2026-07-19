@@ -690,7 +690,7 @@ would require transient groundwater flow modeling.
 
 ## Pipeline overview (`pipeline.py`)
 
-![Pipeline workflow and three-era data harmonization](../docs/images/Pipeline_Harmonization_Fig2.png)
+![Pipeline workflow and three-era data harmonization](../docs/images/Pipeline_Harmonization.png)
 
 **(a)** Processing chain from inputs to published products: the
 three-era-harmonized GEE predictor stack and the infrastructure layers
