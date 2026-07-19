@@ -622,7 +622,7 @@ Augmented (`Capture__*_Rasters`) follow the same 6-band convention and 4 unit co
 
 ## Citations
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Freshwater withdrawals, irrigation consumptive use, and surface water capture for Arizona, 1896–2099. _In prep. for Nature Scientific Data_.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Historical and Projected Freshwater Withdrawals and Irrigation Consumptive Use for Arizona, 1896–2099. _In prep. for Nature Scientific Data_.
 
 Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Where Arizona's Water Goes: Declining Agricultural Dominance and Rising Urban Demand Drive a Two-Century Shift in Withdrawal Patterns (1896–2099). _In prep. for AGU Earth's Future_.
 

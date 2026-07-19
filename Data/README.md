@@ -310,9 +310,8 @@ Predictions, and Validation at 2 km Resolution (1896–2099).*
 **Companion papers:**
 
 Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C.
-(2026).  *Historical and projected groundwater/surface-water
-withdrawals, irrigation consumptive use, and pumping-induced surface
-water capture for Arizona, 1896–2099.*  In prep. for *Nature
+(2026).  *Historical and Projected Freshwater Withdrawals and Irrigation
+Consumptive Use for Arizona, 1896–2099.*  In prep. for *Nature
 Scientific Data*.
 
 Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C.
