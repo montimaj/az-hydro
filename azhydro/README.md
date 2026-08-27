@@ -1035,6 +1035,16 @@ excluded.  All other holdouts use the full `YEAR_LIST` (1984–2024) and
 the pipeline-level `MIN_GW` threshold (`None` by default, which excludes
 zero-withdrawal pixels).
 
+Because `T1_Baseline` trains on a different year range and includes
+zero-withdrawal pixels, its metrics are **not comparable** with T1–T7 and
+it is excluded from the averaged metrics and plots
+(`pipeline.py`, "Exclude T1_Baseline from averages and plots").
+`Per_Holdout_Metrics.csv` therefore holds all eight configurations, while
+`Averaged_Metrics.csv` averages the seven T1–T7 runs only — the values
+reported in the manuscript's cross-strategy table.  Averaging all eight
+instead would raise the XGBRF temporal-holdout RMSE from 77.69 mm to
+99.98 mm, since `T1_Baseline` scores 256.01 mm on a zero-inclusive target.
+
 For each holdout, the model trains on the remaining years and is tested on
 the held-out period.  Per-holdout metrics are recorded, then averaged across
 all splits.  Heatmaps and bar plots (`vizops.plot_loo_heatmap()`,
@@ -3181,23 +3191,31 @@ register as canal pixels in the GEE-derived canal_density raster.
 Without the bypass, pre-CAP Parker showed 100 % GW (wrong — CRIT
 delivers ~720 kAF/yr Priority-1 SW from Colorado mainstem direct).
 
-**Per-basin GW-share cap at CO-direct basins** — required because
+**GW-share cap at CO-direct basins** — required because
 `irr_sw_rights_density` is sparse (4 pixels at Parker, 0 at Lake
 Havasu) and federal/tribal mainstem deliveries (CRIT, Yuma Project,
 Bullhead City) bypass the well registry entirely.  Without the cap,
 density-ratio drives `gw_share → 1` at these basins.
 
-| Basin | Cap (max GW share) | Implied SW floor | Rationale |
-|---|---|---|---|
-| **PARKER** | **0.15** | 85 % SW | CRIT senior Priority-1 rights ~720 kAF/yr ag-dominant; physical SW share 85-95 % |
-| **YUMA** | **0.10** | 90 % SW | Yuma Project + Cocopah/Quechan tribal deliveries; physical 90-98 % SW |
-| **LAKE MOHAVE** | **0.10** | 90 % SW | Bullhead City direct mainstem M&I, ~95-99 % SW physically |
-| LAKE HAVASU | 0.40 (default) | 60 % SW | Mixed M&I (Havasu City) + CAP intake; conservative |
-| DETRITAL VALLEY | 0.40 (default) | 60 % SW | Small basin, mixed M&I |
-| MEADVIEW | 0.40 (default) | 60 % SW | Small basin, mixed M&I |
+A **uniform** cap applies across the CO-direct set:
 
-The default `MAX_GW_SHARE_CO_DIRECT = 0.4` applies to any CO-direct
-basin not listed in `CO_DIRECT_BASIN_GW_CAP`.
+| Constant | Value | Applies to |
+|---|---|---|
+| `MAX_GW_SHARE_CO_DIRECT` | **0.10** (90 % SW floor) | PARKER, YUMA, LAKE MOHAVE, LAKE HAVASU, MEADVIEW, DETRITAL VALLEY |
+| `CO_DIRECT_BASIN_GW_CAP` | `{}` (empty) | per-basin overrides — none currently set |
+| `BASIN_GW_CAP` | `{'LOWER GILA': 0.25}` (75 % SW floor) | canal-served basins outside the CO-direct set |
+
+> **History (2026-04-23, commit `785bc84`).**  Earlier versions used
+> `MAX_GW_SHARE_CO_DIRECT = 0.4` with per-basin overrides
+> `{PARKER: 0.15, YUMA: 0.10, LAKE MOHAVE: 0.10}`.  Those were replaced
+> by the uniform 0.10 cap in the *same* commit that introduced the
+> per-basin GW **floors** (`BASIN_GW_FLOOR`,
+> `BASIN_IRR_GW_FLOOR_POST_CAP`, `BASIN_NI_GW_FLOOR_POST_CAP`) and the
+> era-mapped `GW_WEIGHT_*` ladder.  Per-basin discrimination moved from
+> the caps to the floors: the caps now bound the CO-direct basins
+> uniformly, while the floors carry basin-specific behaviour at the
+> canal-served AMA/INAs.  **All published rasters were generated with
+> the uniform 0.10 cap** (partition outputs written 2026-05-03).
 
 Caps are enforced **twice** — once on the raw density-ratio shares
 before per-pixel GW/SW assignment, and again on the FINAL per-pixel
@@ -3208,14 +3226,9 @@ without rebalancing GW share — at low-cf CO-direct basins
 (Meadview / Detrital Valley) the GW share inflated to 83-95 % at
 2020 without the final cap.
 
-The Parker / Yuma / Lake Mohave tighter caps were calibrated to
-historical evidence: Parker 1980 at the 0.4 cap produced 60 % SW
-(254 kAF) against a CRIT-dominated physical reality of ~85-95 % SW
-(360-400 kAF for the 425 kAF total); the 0.15 cap raises it to
-85 % SW (~360 kAF), within the right order of magnitude.  CRIT and
-Yuma Project deliveries that bypass wells entirely remain a known
-under-prediction (~150 kAF residual) documented as an unaccounted
-source in the source-attribution table.
+CRIT and Yuma Project deliveries that bypass wells entirely remain a
+known under-prediction (~150 kAF residual) documented as an
+unaccounted source in the source-attribution table.
 
 #### CAP-basin dynamic NonIrr cap + dynamic Irr floor + decoupled static floors (1985+)
 
@@ -4598,8 +4611,10 @@ model's statewide total now closes against ADWR's 7.0 MAF (2017)
 ADWR reports total statewide water use of ~7.0 MAF (2017), of which
 irrigated agriculture consumes approximately 72 % (as per ADWR 2019
 data) ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
-The model produces **6.84 MAF total** / **70.3 % irrigation share** for
-2017, matching both anchor numbers within 2.3 %.
+The model produces **6.81 MAF total** / **75.1 % irrigation share** for
+2017, within −2.7 % of the ADWR total.  Against the 2019 ADWR shares the
+model is +2.2 pp on irrigation and +4.9 pp on groundwater (manuscript
+Table 9).
 
 **Water budget reconciliation (2017).** Following the partition-side
 calibration session documented in the Calibration subsection (peak-year
@@ -4608,27 +4623,26 @@ direct basins, dual-gate basin-level canal-infrastructure gate, the
 auto-detect phantom-icap gate, and the restored cropland-proximity gate at
 year ≥ 1986), the model now captures the full statewide pumping
 volume directly without requiring an external federal-delivery offset.
-2017 model total = **6.84 MAF** vs ADWR's **7.0 MAF** — a gap of
-**−0.16 MAF (−2.3 %)**, well inside the model's σ_total interval
-(95 % CI ≈ 6.05–7.65 MAF).
+2017 model total = **6.81 MAF** vs ADWR's **7.0 MAF** — a gap of
+**−0.19 MAF (−2.7 %)**, well inside the model's σ_total interval
+(95 % CI ≈ 4.60–9.01 MAF).
 
-The Total_SW component (3.68 MAF in 2017) now folds in CAP, SRP, and
+The Total_SW component (3.75 MAF in 2017) now folds in CAP, SRP, and
 Yuma-area federal canal deliveries via the density-ratio partition
 augmented by the per-basin GW caps:
 
-- **Parker** (CRIT senior Priority-1 ~720 kAF/yr) is capped at
-  GW share ≤ 15 %, routing the Colorado mainstem deliveries to SW.
-- **Yuma** (Yuma Project + Cocopah/Quechan tribal deliveries) is
-  capped at GW share ≤ 10 %, routing Yuma-area federal deliveries
-  to SW.
-- **Lake Mohave** (Bullhead City direct mainstem M&I) is capped at
-  GW share ≤ 10 %.
-- **Lake Havasu / Detrital Valley / Meadview** retain the default
-  CO-direct cap of 0.40.
+- **All six CO-direct basins** (Parker, Yuma, Lake Mohave, Lake
+  Havasu, Detrital Valley, Meadview) are capped at GW share ≤ 10 %
+  (`MAX_GW_SHARE_CO_DIRECT = 0.10`), routing CRIT Priority-1,
+  Yuma Project and Bullhead City mainstem deliveries to SW.
+- **Lower Gila** is capped at GW share ≤ 25 %
+  (`BASIN_GW_CAP`), outside the CO-direct set.
 
-These caps were calibrated to match the ~85-95 % SW physical share at
-mainstem-direct basins, where federal/tribal canal deliveries bypass
-the ADWR Well Registry entirely.  Simultaneously, the basin-level dual-gate canal infrastructure gate
+The uniform 0.10 cap replaced the earlier per-basin scheme
+(Parker 0.15 / 0.40 default) in commit `785bc84`; see the
+GW-share cap section above.  It matches the ~85-95 % SW physical
+share at mainstem-direct basins, where federal/tribal canal
+deliveries bypass the ADWR Well Registry entirely.  Simultaneously, the basin-level dual-gate canal infrastructure gate
 (`canal coverage < 1 % of basin pixels OR mean canal_weighted_streamflow ≤ 0
 → collapse SW into GW`) zeroes phantom SW at GW-only basins like
 Willcox / Douglas / Joseph City / Lower Gila that were previously
@@ -4639,15 +4653,17 @@ Sacramento Valley / Big Sandy / Bill Williams — the basins with
 direct lake/river M&I intakes such as Page on Lake Powell or Bullhead
 City).
 
-Independent USGS / ADWR cross-checks (current run):
+Independent USGS / ADWR cross-checks, computed from the shipped
+`Full_Period_Time_Series.csv` and `Annual_Summaries/` outputs
+(identical to Table 9 of the manuscript):
 
 | Year | Source | Reported | Model | Δ | Notes |
 |---|---|---|---|---|---|
-| 2017 | ADWR Total | 7.00 MAF | 6.84 MAF | −0.16 (−2.3 %) | matches without federal offset |
-| 2015 | USGS Total GW | 3.09 MAF | 3.16 MAF | +0.07 (+2 %) | within model 95 % CI |
-| 2015 | USGS GW% | 46 % | 47 % | +1 pp | |
-| 2019 | ADWR GW% | 41 % | 47 % | +6 pp | |
-| 2019 | ADWR Irr% | 72 % | 69 % | −3 pp | |
+| 2017 | ADWR Total | 7.00 MAF | 6.81 MAF | −0.19 (−2.7 %) | matches without federal offset |
+| 2015 | USGS Total GW | 3.09 MAF | 2.96 MAF | −0.13 (−4.1 %) | within model 95 % CI |
+| 2015 | USGS GW% | 46 % | 44.3 % | −1.7 pp | |
+| 2019 | ADWR GW% | 41 % | 45.9 % | +4.9 pp | |
+| 2019 | ADWR Irr% | 72 % | 74.2 % | +2.2 pp | |
 | 1980 | USGS Total | 8.93 MAF | 8.43 MAF | −0.50 (−6 %) | within 95 % CI; peak-year ML floor |
 | 1980 | ADWR Total | 9.50 MAF | 8.43 MAF | −1.07 (−11 %) | ADWR > USGS by 0.57 |
 | 1955 | USGS Total | 8.09 MAF | 7.59 MAF | −0.50 (−6 %) | peak-year basin-MAX wd lift + AGRI/URBAN edge dilationos closed −1.30 → −0.50 MAF |
@@ -4665,9 +4681,10 @@ fall inside the model's 95 % σ_total ribbon.
 **Uncertainty around the reconciliation.**  The 2017 AZ-wide σ_total
 from the six-component UQ pipeline (linear sum across basins; see
 "σ_total — Combination of components and aggregation across space"
-for the rationale) is approximately **0.40 MAF** (≈ 5.8 % of the
-6.84 MAF model total), giving a 95 % confidence interval of roughly
-**6.05–7.65 MAF** on the model alone.  ADWR's reported 7.0 MAF lands
+for the rationale) is **1.13 MAF** (≈ 16.5 % of the
+6.81 MAF model total) as written to `Full_Period_Time_Series.csv`,
+giving a 95 % confidence interval of roughly **4.60–9.01 MAF** on the
+model alone.  ADWR's reported 7.0 MAF lands
 well inside this interval, **and the central model value matches ADWR
 within −2.3 % without any external offset**.  This is a substantial
 tightening relative to the prior framing that required a +2.26 MAF
@@ -4712,7 +4729,7 @@ from the eight legacy areas.  Predictions are then generated for every
 2 km pixel in Arizona, including the ~25 unmetered Other basins
 (basin type 2) — Yuma, Lower Gila, Parker, Lake Havasu, Bill Williams,
 Butler Valley, the Mogollon plateau basins, and others — for which
-**no per-well training labels exist anywhere**.  The 6.84 MAF (2017)
+**no per-well training labels exist anywhere**.  The 6.81 MAF (2017)
 model total therefore mixes in-sample-distribution AMA/INA predictions
 with out-of-distribution unmetered-basin predictions, and roughly 35-40 %
 of the statewide volume comes from the latter group (Yuma + Lower Gila
@@ -4939,8 +4956,8 @@ Key trends (current run):
 
   Note (post-fix): SW Withdrawal Volume above now folds CAP, SRP, and
   Yuma-area federal canal deliveries into Total_SW via the per-basin
-  GW caps at CO-river-direct basins (Parker GW ≤ 15 %, Yuma GW ≤ 10 %,
-  Lake Mohave GW ≤ 10 %).  Yuma 2017 Total_SW = 434 kAF — substantially
+  GW cap at CO-river-direct basins (uniform GW ≤ 10 % at Parker,
+  Yuma, Lake Mohave, Lake Havasu, Detrital Valley and Meadview).  Yuma 2017 Total_SW = 434 kAF — substantially
   higher than the prior 148 kAF (which was only the well-routed SW
   share), and consistent with the basin's full surface-water economy
   including the ~720 kAF/yr of Yuma Project + Cocopah/Quechan tribal
@@ -5002,7 +5019,7 @@ Key trends (current run):
   (linear sum across basins; see σ_total aggregation subsection for
   why linear sum is correct under shared ensemble members) is
   **~5–6 % of the mean predicted withdrawal during the 1984–2025
-  historical period** (e.g. ~0.40 MAF σ on a 6.84 MAF mean at 2017),
+  historical period** (e.g. ~1.13 MAF σ on a 6.81 MAF mean at 2017),
   rising to **~6–9 % over the 2026–2099 projection** (e.g. ~0.72 MAF
   on 8.04 MAF at 2099) as σ_LULC and σ_MACA begin to contribute, and
   reaching **~16–22 % in the peak-pumping pre-CAP era (1950–1984)**

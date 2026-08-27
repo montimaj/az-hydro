@@ -694,10 +694,10 @@ CO_DIRECT_BASIN_GW_CAP: dict[str, float] = {}
 def _co_direct_gw_cap_array(basin_names: np.ndarray) -> np.ndarray:
     """Return per-pixel GW-share cap for CO-river-direct basins.
 
-    Default cap is ``MAX_GW_SHARE_CO_DIRECT`` (0.4) for every CO-direct
-    basin not listed in ``CO_DIRECT_BASIN_GW_CAP``.  Per-basin overrides
-    apply at Parker / Yuma / Lake Mohave (ag- or M&I-mainstem-dominant
-    basins where physical SW share is 85-99 %).  Pixels in non-CO-direct
+    Every CO-direct basin receives ``MAX_GW_SHARE_CO_DIRECT`` (0.10).
+    ``CO_DIRECT_BASIN_GW_CAP`` holds per-basin overrides and is currently
+    empty, so the cap is uniform across Parker / Yuma / Lake Mohave /
+    Lake Havasu / Meadview / Detrital Valley.  Pixels in non-CO-direct
     basins receive a sentinel of ``np.inf`` (no cap) so callers can
     apply the cap unconditionally via ``np.minimum``.
     """
@@ -1203,7 +1203,7 @@ PHANTOM_M_TOTAL = 12.0
 # AGRI threshold drops sharply during the 1951–1955 drilling boom.
 # Physically: ag-well drilling grew modestly 1938→1951 (threshold 0.60
 # → 0.40), then exploded during the 1951–1955 peak (threshold crashes
-# 0.40 → 0.15 as farmers drilled on any marginal ag land). Post-1955
+# 0.40 → 0.08 as farmers drilled on any marginal ag land). Post-1955
 # the effective threshold recovers to a 0.30 plateau by 1960.
 PHANTOM_AGRI_THRESHOLD_EARLY = 0.60    # 1938
 PHANTOM_AGRI_THRESHOLD_MID = 0.40      # 1951 (pre-boom)
@@ -1251,7 +1251,7 @@ def _phantom_canal_include(year: int) -> float:
 
 
 def _phantom_agri_threshold(year: int) -> float:
-    """Three-segment V: 0.60 (1938) → 0.40 (1951) → 0.15 (1955) → 0.30 (1960+)."""
+    """Three-segment V: 0.60 (1938) → 0.40 (1951) → 0.08 (1955) → 0.30 (1960+)."""
     if year < PHANTOM_K_RAMP_UP_START:
         return PHANTOM_AGRI_THRESHOLD_EARLY
     if year < PHANTOM_AGRI_BOOM_START:
@@ -1264,7 +1264,7 @@ def _phantom_agri_threshold(year: int) -> float:
             + frac * (PHANTOM_AGRI_THRESHOLD_MID - PHANTOM_AGRI_THRESHOLD_EARLY)
         )
     if year < PHANTOM_K_RAMP_UP_END:
-        # 1951→1955: sharp drop 0.40 → 0.15 (drilling boom)
+        # 1951→1955: sharp drop 0.40 → 0.08 (drilling boom)
         frac = (year - PHANTOM_AGRI_BOOM_START) / float(
             PHANTOM_K_RAMP_UP_END - PHANTOM_AGRI_BOOM_START,
         )
@@ -2716,9 +2716,9 @@ def partition_predictions(
     # represented in the raster (Parker / Lake Havasu have near-zero
     # sw_rights pixels despite real CRIT / mainstem SW access, so
     # density ratio naturally produces gw_share = 1 there).
-    # Cap is per-pixel and per-basin: ag-dominant CRIT (Parker 0.15)
-    # and Yuma Project (Yuma 0.10) basins use tighter caps than the
-    # 0.40 default for M&I-dominant Lake Havasu / Detrital / Meadview.
+    # Cap is uniform across the CO-direct set (0.10) since commit
+    # 785bc84; per-basin discrimination now lives in the GW *floors*
+    # (BASIN_GW_FLOOR et al.) rather than in these caps.
     if basin_names is not None:
         co_gw_cap = _co_direct_gw_cap_array(basin_names)
         basin_cap = _basin_gw_cap_array(basin_names)
@@ -3022,9 +3022,9 @@ def partition_predictions(
     # canal-heavy basins, disappears excess into desert via cf
     # weighting), and the net effect at low-cf CO-direct basins
     # (Meadview / Detrital Valley) is to inflate the GW share back to
-    # ~80-95 % at 2020.  Final cap re-enforces the per-basin floor:
-    # Parker 0.15 GW / 0.85 SW, Yuma 0.10 / 0.90, Lake Mohave 0.10 /
-    # 0.90, Lake Havasu / Detrital / Meadview 0.40 / 0.60.
+    # ~80-95 % at 2020.  Final cap re-enforces the uniform CO-direct
+    # bound of 0.10 GW / 0.90 SW, plus BASIN_GW_CAP at Lower Gila
+    # (0.25 GW / 0.75 SW).
     if basin_names is not None:
         co_gw_cap_final = _co_direct_gw_cap_array(basin_names)
         # Combine with non-CO-direct basin caps (Lower Gila / Ranegras Plain).
