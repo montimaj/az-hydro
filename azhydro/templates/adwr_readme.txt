@@ -31,11 +31,11 @@ archive plus the relevant companion paper(s):
 
    Sci Data data paper (in preparation):
 
-   Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C.,
-   Tadych, D.E., & Meeker, L. (2026).  Historical and projected
+   Majumdar, S., Smith, R., ReVelle, P., Hasan, M. F., Wogenstahl, C.,
+   Tadych, D., & Meeker, L. (2026).  Historical and projected
    freshwater withdrawals and irrigation consumptive use for
-   Arizona, 1896-2099.
-   In prep. for Nature Scientific Data.
+   Arizona, 1896-2099.  In preparation for Nature Scientific Data.
+   Preprint at https://doi.org/10.31223/X56N63
 
 
    AGU Earth's Future analysis paper (in preparation):
