@@ -791,7 +791,7 @@ sidePanel.add(legendPanel);
 // ── Footer ───────────────────────────────────────────────────────────
 sidePanel.add(ui.Label('—', {margin: '12px 0 4px 0', color: '#aaa'}));
 sidePanel.add(ui.Label(
-  'Citation: Majumdar et al. (2026), Zenodo DOI 10.5281/zenodo.19057936',
+  'Citation: Majumdar et al. (2026), Zenodo DOI 10.5281/zenodo.19057935',
   {fontSize: '10px', color: '#777'}
 ));
 sidePanel.add(ui.Label(
@@ -1366,7 +1366,7 @@ function capClickReadout(pt, coords, side) {
     ));
   });
 
-  // 5th panel: per-basin cumulative ΔGW time series across all 7
+  // 5th panel: per-basin cumulative ΔGW time series across all 8
   // scenarios (data: Outputs/.../CAP_Scenario/CAP_Scenario_Cumulative.csv,
   // uploaded as a non-spatial table — see gee/upload_cap_cumulative.sh).
   addCapBasinScenarioChart(pt);
