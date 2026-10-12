@@ -1,5 +1,5 @@
 """
-Export bias-corrected USGS Reitz Ensemble ET as monthly GEE assets for 1896-1999.
+Export bias-corrected USGS Reitz Ensemble ET as monthly GEE assets for 1896-01 to 2018-09.
 
 For each year, applies the pre-exported OpenET/Reitz ratio to Reitz ET
 to produce bias-corrected monthly ET grids.
@@ -10,7 +10,7 @@ Asset: projects/azhydro/assets/usgs_adjusted_et/ (1896-01 to 2018-09)
 
 Usage:
     conda activate azhydro
-    python export_usgs_adjusted_et.py [--start-year 1896] [--end-year 1999] [--no-wait]
+    python export_usgs_adjusted_et.py [--start-year 1896] [--end-year 2018] [--no-wait]
 """
 
 import logging

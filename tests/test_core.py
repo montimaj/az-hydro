@@ -219,6 +219,11 @@ class TestComputeSwFraction:
 
 
 class TestPartitionPredictions:
+    # partition_predictions retains pixels by era: before 1922 a pixel needs
+    # wells AND mapped cropland or urban land, so the fixture carries LULC
+    # fractions and each conservation test runs in several eras.
+    ERAS = (1920, 1960, 1990, 2020)
+
     def _make_inputs(self, n=25):
         predictions = np.full(n, 100.0)
         raster_shape = (5, 5)
@@ -228,40 +233,58 @@ class TestPartitionPredictions:
             'annual_irr_fraction': np.full(n, 0.6),
             'annual_gw_fraction': np.full(n, 0.7),
             'canal_density': np.full(n, 0.5),
+            'annual_crop_fraction': np.full(n, 0.5),
+            'annual_urban_fraction': np.full(n, 0.1),
         })
         return predictions, year_df, raster_shape, valid_mask
 
-    def test_returns_all_categories(self):
+    def _partition(self, year):
         predictions, year_df, raster_shape, valid_mask = self._make_inputs()
-        result = partition_predictions(predictions, year_df, raster_shape, valid_mask)
+        result = partition_predictions(predictions, year_df, raster_shape,
+                                       valid_mask, year=year)
+        assert not np.isnan(result['Irrigation']).any(), year
+        return predictions, result
+
+    def test_returns_all_categories(self):
+        _, result = self._partition(2020)
         assert set(result.keys()) == set(CATEGORIES)
 
-    def test_irr_plus_nonirr_equals_total(self):
-        predictions, year_df, raster_shape, valid_mask = self._make_inputs()
-        result = partition_predictions(predictions, year_df, raster_shape, valid_mask)
+    @pytest.mark.parametrize('year', ERAS)
+    def test_irr_plus_nonirr_equals_total(self, year):
+        predictions, result = self._partition(year)
         np.testing.assert_allclose(
             result['Irrigation'] + result['Non_Irrigation'],
             predictions,
             rtol=1e-10,
         )
 
-    def test_gw_plus_sw_equals_total(self):
-        predictions, year_df, raster_shape, valid_mask = self._make_inputs()
-        result = partition_predictions(predictions, year_df, raster_shape, valid_mask)
+    @pytest.mark.parametrize('year', ERAS)
+    def test_gw_plus_sw_equals_total(self, year):
+        predictions, result = self._partition(year)
         np.testing.assert_allclose(
             result['Total_GW'] + result['Total_SW'],
             predictions,
             rtol=1e-10,
         )
 
-    def test_irr_gw_plus_irr_sw_equals_irr(self):
-        predictions, year_df, raster_shape, valid_mask = self._make_inputs()
-        result = partition_predictions(predictions, year_df, raster_shape, valid_mask)
+    @pytest.mark.parametrize('year', ERAS)
+    def test_irr_gw_plus_irr_sw_equals_irr(self, year):
+        _, result = self._partition(year)
         np.testing.assert_allclose(
             result['Irrigation_GW'] + result['Irrigation_SW'],
             result['Irrigation'],
             rtol=1e-10,
         )
+
+    def test_pre_1922_without_lulc_gives_nan(self):
+        # Pre-1922 retention needs mapped cropland or urban land; without
+        # LULC columns no pixel is kept.
+        predictions, year_df, raster_shape, valid_mask = self._make_inputs()
+        year_df = year_df.drop(columns=['annual_crop_fraction',
+                                        'annual_urban_fraction'])
+        result = partition_predictions(predictions, year_df, raster_shape,
+                                       valid_mask, year=1910)
+        assert np.all(np.isnan(result['Irrigation']))
 
     def test_zero_well_density_gives_nan(self):
         n = 25
@@ -274,7 +297,8 @@ class TestPartitionPredictions:
             'annual_gw_fraction': np.full(n, 0.7),
             'canal_density': np.full(n, 0.5),
         })
-        result = partition_predictions(predictions, year_df, raster_shape, valid_mask)
+        result = partition_predictions(predictions, year_df, raster_shape,
+                                       valid_mask, year=1910)
         assert np.all(np.isnan(result['Irrigation']))
 
 

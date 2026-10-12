@@ -28,7 +28,10 @@ logger = logging.getLogger(__name__)
 # For unnamed canals not matched here, a spatial nearest-neighbor join
 # to HarDWR irrigation SW PODs provides the priority-date fallback.
 CANAL_FIRST_DELIVERY: list[tuple[str, int]] = [
-    # SRP / Arizona Canal system — original Phoenix canals from 1868
+    # SRP / Arizona Canal system — original Phoenix canals from 1868: a private
+    # canal company formed in December 1867 and 15 canals were dug across the
+    # Salt River Valley between 1868 and 1912 (Autobee, 1993, The Salt River
+    # Project, Bureau of Reclamation History Program; usbr.gov/projects/pdf.php?id=183).
     (r'Arizona Canal|South Canal|Grand Canal|Western Canal|Eastern Canal'
      r'|Consolidated Canal|Highline|Crosscut Canal', 1868),
     # Roosevelt Canal — associated with Roosevelt Dam (1911)

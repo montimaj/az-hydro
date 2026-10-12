@@ -8,7 +8,7 @@ Pipeline: ML (XGBRF) + density-ratio partition + 6-component
          per-well ADWR meter records 1984-2024; predictions
          span 1896-2099 at 2 km grid resolution.
 
-Source:  Zenodo deposit DOI 10.5281/zenodo.19057936
+Source:  Zenodo deposit DOI 10.5281/zenodo.19057935 (version 1.2)
          (full citations listed below).
 
 
@@ -21,27 +21,27 @@ archive plus the relevant companion paper(s):
 
    Data archive (this Zenodo deposit):
 
-   Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., &
-   Wogenstahl, C. (2026).  AZ-Hydro -- Historical and Projected
+   Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C.,
+   Tadych, D.E., & Meeker, L. (2026).  AZ-Hydro -- Historical and Projected
    Arizona Annual Water Use: Software, Input Data, Models,
    Raster and Well Package Predictions, and Validation at 2 km
    Resolution (1896-2099).  Zenodo.
-   https://doi.org/10.5281/zenodo.19057936
+   https://doi.org/10.5281/zenodo.19057935
 
 
    Sci Data data paper (in preparation):
 
-   Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., &
-   Wogenstahl, C. (2026).  Historical and projected groundwater/
-   surface-water withdrawals, irrigation consumptive use, and
-   pumping-induced surface water capture for Arizona, 1896-2099.
+   Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C.,
+   Tadych, D.E., & Meeker, L. (2026).  Historical and projected
+   freshwater withdrawals and irrigation consumptive use for
+   Arizona, 1896-2099.
    In prep. for Nature Scientific Data.
 
 
    AGU Earth's Future analysis paper (in preparation):
 
-   Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., &
-   Wogenstahl, C. (2026).  Where Arizona's Water Goes: Declining
+   Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C.,
+   Tadych, D.E., & Meeker, L. (2026).  Where Arizona's Water Goes: Declining
    Agricultural Dominance and Rising Urban Demand Drive a
    Two-Century Shift in Withdrawal Patterns (1896-2099).  In
    prep. for AGU Earth's Future.
@@ -67,13 +67,15 @@ Categories (8 total = 7 partition outputs + Irrigation CU):
    8. Irrigation_CU       -- irrigation consumptive use
                             (= Irrigation x Irrigation Efficiency)
 
-Internal partition identities (true at every basin and every year):
+Internal partition identities (hold at every basin and every year,
+within rounding):
 
    Total_Predicted   = Total_GW + Total_SW
    Total_Predicted   = Irrigation + Non_Irrigation
    Total_GW          = Irrigation_GW + Non_Irrigation_GW
    Total_SW          = Irrigation_SW + Non_Irrigation_SW
-   Irrigation_CU     = Irrigation x basin-mean Irrigation Efficiency
+   Irrigation_CU     = Irrigation x Irrigation Efficiency (USGS NHM
+                       basin-level efficiency, applied per pixel)
 
 Spatial levels:
 
@@ -110,12 +112,12 @@ Subbasin level (~82 subbasins x 1896-2099 = up to ~16,700 rows each):
    Subbasin_Non_Irrigation_SW.csv
    Subbasin_Irrigation_CU.csv
 
-Note: Row counts vary by category.  Basins/subbasins outside an
-irrigation footprint contribute no rows to Irrigation_* / CU files,
-and basins outside the surface-water-rights envelope contribute no
-rows to *_SW files in pre-rights years.  This is partition behavior,
-not data loss: the omitted (basin, year, category) combinations are
-structural zeros.
+Note: Row counts vary by category.  The *_SW files list every
+(basin, year) combination, with explicit zero rows where there is no
+surface water.  The Total_Predicted, *_GW and Irrigation_CU files omit
+(basin, year) combinations with no predicted withdrawal (for example,
+AGUA FRIA has no rows before 1922).  A missing row means zero; it is
+not missing data.
 
 
 ----------------------------------------------------------------
@@ -127,13 +129,14 @@ Basin files (7 columns):
    Year            -- integer, 1896-2099
    Basin           -- ADWR basin name (e.g. "PHOENIX AMA",
                       "TUCSON AMA", "AGUA FRIA")
-   Mean_Depth_mm   -- area-weighted mean withdrawal depth over
-                      all pixels in the basin (mm)
+   Mean_Depth_mm   -- mean withdrawal depth over the basin's
+                      active pixels, i.e. 2 km pixels with at least
+                      5 mm of predicted withdrawal that year (mm)
    Mean_Depth_ft   -- same as Mean_Depth_mm but in feet
    Volume_m3       -- total annual volume in cubic meters
    Volume_AF       -- total annual volume in acre-feet
-   Era             -- era label (Hindcast 1896-1979,
-                      Historical 1980-2025, Projection 2026-2099)
+   Era             -- era label (Hindcast 1896-1983,
+                      Historical 1984-2025, Projection 2026-2099)
 
 Subbasin files (8 columns):
 
@@ -149,19 +152,20 @@ Subbasin files (8 columns):
 Era definitions
 ----------------------------------------------------------------
 
-   Hindcast   1896-1979   Pre-meter-era model retrodiction
-                          calibrated against USGS Circulars
-                          1950-1980 statewide totals.
-   Historical 1980-2025   Period covered by (or directly adjacent
-                          to) ADWR meter records.  1984-2024 is
-                          the metered training window; 1980-1983
-                          and 2025 lean on USGS Circulars and
-                          ADWR Annual Reports for tuning anchors
-                          and on the latest observed climate /
-                          LULC inputs.
-   Projection 2026-2099   Forward predictions driven by MACA-
-                          downscaled CMIP5 climate (5 GCMs) and
-                          USGS FORE-SCE LULC scenarios.
+   Hindcast   1896-1983   Before the ADWR meter record; model
+                          retrodiction checked against USGS OFR
+                          94-476 (1915-1990) and USGS Circular
+                          statewide totals.
+   Historical 1984-2025   ADWR meter era.  1984-2024 is the metered
+                          training window; 2025 uses the latest
+                          observed climate and land-use inputs.
+   Projection 2026-2099   Forward predictions driven by the MACA v2
+                          CMIP5 ensemble mean (20 GCMs x RCP 4.5 and
+                          8.5), the USGS FORE-SCE land-use scenario
+                          mode, USBR streamflow projections, and the
+                          CAP shortage set by the 2027-2028 Operating
+                          Guidelines, held through 2099 as an
+                          assumption.
 
 
 ----------------------------------------------------------------
@@ -189,20 +193,22 @@ Excel:
 Sanity checks
 ----------------------------------------------------------------
 
-The following identities should hold to within partition-rounding
-noise (sub-1% mismatch in some basins/years; aggregated totals
-agree to >99.9%):
-
-   Sum over basins of Basin_Total_GW.csv[Volume_AF, year=Y]
-       == statewide annual Total_GW for year Y (in
-       Outputs/.../Annual_Summaries/Total_GW.csv).
+Within each file the following hold per row (matched on Year +
+Basin, treating a missing row as zero), to rounding:
 
    Basin_Irrigation_GW.csv + Basin_Non_Irrigation_GW.csv
-       == Basin_Total_GW.csv (per-row sum, matched on
-       Year + Basin).
+       == Basin_Total_GW.csv
 
    Basin_Total_GW.csv + Basin_Total_SW.csv
-       == Basin_Total_Predicted.csv (per-row sum).
+       == Basin_Total_Predicted.csv
+
+Summing basins does NOT reproduce the statewide total exactly.  Each
+basin total includes every 2 km pixel that touches the basin
+polygon, so pixels on a shared boundary count in both basins, and
+the sum over the 52 basins exceeds the statewide total by about
+2-3 % (e.g. 2020 Total_GW: 3.28 MAF summed over basins vs 3.16 MAF
+statewide).  For statewide totals use
+Outputs/.../Annual_Summaries/Total_<category>.csv.
 
 
 ----------------------------------------------------------------
@@ -217,14 +223,14 @@ disaggregation are in the Zenodo deposit at the DOI cited above.
 
 Files of interest in the Zenodo deposit:
 
-   az-hydro-headline.7z                ~8.8 GB
+   az-hydro-headline.7z                ~8.7 GB
        Predicted_Rasters/, Total_GW_Rasters/, Total_SW_Rasters/,
        Irrigation_GW_Rasters/, Irrigation_SW_Rasters/, ... and
        Well_Package/ -- the per-pixel and per-well published
        products with full uncertainty.
        Recommended starting point.
 
-   az-hydro-data.7z                    ~74 GB
+   az-hydro-data.7z                    ~80 GB
        Full reproducibility archive (raw inputs + Step 2
        cross-validation + intermediate predictor stacks +
        per-component sigma rasters).
@@ -235,25 +241,31 @@ Methodology summary
 ----------------------------------------------------------------
 
 Step 1.  XGBRF model trained on per-well ADWR meter records (1984-
-         2024) using 16 predictor bands (climate, ET, Peff,
-         irrigation fraction, well density, canal density, water-
-         rights density, etc.) at 2 km grid resolution.
+         2024) using 22 predictors (climate, ET, effective
+         precipitation, land-cover fractions and densities,
+         irrigated and groundwater-irrigation fractions, soils,
+         water-table depth, well, surface-water-rights and canal
+         densities, watershed streamflow, coordinates) at 2 km
+         grid resolution.
 
 Step 2.  Density-ratio partition decomposes the total prediction
-         into Irrigation/Non-Irrigation x GW/SW using era-mapped
-         factors anchored to USGS Circulars 1950-2015 and ADWR
-         Annual Reports 2016-2024.
+         into Irrigation/Non-Irrigation x GW/SW.  The few free
+         partition parameters were tuned to statewide records:
+         USGS OFR 94-476 (1915-1990), USGS Circulars (1950-2015),
+         ADWR Annual Report totals and the 2019 ADWR shares.  The
+         ML totals are never adjusted.
 
 Step 3.  Six-component quadrature uncertainty:
-         sigma_MACA   (5 GCMs)
+         sigma_MACA   (5 GCMs; 2026-2099)
          sigma_Model  (10 XGBRF random seeds, t-corrected)
-         sigma_LULC   (4 USGS FORE-SCE scenarios)
-         sigma_USBR   (5 CMIP3 Upper Colorado streamflow members,
-                      t-corrected)
+         sigma_Irr    (irrigated-area input; 1896-2025)
+         sigma_LULC   (4 USGS FORE-SCE scenarios; 2026-2099)
          sigma_GW     (5 recent ADWR Well Registry snapshots,
                       t-corrected)
-         sigma_CU     (analytic propagation through Irrigation
-                      Efficiency)
+         sigma_USBR   (5 CMIP3 Upper Colorado streamflow members,
+                      t-corrected; 1950-2099)
+         Consumptive-use uncertainty (sigma_CU) is propagated
+         from these through the irrigation efficiency.
 
 Step 4.  Validation against USGS NHM (Haynes 2023, Martin 2025),
          USGS public-supply reanalysis (Luukkonen 2023), Reitz ET
@@ -265,19 +277,18 @@ Step 4.  Validation against USGS NHM (Haynes 2023, Martin 2025),
 Validation summary
 ----------------------------------------------------------------
 
-Statewide-anchor matches (independent or partially-calibrated):
+Statewide agency reconciliation (the partition was tuned to these
+records, so they show calibration adequacy, not an independent test):
 
-   2016 ADWR Total           model 6.72 MAF vs ADWR ~7.0 MAF
-                             (within -0.28 MAF)
-   2017 ADWR Total           model 6.81 MAF vs ADWR ~7.0 MAF
-                             (within -0.19 MAF, model 95% CI
-                             brackets the anchor)
-   2017 ADWR GW share        model 44.9% vs ADWR 41% (within 4 pp)
-   2015 USGS GW pumping      model 2.96 MAF vs USGS 3.09 MAF
-                             (within -0.13 MAF)
-   2019-20 ADWR irrigation
-   share                     model 73.8% (2-year mean) vs ADWR 74%
-                             (essentially exact)
+   2017 ADWR total           model 6.81 MAF vs ADWR 7.00 MAF (-2.7 %)
+   2015 USGS GW withdrawal   model 2.96 MAF vs USGS 3.09 MAF (-4.1 %)
+   2019 ADWR GW share        model 45.9 % vs ADWR 41 %
+   2019 ADWR irrigation
+   share                     model 74.2 % vs ADWR 72 %
+
+Independent checks against USGS NHM, USGS Reitz, the USGS public-
+supply reanalysis, and CAP and SRP delivery records are described
+in the Sci Data paper.
 
 
 ----------------------------------------------------------------

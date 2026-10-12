@@ -82,7 +82,7 @@ The export pipeline harmonizes multiple heterogeneous data sources into temporal
     └─────────────────────────────────────────────────────────────┘
 ```
 
-- **1896–1999 (Reitz → OpenET scale):** USGS Reitz Ensemble ET ([Reitz et al., 2023](https://doi.org/10.1029/2022WR034012)) is available as mm/day. It is converted to mm/month, then multiplied by a monthly OpenET/Reitz ratio derived from the 2000–2018 overlap period (228 paired monthly images). The ratio for each calendar month is averaged across all overlapping years to produce 12 climatological ratio grids, ensuring the Reitz ET is scaled to match the magnitude and spatial patterns of OpenET.
+- **1896–1999 (Reitz → OpenET scale):** USGS Reitz Ensemble ET ([Reitz et al., 2023](https://doi.org/10.1029/2022WR034012)) is available as mm/day. It is converted to mm/month, then multiplied by a monthly OpenET/Reitz ratio derived from the 2000–2018 overlap period (225 paired monthly images, January 2000 to September 2018). The ratio for each calendar month is averaged across all overlapping years to produce 12 climatological ratio grids, ensuring the Reitz ET is scaled to match the magnitude and spatial patterns of OpenET.
 
 - **2000–2025 (OpenET, native):** OpenET Ensemble v2.0/v2.1 ([Melton et al., 2022](https://doi.org/10.1111/1752-1688.12956); [Volk et al., 2024](https://doi.org/10.1038/s44221-023-00181-7)) (`et_ensemble_mad`) is used directly. Monthly ET is computed by summing all OpenET images within each calendar month.
 
@@ -178,7 +178,7 @@ Two external datasets — [Reitz Ensemble ET](https://doi.org/10.5066/P9EZ3VAS) 
 **Purpose:** Bias-correct USGS [Reitz Ensemble ET (Reitz et al., 2023)](https://doi.org/10.5066/P9EZ3VAS) (1896–1999) to be consistent with [OpenET (Melton et al., 2022)](https://doi.org/10.1111/1752-1688.12956) (2000–2025).
 
 **Method:**
-1. Build monthly OpenET ET for 2000–2018 by summing daily OpenET v2.0 images per month (band `et_ensemble_mad`).
+1. Load monthly OpenET ET for 2000–2018 from the OpenET v2.0 monthly collection (`OpenET/ENSEMBLE/CONUS/GRIDMET/MONTHLY/v2_0`, band `et_ensemble_mad`).
 2. Load USGS Reitz Ensemble ET (`projects/nwi-usgs/assets/USGS-Reitz-Ensemble-ET`) for 2000–2018. Convert from mm/day to mm/month by multiplying by the number of days in each month.
 3. Inner join on both `month` AND `year`.
 4. Compute per-pixel ratio: $\text{ratio} = \frac{\text{OpenET ET}}{\text{Reitz ET}}$.
@@ -464,7 +464,7 @@ GEE enforces a 3,000-task queue limit. `export_image()` automatically calls `_wa
 | `get_export_parser(description)` | Argparse with `--start-year`, `--end-year`, `--no-wait` |
 | `calc_prism_monthly_eto(img)` | Hargreaves PET from PRISM tmax/tmin |
 | `build_openet_monthly_et_ic()` | Monthly OpenET ET 2000–2025 |
-| `build_daily_maca_ensemble(year)` | Daily MACA ensemble for one year (legacy, used by `dataops.py`) |
+| `build_daily_maca_ensemble(year)` | Daily MACA ensemble for one year (legacy; not called by the current scripts) |
 | `build_daily_maca_single(year, model, scenario)` | Daily MACA data for one GCM/scenario |
 | `MACA_REPRESENTATIVE_GCMS` | 5 GCMs spanning hot-dry/hot-wet/cool-dry/cool-wet/median for uncertainty quantification |
 
@@ -507,7 +507,7 @@ Since every day has exactly one image per model/scenario pair, `.mean()` across 
 
 **Live app:** [AZ-Hydro Explorer](https://azhydro.projects.earthengine.app/view/azhydro-explorer) — published GEE App backed by the assets and the visualizer described below.
 
-The scripts above export **inputs** consumed by the modeling pipeline.  The files below ingest the modeling pipeline's **outputs** (`Data/Outputs/.../Full_Prediction_XGBRF/`) into GEE and serve them through an interactive visualizer.  All assets land under `projects/azhydro/assets/az-wu/`.
+The scripts above export **inputs** consumed by the modeling pipeline.  The files below ingest the modeling pipeline's **outputs** (`Data/Outputs/.../Full_Prediction_XGBRF/`) into GEE and serve them through an interactive visualizer.  All assets land under `projects/azhydro/assets/az-wu-v1-2/`.
 
 The pipeline uses two distinct upload paths:
 - **Rasters** → `geeup upload` (handles ImageCollections via `metadata.csv` files).
@@ -520,12 +520,12 @@ The pipeline uses two distinct upload paths:
 | [`generate_geeup_metadata.py`](generate_geeup_metadata.py) | Walk `gee/Data/`, write per-leaf `metadata.csv` files (`id_no`, `system:time_start`, `year`, `unit`, `category`, `asset_collection`).  Detects unit-parent dirs (`Depth_mm`/`Depth_ft`/`Volume_m3`/`Volume_AF`) and consolidates the four unit conventions into a **single** ImageCollection per category, tagging each image with a `unit` property the visualizer filters on. |
 | [`upload_to_gee.sh`](upload_to_gee.sh) | Batch raster upload.  Iterates every `metadata.csv`, runs `geeup upload --workers 10 --resume` on each.  Per-source logs in `gee/upload_logs/`.  Supports `--dry-run` and `--filter <pattern>`. |
 | [`pivot_to_csv.py`](pivot_to_csv.py) | Pivot the Well_Package long-format GeoParquet (170,137 wells × 204 years × 15 categories, ~2.1 GB) into 15 per-category CSVs at `gee/Data/Well_Package/csv/Well_Package__<Cat>.csv`.  Each row carries a `.geo` column (GeoJSON Point), `REGISTRY_I`, `WATER_USE`, plus year-stamped property columns (`<Cat>_AF_<year>`, `<Cat>_AF_sigma_<year>`) — ~412 properties / row.  Paths anchored to the script location, so it runs from any cwd.  ~5–10 min per category on 64 GB RAM. |
-| [`upload_well_package.sh`](upload_well_package.sh) | Loops the 15 CSVs: `gsutil cp` to `gs://azhydro/Well_Package__<Cat>.csv`, then `earthengine upload table --asset_id=projects/azhydro/assets/az-wu/Well_Package__<Cat>` to ingest each.  Per-stage log: `gee/upload_logs/Well_Package_upload.log`.  `--dry-run` and `--filter <pattern>` flags.  Cleanup hint at the end (`gsutil -m rm`). |
-| [`pivot_cap_cumulative.py`](pivot_cap_cumulative.py) | Pivot `Data/Outputs/.../CAP_Scenario/CAP_Scenario_Cumulative.csv` (long format, ~27 k rows) into a wide-format CSV with `.geo` column: 364 features (52 basin polygons × 7 scenarios), `Cum_<year>` columns covering 2026–2099, basin centroid as the geometry. |
-| [`upload_cap_cumulative.sh`](upload_cap_cumulative.sh) | Stage the CSV to `gs://azhydro/CAP_Scenario_Cumulative.csv` and ingest as `projects/azhydro/assets/az-wu/CAP_Scenario_Cumulative`.  The visualizer reads this asset on every CAP click to chart all 7 scenarios for the basin. |
+| [`upload_well_package.sh`](upload_well_package.sh) | Loops the 15 CSVs: `gsutil cp` to `gs://azhydro/Well_Package__<Cat>.csv`, then `earthengine upload table --asset_id=projects/azhydro/assets/az-wu-v1-2/Well_Package__<Cat>` to ingest each.  Per-stage log: `gee/upload_logs/Well_Package_upload.log`.  `--dry-run` and `--filter <pattern>` flags.  Cleanup hint at the end (`gsutil -m rm`). |
+| [`pivot_cap_cumulative.py`](pivot_cap_cumulative.py) | Pivot `Data/Outputs/.../CAP_Scenario/CAP_Scenario_Cumulative.csv` (long format, ~31 k rows) into a wide-format CSV with `.geo` column: 416 features (52 basin polygons × 8 scenarios), `Cum_<year>` columns covering 2026–2099, basin centroid as the geometry. |
+| [`upload_cap_cumulative.sh`](upload_cap_cumulative.sh) | Stage the CSV to `gs://azhydro/CAP_Scenario_Cumulative.csv` and ingest as `projects/azhydro/assets/az-wu-v1-2/CAP_Scenario_Cumulative`.  The visualizer reads this asset on every CAP click to chart all 8 scenarios for the basin. |
 | [`cap_service_area_to_csv.py`](cap_service_area_to_csv.py) | Convert the CAP service-area polygon GeoJSON (3 polygons, MARICOPA / PIMA / PINAL) into `gee/Data/CAP/CAP.csv` with a `.geo` GeoJSON-string column (polygon geometry preserved exactly). |
-| [`upload_cap_service_area.sh`](upload_cap_service_area.sh) | Stage to `gs://azhydro/CAP.csv` and ingest as `projects/azhydro/assets/az-wu/CAP`.  Asset is consumed by the visualizer as the CAP-eligible county overlay layer. |
-| [`azhydro-visualizer.js`](azhydro-visualizer.js) | GEE Apps interactive visualizer.  Year slider 1896–2099, category / unit / band dropdowns, manual color-stretch override (auto-fills with the 2nd / 98th percentile of the current image), click-driven pixel + basin + sub-basin time series with **prediction + 95 % CI envelope** on every chart, plus a **nearest-well** chart pulled from the Well_Package FeatureCollections (capacity-disaggregated per-well values; AF → selected unit converted client-side).  **Side-by-side comparison** via the Compare toggle: `ui.SplitPanel` with linked zoom/pan + draggable wipe divider; each map has its own category dropdown AND its own CAP scenario / window dropdowns so two CAP scenarios can be compared on the wipe.  Vector overlays include AMA / INA / regular basins in distinct colours, sub-basins, ADWR wells, and the **CAP-eligible counties** (Maricopa / Pima / Pinal as dashed outlines).  Special UX for OOD (single band, no unit), **Stream Capture Fraction** (dimensionless 0–1, OOD-style palette), and **CAP scenarios** (scenario × window dropdowns + cumulative ΔGW readout + per-basin × 7-scenario time-series chart). |
+| [`upload_cap_service_area.sh`](upload_cap_service_area.sh) | Stage to `gs://azhydro/CAP.csv` and ingest as `projects/azhydro/assets/az-wu-v1-2/CAP`.  Asset is consumed by the visualizer as the CAP-eligible county overlay layer. |
+| [`azhydro-visualizer.js`](azhydro-visualizer.js) | GEE Apps interactive visualizer.  Year slider 1896–2099, category / unit / band dropdowns, manual color-stretch override (auto-fills with the 2nd / 98th percentile of the current image), click-driven pixel + basin + sub-basin time series with **prediction + 95 % CI envelope** on every chart, plus a **nearest-well** chart pulled from the Well_Package FeatureCollections (capacity-disaggregated per-well values; AF → selected unit converted client-side).  **Side-by-side comparison** via the Compare toggle: `ui.SplitPanel` with linked zoom/pan + draggable wipe divider; each map has its own category dropdown AND its own CAP scenario / window dropdowns so two CAP scenarios can be compared on the wipe.  Vector overlays include AMA / INA / regular basins in distinct colours, sub-basins, ADWR wells, and the **CAP-eligible counties** (Maricopa / Pima / Pinal as dashed outlines).  Special UX for OOD (single band, no unit), **Stream Capture Fraction** (dimensionless 0–1, OOD-style palette), and **CAP scenarios** (scenario × window dropdowns + cumulative ΔGW readout + per-basin × 8-scenario time-series chart). |
 
 ### Workflow (one-time, after the modeling pipeline finishes)
 
@@ -535,6 +535,15 @@ gcloud auth login
 gcloud config set project azhydro
 earthengine authenticate
 pip install earthengine-api geeup
+geeup cookie_setup                        # geeup login; repeat when cookies expire
+
+# 0. Stage the outputs: copy each raster directory from the pipeline
+#    output into gee/Data/, keeping its sub-directory layout (the
+#    *_Rasters/ dirs, Capture/, OOD_Rasters/, and
+#    Raster_Maps/CAP_Scenario/Pixel_Rasters/ as CAP_Scenario/Pixel_Rasters/), e.g.
+P=Data/Outputs/ML_Model_All_Wells_2000m/Full_Prediction_XGBRF
+rsync -a --include='*/' --include='*.tif' --exclude='*' \
+      "$P/Total_GW_Rasters/" gee/Data/Total_GW_Rasters/
 
 # 1. Rasters: generate metadata.csv files, batch-upload via geeup
 python gee/generate_geeup_metadata.py
@@ -546,7 +555,7 @@ python gee/generate_geeup_metadata.py
 python gee/pivot_to_csv.py                # writes gee/Data/Well_Package/csv/
 ./gee/upload_well_package.sh              # gsutil cp + earthengine upload table
 
-# 3. CAP cumulative basin time series (per-basin × 7-scenario chart)
+# 3. CAP cumulative basin time series (per-basin × 8-scenario chart)
 python gee/pivot_cap_cumulative.py
 ./gee/upload_cap_cumulative.sh
 
@@ -563,7 +572,7 @@ python gee/cap_service_area_to_csv.py
 
 ### Asset paths used by the visualizer
 
-All assets live under `projects/azhydro/assets/az-wu/`.
+All assets live under `projects/azhydro/assets/az-wu-v1-2/` (the v1.2 release; the v1.0–v1.1 assets remain under `projects/azhydro/assets/az-wu/` until removed).  The ADWR vector layers (`Groundwater_Basin`, `ADWR_Groundwater_Subbasin`, `Well_Registry_2024`) and the `CAP` county layer do not change between releases; for a new release folder, copy them server-side with `earthengine cp <old_folder>/<name> <new_folder>/<name>` instead of re-uploading.  To upload to a different folder, pass `--asset-prefix` to `generate_geeup_metadata.py` and set `AZHYDRO_ASSET_ROOT` for the table-upload scripts.
 
 #### Per-category augmented raster ImageCollections (12)
 
@@ -602,31 +611,31 @@ Augmented (`Capture__*_Rasters`) follow the same 6-band convention and 4 unit co
 | Asset | Category |
 |---|---|
 | `OOD_Rasters` | Annual out-of-distribution probability (single band, dimensionless 0–1) |
-| `CAP_Scenario__Pixel_Rasters` | 14 cumulative ΔGW images = 7 shortfall scenarios × 2 windows (2027–2060, 2027–2099); single AF band per image, `system:index` = `CAP_Scenario_Pixel_<scenario>_cum_AF_<window>` |
+| `CAP_Scenario__Pixel_Rasters` | 16 cumulative ΔGW images = 8 shortfall scenarios × 2 windows (2027–2060, 2027–2099); single AF band per image, `system:index` = `CAP_Scenario_Pixel_<scenario>_cum_AF_<window>` |
 
 #### Tabular FeatureCollections
 
 | Asset | Contents |
 |---|---|
 | `Well_Package__<Cat>` (15) | One per category: ~170 k well features, each with `REGISTRY_I`, `WATER_USE`, `.geo` geometry, plus year-stamped `<Cat>_AF_<year>` and `<Cat>_AF_sigma_<year>` properties (1896–2099).  Capacity-disaggregated per-well values from the published parquet. |
-| `CAP_Scenario_Cumulative` | 364 features (52 basin polygons × 7 scenarios), each with `Basin`, `Scenario`, `.geo` (basin centroid Point), and year-stamped `Cum_<year>` properties for 2026–2099.  Powers the per-basin × 7-scenario time-series chart in CAP click mode. |
+| `CAP_Scenario_Cumulative` | 416 features (52 basin polygons × 8 scenarios), each with `Basin`, `Scenario`, `.geo` (basin centroid Point), and year-stamped `Cum_<year>` properties for 2026–2099.  Powers the per-basin × 8-scenario time-series chart in CAP click mode. |
 
 #### Vector overlay layers
 
 | Asset | Contents |
 |---|---|
 | `Groundwater_Basin` | 52 GW-basin polygons (`BASIN_NAME` property; spanning Arizona's 51 ADWR groundwater basins).  Visualizer filters into AMA / INA / other groups by exact name match for distinct styling. |
-| `ADWR_Groundwater_Subbasin` | 82 sub-basin polygons (`SUBBASIN_N` property) |
+| `ADWR_Groundwater_Subbasin` | 83 sub-basin polygons with 82 unique names (`SUBBASIN_N` property) |
 | `Well_Registry_2024` | ADWR well-registry points; powers the nearest-well lookup on click |
 | `CAP` | 3 CAP-eligible county polygons (Maricopa, Pima, Pinal) with `NAME` property; rendered as dashed outlines in the visualizer |
 
 ## Citations
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Historical and Projected Freshwater Withdrawals and Irrigation Consumptive Use for Arizona, 1896–2099. _In prep. for Nature Scientific Data_.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C., Tadych, D.E., & Meeker, L. (2026). Historical and Projected Freshwater Withdrawals and Irrigation Consumptive Use for Arizona, 1896–2099. _In prep. for Nature Scientific Data_.
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Where Arizona's Water Goes: Declining Agricultural Dominance and Rising Urban Demand Drive a Two-Century Shift in Withdrawal Patterns (1896–2099). _In prep. for AGU Earth's Future_.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C., Tadych, D.E., & Meeker, L. (2026). Where Arizona's Water Goes: Declining Agricultural Dominance and Rising Urban Demand Drive a Two-Century Shift in Withdrawal Patterns (1896–2099). _In prep. for AGU Earth's Future_.
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). AZ-Hydro — Historical and Projected Arizona Annual Water Use: Software, Input Data, Models, Raster and Well Package Predictions, and Validation at 2 km Resolution (1896–2099). _Zenodo_. https://doi.org/10.5281/zenodo.19057935.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C., Tadych, D.E., & Meeker, L. (2026). AZ-Hydro — Historical and Projected Arizona Annual Water Use: Software, Input Data, Models, Raster and Well Package Predictions, and Validation at 2 km Resolution (1896–2099). _Zenodo_. https://doi.org/10.5281/zenodo.19057935.
 
 ### Data References
 

@@ -6,10 +6,10 @@
 # Two-step:
 #   1. Stage gee/Data/CAP_Scenario/Cumulative/CAP_Scenario_Cumulative.csv
 #      → gs://azhydro/CAP_Scenario_Cumulative.csv  (gsutil cp)
-#   2. Submit ingest task → projects/azhydro/assets/az-wu/CAP_Scenario_Cumulative
+#   2. Submit ingest task → $ASSET_ROOT/CAP_Scenario_Cumulative
 #      (earthengine upload table; .geo column auto-detected)
 #
-# Result: ~364 features (52 basins × 7 scenarios), each with
+# Result: ~416 features (52 basins × 8 scenarios), each with
 # year-stamped Cum_<year> columns covering 2026–2099.  The
 # visualizer reads this asset on every CAP-mode click.
 #
@@ -30,7 +30,8 @@ REPO_ROOT="$(pwd)"
 GCS_BUCKET="azhydro"
 SOURCE_CSV="$REPO_ROOT/gee/Data/CAP_Scenario/Cumulative/CAP_Scenario_Cumulative.csv"
 ASSET_NAME="CAP_Scenario_Cumulative"
-ASSET_ID="projects/azhydro/assets/az-wu/${ASSET_NAME}"
+ASSET_ROOT="${AZHYDRO_ASSET_ROOT:-projects/azhydro/assets/az-wu-v1-2}"   # v1.2 asset folder
+ASSET_ID="${ASSET_ROOT}/${ASSET_NAME}"
 GCS_URI="gs://${GCS_BUCKET}/${ASSET_NAME}.csv"
 LOG_FILE="$REPO_ROOT/gee/upload_logs/${ASSET_NAME}.log"
 mkdir -p "$(dirname "$LOG_FILE")"

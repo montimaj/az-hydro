@@ -1,6 +1,6 @@
 #!/bin/bash
 # Upload every metadata.csv dir under gee/Data/ to its target ImageCollection
-# in projects/azhydro/assets/az-wu/.
+# in projects/azhydro/assets/az-wu-v1-2/ (asset_collection column of each metadata.csv).
 #
 # Companion to gee/generate_geeup_metadata.py — that script writes one
 # metadata.csv per leaf TIF dir (with asset_collection column pointing

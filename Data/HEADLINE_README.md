@@ -1,13 +1,15 @@
 # AZ-Hydro Headline Data Archive
 
+**Version 1.2** (Zenodo release v1.2; code release v1.2.0).
+
 This is the **focused subset** of the full AZ-Hydro data deposit
 (Majumdar et al. 2026, *Sci Data* — in prep.) — the actual scientific
 deliverables highlighted in the paper, sized for reasonable download.
 
 | Archive | Size | Contents |
 |---|---|---|
-| **`az-hydro-headline.7z`** (this file) | **~8 GB** | Published deliverables only |
-| `az-hydro-data.7z` | ~74 GB | Full bit-identical reproducibility archive — raw inputs + Step 2 cross-validation + intermediate predictor stacks + per-component σ rasters |
+| **`az-hydro-headline.7z`** (this file) | **~8.7 GB** | Published deliverables only |
+| `az-hydro-data.7z` | ~80 GB | Full bit-identical reproducibility archive — raw inputs + Step 2 cross-validation + intermediate predictor stacks + per-component σ rasters |
 
 Both archives are deposited in the same Zenodo record:
 [10.5281/zenodo.19057935](https://doi.org/10.5281/zenodo.19057935).
@@ -17,7 +19,7 @@ citations, see [`Data/README.md`](README.md) inside this archive
 
 ## Citation
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C., Tadych, D.E., & Meeker, L.
 (2026). *AZ-Hydro — Historical and Projected Arizona Annual Water
 Use: Software, Input Data, Models, Raster and Well Package
 Predictions, and Validation at 2 km Resolution (1896–2099).* Zenodo.
@@ -39,11 +41,11 @@ a 6-band stack with the following band order:
 
 | Band | Content |
 |---|---|
-| 1 | Prediction (mm depth or AF volume) |
-| 2 | σ (1σ uncertainty — quadrature-combined for `Predicted_Rasters/`'s `sigma_total_mm`; per-source σ for the others) |
+| 1 | Prediction (depth in mm or ft, or volume in m³ or AF, by sub-directory) |
+| 2 | σ (1σ uncertainty: σ_total for `Predicted_Rasters/`, the per-category σ_total for the partition categories, and σ_CU for the CU categories) |
 | 3 | CV (= σ / |prediction|) |
 | 4 | SNR (= |prediction| / σ) |
-| 5 | Lower 95 % CI (= prediction − 1.96 σ) |
+| 5 | Lower 95 % CI (= max(prediction − 1.96 σ, 0)) |
 | 6 | Upper 95 % CI (= prediction + 1.96 σ) |
 
 Categories included (12 directories):
@@ -57,7 +59,7 @@ Categories included (12 directories):
 Each `*_Rasters/` directory is paired with a sibling `*/` directory
 (without the `_Rasters` suffix) holding **per-category summary CSVs
 and time-series figures** (statewide trajectory, era bar chart,
-basin/AMA/sub-basin breakdowns) — see § 6.
+basin/AMA/sub-basin breakdowns) — see § 5.
 
 ### 2. Per-pixel total uncertainty (`Uncertainty/Sigma_Total/`)
 
@@ -67,11 +69,18 @@ the six σ components (σ_MACA + σ_Model + σ_Irr + σ_LULC + σ_GW +
 σ rasters are in the larger `az-hydro-data.7z` archive; only the
 combined σ_Total is included here.
 
+Per-year out-of-distribution probability rasters
+(`OOD_Rasters/OOD_Flag_{year}.tif`, values in [0, 1]) accompany σ_total:
+each pixel's probability is the χ²(17) CDF of the squared Mahalanobis
+distance between its climate and land-use predictors and those of the
+training data (0 = in-distribution, near 1 = strong extrapolation).
+Per-year summary statistics are in `OOD_Rasters/OOD_Summary.csv`.
+
 ### 3. Per-well GeoParquet (`Well_Package/`)
 
 Four GeoParquet files (Parquet with embedded `geometry` column +
-GeoParquet metadata) covering every ADWR Well Registry well × every
-year 1984–2099 (~34.7 M well-year rows).  Each file holds the same
+GeoParquet metadata) covering every ADWR Well Registry well (170,137)
+× every year 1896–2099 (~34.7 M well-year rows).  Each file holds the same
 34 columns in a different unit convention:
 
 - `Well_Package_mm.parquet` — depths in mm
@@ -80,11 +89,11 @@ year 1984–2099 (~34.7 M well-year rows).  Each file holds the same
 - `Well_Package_AF.parquet` — volumes in acre-feet
 
 Columns: `REGISTRY_I`, `Year`, `WATER_USE`, `geometry`, plus
-prediction + σ for the 11 categories (Total, Total_GW, Total_SW,
+prediction + σ for the 12 categories (Total, Total_GW, Total_SW,
 Irrigation, Irrigation_GW, Irrigation_SW, Non_Irrigation,
 Non_Irrigation_GW, Non_Irrigation_SW, Irrigation_CU,
-Irrigation_GW_CU, Irrigation_SW_CU) and the 3 Stream Capture bands
-(Total, Irrigation, Non_Irrigation).  Headline product for
+Irrigation_GW_CU, Irrigation_SW_CU) and the 3 Stream Capture
+pools (Total, Irrigation, Non_Irrigation).  Headline product for
 well-level analysis.
 
 Load in Python with `geopandas.read_parquet(...)` or in R with
@@ -94,7 +103,7 @@ Load in Python with `geopandas.read_parquet(...)` or in R with
 
 Pumping-induced stream-capture analysis with σ propagation:
 
-- `Total_Fraction/`, `Irrigation_Fraction/`, `Non_Irrigation_Fraction/` — per-year augmented capture-fraction TIFs
+- `Total_Fraction/`, `Irrigation_Fraction/`, `Non_Irrigation_Fraction/` — per-year 3-band capture-fraction TIFs (bands `lower_lambda5m`, `central_lambda10m`, `upper_lambda20m`: the connectivity scales λ = 5, 10 and 20 m)
 - `Total_Rasters/`, `Irrigation_Rasters/`, `Non_Irrigation_Rasters/` — per-year capture rasters in 4 unit conventions (Depth_mm, Depth_ft, Volume_m3, Volume_AF)
 - `Basin_Capture_Fraction.csv`, `Subbasin_Capture_Fraction.csv`, `Capture_Time_Series.csv` — aggregated time series
 
@@ -109,14 +118,15 @@ below.)
 
 - `Annual_Summaries/` — statewide + per-basin annual rollup CSVs
 - `Basin_Time_Series/`, `AMA_INA_Time_Series/`, `Subbasin_Time_Series/` — per-basin / per-AMA / per-sub-basin annual time series CSVs + figures
-- **`ADWR/`** — partner-ready long-format CSV delivery: 16 files (`Basin_<cat>.csv` × 8 + `Subbasin_<cat>.csv` × 8) covering Total_Predicted, Total_GW, Total_SW, Irrigation_GW/SW, Non_Irrigation_GW/SW, and Irrigation_CU.  Each file is a long-format time series (one row per Year × Basin/Subbasin), aggregated from the per-basin / per-sub-basin `<cat>/Basin_Time_Series/*_Annual.csv` files.  Includes a `readme.txt` describing the schema, units, era definitions, and load examples.  Designed for ADWR / state-agency partners (e.g. Senate Bill 1740 basin assessments) who want one CSV per category instead of navigating the per-basin file tree.
+- **`ADWR/`** — partner-ready long-format CSV delivery: 16 files (`Basin_<cat>.csv` × 8 + `Subbasin_<cat>.csv` × 8) covering Total_Predicted, Total_GW, Total_SW, Irrigation_GW/SW, Non_Irrigation_GW/SW, and Irrigation_CU.  Each file is a long-format time series (one row per Year × Basin/Subbasin), aggregated from the per-basin / per-sub-basin `<cat>/Basin_Time_Series/*_Annual.csv` files.  Includes a `readme.txt` describing the schema, units, era definitions, and load examples.  Basin totals include every 2 km pixel touching the basin polygon, so summing basins exceeds the statewide total by about 2–3 %; use `Annual_Summaries/` for statewide totals.  Designed for ADWR / state-agency partners (e.g. Senate Bill 1740 basin assessments) who want one CSV per category instead of navigating the per-basin file tree.
 - `Full_Period_Time_Series.csv` + `.png` — headline statewide trajectory
 - `Era_Summary_Bar.png`, `Mean_Annual_Predicted_mm.tif`, `Prediction_Exceedance_Summary.csv`, `Graphical_Abstract_Fig1.png` — top-level summary figures and CSVs
 
 ### 6. CAP delivery scenario sweep (`Uncertainty/CAP_Scenario/`)
 
-Eight CAP delivery scenarios (Baseline_900kAF, DCP Tier 0–3, Basic
-Coordination, Extreme Shortage) re-partitioned 2026–2099:
+Nine CAP delivery scenarios (the no-cut Baseline_900kAF; DCP Tiers 0,
+1, 2a, 2b, and 3; the 2027–2028 Operating Guidelines; WestWater Basic
+Coordination; Extreme Shortage) re-partitioned 2026–2099:
 
 - `CAP_Scenario_Statewide.csv`, `CAP_Scenario_Basin.csv`, `CAP_Scenario_Delta.csv`, `CAP_Scenario_Cumulative.csv` — primary outputs
 - `CAP_Scenario_DCP_Tiers.png`, `CAP_Scenario_WestWater.png`, `CAP_Scenario_Basin.png`, `CAP_Scenario_Cumulative_Drawdown.png` — time-series figures
@@ -162,11 +172,11 @@ plus the per-scenario per-window cumulative ΔGW pixel rasters in
 | Excluded | Why excluded from headline |
 |---|---|
 | `Data/Inputs/` | ~9 GB of raw inputs (GEE tiles, ADWR meter records, ancillary vectors, WTD).  Only needed to re-run the pipeline from scratch. |
-| Step 2 cross-validation (`ML_Model_All_Wells_2000m/Model_Evaluation/`) | ~121 GB of 5-strategy × 4-model evaluation outputs.  Per-strategy metrics summarized in the paper. |
-| Per-component σ rasters (`Sigma_MACA/`, `Sigma_Model/`, `Sigma_Irr/`, `Sigma_LULC/`, `Sigma_GW/`, `Sigma_USBR/`, `Sigma_CU/`) | ~13 GB.  Only the quadrature-combined `Sigma_Total/` is included here.  Per-component σ is needed for the σ-attribution diagnostics suite but not for downstream users. |
-| Out-of-distribution rasters (`OOD_Rasters/`) | 68 MB.  Diagnostic, not a primary deliverable. |
+| Step 2 cross-validation (`ML_Model_All_Wells_2000m/Model_Evaluation/`) | ~121 GB of 5-strategy × 13-model evaluation outputs.  Per-strategy metrics summarized in the paper. |
+| Per-component σ rasters (`Sigma_MACA/`, `Sigma_Model/`, `Sigma_Irr/`, `Sigma_LULC/`, `Sigma_GW/`, `Sigma_USBR/`, `Sigma_CU/`) | ~2.3 GB.  Only the quadrature-combined `Sigma_Total/` is included here.  Per-component σ is needed for the σ-attribution diagnostics suite but not for downstream users. |
 | Trained model + interpretability (`Model/`, `Model_Interpretability/`, `EDA/`, `Bias_Correction/`) | Diagnostic intermediates. |
 | Intermediate predictor stacks (`Outputs/GEE_Mosaics_*/`, `GW_Data/`, `Predictor_Data_*/`, `GW/`) | ~37 GB derivable from inputs. |
+| Model-input table and diagnostics (`ML_Model_All_Wells_2000m/AZ_Data.parquet`, `Basin_LULC_Deltas.csv`, `Full_Prediction_XGBRF/Uncertainty/Plots/`, `Full_Prediction_XGBRF/data/`) | Pipeline intermediates and diagnostic plots. |
 
 If you need any of the above, download the full
 `az-hydro-data.7z` from the same Zenodo record.
@@ -177,7 +187,7 @@ If you need any of the above, download the full
 
 This headline archive contains the *outputs*, not the source inputs
 needed to re-run the pipeline.  To reproduce everything from the raw
-inputs, download `az-hydro-data.7z` from the same Zenodo record (~74
+inputs, download `az-hydro-data.7z` from the same Zenodo record (~80
 GB) plus the external USGS NHM / Reitz / PS data products from USGS
 ScienceBase (see `Data/README.md` for citations and naming
 conventions), then follow the runtime instructions in

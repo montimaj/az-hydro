@@ -71,8 +71,10 @@ SRC=(
   "$PRED/Non_Irrigation_GW"
   "$PRED/Non_Irrigation_SW"
 
-  # ----- Per-pixel total uncertainty rasters
+  # ----- Per-pixel total uncertainty rasters + out-of-distribution
+  #       probability rasters (Supplementary Fig. S6; 68 MB)
   "$PRED/Uncertainty/Sigma_Total"
+  "$PRED/OOD_Rasters"
 
   # ----- Per-well GeoPackage + Parquet (the headline well-level product)
   "$PRED/Well_Package"

@@ -9,11 +9,11 @@ Maintainer: [Dr. Sayantan Majumdar](https://www.dri.edu/directory/sayantan-majum
 
 ## Citations
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Historical and Projected Freshwater Withdrawals and Irrigation Consumptive Use for Arizona, 1896–2099. _In prep. for Nature Scientific Data_.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C., Tadych, D.E., & Meeker, L. (2026). Historical and Projected Freshwater Withdrawals and Irrigation Consumptive Use for Arizona, 1896–2099. _In prep. for Nature Scientific Data_.
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Where Arizona's Water Goes: Declining Agricultural Dominance and Rising Urban Demand Drive a Two-Century Shift in Withdrawal Patterns (1896–2099). _In prep. for AGU Earth's Future_.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C., Tadych, D.E., & Meeker, L. (2026). Where Arizona's Water Goes: Declining Agricultural Dominance and Rising Urban Demand Drive a Two-Century Shift in Withdrawal Patterns (1896–2099). _In prep. for AGU Earth's Future_.
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). AZ-Hydro — Historical and Projected Arizona Annual Water Use: Software, Input Data, Models, Raster and Well Package Predictions, and Validation at 2 km Resolution (1896–2099). _Zenodo_. https://doi.org/10.5281/zenodo.19057935.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C., Tadych, D.E., & Meeker, L. (2026). AZ-Hydro — Historical and Projected Arizona Annual Water Use: Software, Input Data, Models, Raster and Well Package Predictions, and Validation at 2 km Resolution (1896–2099). _Zenodo_. https://doi.org/10.5281/zenodo.19057935.
 
 ---
 
@@ -109,10 +109,11 @@ python pipeline.py --skip-eval pixel,temporal,summary # skip multiple strategies
 UQ components (Step 3b) support `--skip-uq`:
 
 ```bash
-python pipeline.py --steps 3b --skip-uq sigma-maca,sigma-lulc   # skip GEE-dependent components
-python pipeline.py --steps 3b --skip-uq sigma-maca              # skip only inter-GCM spread
-python pipeline.py --steps 3b --skip-uq sigma-model,density-sensitivity # skip seed ensemble + partition sensitivity
-python pipeline.py --steps 3b --skip-uq sw-capture-sigma         # skip Stream Capture Index w/ σ_GW propagation
+# Step 3b needs the trained model from Step 3 in the same run
+python pipeline.py --steps 3,3b --skip-uq sigma-maca,sigma-lulc   # skip GEE-dependent components
+python pipeline.py --steps 3,3b --skip-uq sigma-maca              # skip only inter-GCM spread
+python pipeline.py --steps 3,3b --skip-uq sigma-model,density-sensitivity # skip seed ensemble + partition sensitivity
+python pipeline.py --steps 3,3b --skip-uq sw-capture-sigma         # skip Stream Capture Index w/ σ_GW propagation
 ```
 
 Step 3g map families support `--skip-maps`:
@@ -152,7 +153,7 @@ Step 3h is excluded from `--steps all` because Step 3g already produces the grap
 | `4c` | CAP/SRP surface-water validation |
 | `4d` | Effective precipitation intercomparison |
 | `4e` | Non-irrigation vs USGS Public Supply intercomparison |
-| `4f` | USGS statewide calibration overview (AZ-wide annual Total GW/SW bars ±1σ vs USGS Circular & OFR 94-476 anchors). Mirrors USGS OFR 94-476 Figure 1 in bar form. |
+| `4f` | USGS statewide calibration overview (AZ-wide annual Total GW/SW bars with 95 % CI (±1.96σ) vs USGS Circular & OFR 94-476 anchors). Mirrors USGS OFR 94-476 Figure 1 in bar form. |
 
 #### Step 0 sub-steps
 
@@ -189,19 +190,19 @@ Step 3h is excluded from `--steps all` because Step 3g already produces the grap
 | `sigma-lulc` | Skip σ_LULC — LULC projection spread (requires GEE download) |
 | `sigma-gw` | Skip σ_gw — well-density feature sensitivity across 5 recent HarDWR snapshots (2020–2024) |
 | `sigma-usbr` | Skip σ_USBR — Upper Colorado River Basin streamflow uncertainty (5 USBR CMIP3 ensemble members spanning Rupp 2013 GCM corners + mixed SRES). Captures CAP-delivery uncertainty driven by Wyoming/Colorado/Utah snowpack — the gap σ_MACA cannot reach (MACA only downscales to AZ-local domain). |
-| `density-sensitivity` | Skip partition-level diagnostic (density-ratio ±20% + smoothing-sigma sweep {2, 8}) |
+| `density-sensitivity` | Skip partition-level diagnostic (density-ratio ±20% + smoothing-σ sweep at ½× and 2× the per-year production σ, floor 0.5) |
 | `sigma-total` | Skip σ_total quadrature, basin σ, visualizations, and raster augmentation |
 | `time-series-plots` | Skip the AZ-wide and basin/sub-basin σ time-series plots produced after `sigma-total` (`_plot_basin_sigma_time_series`, `_plot_uncertainty_time_series`). Underlying CSVs (`Basin_Sigma_Total.csv`, `Uncertainty_Summary_*.csv`) are still produced; only the matplotlib renders are skipped. Useful when iterating on raster augmentation or downstream analyses without spending the ~5-10 minute plotting cost. Requires `sigma-total` to have run; no-op if `sigma-total` is also skipped. |
 | `sigma-cu` | Skip σ_CU — consumptive use uncertainty (IE × Withdrawal error propagation) |
-| `sw-capture-sigma` | Skip Stream Capture Index computation with σ_GW propagation. Produces the per-pool stream capture rasters (fraction, depth, volume) with combined λ + σ_total 95 % CI bounds plus per-well σ_capture disaggregation in `Well_Package.gpkg`. Depends on `sigma-total`; skipping means no stream capture outputs are produced (there is no σ-less fallback path). |
+| `sw-capture-sigma` | Skip Stream Capture Index computation with σ_GW propagation. Produces the per-pool stream capture rasters (fraction, depth, volume) with combined λ + σ_total 95 % CI bounds plus per-well σ_capture disaggregation in the `Well_Package_{mm,ft,m3,AF}.parquet` files. Depends on `sigma-total`; skipping means no stream capture outputs are produced (there is no σ-less fallback path). |
 | `kernel-sensitivity` | Skip the Stream Capture Index connectivity-kernel robustness diagnostic (`partitionops.run_capture_kernel_sensitivity`). Re-derives the capture field under six scale-matched monotone connectivity kernels (exponential, Gaussian, power law p = 15 / p = 3, reciprocal, linear) to show the capture pattern and basin ranking do not depend on the exponential kernel — only the absolute volume magnitude does (hence the index is reported as an ordinal screen). Writes `Capture/Capture_Kernel_Sensitivity.{csv,png}` and `Capture_Kernel_Curves.png`. Cheap post-partition array arithmetic (no ML prediction); independent of the other σ steps. |
-| `cap-scenario` | Skip CAP delivery scenario sweep (`uncertaintyops.run_cap_scenario_analysis`). Re-partitions every projection-era year (2026–2099) under eight CAP delivery scenarios (Baseline_900kAF, DCP Tier 0/1/2a/2b/3, WestWater Basic Coordination, Extreme Shortage) using scenario-specific SW factors and GW boost factors at CAP-service-area pixels. Produces statewide and per-basin time series of GW/SW reapportionment plus cumulative drawdown comparisons against WestWater 2026 Figures 4 and 5 (`CAP_Scenario_Statewide.csv`, `CAP_Scenario_Basin.csv`, `CAP_Scenario_Cumulative.csv`, plus DCP-tier / WestWater / cumulative-drawdown PNG figures). |
+| `cap-scenario` | Skip CAP delivery scenario sweep (`uncertaintyops.run_cap_scenario_analysis`). Re-partitions every projection-era year (2026–2099) under nine CAP delivery scenarios (Baseline_900kAF, DCP Tier 0/1/2a/2b/3, the 2027–2028 Operating Guidelines, WestWater Basic Coordination, Extreme Shortage) using scenario-specific SW factors and GW boost factors at CAP-service-area pixels. Produces statewide and per-basin time series of GW/SW reapportionment plus cumulative drawdown comparisons against WestWater 2026 Figures 4 and 5 (`CAP_Scenario_Statewide.csv`, `CAP_Scenario_Basin.csv`, `CAP_Scenario_Cumulative.csv`, plus DCP-tier / WestWater / cumulative-drawdown PNG figures). |
 
 #### Step 3g map sub-steps
 
 | Sub-step | Description |
 |----------|-------------|
-| `trends` | Skip the full Mann-Kendall + Sen's slope trend-map suite (withdrawals, CU, stream capture depth/volume/fraction, per-basin and per-sub-basin trend CSVs). This is the slowest sub-step in Step 3g — per-pixel MK + Sen on 204 annual rasters × ~15 product families × 4 periods takes the bulk of the step's runtime, so skipping is useful when iterating on the era-mean raster maps or the graphical abstract. Era-mean raster maps, σ-component CV maps, Prediction CV/SNR maps, actual-vs-predicted figures, and the graphical abstract are still produced. |
+| `trends` | Skip the full Mann-Kendall + Sen's slope trend-map suite (withdrawals, CU, stream capture depth/volume/fraction, per-basin and per-sub-basin trend CSVs). This is the slowest sub-step in Step 3g — per-pixel MK + Sen on 204 annual rasters × ~15 product families × 4 periods takes the bulk of the step's runtime, so skipping is useful when iterating on the era-mean raster maps or the graphical abstract. Era-mean raster maps, σ-component maps, Prediction CV/SNR maps, actual-vs-predicted figures, and the graphical abstract are still produced. |
 
 > **Note on skipping individual σ components:** Per-category σ at the *pixel* level (e.g., the per-pixel σ_model array for Irrigation, Non_Irrigation, etc.) is only held in memory during computation and is never written to disk as a separate per-category raster. Per-category σ at the *basin* level, by contrast, **is** persisted to disk as `Uncertainty/{component}/Basin_Sigma_{component}_{category}.csv` (six components × eight partition categories = 48 new CSVs per full Step 3b run), where it is consumed by the σ attribution diagnostic suite in Step 3g; those files are additive and leave the existing total-level `Basin_Sigma_{component}.csv` and `SubBasin_Sigma_{component}.csv` untouched. When `sigma-total` runs, it can reload *total-level* per-component σ from disk (e.g., `Sigma_Model_mm_{year}.tif`), but the per-category σ_total rasters (`Sigma_Total_{cat}_mm_{year}.tif`) will be zero if the individual σ steps were skipped because the per-category pixel arrays they depend on are not on disk. This causes downstream augmented category rasters to have zero σ, which in turn makes σ_CU zero. To get correct per-category uncertainty in the augmented rasters *and* correct per-category basin CSVs for the σ attribution suite, run all individual σ components (σ_MACA through σ_USBR) without skipping. Only `density-sensitivity` (the partition-level diagnostic) can be safely skipped without affecting downstream products.
 
@@ -219,6 +220,7 @@ Step 3h is excluded from `--steps all` because Step 3g already produces the grap
 | `--skip-eval` | — | Comma-separated evaluation strategies to skip. |
 | `--skip-uq` | — | Comma-separated UQ sub-steps to skip (including `sw-capture-sigma`). |
 | `--skip-maps` | — | Comma-separated Step 3g map sub-steps to skip (currently `trends`). |
+| `--force-predict` | `False` | Re-run the Step 3 prediction and partition loop even when the output rasters already exist (use after changing partition parameters such as the CAP delivery factors). |
 | `-v`, `--verbose` | `False` | Enable verbose (DEBUG-level) logging. |
 
 The pipeline executes the selected steps in sequence (details below).
@@ -327,7 +329,7 @@ The [`streamflowops`](hydrolibs/streamflowops.py) module handles streamflow data
 | 09537200 | — | Leslie Creek near McNeal | White Water Draw / Rio Yaqui |
 | 09426650 | — | CAP Canal at Havasu Pumping Plant | CAP Diversion |
 
-Sites with USBR IDs (9 sites) have direct modeled projections. The remaining 11 sites use the historical ratio method, where monthly scaling ratios are computed from the overlapping USGS observation period between the target site and its nearest USBR-gauged reference.
+Sites with USBR IDs (9 sites) have direct modeled projections. The remaining 10 sites use the historical ratio method, where monthly scaling ratios are computed from the overlapping USGS observation period between the target site and its nearest USBR-gauged reference.
 
 #### Gap-filling strategy
 
@@ -632,8 +634,10 @@ this study:
 4. **A 204-year continuous record** — hindcast (1896–1983),
    historical (1984–2025), and projection (2026–2099) eras all in
    one self-consistent framework, with the projection driven by
-   5 GCMs × 2 RCPs × 4 USGS LULC scenarios × 112 streamflow
-   ensemble members. No prior single-state water-use study spans
+   the MACA 20-GCM × 2-RCP ensemble mean, the 4-scenario USGS LULC
+   mode and the 112-member USBR streamflow mean (5 GCMs, 4 LULC
+   scenarios and 5 streamflow members are sampled for the
+   uncertainty). No prior single-state water-use study spans
    two centuries with a uniform methodology and per-pixel/per-well
    resolution.
 
@@ -769,7 +773,7 @@ All paths and modeling parameters are defined once at the top of
 | `USE_AMA_INA` | `True` | Restrict training to AMA/INA management areas. |
 | `DROP_GW_BASINS` | `()` | Basins excluded from training. Empty by default (all AMA/INA basins included). For the `T1_Baseline` holdout, WILLCOX AMA and HUALAPAI VALLEY INA are dropped because they were not yet designated as AMA/INA management areas during the 2002–2020 period used by [Majumdar et al. (2022)](https://doi.org/10.1002/hyp.14757), and therefore had no (or limited) metered withdrawal data at that time. |
 | `MIN_SPATIAL_EVAL_SAMPLES` | `30` | Minimum non-zero metered samples for a basin to be included in spatial LOO. |
-| `SKIP_SPATIAL_BASINS` | `('WILLCOX AMA',)` | Basins explicitly excluded from spatial LOO evaluation regardless of sample count. WILLCOX AMA is excluded because it has very few metered samples in the current dataset. |
+| `SKIP_SPATIAL_BASINS` | `('WILLCOX AMA', 'RANEGRAS PLAIN')` | Basins explicitly excluded from spatial LOO evaluation regardless of sample count. WILLCOX AMA has very few metered samples in the current dataset; RANEGRAS PLAIN was designated an AMA in January 2026 and has no metering history. |
 | `SPATIAL_SEED_FRACTION` | `0.1` | Fraction of held-out basin samples randomly seeded into training for the seeded spatial LOO (Step 2c-seed). |
 | `TEMPORAL_HOLDOUTS` | T1_Baseline + T1–T7 | Eight temporal leave-one-out configurations. `T1_Baseline` uses `TRAIN_YEAR_LIST_BASELINE` and `MIN_GW=0`. |
 | `DROP_ATTRS` | (list) | Columns dropped before modeling. |
@@ -874,7 +878,7 @@ steps.
 
 ### Step 2 — Model evaluation
 
-Four complementary strategies assess model performance.  The default
+Five complementary strategies assess model performance.  The default
 model zoo comprises 13 models — 4 core baselines (XGB, LGBM, RF, XGBRF)
 and 9 additional ensemble/linear models (ETR, HGBR, GBR, ADA, BAG, CAT,
 LR, RIDGE, LASSO) enabled via `INCLUDE_ALL_MODELS=True`.
@@ -1067,11 +1071,11 @@ Iterates over every AMA/INA management area (identified by
 each basin the model trains on the rest of Arizona and is tested on the
 held-out management area.  Basins with fewer than
 ``MIN_SPATIAL_EVAL_SAMPLES`` (default 30) non-zero metered samples or
-listed in ``SKIP_SPATIAL_BASINS`` (currently WILLCOX AMA) are excluded.  Bias correction is **disabled** for spatial strategies because
+listed in ``SKIP_SPATIAL_BASINS`` (currently WILLCOX AMA and RANEGRAS PLAIN) are excluded.  Bias correction is **disabled** for spatial strategies because
 a linear correction calibrated on training-basin residuals can actively
 hurt when applied to a held-out basin with a different management regime.
 
-Steps 2c, 2c-seed, and 2d also produce **stratified error metrics** that
+Steps 2c and 2c-seed also produce **stratified error metrics** that
 bin test-set predictions by actual pumping magnitude (Low < 500 mm,
 High ≥ 500 mm).  For each model and bin, R², RMSE, MAE, and MBE are
 computed across holdout folds, revealing whether errors concentrate in a
@@ -1096,8 +1100,9 @@ Comparing pure LOO (Step 2c) with seeded LOO demonstrates that the
 model captures the climate-driven temporal variability across basins but
 requires a minimal local signal to calibrate the management-driven
 pumping intensity.  Preliminary results show that adding just 10 % of
-local data improves mean test R² from approximately −0.17 (pure LOO) to
-+0.43 (seeded LOO) over the Douglas AMA, confirming that the negative R² in pure LOO is
+local data improves the XGBRF mean test R² across the nine held-out basins
+from −0.46 (pure LOO) to +0.42 (seeded LOO), and at Douglas AMA from −1.24
+to +0.50, confirming that the negative R² in pure LOO is
 driven almost entirely by a basin-specific magnitude offset — not by a
 failure to capture the underlying hydrological process.  This supports
 the argument that conventional spatial LOO is overly punitive for
@@ -1173,7 +1178,7 @@ are re-computed separately for each temporal era:
 | Era | Years | Purpose |
 |---|---|---|
 | Hindcast | 1896–1983 | Pre-training extrapolation |
-| Training | 1984–2024 | In-distribution reference |
+| Historical | 1984–2025 | In-distribution reference (training years 1984–2024) |
 | Projection | 2026–2099 | Future extrapolation |
 
 Up to 2 000 pixels are subsampled per year (capped at 10 000 per era) and
@@ -1200,10 +1205,14 @@ of location.  The detector computes the Mahalanobis distance from the
 training distribution and converts it to an OOD probability via the
 χ²(n\_features) CDF.
 
-OOD features used: ET, ETo, precipitation, temperature, AGRI density,
-URBAN density, crop fraction, irrigation fraction, GW fraction, AWC,
-Ksat, soil depth.  Excluded: easting, northing, well density, canal
-density, canal-weighted streamflow, streamflow.
+OOD features used (17 of the 22 predictors): ET, ETo, precipitation,
+effective precipitation, Tmax, Tmin, AGRI density, URBAN density, crop
+fraction, urban fraction, irrigation fraction, GW irrigation fraction,
+water-table depth, SW-rights density, AWC, Ksat, soil depth.  Excluded:
+easting, northing, well density, canal density, streamflow (and the
+partition-only canal-weighted streamflow).  The OOD probability is the
+χ²(17) CDF of the squared Mahalanobis distance; pixels beyond the 99th
+percentile (α = 0.01) are flagged as hard out-of-distribution.
 
 A **prediction exceedance check** complements the OOD detector from the
 opposite direction.  While OOD flags feature-space extrapolation, the
@@ -1306,9 +1315,9 @@ crop / urban pixel in AZ), so the reported mean reflects per-pixel
 irrigation / M&I intensity rather than an AZ-wide dilution.  Volume
 sums (`Volume_m3`, `Volume_AF`) are unchanged — they remain full-state
 nansums so total volumes are conserved.  Empirically, the 5 mm
-threshold removes 79 % of pixels but loses only 0.3 % of the 2024
-volume (6.823 → 6.804 MAF), while shifting the reported mean depth
-from 30 mm (diluted) to 145 mm (intensity-scale, matching typical
+threshold removes 75 % of pixels but loses only 0.2 % of the 2024
+volume (6.854 → 6.840 MAF), while shifting the reported mean depth
+from 31 mm (diluted) to 123 mm (intensity-scale, matching typical
 irrigation application rates).  The same 5 mm threshold is applied to
 per-category, per-basin, per-sub-basin, and σ_LULC-scenario
 aggregations for consistency.  σ statistics (sigma rasters / sigma
@@ -1326,7 +1335,7 @@ per-sub-basin) are **deferred to the UQ step** (§3d) so that they include
 |---|---|---|
 | Era summary maps | `vizops.create_era_summary_maps()` | Total, 8 categories, 3 CU  |
 
-Four temporal eras are distinguished in the plots:
+Three temporal eras are distinguished in the plots:
 
 | Era | Years | Description |
 |---|---|---|
@@ -1401,13 +1410,21 @@ sources but stitched into one file per (category, level): `Year,
 Basin (or Subbasin), Mean_Depth_mm, Mean_Depth_ft, Volume_m3,
 Volume_AF, Era` (sub-basin files additionally have `Parent_Basin`).
 
-**How the aggregation works.**  `Total_Predicted` is copied directly
-from `Annual_Summaries/Basin_Total.csv` and
-`Annual_Summaries/Subbasin_Total.csv` (already aggregated by Step 3
-into long format).  The other seven categories are **concatenated**
-from each `<category>/Basin_Time_Series/*_Annual.csv` and
-`<category>/Subbasin_Time_Series/*_Annual.csv` directory — header from
-the first file, rows from all files, in alphabetical basin order.
+**How the aggregation works.**  Every category is **concatenated**
+from the per-basin `<NAME>_Annual.csv` files in its
+`Basin_Time_Series/` and `Subbasin_Time_Series/` directories — header
+from the first file, rows from all files, in alphabetical basin order.
+`Total_Predicted` reads the top-level `Basin_Time_Series/` and
+`Subbasin_Time_Series/`; the other seven categories read
+`<category>/Basin_Time_Series/` and `<category>/Subbasin_Time_Series/`.
+The all-basin aggregate files `Basin_Annual.csv` / `Subbasin_Annual.csv`
+in the same directories are skipped (they repeat every per-basin row).
+Using one source for all eight categories makes Total_GW + Total_SW =
+Total_Predicted and Irrigation_GW + Non_Irrigation_GW = Total_GW hold
+row by row.  Basin totals include every 2 km pixel that touches the
+basin polygon (`rasterio.mask(..., all_touched=True)`), so summing the
+52 basins overstates the statewide total by about 2–3 %; statewide
+totals are in `Annual_Summaries/`.
 
 Step 3i also writes a partner-facing `readme.txt` alongside the 16
 CSVs, refreshed from the version-controlled template at
@@ -1597,8 +1614,9 @@ plotting scenario-dependent volume trajectories.
 
 σ_gw measures ML-feature sensitivity of predicted pumping to recent
 year-over-year variability in HarDWR well-registry counts.  For each
-prediction year, ``well_density`` — the **#1 feature by mean |SHAP
-value|** in the XGBRF model — is swapped with values observed in each
+prediction year, ``well_density`` — the main groundwater-infrastructure
+predictor in the XGBRF model (6th by mean |SHAP value|) — is swapped
+with values observed in each
 of five recent reference years (``INFRASTRUCTURE_SNAPSHOT_YEARS = [2020,
 2021, 2022, 2023, 2024]``), the model is re-run on the modified feature
 matrix, and σ_gw is the sample std across the five predictions:
@@ -1612,18 +1630,18 @@ quadrature, so the final σ_total reflects a t-corrected 95 % CI rather
 than a z-based one.
 
 ``well_density`` was chosen because it dominates the model's learned
-response to GW infrastructure (mean |SHAP| ≈ 24 mm, roughly 8× the
-contribution of the Hung ``annual_gw_fraction`` feature that earlier
-versions of this component perturbed).  Replacing a perturbation of a
-rank-12 feature with a perturbation of the rank-1 feature at the same
-input CV gives a substantially larger σ_gw signal across the entire
+response to GW infrastructure (mean |SHAP| ≈ 23 mm, 6th overall and
+roughly 1.7× the contribution of the Hung ``annual_gw_fraction`` feature,
+11th, that earlier versions of this component perturbed).  Replacing a
+perturbation of that feature with a perturbation of ``well_density`` at
+the same input CV gives a substantially larger σ_gw signal across the entire
 1896–2099 window — the previous Hung-based implementation collapsed to
 ~0 outside 2000–2015, whereas the new one is nonzero everywhere because
 the same five reference snapshots are loaded and swapped in regardless
 of the prediction year.
 
 **Known limitations — σ_gw scope:** ``sw_rights_density`` is *not*
-perturbed.  It is rank 15 in SHAP importance (~2 mm, about 12× less
+perturbed.  It is rank 15 in SHAP importance (~10 mm, about 2.4× less
 influential than ``well_density``) and is effectively frozen in the
 HarDWR record after ~1996: per-pixel std across 2020–2024 is literally
 0.000 because SW water rights in Arizona were almost entirely filed by
@@ -1641,7 +1659,7 @@ if 2099 Arizona had 2020-era wells"), but because ``well_density`` is
 the dominant SHAP feature, probing it at real observed amounts still
 exercises the model's primary sensitivity axis.
 
-##### σ_USBR — Upper Colorado River Basin streamflow uncertainty (all years, 1896–2099)
+##### σ_USBR — Upper Colorado River Basin streamflow uncertainty (1950–2099; zero before 1950, and at CAP pixels before 1985)
 
 σ_USBR captures **inter-USBR-ensemble-member spread of CAP delivery**
 driven by Upper Colorado River Basin streamflow uncertainty — the
@@ -1661,7 +1679,7 @@ both re-run per member:
    ``streamflow_mm`` at any pixel equals
    ``local_watershed_runoff + co_flow``, where ``co_flow`` is the
    Lees-Ferry-derived component injected by
-   ``streamflowops._create_streamflow_rasters``.  Per-pixel
+   ``streamflowops.create_streamflow_rasters``.  Per-pixel
    ``co_flow_mm`` is the sum of two contributions:
    - **CAP overlay** (uniform across CAP service-area pixels, added
      post-1985):
@@ -1818,7 +1836,7 @@ A temporal average `Mean_CV.tif` is also computed across all years.
 **Outputs:**
 
 ```
-Full_Prediction_XGB/Uncertainty/
+Full_Prediction_XGBRF/Uncertainty/
 ├── Sigma_MACA/
 │   ├── Rasters/Sigma_MACA_mm_{year}.tif
 │   ├── Climate_Input_Spread/
@@ -1853,6 +1871,10 @@ Full_Prediction_XGB/Uncertainty/
 │   ├── Basin_Sigma_GW.csv
 │   ├── Subbasin_Sigma_GW.csv
 │   └── Uncertainty_Summary_GW.csv
+├── Sigma_USBR/                        # rasters from 1950 (USBR ensemble start)
+│   ├── Rasters/Sigma_USBR_mm_{year}.tif
+│   ├── Basin_Sigma_USBR.csv
+│   └── Uncertainty_Summary_USBR.csv
 ├── Sigma_Total/
 │   ├── Rasters/Sigma_Total_mm_{year}.tif   (2-band: σ, CV)
 │   ├── Mean_CV.tif
@@ -1912,9 +1934,9 @@ This augmentation is applied to:
 
 | Product | σ source | Units augmented | Details |
 |---------|----------|----------------|---------|
-| **Total annual withdrawal** (32 rasters/yr) | σ_total × unit scale | mm, ft, m³, AF | σ_total computed in mm, scaled by conversion factor per unit |
-| **8 withdrawal categories** (256 rasters/yr) | σ_cat via quadrature of per-category ensemble spreads | mm, ft, m³, AF | Each ensemble member is partitioned before computing std |
-| **3 CU categories** (48 rasters/yr) | σ_CU (error propagation) | mm, ft, m³, AF | σ_CU in mm, scaled to target unit |
+| **Total annual withdrawal** (4 rasters/yr) | σ_total × unit scale | mm, ft, m³, AF | σ_total computed in mm, scaled by conversion factor per unit |
+| **8 withdrawal categories** (32 rasters/yr) | σ_cat via quadrature of per-category ensemble spreads | mm, ft, m³, AF | Each ensemble member is partitioned before computing std |
+| **3 CU categories** (12 rasters/yr) | σ_CU (error propagation) | mm, ft, m³, AF | σ_CU in mm, scaled to target unit |
 
 **Unit conversion for σ:** σ_total is natively in mm.  For other units
 the same conversion factors as the predictions are applied:
@@ -1929,7 +1951,7 @@ the same conversion factors as the predictions are applied:
 **Category uncertainty:** Each UQ ensemble function partitions every
 member’s total prediction into the 8 withdrawal categories *before*
 computing std.  This produces per-category σ for each component (MACA,
-Model, Irr, LULC, GW), which are then combined via quadrature:
+Model, Irr, LULC, GW, USBR), which are then combined via quadrature:
 
 $$\sigma_{\text{cat}} = \sqrt{\sum_i \sigma_{\text{cat},i}^2}$$
 
@@ -1994,8 +2016,8 @@ dual y-axes (m³ on the left, AF on the right):
 ##### Per-component basin / sub-basin σ time series
 
 In addition to the combined σ_total basin plots, per-component σ time
-series are generated for each of the five uncertainty components (MACA,
-Model, Irr, LULC, GW).  For each component,
+series are generated for each of the six uncertainty components (MACA,
+Model, Irr, LULC, GW, USBR).  For each component,
 `_plot_component_basin_sigma()` reads the component's
 `Basin_Sigma_{X}.csv` and `Subbasin_Sigma_{X}.csv` and produces:
 
@@ -2042,9 +2064,9 @@ earlier plots from Step 3c that lacked uncertainty bounds.
 Generates publication-quality spatial maps for **every** raster output
 product in the pipeline.  Three types of maps are produced:
 
-**Era-mean maps** (`vizops.create_era_raster_maps()`) — A 2×2 panel figure
-for each raster category showing the temporal mean within each of the four
-eras (Hindcast, Historical, Projection).  Groundwater basin
+**Era-mean maps** (`vizops.create_era_raster_maps()`) — A vertically
+stacked 3×1 panel figure for each raster category showing the temporal
+mean within each of the three eras (Hindcast, Historical, Projection).  Groundwater basin
 boundaries (thin gray) and AMA/INA basins (bold dark + labels) are overlaid
 on every panel.  No-data pixels appear as gray background.
 
@@ -2052,8 +2074,7 @@ on every panel.  No-data pixels appear as gray background.
 |---|---|---|
 | Total predicted withdrawal + 8 partition categories + 3 CU | `YlOrRd` | 12 figures |
 | OOD probability (mean) | `RdYlGn_r` | 1 figure |
-| 6 sigma components — band 1 (σ in mm) | `Purples` | 6 figures |
-| 6 sigma components — band 2 (CV) | `inferno` | 6 figures |
+| 6 σ components + σ_Total (σ in mm) | `Purples` | 7 figures |
 | Augmented prediction CV (band 3) and SNR (band 4) | `inferno` / `viridis` | 2 figures |
 
 **Actual vs predicted comparison** (`vizops.create_actual_vs_predicted_maps()`)
@@ -2082,7 +2103,7 @@ per-era).  Each figure shows:
 
 Trend maps are generated for: total predicted withdrawal, 8 partition
 categories, 3 CU categories, and 3 stream capture categories — each with
-up to 5 periods (full + 3 eras).
+up to 4 periods (full + 3 eras).
 
 **Basin-level trend choropleth** — For each category × period, a
 choropleth map colors each GW basin by its mean Sen's slope (blue =
@@ -2128,8 +2149,8 @@ sharing the same underlying three-way decomposition:
   Historical eras it is `Mgmt / (Mgmt + Model)` (purple = model-
   dominated, red = management-dominated) because σ_MACA is zero by
   design in those eras. In the Projection era, basins where σ_Model is
-  the single largest variance contributor are flagged with a **bold
-  black polygon edge**, and an on-figure disclosure box reports the
+  the single largest variance contributor are flagged with a **bright
+  lime-green polygon edge**, and an on-figure disclosure box reports the
   count and median Model share so users cannot miss σ_Model's magnitude
   when reading the Clim-vs-Mgmt classification.
 - **Ternary RGB-mixed choropleth**. Each basin's color is a continuous
@@ -2154,8 +2175,8 @@ decisions are made at the basin scale):
 | 4 | Ternary headline withdrawal | `Total_GW`, `Total_SW` | 3 PNGs, 1×2 panels |
 | 5 | Ternary detailed withdrawal | same as (2) | 3 PNGs, 1×4 panels |
 | 6 | Ternary σ_CU attribution | same as (3) | 3 PNGs, 1×3 panels |
-| 7 | Per-year stacked-area timeseries | `Total_GW`, `Total_SW` × 8 headline basins | 1 PNG, 8×2 panels |
-| 8 | Projection bubble scatter | `Total_GW`, `Total_SW` | 1 PNG, 1×2 panels |
+| 7 | Per-year stacked-area timeseries | `Total_GW`, `Total_SW` × headline basins | 2 PNGs (one per pool), one panel per basin |
+| 8 | Projection stacked-bar chart | `Total_GW`, `Total_SW` | 2 PNGs (one per pool), horizontal stacked bars per basin (`Sigma_Attribution_Stacked_Bar_Total_{GW,SW}_Projection.png`) |
 
 **σ_CU attribution propagation.** Consumptive-use σ is propagated via
 `σ_CU = √((IE × σ_wd)² + (wd × σ_IE)²)`. The three-way decomposition
@@ -2196,14 +2217,14 @@ ensemble) would most reduce uncertainty in a given basin.
 Mann-Kendall + Sen's slope computation is per-pixel × 204 years ×
 ~15 product families × 4 periods and dominates the Step 3g runtime.
 When iterating on the era-mean raster maps, the actual-vs-predicted
-maps, the σ-component CV maps, or the graphical abstract, skip the
+maps, the σ-component maps, or the graphical abstract, skip the
 trend suite with:
 
 ```bash
 python pipeline.py --steps 3g --skip-maps trends
 ```
 
-All era-mean maps, Prediction CV / SNR maps, σ-component CV maps,
+All era-mean maps, Prediction CV / SNR maps, σ-component maps,
 actual-vs-predicted maps, Stream Capture era maps, and the graphical
 abstract are still produced.  The `Trend_Analysis/` directory is
 simply not touched, so existing trend maps from previous runs remain
@@ -2267,7 +2288,7 @@ proportionally to capacity weight.  True per-well uncertainty would
 require well-specific error models (pump efficiency variability,
 metering error distributions) that are not currently available.
 
-**Outputs:** `{MODEL_DIR}Full_Prediction_XGB/Well_Package/`
+**Outputs:** `{MODEL_DIR}Full_Prediction_XGBRF/Well_Package/`
 
 ### Step 4 — USGS intercomparison
 
@@ -2316,7 +2337,7 @@ comparison.  The intercomparison produces:
   - **r vs NSE scatter** — Paired scatter with quadrant annotations
     identifying basins with good/mixed/poor agreement.
 
-All outputs are written to `{prediction_dir}Intercomparison/`.
+All outputs are written to `{prediction_dir}Withdrawal_Intercomparison/`.
 
 #### Step 4b — CU intercomparison (`run_cu_usgs_intercomparison()`)
 
@@ -2601,7 +2622,7 @@ Key functions:
   (excluding coordinates, well/canal density, streamflow), it produces
   per-pixel OOD probabilities (continuous [0, 1] via χ² CDF) that
   measure temporal novelty — how different a pixel's climate and land-use
-  conditions are from the 1984–2025 training era.  Used in
+  conditions are from the 1984–2024 training years.  Used in
   `predict_full_period()` to write per-year OOD rasters, a summary CSV
   with era-level diagnostics, and a time-series plot.
 
@@ -2627,12 +2648,14 @@ Key functions:
 - **`create_cross_strategy_summary()`** — Side-by-side comparison of Random,
   Temporal LOO, and Spatial LOO results with R², RMSE, MAE, MBE, and
   Overfit R².  Produces CSV, LaTeX (`booktabs`), and grouped bar chart.
-- **`create_graphical_abstract()`** — Three-panel Figure 1: (a) mean-annual
-  withdrawal depth map with GW basin boundaries, (b) annual withdrawal time series
-  with era shading and inset bar chart.
-- **`create_era_raster_maps()`** — 2×2 panel era-mean spatial maps with
+- **`create_graphical_abstract()`** — Four-panel Figure 1: (a) mean-annual
+  withdrawal depth map with GW basin boundaries, (b) statewide annual withdrawal
+  time series (GW and SW) with ±1σ_total and era shading, (c) era-average
+  irrigation and non-irrigation volumes with ±1σ_total error bars, and (d) key
+  contributions.
+- **`create_era_raster_maps()`** — 3×1 panel era-mean spatial maps with
   basin/AMA/INA overlays and shared colorbar.  Supports multi-band rasters
-  (e.g., band 2 for CV in sigma rasters).
+  (e.g., band 3 for CV in the augmented prediction rasters).
 - **`create_actual_vs_predicted_maps()`** — 3-panel actual vs predicted
   comparison with gray no-data for unmetered areas and diverging difference
   colormap.
@@ -2771,23 +2794,20 @@ LU-only retention 1930-1937 (gradually opens cf threshold):
 | 1936 | 0.51 |
 | 1937 | 0.50 |
 
-Well&LULC intersection 1938-1944 (gradually loosens to baseline 0.7):
+Well&LULC intersection 1938-1944 (loosens to the baseline 0.7 by 1940):
 
 | Year | cf threshold |
 |---|---|
 | 1938 | 0.95 |
 | 1939 | 0.90 |
-| 1940 | 0.80 (tight to match USGS 1940 = 1.80 MAF anchor) |
-| 1941 | 0.75 |
-| 1942–1944 | 0.70 |
+| 1940–1944 | 0.70 (flat; admits more intersection pixels at 1940–41 to recover the 1940 GW under-attribution toward the USGS 1.80 MAF anchor) |
 
 Pre-1922 strict intersection reflects the low-development era (USGS
 shows < 0.20 MAF total water use through 1920). The 1938 cliff in
 ML-predicted per-pixel pumping (mean depth jumps 129 mm → 228 mm at
 1938 due to features the model interprets as a regime change) is
 mitigated by tightening the well&LULC intersection at 1938 (very
-few pixels retained), then gradually loosening to the baseline 0.7
-by 1942.
+few pixels retained), then loosening to the baseline 0.7 by 1940.
 
 #### Density-ratio GW/SW split with CW-weighted smoothing
 
@@ -2841,8 +2861,8 @@ Pre-1948 anchors (interpolated linearly between):
 | 1917 | 0.3 | Pinal/SRP early canal era |
 | 1929 | 0.3 | end of Pinal era |
 | 1935 | 0.0 | well-drilling boom era (USGS 1935 = 1.20 MAF, mostly GW) |
-| 1940 | 0.3 | Gila Project deliveries start |
-| 1945 | 1.0 | Gila dam era |
+| 1940 | 0.10 | lowered from 0.3 to keep the canal-served SW kernel tight pre-1948 |
+| 1945 | 0.30 | lowered from 1.0 (ML was over-attributing ~1.7 MAF SW at 1945 vs ~1.0 MAF USBR-reconciled) |
 | 1948 | 1.5 | pre-GMA baseline |
 
 Post-1948 schedule:
@@ -2851,17 +2871,16 @@ Post-1948 schedule:
 |---|---|---|
 | 1948–1955 | 1.5 | Pre-GMA SRP era |
 | 1956–1964 | 1.0 (default) | Pre-GMA |
-| 1965–1984 | linear ramp 1.0 → 4.0 | SRP canals matured + CAP construction |
+| 1965–1984 | linear ramp 1.0 → 6.0 | SRP canals matured + CAP construction |
 | 1973–1977 (override) | 2.0 | mid-1970s drought reduced SW deliveries → tighter halo lifts GW% |
-| 1985–2002 | 4.0 | CAP/SRP full service area |
-| 2003–2010 (override) | 3.0 | CAP-era ag-retirement window — model SW was excess; tighter halo brings SW down toward USGS |
-| 2011–2021 | linear ramp 4.0 → 6.0 | Bridges 2010→2011 ML drop |
-| 2022+ | 6.0 | Mature CAP — wider halo brings GW% into ADWR 41–42 % band |
+| 1985+ | 6.0 | CAP/SRP full service area (`partops.era_sw_sigma`) |
 
-**Pre-1945 SW-gate**: SW share is restricted to pixels with explicit
-canal access (`has_smooth_canal | has_direct_canal`) or registered
-SW rights (`sw_rights_density > 0`). At all other pre-1945 pixels,
-any SW share computed by the density ratio is collapsed back into GW.
+**Pre-1948 SW-gate** (`year < 1948`): SW share is restricted to pixels
+with explicit canal access (`has_smooth_canal | has_direct_canal`) or
+registered SW rights of the matching use (`irr_sw_rights_density > 0`
+for irrigation SW, `nonirr_sw_rights_density > 0` for non-irrigation
+SW). At all other pre-1948 pixels, any SW share computed by the
+density ratio is collapsed back into GW.
 Matches the USGS narrative that pre-CAP pumping was essentially all
 GW outside SRP/Yuma canal service areas.
 
@@ -2877,10 +2896,9 @@ baseline. Era-dependent overrides:
 
 | Era | Pixel condition | Rule | Rationale |
 |---|---|---|---|
-| `year ≤ 1980` | `uf < 0.3` (rural + LU proximity band) | `irr_frac = 0.95` flat | USGS shows ag was 89–97 % of AZ-total pumping through 1980 |
-| `year ≤ 1980` | `uf ≥ 0.3` (urban core, any basin) | `irr_frac = 1 − uf` (clipped) | M&I share at urban cores routed to NonIrr regardless of AMA — Flagstaff / Lake Havasu / Bullhead / Phoenix-Tucson cores |
-| `1981 ≤ year ≤ 1985` (NON-AMA) | — | `irr_frac = 1 − uf` (clipped to ≥ 0.05) | CAP-startup transition; rural basins still mostly irrigation |
-| `1981+` AMA | — | natural `irr_capacity_fraction` (cf-floor) | M&I growth in urban AMAs |
+| `year < 1970` | all pixels | `irr_frac = 0.95` flat | USGS shows ag was ~95 % of AZ-total pumping before 1970 |
+| `1970 ≤ year ≤ 1985` (NON-AMA) | — | `irr_frac = 1 − uf` (clipped to ≥ 0.05) | uf share routed to NonIrr (municipal / industrial) |
+| `1970 ≤ year ≤ 1985` (AMA) | — | natural `irr_capacity_fraction` | registry captures metro Phoenix/Tucson M&I growth |
 | `year ≥ 1986` NON-URBAN-AMA | — | post-1985 LU-aware branch (only_crop / both_lu / only_urban / pure_desert / ag_halo) | Modern era |
 
 **Pre-1981 simplification (current)**: removed the
@@ -2905,7 +2923,7 @@ Post-1985 orphan pixels fall through to the default partition
 (at `1 − uf = 1` → 100 % Irr), matching the behaviour that
 post-CAP NonIrr-bleed otherwise inflates NonIrr_GW.
 
-**1985 special case**: 1985 uses the 1981–1985 `irr_frac = 1 − uf`
+**1985 special case**: 1985 uses the 1970–1985 `irr_frac = 1 − uf`
 override at NON-AMA pixels with natural `irr_cap` at AMA pixels —
 matches USGS Irr% = 85.5.
 
@@ -2964,9 +2982,9 @@ Irr-bias and a year-conditional symmetric dampener.  At every
    volume in 1990-2000 closes the gap while the well-density split
    keeps NIGW / Irr% well-aligned.
 
-Net effect (1985-2015 anchors, computed in Step 4f category
-comparison): Irr% / NIR% MAE = **1.87 / 1.95 pp**, NIGW MAE =
-**1.32 pp**, NISW MAE = **0.92 pp**.
+Net effect (USGS anchors from 1950 onward, N = 14–15, computed in the
+Step 4f category comparison, `USGS_AZ_Category_MAE.csv`): Irr% / NIR%
+MAE = **1.90 / 1.96 pp**, NIGW MAE = **1.32 pp**, NISW MAE = **0.92 pp**.
 
 #### AGRI-extension retention (pre-1986) — REMOVED
 
@@ -2985,7 +3003,7 @@ the AGRI cropland-proximity band into the partition footprint.
 
 **Post-1985 cropland-proximity gate retained** (in the `1986+` LU-aware
 branch) — the post-1985 use never produced visual halos because the
-SW-smoothing kernel σ is fixed at 4.0 (vs the 1965-1984 ramp 1.0 → 4.0
+SW-smoothing kernel σ is fixed at 6.0 (vs the 1965-1984 ramp 1.0 → 6.0
 that was the actual halo amplifier). The post-1985 cropland-proximity gate
 prevents NonIrr inflation at cropland-proximity pixels in URBAN_AMA basins
 (Phoenix / Tucson) where they would otherwise fall into
@@ -3242,29 +3260,34 @@ NIGW by 5–8 pp statewide vs USGS at 1990/1995/2010/2019 anchors.
 
 Three coordinated mechanisms address this — all driven by the
 **actual per-basin per-year CAP delivery** loaded once at pipeline
-startup from the CAP Excel via
-`partops.load_cap_basin_direct_delivery()`.  Hindcast years use
-real CAP records; projection years (2025+) fall back to the same
-`CAP_DELIVERY_FACTORS` Tier multipliers that drive
-`apply_cap_delivery_perturbation`, guaranteeing consistency between
-the SW-pixel perturbation and the per-basin cap/floor.
+startup from the CAP Excel via `partops.load_cap_basin_delivery()`
+(all CAP deliveries, direct use plus recharge, by default;
+`include_recharge=False` restricts to direct use).  Years with CAP
+records (through 2023; 2022 for Harquahala) use the recorded delivery.
+From 2024 the NonIrr cap falls back to the same `CAP_DELIVERY_FACTORS`
+multipliers that drive `apply_cap_delivery_perturbation`, keeping the
+SW-pixel perturbation and the cap consistent; the Irr floor instead
+carries forward the last recorded delivery ratio.
 
 **(1) Dynamic NonIrr GW share cap** (`CAP_BASIN_NI_PEAK_SW_FRACTION`,
 helper `partops._cap_basin_ni_cap`).  Per-basin per-year upper bound
 on `nonirr_gw_share` driven by the actual delivery ratio:
 
 ```
-cap(basin, year) = 1 − peak_sw_fraction × delivery_ratio
-delivery_ratio   = direct_delivery[year] / baseline (hindcast)
-                   or CAP_DELIVERY_FACTORS[year]    (projection)
+cap(basin, year) = 1 − peak_sw_fraction × delivery_ratio²
+delivery_ratio   = delivery[year] / baseline       (years with CAP records)
+                   or CAP_DELIVERY_FACTORS[year]   (later years)
 ```
 
-| Basin | Peak NonIrr SW fraction | Cap @ peak | Cap @ Tier 1 sustained (2027+) | Cap @ low delivery (2023) |
+The quadratic keeps the cap loose at low delivery (early-CAP years)
+and reaches `1 − peak_sw_fraction` at peak delivery.
+
+| Basin | Peak NonIrr SW fraction | Cap @ peak | Cap @ 2027+ (Operating Guidelines, factor 0.49) | Cap @ 2023 (recorded delivery) |
 |---|---|---|---|---|
-| Phoenix | 0.70 | 0.30 | 0.54 | 0.44 |
-| Pinal | 0.65 | 0.35 | 0.57 | **0.88** (post CAP-NIA wind-down) |
-| Tucson | 0.70 | 0.30 | 0.54 | 0.84 |
-| Harquahala | 0.50 | 0.50 | 0.67 | 0.70 (capped at FLOOR_MAX) |
+| Phoenix | 0.70 | 0.30 | 0.83 | 0.67 |
+| Pinal | 0.65 | 0.35 | 0.84 | **0.97** (post CAP-NIA wind-down) |
+| Tucson | 0.70 | 0.30 | 0.83 | 0.50 |
+| Harquahala | 0.50 | 0.50 | 0.88 | 0.81 |
 
 Baseline is the mean direct CAP delivery over
 `CAP_BASIN_NI_BASELINE_PERIOD = (2000, 2009)` (peak-CAP era).
@@ -3293,21 +3316,21 @@ delivery falls below baseline (it never tightens past the static
 calibration):
 
 ```
-floor = static_floor + (FLOOR_MAX − static_floor) × (1 − delivery_ratio)
+floor = static_floor + (FLOOR_MAX − static_floor) × (1 − delivery_ratio²)
 ```
 
-with `CAP_BASIN_IRR_FLOOR_MAX = 0.70` (leaves 30 % SW slack for
-local/tribal/residual ag SW at zero CAP-NIA delivery).
+with `CAP_BASIN_IRR_FLOOR_MAX_PER_BASIN` = 0.70 at Pinal (leaves 30 %
+SW slack for local/tribal/residual ag SW at zero CAP-NIA delivery) and
+0.95 at Harquahala (`CAP_BASIN_IRR_FLOOR_MAX_DEFAULT = 0.70` elsewhere).
 
-| Basin | Peak Irr SW frac | Static floor | Floor @ peak | Floor @ Tier 1 (2027+) |
+| Basin | Peak Irr SW frac | Static floor | Floor @ peak | Floor @ 2027+ (last recorded delivery carried forward) |
 |---|---|---|---|---|
-| Pinal | 0.50 | 0.30 | 0.30 (matches static) | 0.44 |
-| Harquahala | 0.50 | 0.40 | 0.40 (matches static) | 0.50 |
+| Pinal | 0.50 | 0.30 | 0.30 (matches static) | 0.68 |
+| Harquahala | 0.50 | 0.40 | 0.40 (matches static) | 0.95 |
 
-Captures the post-2011 CAP-NIA cancellation: Pinal/Harquahala ag
-floor automatically rises 0.30→0.62 and 0.40→0.57 between
-2000-2023 as direct CAP delivery to ag districts dropped to near
-zero.
+Captures the post-2011 CAP-NIA cancellation: the Pinal/Harquahala ag
+floor rises 0.30→0.68 and 0.40→0.95 as CAP delivery to ag districts
+dropped to near zero.
 
 **(3) Decoupled static floors at all CAP basins** (1985+).  Pre-
 1985 keeps the original symmetric `BASIN_GW_FLOOR` (Phoenix 0.20,
@@ -3409,19 +3432,18 @@ below the model's resolution and not represented separately.
 
 2026 is the final year under the 2007 Interim Guidelines + 2019 DCP
 framework (which expires December 2026), so it's treated as part of
-the hindcast at Tier 1 (0.66).  For the post-framework projection
-horizon (2027–2099), the central projection assumes **continued
-Tier 1 shortage conditions** — the dominant recent regime.  AZ has
-been in Tier 1 (or Tier 2a) every year 2022–2026, USBR's 24-month
-projections suggest Lake Mead will remain in the 1050–1075 ft
-elevation band (Tier 1 trigger range) for the near term under
-current Compact conditions, and the Lake Mead carryover that
-protected the 2010–2021 plateau is exhausted.  Continuing factor
-0.66 (= Tier 1's 512 kAF cut from the 1500 kAF design capacity, ≈
-34 % reduction) past 2026 is the most defensible single central
-estimate; it preserves continuity at the 2026→2027 boundary (no
-boundary step) and matches the regime AZ stakeholders are actively
-planning around.
+the hindcast at Tier 1 (0.66).  For 2027–2028 the central projection uses the **2027–2028 Operating
+Guidelines** (USBR, August 2026; a final agency action under the
+2027–2036 Decision Framework ROD): the Lower Division apportionment
+falls to 6.25 MAF, of which Arizona's reduction is **760 kAF/yr**
+(Section 5.3.A), giving a factor of 1 − 760/1500 = **0.49**.  The
+guidelines cover 2027–2028 only, so 2029–2099 hold that latest
+official condition as a stand-in for continued shortage (storage in
+Lakes Powell and Mead was at an all-time low when they were adopted).
+The 2029–2099 values are an assumption, not a forecast.  As for
+2020–2026, the whole Arizona reduction is assigned to CAP, and the
+additional 700 kAF of voluntary Lower Basin system conservation
+(2026–2028) is excluded.
 
 **This is a separate choice from WestWater Research (2026)'s "Basic
 Coordination" scenario** (which assumes a maximum policy shortage
@@ -3432,7 +3454,7 @@ alternative trajectory in the CAP scenario sweep (below) along with
 Extreme Shortage and the DCP Tier 0/1/2a/2b/3 alternatives.
 
 **Caveat on the 74-year projection horizon.** Applying a single
-fixed 0.66 factor across all of 2027–2099 is a simplification —
+fixed 0.49 factor across all of 2027–2099 is a simplification —
 real-world Compact renegotiations happen on 15–20 year cycles and
 climate / basin hydrology / political dynamics will continue to
 evolve.  The fixed factor is best read as *"the most likely
@@ -3467,7 +3489,8 @@ CAP_DELIVERY_FACTORS = {
     2022: 0.66,                                   # Tier 1
     2023: 0.61,                                   # Tier 2a (mandatory only)
     2024: 0.66, 2025: 0.66, 2026: 0.66,           # Tier 1 (returns, continues)
-    **{year: 0.66 for year in range(2027, 2100)}, # Sustained Tier 1
+    2027: 0.49, 2028: 0.49,                       # 2027-2028 Operating Guidelines (AZ -760 kAF)
+    **{year: 0.49 for year in range(2029, 2100)}, # latest official condition held (assumption)
 }
 ```
 
@@ -3510,11 +3533,24 @@ scales the `well_density` columns (`well_density`, `irr_well_density`,
 | Tier | Cut | Target effective gw_w (era-mapped) | Boost factor |
 |---|---|---|---|
 | Tier 0 | 192 kAF | 0.2 (post-CAP, no shift) | **1.0** |
-| Tier 1 | 512 kAF | 1.0 (pre-CAP 1945–1980 era) | **5.0** |
-| Tier 2a | 592 kAF | 1.5 (pre-CAP peak 1948–1955) | **7.5** |
+| Tier 1 | 512 kAF | 1.0 (between post-CAP 0.2 and the 1981–84 GMA transition 2.0) | **5.0** |
+| Tier 2a | 592 kAF | 1.5 (approaching the 1981–84 GMA transition) | **7.5** |
 | Tier 2b | 640 kAF | 1.5 | 7.5 |
-| Tier 3 | 720 kAF | 2.0 (approaching pre-1945 all-GW) | 10.0 |
-| **Projection 2027–2099 (sustained Tier 1)** | 512 kAF | 1.0 (pre-CAP era) | **5.0** |
+| Tier 3 | 720 kAF | 2.0 (the 1981–84 GMA transition) | 10.0 |
+| **2027–2028 Operating Guidelines (held to 2099)** | 760 kAF | 1.5 (Tier 2a value) | **7.5** |
+
+These central-run targets reach at most the 1981–84 GMA-transition
+level (gw_w = 2.0); only the stress sweep (`CAP_SCENARIO_GW_BOOSTS`)
+reaches the pre-CAP regimes.
+
+Only Tier 0, Tier 1 and Tier 2a occurred in the observed record, so the
+2027+ boost cannot be calibrated directly.  It was chosen so that the
+statewide groundwater substitution share (ΔGW against a no-cut
+partition, as a share of the cut volume) stays within the observed
+range: the calibrated 2022, 2023 and 2024 settings give 22.7 %, 29.2 %
+and 37.7 %; for 2027 with the 760 kAF cut, a boost of 5.0 gives 32.5 %,
+7.5 gives 38.1 % and 10.0 gives 42.2 %.  The Tier 2b / Tier 3 rows above
+are a mapping only and are not used by the central run.
 
 Multiplying `wd` by `k` is mathematically equivalent to multiplying
 `gw_weight` by `k` at those pixels — both just scale the numerator of
@@ -3565,11 +3601,11 @@ defensible representation of "what AZ will plausibly receive" than
 extrapolating a noisy historical fit.
 
 **Bounded by the CAP scenario step.**  `run_cap_scenario_analysis`
-still computes the full WestWater + DCP-Tier envelope
-(`Baseline_900kAF`, `Basic_Coordination_237kAF`,
-`Extreme_Shortage_0kAF`, `DCP_Tier0_192kAF_cut` through
-`DCP_Tier3_720kAF_cut`) as *additive* deltas on top of whatever
-`CAP_DELIVERY_FACTORS` produces for that year.
+computes the nine-scenario envelope (`Baseline_900kAF`,
+`DCP_Tier0_192kAF_cut`, `Operating_Guidelines_652kAF`,
+`DCP_Tier1_512kAF_cut` through `DCP_Tier3_720kAF_cut`,
+`Basic_Coordination_237kAF`, `Extreme_Shortage_0kAF`) against a no-cut
+counterfactual that bypasses `CAP_DELIVERY_FACTORS` (see below).
 
 **Scenario semantics — no-cut counterfactual reference.** Every
 scenario row (including `Baseline_900kAF`) is computed with
@@ -3582,25 +3618,42 @@ un-perturbed reference:
 
 - `Baseline_900kAF` (scenario factor 1.0) = **no cuts at all**
   (counterfactual full delivery).
-- `Basic_Coordination_237kAF` (factor 0.263) = 663 kAF additive
-  SW cut + 7.5× well_density boost — WestWater's post-Compact
-  central assumption.
-- `DCP_Tier1_512kAF_cut` (factor 0.431) = 512 kAF additive SW cut +
-  5× well_density boost — same magnitudes used by the central
-  hindcast for 2022/2024-2026.
+- `Operating_Guidelines_652kAF` (factor 0.724) = 248 kAF SW cut +
+  2.6× well_density boost — the 2027–2028 Operating Guidelines'
+  760 kAF Arizona reduction less the 512 kAF Tier 1 cut already in
+  the 900 kAF baseline.
+- `Basic_Coordination_237kAF` (factor 0.263) = 663 kAF SW cut +
+  25× well_density boost — WestWater's upper-bound stress scenario.
+- `DCP_Tier1_512kAF_cut` (factor 0.431) = 512 kAF SW cut +
+  10× well_density boost.
 - `Extreme_Shortage_0kAF` (factor 0) = 900 kAF (full CAP overlay)
-  additive SW cut + 12.5× well_density boost — pessimistic bound.
+  SW cut + 75× well_density boost — pessimistic bound.
+
+The sweep boosts (`CAP_SCENARIO_GW_BOOSTS`) are larger than the
+central-run boosts (`CAP_CUT_GW_BOOST_FACTORS`), because the sweep is
+calibrated as a WestWater-anchored stress bracket.
+
+Every panel title in the CAP map suite gives the scenario's cut from
+the 900 kAF Baseline.  The DCP tier rows remove each tier's full cut
+from that baseline, which is taken to already reflect the 512 kAF Tier 1
+cut, so they describe shortages deeper than the tiers themselves (the
+Tier 1 row leaves 388 kAF).  `Operating_Guidelines_652kAF` removes only
+248 kAF, the part of the guidelines' 760 kAF Arizona reduction beyond
+that Tier 1 cut, which is why its ΔGW is smaller than the Tier 1
+row's.  The central projection instead takes the full 760 kAF from the
+1,500 kAF design capacity (`CAP_DELIVERY_FACTORS = 0.49`).
 
 Scenario deltas in `CAP_Scenario_Cumulative.csv` are therefore
 **directly comparable to WestWater 2026's 8.0 MAF anchor** (also a
 with-cut-vs-no-cut projection delta).  The central pipeline output
-for 2027+ embodies a **sustained Tier 1 shortage assumption** (via
-`CAP_DELIVERY_FACTORS[2027+] = 0.66` and `CAP_CUT_GW_BOOST_FACTORS
-[2027+] = 5.0` — same magnitudes as the 2022/2024–2026 hindcast).
-This represents AZ's most likely sustained shortage condition, not
-WestWater's max-policy-shortage Basic Coordination scenario; the
-latter is one of several alternative trajectories evaluated in the
-scenario sweep, with deltas measured against the no-cut Baseline.
+for 2027+ embodies the **2027–2028 Operating Guidelines shortage, held
+through 2099** (via `CAP_DELIVERY_FACTORS[2027+] = 0.49` and
+`CAP_CUT_GW_BOOST_FACTORS[2027+] = 7.5`).  The sweep is independent of
+that choice: every scenario, including Baseline, bypasses the central
+perturbation, and the sweep runs with the CAP delivery lookup disabled
+so the dynamic CAP NonIrr cap and irrigation floor (which read
+`CAP_DELIVERY_FACTORS` for projection years) do not carry the central
+assumption into the scenarios.
 
 Each scenario applies two coordinated effects (mirroring the
 hindcast perturbation in `partops.apply_cap_delivery_perturbation`):
@@ -3754,15 +3807,15 @@ against USGS Total_GW pre-1950 and USGS/ADWR aggregate breakdowns
   (1) scales `canal_weighted_streamflow_mm` AND the
   `*_sw_rights_density` columns by `CAP_DELIVERY_FACTORS[year]`
   (Tier 0 = 0.87, Tier 1 = 0.66, Tier 2a = 0.61 for 2020–2026;
-  **Tier 1 sustained = 0.66 for 2027–2099**; each factor =
+  **2027–2028 Operating Guidelines = 0.49, held for 2027–2099**; each factor =
   `1 − mandatory_cut_kAF / 1500` where 1500 kAF is CAP design
   capacity); (2) scales `well_density` / `irr_well_density` /
   `nonirr_well_density` by `CAP_CUT_GW_BOOST_FACTORS[year]`
-  (Tier 1 = 5.0, Tier 2a = 7.5; **Sustained Tier 1 projection =
-  5.0 for 2027–2099** — mathematically equivalent to boosting
+  (Tier 1 = 5.0, Tier 2a = 7.5; **projection = 7.5 for 2027–2099** —
+  mathematically equivalent to boosting
   `gw_weight` at those pixels; era-mapped to the `_era_gw_weight`
-  calibration).  The 2026→2027 boundary is smooth because both
-  factors carry forward unchanged from the hindcast Tier 1 regime.
+  calibration).  Both factors step at 2026→2027, from Tier 1 to the
+  Operating Guidelines cut.
   Together these produce the factor² SW-kernel reduction and the
   corresponding GW allocation shift, calibrated against WestWater
   2026 drawdown projections.  No-op for pre-2020 years or when
@@ -3770,9 +3823,10 @@ against USGS Total_GW pre-1950 and USGS/ADWR aggregate breakdowns
   pipeline.py Step 3 and by `uncertaintyops.py:_partition_with_ctx`.
   An alias `apply_cap_hindcast_perturbation` is kept temporarily for
   backwards compatibility.
-- **`load_cap_basin_direct_delivery(cap_xlsx)`** — loads direct-use
-  CAP delivery per basin per year from the CAP Excel
-  (`Recharge Facility.isna()`), computes a 2000-2009 baseline mean,
+- **`load_cap_basin_delivery(cap_xlsx)`** — loads
+  CAP delivery per basin per year from the CAP Excel (direct use plus
+  recharge by default; `include_recharge=False` keeps only rows with
+  `Recharge Facility.isna()`), computes a 2000-2009 baseline mean,
   auto-trims a partial-year final record, and auto-infers the
   per-basin arrival year (first year ≥ 5 % of baseline).  Returns
   `{basin: {'yearly_af', 'baseline_af', 'arrival_year'}}` ready for
@@ -3788,10 +3842,11 @@ against USGS Total_GW pre-1950 and USGS/ADWR aggregate breakdowns
   share floor at Pinal + Harquahala (the two CAP-NIA basins).
   Rebased to the static `BASIN_IRR_GW_FLOOR_POST_CAP` value at peak
   delivery so the floor only LIFTS when delivery falls.  Capped at
-  `CAP_BASIN_IRR_FLOOR_MAX = 0.70`.
+  `CAP_BASIN_IRR_FLOOR_MAX_PER_BASIN` (Pinal 0.70, Harquahala 0.95).
 - **`_era_gw_weight(year)`** — returns the era-dependent `gw_weight`
-  (5.0 pre-1945, 2.0 pre-GMA, mid-CAP bump 0.5 at 1998–2007, 0.2
-  post-CAP, with 1930–1935 = 10.0 override).
+  (10.0 before 1950, 30.0 at 1950–1965, 15.0 at 1971–1979, 2.0
+  pre-GMA, 0.1 early CAP, mid-CAP bump 0.4 at 1998–2007, 0.2
+  post-CAP; full schedule in "GW weight schedule" above).
 - **`era_sw_sigma(year)`** — single source of truth for the SW
   Gaussian smoothing σ schedule (0.0 pre-1912, piecewise anchors
   1912–1948, 1.5 1948–1955, 1.0 1956–1964, linear ramp 1.0 → 6.0
@@ -3956,10 +4011,10 @@ single-year 2019 detail.
 
 **Calibration interpretation.**
 
-The model fits anchor totals to within ±2 % at 5 of 7 USGS pre-1945
-GW anchors (worst: 1920 at −13.9 %, still inside USGS bar-chart
-±20 % uncertainty) and within ±8 % at all 14 post-1950 USGS Total
-anchors.  Per-category share MAE at 1950-2015:
+The model fits anchor totals to within ±2 % at 3 of 7 USGS pre-1950
+GW anchors and within ±6 % at all but 1920 (−13.9 %, still inside the
+USGS bar-chart ±20 % uncertainty), and within ±8 % at 13 of the 14
+post-1950 USGS Total anchors (1965: −8.2 %).  Per-category share MAE at 1950-2015:
 
 | Category | MAE (pp) |
 |---|---|
@@ -3999,9 +4054,10 @@ duty estimates).
 ##### Calibration design principles
 
 1. **Pre-1950 USGS reconstructions are noisy** (±0.05 MAF estimated).
-   All pre-1950 anchors are within ±0.03 MAF — essentially perfect
-   given USGS noise floor. Tight-fit at the relative-percent level
-   (e.g., 1915 +20 % relative) is misleading because USGS values
+   All pre-1950 anchors are within ±0.07 MAF (1935: −0.07; 1940:
+   −0.04; all others ±0.03) — within the USGS noise floor. Tight-fit
+   at the relative-percent level (e.g., 1920 −13.9 % relative) is
+   misleading because USGS values
    are tiny; absolute MAF is the correct comparison metric pre-1950.
 
 2. **Era-specific σ + retention combinations** are necessary because
@@ -4023,7 +4079,7 @@ duty estimates).
    bumps target specific anchor periods (1930s well-boom, late-1990s
    GW% rebound).
 
-5. **Pre-1945 SW-gate**: SW share is restricted to canal/sw_rights
+5. **Pre-1948 SW-gate**: SW share is restricted to canal/sw_rights
    pixels. Otherwise SW collapses back to GW. Matches USGS narrative
    that pre-CAP pumping was essentially all GW outside SRP/Yuma.
 
@@ -4046,10 +4102,10 @@ duty estimates).
    `pure_desert` to `only_crop`. GEE LULC misses substantial rural
    ag in Willcox / Harquahala / Douglas; AGRI smoothing recovers it.
 
-9. **2003–2012 desert-well scaling** (`pure_desert_with_well × 0.75`)
-   mimics CAP-era ag retirement. ML doesn't capture the 2005/2010
-   pumping decline explicitly; scaling sparse-well desert pixels
-   trims Total toward USGS.
+9. **Desert-well scaling** (`pure_desert_with_well × 0.75` in 1986–1989
+   and from 2001 on; skipped in the wet, peak-SW years 1990–2000)
+   trims diffuse rural-well prediction that exceeds real per-pixel
+   pumping, moving Total toward USGS.
 
 10. **Year 1985 special case**: uses the 1970–1984 `irr_frac = 1 − uf`
     override AND the bumped pre-CAP `gw_weight = 2.0` together. The
@@ -4108,14 +4164,16 @@ every UQ ensemble member match the central pipeline byte-for-byte.
 `partops.apply_cap_delivery_perturbation` with a module-level
 `_CAP_PIXEL_MASK_CTX` (initialized from the rasterized CAP service-area
 GeoJSON), so both the 2020–2026 observed Tier cuts and the 2027–2099
-sustained "Basic Coordination" projection baseline propagate into the
+Operating Guidelines projection setting (factor 0.49, boost 7.5, held
+to 2099) propagate into the
 UQ ensemble at the same CAP-served pixels as in the central pipeline
 — *including* the paired SW-signal reduction
 (`CAP_DELIVERY_FACTORS`) and GW-weight boost
 (`CAP_CUT_GW_BOOST_FACTORS`).  The CAP scenario sweep in
-`run_cap_scenario_analysis` also operates on top of this perturbed
-baseline, adding scenario-specific SW deltas without re-touching
-well_density.
+`run_cap_scenario_analysis` does not use this perturbed baseline: every
+scenario bypasses the central perturbation and runs with the CAP
+delivery lookup disabled, applying its own SW cut and well_density
+boost to a no-cut counterfactual.
 
 Key functions:
 - **`run_uncertainty_quantification()`** — Master orchestrator.  Computes
@@ -4139,12 +4197,17 @@ Key functions:
   future only, 2026–2099).  Re-derives the full LULC → crop_frac →
   irr_frac chain per scenario.  Returns per-year total σ and per-category σ.
 - **`compute_sigma_gw()`** — ML-feature sensitivity to recent HarDWR
-  well-registry variability.  Swaps `well_density` (#1 SHAP feature)
-  with values from each of 5 recent reference years (2020–2024) and
+  well-registry variability.  Swaps `well_density` (the main
+  groundwater-infrastructure predictor, 6th by mean |SHAP|) with
+  values from each of 5 recent reference years (2020–2024) and
   takes the sample std across the 5 predictions.  Does not cover
   `sw_rights_density` sensitivity (the feature is rank 15 in SHAP and
   flat post-1996).  Returns per-year total σ and per-category σ.
-- **`compute_sigma_total()`** — Quadrature combination of all five
+- **`compute_sigma_usbr()`** — Upper Colorado River streamflow
+  sensitivity across 5 USBR CMIP3 ensemble members (from 1950 at
+  Colorado-River-watershed pixels; from 1985 at CAP pixels).  Returns
+  per-year total σ and per-category σ.
+- **`compute_sigma_total()`** — Quadrature combination of all six
   components for both total and per-category σ.  Writes 2-band total σ
   rasters (σ, CV), per-category σ rasters, and temporal Mean_CV.tif.
 - **`compute_basin_sigma_total()`** — Reads per-component basin/sub-basin
@@ -4157,21 +4220,20 @@ Key functions:
 - **`run_density_ratio_sensitivity()`** — Partition-level diagnostic
   covering two orthogonal knobs: a density-ratio sweep (well and
   SW-rights densities perturbed with opposite signs at ±20%) and a
-  smoothing-kernel sweep (`sw_smooth_sigma ∈ {2, 8}`).  Writes one CSV
+  smoothing-kernel sweep (per-year σ at ½× and 2× the production
+  `era_sw_sigma`, floor 0.5).  Writes one CSV
   with a `Perturbation_Type` column and two ribbon-plot PNGs.
 - **`run_cap_scenario_analysis()`** — Simulates CAP delivery reduction
-  scenarios by perturbing `canal_weighted_streamflow_mm` at CAP service-
-  area pixels and re-running the density-ratio partitioning. Total
-  withdrawals stay fixed; only the GW/SW split changes. Scenarios
-  include three WestWater Research (2026) Post-2026 Colorado River
-  alternatives (Baseline 900 kAF, Basic Coordination 237 kAF, Extreme
-  Shortage 0 kAF) and five DCP shortage tiers (Tier 0–3). Outputs
-  per-basin and statewide CSVs with scenario-aware non-well offset for
-  estimated statewide total water use, cumulative additional GW
-  drawdown, and multi-panel time-series plots with ±1σ ribbons (drawn
-  when per-category σ rasters from `Sigma_Total/Rasters/` are
-  available — the block runs after sigma-total so they always are
-  unless `--skip-uq sigma-total`).  Skip via `--skip-uq cap-scenario`.
+  scenarios by perturbing `canal_weighted_streamflow_mm` and boosting
+  `well_density` at CAP service-area pixels, then re-running the
+  density-ratio partitioning. Total withdrawals stay fixed; only the
+  GW/SW split changes. Nine scenarios: the no-cut Baseline 900 kAF,
+  WestWater Research (2026) Basic Coordination 237 kAF and Extreme
+  Shortage 0 kAF, the five DCP shortage tiers (Tier 0, 1, 2a, 2b, 3),
+  and the 2027–2028 Operating Guidelines (652 kAF). Outputs per-basin
+  and statewide CSVs with scenario-aware non-well offset for estimated
+  statewide total water use, cumulative additional GW drawdown, and
+  multi-panel time-series plots.  Skip via `--skip-uq cap-scenario`.
 
   **Additive CAP-import perturbation.**  The previous multiplicative
   form `cw_sf *= factor` zeroed the *entire* canal-weighted streamflow
@@ -4230,8 +4292,8 @@ from the ADWR Well Registry and writes four GeoParquet files — one per
 unit (`Well_Package_mm.parquet`, `_ft`, `_m3`, `_AF`) — with WKB point
 geometry, compatible with QGIS and GeoPandas.
 
-**Sampling**: Only the **mm** rasters are read (12 categories per year:
-9 withdrawal + 3 CU); ft, m³, and acre-ft values are computed
+**Sampling**: Only the **mm** rasters are read (15 categories per year:
+9 withdrawal + 3 CU + 3 capture); ft, m³, and acre-ft values are computed
 arithmetically, reducing I/O by 75 %.  When augmented 6-band rasters are
 available (after Step 3b), band 2 (σ) is also sampled and per-well
 uncertainty columns (σ, lower/upper 95 % CI) are included for every
@@ -4526,10 +4588,10 @@ Data/Outputs/
     │   ├── Cross_Strategy_Summary.tex       # LaTeX table for manuscripts
     │   └── Cross_Strategy_Comparison.png    # Grouped bar chart
     │
-    └── Full_Prediction_XGB/
+    └── Full_Prediction_XGBRF/
         ├── Model_Interpretability/          # SHAP, ALE, permutation importance
         │   ├── Hindcast/                    #   Era-specific plots (1896-1983)
-        │   ├── Training/                    #   Era-specific plots (1984-2024)
+        │   ├── Historical/                  #   Era-specific plots (1984-2025)
         │   └── Projection/                  #   Era-specific plots (2026-2099)
         ├── Predicted_Rasters/               # Total annual withdrawal (4 units, 6-band)
         │   ├── Depth_mm/
@@ -4560,14 +4622,16 @@ Data/Outputs/
         │   ├── Sigma_Irr/                   #   Irrigation fraction spread
         │   ├── Sigma_LULC/                  #   LULC projection spread
         │   ├── Sigma_GW/                    #   Well-density feature sensitivity (2020–2024 snapshots)
+        │   ├── Sigma_USBR/                  #   Upper Colorado streamflow spread (from 1950)
         │   ├── Sigma_Total/                 #   Quadrature combination (σ, CV, per-category σ)
         │   ├── Sigma_CU/                    #   CU error-propagation σ
+        │   ├── CAP_Scenario/                #   CAP shortage scenario sweep CSVs + figures
         │   └── Plots/                       #   Time-series plots
-        ├── Graphical_Abstract_Fig1.png         # Publication Figure 1 (map + ts + bar)
+        ├── Graphical_Abstract_Fig1.png         # Publication Figure 1 (map + ts + bars + key contributions)
         ├── Mean_Annual_Predicted_mm.tif        # Mean-annual depth GeoTIFF (1896–2099)
         ├── Prediction_Exceedance_Summary.csv   # Per-year exceedance stats
         ├── Raster_Maps/                     # Step 3g — spatial maps for all products
-        │   ├── Era_Maps_*.png               #   2×2 era-mean panels per category
+        │   ├── Era_Maps_*.png               #   3×1 era-mean panels per category
         │   ├── Actual_vs_Predicted.png      #   Actual vs predicted (1984–2024)
         │   └── Trend_Analysis/              #   Mann-Kendall + Sen's slope maps
         │       ├── Trend_*.png              #   Per-category, per-period pixel-level trend maps
@@ -4584,7 +4648,7 @@ Data/Outputs/
         │   ├── Well_Package_ft.parquet     #   GeoParquet: 15 categories (ft + σ_ft)
         │   ├── Well_Package_m3.parquet     #   GeoParquet: 15 categories (m³ + σ_m³)
         │   └── Well_Package_AF.parquet     #   GeoParquet: 15 categories (AF + σ_AF)
-        ├── Intercomparison/                 # Step 4a — withdrawal comparison
+        ├── Withdrawal_Intercomparison/      # Step 4a — withdrawal comparison
         │   └── Temporal_Agreement/          #   Heatmaps, box/violin, Taylor, r-vs-NSE
         ├── CU_Intercomparison/              # Step 4b — CU comparison
         ├── CAP_SRP_Validation/              # Step 4c — CAP/SRP SW validation
@@ -4670,7 +4734,7 @@ Independent USGS / ADWR cross-checks, computed from the shipped
 | 1990 | USGS Total | 7.59 MAF | 7.33 MAF | −0.26 (−3 %) | |
 
 Peak years 1955 / 1957 / 1975 / 1980 are systematically under-predicted
-by 12-18 % because the modern (2024) HarDWR registry has lost records
+by 6–11 % because the modern (2024) HarDWR registry has lost records
 for many peak-era wells abandoned before GMA-mandated registration
 began in 1980.  The peak-year basin-MAX lift on `well_density` (and
 the partition-side mirror on `irr_well_density` / `nonirr_well_density`)
@@ -4681,12 +4745,12 @@ fall inside the model's 95 % σ_total ribbon.
 **Uncertainty around the reconciliation.**  The 2017 AZ-wide σ_total
 from the six-component UQ pipeline (linear sum across basins; see
 "σ_total — Combination of components and aggregation across space"
-for the rationale) is **1.13 MAF** (≈ 16.5 % of the
+for the rationale) is **1.08 MAF** (≈ 15.8 % of the
 6.81 MAF model total) as written to `Full_Period_Time_Series.csv`,
-giving a 95 % confidence interval of roughly **4.60–9.01 MAF** on the
+giving a 95 % confidence interval of roughly **4.69–8.92 MAF** on the
 model alone.  ADWR's reported 7.0 MAF lands
 well inside this interval, **and the central model value matches ADWR
-within −2.3 % without any external offset**.  This is a substantial
+within −2.7 % without any external offset**.  This is a substantial
 tightening relative to the prior framing that required a +2.26 MAF
 federal-delivery offset to close the budget; the partition-side
 calibration (per-basin GW caps + dual-gate canal-infra gate +
@@ -4695,14 +4759,15 @@ crop/urban edge dilations) now folds the federal canal deliveries
 directly into Total_SW via the density-ratio split.
 
 The USGS 2015 GW cross-check tells the same story from an
-independent direction: model 3.16 MAF GW vs USGS 3.09 MAF
-(+0.07 MAF, +2 %), comfortably inside the model 95 % CI.
+independent direction: model 2.96 MAF GW vs USGS 3.09 MAF
+(−0.13 MAF, −4.1 %), inside the model 95 % CI.
 
 For the deep hindcast / pre-CAP era (1896–1984), σ_total widens
 substantially because σ_irr (irrigation-fraction reconstruction
-uncertainty) and σ_USBR (no-spread → wide range across MACA-era
-GCMs) both peak in this regime.  Anchor years 1955 / 1975 / 1980
-under-predict by 1.0–1.7 MAF (12–18 %) but all fall within the
+uncertainty) peaks in this regime (σ_USBR is zero before 1950 and
+small before CAP deliveries began in 1985).  The 1955 and 1980 peaks
+under-predict by 0.50–1.07 MAF (6–11 % against the USGS and ADWR
+totals) but all fall within the
 model's ±2σ ribbon; three of the four also fall within ±1σ.  The
 under-prediction is attributed to **2024 HarDWR registry attrition**
 (peak-era wells abandoned before GMA-mandated registration) — a
@@ -4710,7 +4775,7 @@ documented bias rather than a model failure.
 
 **Spatial scope of the "no per-basin calibration" claim:** The
 training dataset (`USE_AMA_INA = True` in
-[pipeline.py](pipeline.py#L120)) is restricted to ADWR-metered pixels
+[pipeline.py](pipeline.py#L122)) is restricted to ADWR-metered pixels
 inside the ten AMA/INA management areas: Phoenix, Pinal, Tucson,
 Prescott, Santa Cruz, Douglas, and Willcox AMAs plus Joseph City,
 Harquahala, and Hualapai Valley INAs.  The deterministic partition step
@@ -4726,12 +4791,11 @@ metering both temporally (records concentrated in the most recent
 years) and spatially (fewer reporting wells per pixel)**, so the
 effective training signal from those two basins is much smaller than
 from the eight legacy areas.  Predictions are then generated for every
-2 km pixel in Arizona, including the ~25 unmetered Other basins
-(basin type 2) — Yuma, Lower Gila, Parker, Lake Havasu, Bill Williams,
+2 km pixel in Arizona, including the 42 unmetered Other basins — Yuma, Lower Gila, Parker, Lake Havasu, Bill Williams,
 Butler Valley, the Mogollon plateau basins, and others — for which
 **no per-well training labels exist anywhere**.  The 6.81 MAF (2017)
 model total therefore mixes in-sample-distribution AMA/INA predictions
-with out-of-distribution unmetered-basin predictions, and roughly 35-40 %
+with out-of-distribution unmetered-basin predictions, and roughly 53 %
 of the statewide volume comes from the latter group (Yuma + Lower Gila
 + Parker alone account for ~1.5 MAF in 2017 after the per-basin GW
 caps route their share to SW).  When ADWR's 7.0 MAF and USGS's
@@ -4759,64 +4823,64 @@ Representative statewide volumes (million acre-feet, current run):
 
 | Year | Total | Irrigation | Non-Irrigation | Total GW | Total SW | Irr % | GW % |
 |------|-------|------------|----------------|----------|----------|-------|------|
-| 1900 | 0.12 | 0.11 | 0.01 | 0.10 | 0.02 | 91 % | 84 % |
-| 1910 | 0.14 | 0.13 | 0.01 | 0.11 | 0.03 | 91 % | 79 % |
-| 1920 | 0.25 | 0.23 | 0.02 | 0.17 | 0.07 | 92 % | 70 % |
-| 1930 | 1.01 | 0.94 | 0.07 | 0.75 | 0.26 | 93 % | 74 % |
-| 1940 | 2.40 | 2.36 | 0.04 | 1.49 | 0.91 | 99 % | 62 % |
-| 1950 | 5.18 | 4.89 | 0.29 | 2.93 | 2.24 | 94 % | 57 % |
-| 1960 | 5.55 | 5.10 | 0.45 | 3.34 | 2.21 | 92 % | 60 % |
-| 1970 | 7.84 | 6.94 | 0.90 | 4.80 | 3.04 | 89 % | 61 % |
-| 1980 | 8.43 | 7.25 | 1.18 | 4.57 | 3.85 | 86 % | 54 % |
-| 1985 | 7.13 | 5.93 | 1.21 | 3.50 | 3.63 | 83 % | 49 % |
-| 1990 | 7.33 | 5.67 | 1.66 | 3.47 | 3.85 | 77 % | 47 % |
-| 2000 | 7.63 | 5.57 | 2.06 | 3.85 | 3.78 | 73 % | 51 % |
-| 2010 | 6.95 | 4.96 | 1.99 | 3.44 | 3.51 | 71 % | 50 % |
-| 2015 | 6.79 | 4.72 | 2.07 | 3.16 | 3.62 | 70 % | 47 % |
-| 2017 | 6.84 | 4.80 | 2.03 | 3.16 | 3.68 | 70 % | 46 % |
-| 2019 | 6.42 | 4.44 | 1.98 | 3.00 | 3.42 | 69 % | 47 % |
-| 2020 | 6.76 | 4.64 | 2.12 | 3.22 | 3.54 | 69 % | 48 % |
-| 2024 | 6.85 | 4.69 | 2.17 | 3.37 | 3.49 | 68 % | 49 % |
-| 2030 | 6.66 | 4.51 | 2.15 | 3.12 | 3.54 | 68 % | 47 % |
-| 2040 | 6.81 | 4.56 | 2.25 | 3.20 | 3.60 | 67 % | 47 % |
-| 2050 | 7.06 | 4.69 | 2.38 | 3.34 | 3.72 | 66 % | 47 % |
-| 2060 | 7.25 | 4.79 | 2.46 | 3.44 | 3.81 | 66 % | 47 % |
-| 2070 | 7.51 | 4.89 | 2.63 | 3.61 | 3.90 | 65 % | 48 % |
-| 2080 | 7.66 | 4.92 | 2.74 | 3.72 | 3.94 | 64 % | 49 % |
-| 2090 | 7.84 | 4.96 | 2.88 | 3.84 | 4.00 | 63 % | 49 % |
-| 2099 | 8.04 | 5.01 | 3.02 | 3.99 | 4.04 | 62 % | 50 % |
+| 1900 | 0.12 | 0.11 | 0.01 | 0.10 | 0.02 | 95 % | 84 % |
+| 1910 | 0.14 | 0.13 | 0.01 | 0.11 | 0.03 | 95 % | 78 % |
+| 1920 | 0.25 | 0.23 | 0.01 | 0.17 | 0.07 | 95 % | 70 % |
+| 1930 | 1.01 | 0.95 | 0.06 | 0.75 | 0.27 | 94 % | 74 % |
+| 1940 | 2.40 | 2.37 | 0.03 | 1.76 | 0.64 | 99 % | 73 % |
+| 1950 | 5.18 | 4.96 | 0.22 | 2.95 | 2.23 | 96 % | 57 % |
+| 1960 | 5.55 | 5.25 | 0.30 | 3.35 | 2.19 | 95 % | 60 % |
+| 1970 | 7.84 | 6.98 | 0.86 | 4.63 | 3.22 | 89 % | 59 % |
+| 1980 | 8.43 | 7.36 | 1.07 | 4.42 | 4.00 | 87 % | 52 % |
+| 1985 | 7.13 | 5.93 | 1.21 | 3.51 | 3.62 | 83 % | 49 % |
+| 1990 | 7.33 | 5.93 | 1.39 | 3.42 | 3.91 | 81 % | 47 % |
+| 2000 | 7.63 | 5.96 | 1.67 | 3.66 | 3.97 | 78 % | 48 % |
+| 2010 | 6.95 | 5.38 | 1.57 | 3.11 | 3.83 | 77 % | 45 % |
+| 2015 | 6.69 | 5.02 | 1.67 | 2.96 | 3.73 | 75 % | 44 % |
+| 2017 | 6.81 | 5.11 | 1.70 | 3.06 | 3.75 | 75 % | 45 % |
+| 2019 | 6.41 | 4.76 | 1.65 | 2.94 | 3.47 | 74 % | 46 % |
+| 2020 | 6.77 | 4.97 | 1.80 | 3.16 | 3.61 | 73 % | 47 % |
+| 2024 | 6.85 | 5.02 | 1.84 | 3.54 | 3.31 | 73 % | 52 % |
+| 2030 | 6.70 | 4.84 | 1.86 | 3.45 | 3.25 | 72 % | 51 % |
+| 2040 | 6.84 | 4.88 | 1.96 | 3.53 | 3.31 | 71 % | 52 % |
+| 2050 | 7.12 | 5.01 | 2.11 | 3.69 | 3.44 | 70 % | 52 % |
+| 2060 | 7.33 | 5.12 | 2.21 | 3.80 | 3.52 | 70 % | 52 % |
+| 2070 | 7.60 | 5.22 | 2.37 | 3.98 | 3.61 | 69 % | 52 % |
+| 2080 | 7.74 | 5.26 | 2.48 | 4.08 | 3.66 | 68 % | 53 % |
+| 2090 | 7.93 | 5.31 | 2.62 | 4.19 | 3.75 | 67 % | 53 % |
+| 2099 | 8.13 | 5.38 | 2.75 | 4.33 | 3.80 | 66 % | 53 % |
 
 Consumptive use (CU = IE × Irrigation Withdrawal) volumes, where IE is the
 USGS NHM basin-level irrigation efficiency (million acre-feet):
 
 | Year | Irrigation | Irrigation CU | Irrigation GW CU | Irrigation SW CU | IE |
 |------|------------|---------------|-------------------|------------------|----|
-| 1900 | 0.11 | 0.06 | 0.05 | 0.01 | 61 % |
+| 1900 | 0.11 | 0.07 | 0.06 | 0.01 | 61 % |
 | 1910 | 0.13 | 0.08 | 0.06 | 0.02 | 61 % |
 | 1920 | 0.23 | 0.14 | 0.10 | 0.04 | 61 % |
-| 1930 | 0.94 | 0.57 | 0.42 | 0.16 | 61 % |
-| 1940 | 2.36 | 1.42 | 0.89 | 0.53 | 60 % |
-| 1950 | 4.89 | 2.94 | 1.66 | 1.28 | 60 % |
-| 1960 | 5.10 | 3.06 | 1.84 | 1.22 | 60 % |
-| 1970 | 6.94 | 4.18 | 2.56 | 1.62 | 60 % |
-| 1980 | 7.25 | 4.36 | 2.41 | 1.94 | 60 % |
-| 1985 | 5.93 | 3.55 | 1.70 | 1.85 | 60 % |
-| 1990 | 5.67 | 3.40 | 1.27 | 2.13 | 60 % |
-| 2000 | 5.57 | 3.31 | 1.28 | 2.02 | 59 % |
-| 2010 | 4.96 | 2.97 | 1.09 | 1.87 | 60 % |
-| 2015 | 4.72 | 2.84 | 0.93 | 1.91 | 60 % |
-| 2017 | 4.80 | 2.89 | 0.95 | 1.95 | 60 % |
-| 2019 | 4.44 | 2.68 | 0.89 | 1.79 | 60 % |
-| 2020 | 4.64 | 2.78 | 0.93 | 1.85 | 60 % |
-| 2024 | 4.69 | 2.82 | 1.00 | 1.82 | 60 % |
-| 2030 | 4.51 | 2.71 | 0.89 | 1.82 | 60 % |
-| 2040 | 4.56 | 2.74 | 0.90 | 1.84 | 60 % |
-| 2050 | 4.69 | 2.82 | 0.93 | 1.89 | 60 % |
-| 2060 | 4.79 | 2.88 | 0.96 | 1.92 | 60 % |
-| 2070 | 4.89 | 2.94 | 0.99 | 1.95 | 60 % |
-| 2080 | 4.92 | 2.96 | 1.00 | 1.96 | 60 % |
-| 2090 | 4.96 | 2.99 | 1.01 | 1.98 | 60 % |
-| 2099 | 5.01 | 3.02 | 1.03 | 1.99 | 60 % |
+| 1930 | 0.95 | 0.58 | 0.42 | 0.16 | 61 % |
+| 1940 | 2.37 | 1.43 | 1.06 | 0.37 | 60 % |
+| 1950 | 4.96 | 2.98 | 1.69 | 1.29 | 60 % |
+| 1960 | 5.25 | 3.16 | 1.90 | 1.26 | 60 % |
+| 1970 | 6.98 | 4.20 | 2.43 | 1.77 | 60 % |
+| 1980 | 7.36 | 4.42 | 2.27 | 2.15 | 60 % |
+| 1985 | 5.93 | 3.55 | 1.75 | 1.81 | 60 % |
+| 1990 | 5.93 | 3.55 | 1.58 | 1.97 | 60 % |
+| 2000 | 5.96 | 3.53 | 1.60 | 1.94 | 59 % |
+| 2010 | 5.38 | 3.21 | 1.35 | 1.86 | 60 % |
+| 2015 | 5.02 | 3.02 | 1.26 | 1.76 | 60 % |
+| 2017 | 5.11 | 3.08 | 1.31 | 1.77 | 60 % |
+| 2019 | 4.76 | 2.86 | 1.24 | 1.62 | 60 % |
+| 2020 | 4.97 | 2.97 | 1.30 | 1.67 | 60 % |
+| 2024 | 5.02 | 3.01 | 1.46 | 1.56 | 60 % |
+| 2030 | 4.84 | 2.90 | 1.37 | 1.54 | 60 % |
+| 2040 | 4.88 | 2.93 | 1.38 | 1.55 | 60 % |
+| 2050 | 5.01 | 3.01 | 1.43 | 1.58 | 60 % |
+| 2060 | 5.12 | 3.08 | 1.47 | 1.60 | 60 % |
+| 2070 | 5.22 | 3.14 | 1.52 | 1.62 | 60 % |
+| 2080 | 5.26 | 3.17 | 1.54 | 1.63 | 60 % |
+| 2090 | 5.31 | 3.20 | 1.55 | 1.64 | 60 % |
+| 2099 | 5.38 | 3.24 | 1.59 | 1.65 | 60 % |
 
 The statewide mean IE is ~60 %, meaning roughly 40 % of applied irrigation
 water returns to aquifers as deep percolation or runs off as return flow.
@@ -4826,10 +4890,10 @@ changing withdrawal volumes.
 
 Key trends (current run):
 - **Irrigation share** (irrigation withdrawal as a fraction of total
-  predicted withdrawal) declines from ~92 % (1900-1940 ag-dominant
-  era) to ~69 % (2019) and continues to ~62 % by 2099 as urbanization
-  increases M&I demand.  The 2019 model value of **69.2 %** is within
-  ~2.8 pp of ADWR's reported ~72 % agriculture share
+  predicted withdrawal) declines from ~95 % (1900-1940 ag-dominant
+  era) to ~74 % (2019) and continues to ~66 % by 2099 as urbanization
+  increases M&I demand.  The 2019 model value of **74.2 %** is within
+  ~2.2 pp of ADWR's reported ~72 % agriculture share
   ([MAP Arizona Dashboard](https://mapazdashboard.arizona.edu/article/arizonas-water-use-sector)).
   The irrigation category includes rural dual-purpose wells coded
   ``IRRIGATION, DOMESTIC`` or ``IRRIGATION, STOCK`` in the ADWR Well
@@ -4837,18 +4901,19 @@ Key trends (current run):
   ``RECREATION`` and routed to the non-irrigation category.
 - **Irrigation GW share** (`Irrigation_GW / Irrigation_total`) is a
   separate metric that asks "of the irrigation water alone, what
-  fraction comes from wells." The model produces ~33 % for 2017,
-  ~34 % for 2019, and ~36 % for 2024.  This is lower than the
-  statewide GW share (46–49 % in those years) because the per-basin
+  fraction comes from wells." The model produces ~42 % for 2017,
+  ~43 % for 2019, and ~48 % for 2024.  This is lower than the
+  statewide GW share (45–52 % in those years) because the per-basin
   GW caps at Colorado River direct basins (Parker, Yuma, Lake Mohave)
   route the federal canal deliveries directly to Irr_SW via the
   density-ratio partition — eliminating the prior need for a separate
   federal-delivery offset.
 - **GW share** (current run) starts at 84 % in 1900 (nearly all GW,
-  few canals active), declines to ~50–55 % between 1950 and 1980 as
+  few canals active), ranges between ~52 and 68 % from 1950 to 1980 as
   canal infrastructure (SRP, Yuma Project, then CAP after 1985)
-  brought surface water to irrigated areas, holds at 46–51 % through
-  the modern era, and is projected to stay near 47–50 % through 2099.  The
+  brought surface water to irrigated areas, holds at 43–53 % through
+  the modern era, and is projected at 50.5–53.3 % through 2099 under
+  the 2027–2028 Operating Guidelines shortage held to 2099.  The
   per-basin GW caps at CO-direct basins now route federal canal
   deliveries to Total_SW directly, so the model's statewide GW share
   matches independent agency estimates without a separate offset:
@@ -4856,29 +4921,29 @@ Key trends (current run):
   | Year | Source | GW (MAF) | Statewide GW % | Δ |
   |------|--------|----------|----------------|---|
   | 2015 | USGS / NGWA | 3.09 | 46 % | — |
-  | 2015 | AZ-Hydro | 3.16 | 47 % | +0.07 MAF / +1 pp |
+  | 2015 | AZ-Hydro | 2.96 | 44 % | −0.13 MAF / −2 pp |
   | 2017 | ADWR Total | 7.00 | — | — |
-  | 2017 | AZ-Hydro | 6.84 | 46 % | −0.16 MAF |
+  | 2017 | AZ-Hydro | 6.81 | 45 % | −0.19 MAF |
   | 2019 | ADWR | — | 41 % | — |
-  | 2019 | AZ-Hydro | 3.00 | 47 % | +6 pp |
+  | 2019 | AZ-Hydro | 2.94 | 46 % | +5 pp |
 
-  USGS / 2015 is matched within 1 pp; ADWR / 2019 GW% is over by 6 pp,
+  USGS / 2015 is matched within 2 pp; ADWR / 2019 GW% is over by 5 pp,
   consistent with documented USGS-vs-ADWR methodological divergence at
   basin attribution.
 
 - **Total withdrawals** (current run) grow from 0.12 MAF (1900) to
-  6.85 MAF (2024) and are projected to reach 8.04 MAF by 2099.  Early
+  6.85 MAF (2024) and are projected to reach 8.13 MAF by 2099.  Early
   growth (1900–1950) reflects the build-out of well and canal
   infrastructure; mid-century growth (1950s–1980s) is driven by
   agricultural expansion (peak 1970–1980 ≈ 7.8–8.4 MAF after the
   peak-year edge dilation and basin-MAX wd lift); modern values stabilize at
-  6.4–7.3 MAF (1985–2024); projected growth is driven by urbanization
+  6.4–7.7 MAF (1985–2024); projected growth is driven by urbanization
   and increasing M&I demand.
-- **Irrigation** in the projections grows modestly (4.51 → 5.01 MAF,
-  +11 % by 2099), while **non-irrigation** grows by ~40 %
-  (2.15 → 3.02 MAF), reflecting continued urban and industrial growth
+- **Irrigation** in the projections grows modestly (4.84 → 5.38 MAF
+  from 2030 to 2099, +11 %), while **non-irrigation** grows by ~48 %
+  (1.86 → 2.75 MAF), reflecting continued urban and industrial growth
   including data-center and energy-sector water demand.
-- **Pre-CAP era** (before 1985): GW share declines from 90 % (1900) as
+- **Pre-CAP era** (before 1985): GW share declines from 84 % (1900) as
   SRP and Yuma Project canal infrastructure expanded, reaching ~50 %
   by 1980.  Post-CAP (1985+) the share holds at 45–53 % as CAP
   deliveries route to SW and non-irrigation (predominantly GW) grows.
@@ -4887,16 +4952,16 @@ Key trends (current run):
   canal-coverage gate (`<1 % canal pixels OR mean canal_weighted_streamflow ≤ 0
   → collapse SW into GW`) plus NonIrr_SW collapse at non-preserved
   basins eliminates the phantom SW contamination from Gaussian
-  smoothing.  Willcox 2017 = 343 kAF Total = 343 kAF GW = 0 SW,
-  matching the ADWR understanding of Willcox as a purely GW-mined
+  smoothing.  Willcox 2017 ≈ 333 kAF Total, all of it GW apart from
+  36 AF of SW, matching the ADWR understanding of Willcox as a purely GW-mined
   basin.
 - **Conservation**: Irrigation + Non-Irrigation = Total and GW + SW = Total
   hold exactly for all years.
 - **Consumptive use** (CU = IE × Irrigation Withdrawal, with IE the
   USGS NHM HUC12 irrigation efficiency map): irrigation CU rises from
-  0.06 MAF in 1900 to a 4.36 MAF peak in 1980 (the partition's
-  peak-pumping era) and stabilizes at 2.7–2.9 MAF in the modern era
-  (2.89 MAF in 2017, 2.82 MAF in 2024).  The statewide IE is stable
+  0.07 MAF in 1900 to a 4.42 MAF peak in 1980 (the partition's
+  peak-pumping era) and settles at 2.8–3.7 MAF over 1985–2024
+  (3.08 MAF in 2017, 3.01 MAF in 2024).  The statewide IE is stable
   at ~60 % across all years (60 % in 1980, 60 % in 2017, 60 % in
   2024).  The roughly 40 % of applied irrigation water that is *not*
   consumed returns to the aquifer as deep percolation or runs off as
@@ -4905,10 +4970,10 @@ Key trends (current run):
   The GW share of irrigation CU follows the parent GW share of
   irrigation withdrawal — and after the partition-side calibration
   is now lower than the pre-fix figures (e.g. 2017 Irr_GW_CU /
-  Irr_CU = 0.95 / 2.89 = 33 %, reflecting the per-basin SW caps at
+  Irr_CU = 1.31 / 3.08 = 42 %, reflecting the per-basin SW caps at
   CO-direct basins folding more deliveries into Irr_SW).  In the
   projection (2026–2099) irrigation CU is flat to slightly rising
-  (2.71 → 3.02 MAF, +11 %) because the parent irrigation withdrawal
+  (2.90 → 3.24 MAF from 2030 to 2099, +12 %) because the parent irrigation withdrawal
   — which is driven by the LULC-projection-derived
   `annual_irr_fraction` and `annual_crop_fraction` features — grows
   modestly in the USGS scenarios used here. Crop-area expansion or contraction *is*
@@ -4947,7 +5012,7 @@ Key trends (current run):
   |-------|-------------------|----------------------|-------------------|-----------------|-------------|---------|
   | Yuma          |   7.0 kAF (8.6 Mm³)   | 440.4 kAF (543.3 Mm³) |    551 AF (0.68 Mm³)  | **7.9 %** | 42 | Colorado River alluvial aquifer; per-basin GW cap = 0.10 routes federal/tribal deliveries to SW |
   | Lower Gila    | 101.2 kAF (124.8 Mm³) | 507.2 kAF (625.7 Mm³) | 6,853 AF (8.5 Mm³)    | **6.8 %** | 55 | Gila River corridor; auto-detect phantom-icap gate clears desert pixels |
-  | Parker        |   8.9 kAF (11.0 Mm³)  | 403.1 kAF (497.2 Mm³) |    454 AF (0.56 Mm³)  | 5.1 % | 51 | CRIT senior Priority-1 mainstem; per-basin GW cap = 0.15 |
+  | Parker        |   8.9 kAF (11.0 Mm³)  | 403.1 kAF (497.2 Mm³) |    454 AF (0.56 Mm³)  | 5.1 % | 51 | CRIT senior Priority-1 mainstem; per-basin GW cap = 0.10 |
   | Lake Havasu   |   1.1 kAF (1.4 Mm³)   |  21.1 kAF (26.0 Mm³)  |     15 AF (0.02 Mm³)  | 1.4 % | 73 | Colorado River adjacent |
   | Phoenix AMA   | 266.0 kAF (328.1 Mm³) | 887.8 kAF (1095 Mm³)  | 4,956 AF (6.1 Mm³)    | 1.9 % | 64 | CAP + SRP corridor; deep wells, SW dominant |
   | Safford       | 168.2 kAF (207.4 Mm³) | 142.6 kAF (175.9 Mm³) |    886 AF (1.09 Mm³)  | 0.5 % | 34 | Upper Gila River valley, shallowest WTD |
@@ -5016,26 +5081,32 @@ Key trends (current run):
   primary zones of pumping-induced surface water depletion.
 
 - **Uncertainty (six-component σ_total, current run)**: AZ-wide σ_total
-  (linear sum across basins; see σ_total aggregation subsection for
-  why linear sum is correct under shared ensemble members) is
-  **~5–6 % of the mean predicted withdrawal during the 1984–2025
-  historical period** (e.g. ~1.13 MAF σ on a 6.81 MAF mean at 2017),
-  rising to **~6–9 % over the 2026–2099 projection** (e.g. ~0.72 MAF
-  on 8.04 MAF at 2099) as σ_LULC and σ_MACA begin to contribute, and
-  reaching **~16–22 % in the peak-pumping pre-CAP era (1950–1984)**
-  (e.g. ~1.7 MAF on 8.43 MAF at 1980) where σ_irr is largest because
-  pre-IrrMapper irrigation-fraction reconstruction has wide ensemble
-  spread.  Variance attribution (% of σ_total² at AZ-wide;
+  as the linear sum of the per-basin σ_total (`Basin_Sigma_Total.csv`,
+  where each basin's σ is the spread of basin-total volumes across
+  ensemble members; see σ_total aggregation subsection for why linear
+  sum across basins is correct under shared ensemble members) is
+  **~5 % of the predicted withdrawal in the historical period**
+  (0.35 MAF on 6.81 MAF at 2017), rising to **~9 % by 2099**
+  (0.70 MAF on 8.13 MAF) as σ_LULC and σ_MACA begin to contribute, and
+  reaching **~23 % at the 1980 pre-CAP peak** (1.94 MAF on 8.43 MAF)
+  where σ_irr is largest because pre-IrrMapper irrigation-fraction
+  reconstruction has wide ensemble spread.  The pixel-sum σ in
+  `Uncertainty_Summary_Total.csv` and the statewide ribbon in
+  `Full_Period_Time_Series.csv` (main-text Fig 1) are larger (2017:
+  1.12 and 1.08 MAF, ~16 %; 2099: 1.75 MAF), because summing pixel σ
+  also assumes perfect correlation between pixels within a basin.  The
+  agency-reconciliation statements ("inside the 95 % σ_total
+  interval") use this wider statewide ribbon.  Variance attribution (% of σ_total² at AZ-wide;
   approximate because cross-basin covariance is non-zero):
 
   - **Deep hindcast (1900):** σ_irr 26 % · σ_GW 21 % · σ_model 5 % · others ≈ 0
   - **Pre-CAP peak (1980):** σ_irr 96 % · σ_model 2 % · σ_USBR 0 % · others ≈ 0
-  - **Historical (2017):** σ_model 31 % · σ_USBR 8 % · σ_irr 6 % · σ_GW 0 % · others ≈ 0
-  - **Projection (2099):** σ_LULC 39 % · σ_model 22 % · σ_MACA 8 % · σ_USBR 2 % · σ_irr 0 % · σ_GW 0 %
+  - **Historical (2017):** σ_model 30 % · σ_irr 9 % · σ_USBR 8 % · σ_GW 1 % · others ≈ 0
+  - **Projection (2099):** σ_LULC 44 % · σ_model 23 % · σ_MACA 8 % · σ_USBR 1 % · σ_irr 0 % · σ_GW 0 %
 
   σ_USBR (5 USBR CMIP3 Upper-Basin streamflow ensemble members) now
   appears as a 6-8 % variance contributor in the historical post-CAP
-  era and a 2 % contributor in projection — small at AZ-wide but
+  era and a ~1 % contributor in projection — small at AZ-wide but
   substantially larger at CO-river-served basins (Yuma σ_USBR ≈ 3 mm,
   Phoenix AMA σ_USBR ≈ 7 mm, Pinal AMA up to 216 mm at single CAP
   pixels at 2020).  The σ_GW component (5-snapshot HarDWR perturbation)
@@ -5052,26 +5123,24 @@ Key trends (current run):
 
   | Basin group | Examples (Vol kAF, σ kAF, CV %) | Per-basin CV |
   |---|---|---|
-  | Largest legacy AMAs (in-sample) | Phoenix 1128 / 53 / **4.7 %**, Pinal 683 / 30 / **4.4 %**, Tucson 266 / 26 / **9.7 %** | **3–10 %** |
-  | Large unmetered Other / OOD | Yuma 447 / 15 / **3.4 %**, Lower Gila 636 / 27 / **4.3 %**, Parker 413 / 27 / **6.5 %**, LCRP 487 / 31 / **6.4 %** | **3–7 %** |
-  | Mid-size mixed | Safford 311 / 11 / **3.6 %**, Verde River 296 / 10 / **3.3 %**, Gila Bend 212 / 10 / **4.5 %**, Harquahala 179 / 10 / **5.8 %** | **3–6 %** |
-  | No-canal (negative controls) | Willcox 343 / 9 / **2.6 %**, Douglas 137 / 6 / **4.1 %** | **2–5 %** |
-  | Small low-volume basins | Donnelly Wash 4 / 1.8 / **47 %**, Tiger Wash 0.7 / 0.2 / **36 %**, W. Mexican Drainage 3 / 0.8 / **25 %** | **20–50 %** |
+  | Largest legacy AMAs (in-sample) | Phoenix 1289 / 49 / **3.8 %**, Pinal 691 / 30 / **4.3 %**, Tucson 394 / 17 / **4.3 %** | **3–5 %** |
+  | Large unmetered Other / OOD | Yuma 447 / 15 / **3.4 %**, Lower Gila 606 / 27 / **4.4 %**, Parker 409 / 27 / **6.6 %**, LCRP 375 / 23 / **6.1 %** | **3–7 %** |
+  | Mid-size mixed | Safford 289 / 10 / **3.5 %**, Verde River 93 / 3 / **3.4 %**, Gila Bend 211 / 10 / **4.5 %**, Harquahala 182 / 10 / **5.6 %** | **3–6 %** |
+  | No-canal (negative controls) | Willcox 326 / 8 / **2.6 %**, Douglas 129 / 5 / **4.0 %** | **2–5 %** |
+  | Small low-volume basins | Donnelly Wash 3.0 / 1.4 / **47 %**, Tiger Wash 0.6 / 0.2 / **32 %**, W. Mexican Drainage 2.4 / 0.6 / **25 %** | **20–50 %** |
 
   Two observations.  **First**, the largest unmetered Other basins
-  (Yuma 3.4 %, Lower Gila 4.3 %, Parker 6.5 %) — where the model is in
-  pure OOD mode — have CVs only modestly higher than the largest
-  legacy AMAs (Phoenix 4.7 %, Pinal 4.4 %).  The σ framework inflates
+  (Yuma 3.4 %, Lower Gila 4.4 %, Parker 6.6 %) — where the model is in
+  pure OOD mode — have CVs similar to the largest legacy AMAs
+  (Phoenix 3.8 %, Pinal 4.3 %, Tucson 4.3 %).  The σ framework inflates
   the CI in OOD basins, but the inflation is small because the
   predictor → pumping mapping generalizes well from morphologically
-  similar metered basins.  Tucson AMA's higher CV (9.7 %) is
-  primarily driven by σ_USBR (CAP-served urban + ag pumping is
-  sensitive to Upper-Basin streamflow ensemble members).  **Second**,
+  similar metered basins.  **Second**,
   the very high CVs are concentrated in tiny low-volume basins
   (Donnelly Wash, Tiger Wash) where the absolute σ is small but the
   denominator is even smaller, not in the OOD basins per se.
 
-  The AZ-wide ~5.7 % CV figure reported above (linear sum across
+  The AZ-wide ~5 % CV figure reported above (linear sum across
   basins for σ_total) is the **correlation-correct** aggregation
   given that ensemble members are *shared* across basins (the same
   5 GCMs, 10 model seeds, 5 USBR members, 4 LULC scenarios, 5 HarDWR
@@ -5086,31 +5155,31 @@ Key trends (current run):
 
 Step 3b's `cap-scenario` sub-step
 (`uncops.run_cap_scenario_analysis`) re-partitions every projection-era
-year (2026–2099) under eight CAP delivery scenarios that span the
+year (2026–2099) under nine CAP delivery scenarios that span the
 WestWater 2026 Plan of Operation and the 2007 Interim Guidelines + 2019
 DCP shortage tier framework
 ([WestWater Research](https://waterexchange.com/water-news/sustaining-water-supplies-in-the-cap-service-area/);
 [ADWR Tier 1 Declaration](https://www.azwater.gov/sites/default/files/media/AdoptedAZTier%201%20DCPandTier1Shortage%20Implementation%20Plan_8-15-21.pdf)).
-The cuts are expressed both as kAF reductions from CAP's design
-capacity (~1500 kAF/yr, the 1.5 MAF AZ share of the 2.8 MAF Colorado
-River apportionment under *Arizona v. California* and the 1922 Colorado
-River Compact) and as multiplicative factors on the CAP-pixel
-`canal_weighted_streamflow_mm` overlay:
+The scenarios are defined against WestWater's 900 kAF/yr post-Tier
+operating baseline (`CAP_SCENARIOS`, the remaining fraction of that
+baseline), applied as an additive cut to the CAP overlay in
+`canal_weighted_streamflow_mm`:
 
-| Scenario | Source | CAP delivery (kAF) | Cut (kAF) | Factor |
-|---|---|---|---|---|
-| Baseline_900kAF | WestWater 2026 normal year | 900 | 0 | 1.00 |
-| DCP_Tier0_192kAF_cut | DCP Tier 0 | 1308 | 192 | 0.87 |
-| DCP_Tier1_512kAF_cut | DCP Tier 1 (current 2024–2026) | 988 | 512 | 0.66 |
-| DCP_Tier2a_592kAF_cut | DCP Tier 2a | 908 | 592 | 0.61 |
-| DCP_Tier2b_640kAF_cut | DCP Tier 2b | 860 | 640 | 0.57 |
-| Basic_Coordination_237kAF | WestWater 2026 mid-shortage | 237 | 663 | 0.74 |
-| DCP_Tier3_720kAF_cut | DCP Tier 3 (worst-case Compact) | 780 | 720 | 0.52 |
-| Extreme_Shortage_0kAF | Hypothetical full curtailment | 0 | 900 | 0.00 |
+| Scenario | Source | CAP delivery (kAF) | Cut from 900 kAF (kAF) | Factor (× 900 kAF) | GW boost |
+|---|---|---|---|---|---|
+| Baseline_900kAF | WestWater 2026 post-Tier operating baseline | 900 | 0 | 1.000 | 1.0 |
+| DCP_Tier0_192kAF_cut | DCP Tier 0 (magnitude analog) | 708 | 192 | 0.787 | 1.0 |
+| Operating_Guidelines_652kAF | 2027–2028 Operating Guidelines: 760 kAF AZ cut less the 512 kAF Tier 1 cut already in the baseline | 652 | 248 | 0.724 | 2.6 |
+| DCP_Tier1_512kAF_cut | DCP Tier 1 (magnitude analog) | 388 | 512 | 0.431 | 10.0 |
+| DCP_Tier2a_592kAF_cut | DCP Tier 2a (magnitude analog) | 308 | 592 | 0.342 | 18.0 |
+| DCP_Tier2b_640kAF_cut | DCP Tier 2b (magnitude analog) | 260 | 640 | 0.289 | 23.0 |
+| Basic_Coordination_237kAF | WestWater 2026 Basic Coordination | 237 | 663 | 0.263 | 25.0 |
+| DCP_Tier3_720kAF_cut | DCP Tier 3 (magnitude analog) | 180 | 720 | 0.200 | 50.0 |
+| Extreme_Shortage_0kAF | Complete CAP curtailment | 0 | 900 | 0.000 | 75.0 |
 
-(The Basic Coordination 237 kAF "cut" is actually the *delivery* under
-the WestWater Basic Coordination scenario — represented here as a
-sustained ~74 % multiplier on CAP imports.)
+(The DCP rows are defined by their cut size and retained as magnitude
+analogs after the 2019 DCP lapsed; the WestWater rows by their
+remaining delivery.)
 
 Each scenario re-runs the partition on top of a single fixed central
 ML prediction with two perturbations applied to CAP-service-area
@@ -5130,6 +5199,7 @@ allocation responds.
 |---|---|---|---|---|
 | Baseline_900kAF | 3.26 | 4.19 | — | — |
 | DCP_Tier0_192kAF_cut | 3.26 | 4.19 | +0.00 | −0.00 |
+| Operating_Guidelines_652kAF | 3.30 | 4.15 | +0.04 | −0.04 |
 | DCP_Tier1_512kAF_cut | 3.38 | 4.07 | **+0.13** | −0.13 |
 | DCP_Tier2a_592kAF_cut | 3.44 | 4.01 | **+0.18** | −0.18 |
 | DCP_Tier2b_640kAF_cut | 3.47 | 3.98 | **+0.21** | −0.21 |
@@ -5145,15 +5215,13 @@ Non-Irrigation) over 2026–2099.  Left column shows GW; right column
 shows SW.  Tighter cuts (Tier 3 = darkest red) sit visibly above
 Baseline (dark navy) on every GW panel and visibly below it on every
 SW panel — the GW↔SW reapportionment is monotonic and category-
-preserving.  The 2024–2026 step where Baseline already shifts
-upward reflects the historical Tier 1 declaration absorbed by the
-central pipeline before scenario projection begins.*
+preserving.*
 
 ![CAP WestWater scenario time series](../docs/images/CAP_Scenario_WestWater.png)
 
 *Figure: Same panel layout for the three WestWater 2026 Plan of
 Operation scenarios — Baseline (no cut), Basic Coordination
-(237 kAF delivery, ~74 % factor), and Extreme Shortage (0 kAF
+(237 kAF delivery, factor 0.263, i.e. a 74 % cut), and Extreme Shortage (0 kAF
 delivery, full curtailment).  Extreme Shortage is the upper
 envelope of all DCP tiers and represents the model's response if
 Arizona received zero CAP deliveries from 2026 through 2099 while
@@ -5166,6 +5234,7 @@ comparison anchor):**
 | Scenario | Cumulative ΔGW (2026–2099) | Cumulative ΔGW (2027–2060) | Peak annual ΔGW (kAF/yr) |
 |---|---|---|---|
 | DCP_Tier0_192kAF_cut | 0.08 MAF | 0.03 MAF | 1 |
+| Operating_Guidelines_652kAF | 3.18 MAF | 1.30 MAF | 51 |
 | DCP_Tier1_512kAF_cut | **9.81 MAF** | 4.05 MAF | 155 |
 | DCP_Tier2a_592kAF_cut | 14.10 MAF | 5.89 MAF | 219 |
 | DCP_Tier2b_640kAF_cut | 16.33 MAF | 6.87 MAF | 251 |
@@ -5193,7 +5262,7 @@ WestWater methodological-comparison block below).
 across all CAP shortage scenarios (2026–2099).  DCP tiers are
 solid lines (light-orange to dark-red, ordered by severity);
 WestWater scenarios are dashed lines (Basic Coordination falls
-between Tier 2a/2b; Extreme Shortage is the top envelope).
+between Tier 2b and Tier 3; Extreme Shortage is the top envelope).
 Baseline (dark navy) is the reference at zero by construction.
 The cumulative slopes are roughly constant within each scenario
 because the per-year ΔGW is approximately stationary across the
@@ -5315,16 +5384,16 @@ CAP sub-region carries each scenario's drawdown signal:
 
 | File | Content |
 |---|---|
-| `CAP_Scenario_Basin_Drawdown_<window>.png` | 2×4 grid (7 scenarios + 3×2 legend) of basin choropleths showing cumulative ΔGW vs Baseline over the window.  Basin polygons clipped to the CAP service-area intersection so Verde River / Lower Gila / Upper San Pedro etc. show only the actually-affected sliver instead of the full basin polygon.  Discrete YlOrRd bins in 10⁶ m³ with secondary kAF axis on the colorbar (left side) and full-height shared colorbar across all 7 panels. |
-| `CAP_Scenario_Pixel_Drawdown_<window>.png` | Same layout at native 2 km raster resolution.  Per-pixel ΔGW = basin Δ × pixel ML Total_GW share — pro-rata distribution of the basin total to its CAP-affected pixels.  **Not a hydraulic-head response** (sub-basin texture should not be over-interpreted as drawdown contours). |
+| `CAP_Scenario_Basin_Drawdown_<window>.png` | 3×3 grid (8 scenarios + legend) of basin choropleths showing cumulative ΔGW vs Baseline over the window.  Basin polygons clipped to the CAP service-area intersection so Verde River / Lower Gila / Upper San Pedro etc. show only the actually-affected sliver instead of the full basin polygon.  Discrete YlOrRd bins in 10⁶ m³ with secondary kAF axis on the colorbar (left side) and full-height shared colorbar across all 8 panels. |
+| `CAP_Scenario_Pixel_Drawdown_<window>.png` | Same scenarios at native 2 km raster resolution, in a 4×2 grid with the legend under the colour bar.  Per-pixel ΔGW = basin Δ × pixel ML Total_GW share — pro-rata distribution of the basin total to its CAP-affected pixels.  **Not a hydraulic-head response** (sub-basin texture should not be over-interpreted as drawdown contours). |
 | `CAP_Scenario_Sigma_Cumulative_<window>.png` | Single 2-panel figure (basin + pixel) showing cumulative σ_total_GW over the same window.  Same uncertainty applies to every CAP scenario — quadrature-combined per-component σ at the basin level, linear-time-sum across years (perfect-correlation conservative upper bound). |
 | `CAP_Scenario_Basin_SNR_<window>.png` | Per-scenario basin signal-to-noise (SNR = \|ΔGW_cum\| / σ_cum).  The σ denominator is **CAP-restricted** — only σ from pixels inside the basin × CAP-pixel intersection — so the noise floor at small-CAP-footprint basins like Verde River reflects only the CAP-affected portion, not the full basin's σ_total.  SNR ≥ 1 ⇒ scenario signal exceeds the central-pipeline noise floor (1σ) at that basin.  Note this is signal-to-noise (\|signal\|/σ), not the classical coefficient of variation (σ/mean) — earlier output files used the misnomer ``_CV_``. |
 | `CAP_Scenario_Pixel_SNR_<window>.png` | Pixel-level signal-to-noise (continuous imshow, same discrete bins as basin SNR).  Pro-rata distribution caveat as above. |
 | `Pixel_Rasters/CAP_Scenario_Pixel_<scenario>_cum_AF_<window>.tif` | Per-scenario per-window cumulative ΔGW raster (AF) used by the pixel maps and available for downstream analysis. |
 
 The basin-level and pixel-level drawdown maps are paired: same
-colorbar style, same panel ordering (DCP Tier 0 → 1 → 2a → 2b → 3 →
-Basic Coord → Extreme Shortage), identical scenarios, but different
+colorbar style, same panel ordering (DCP Tier 0 → 2027–2028 Operating
+Guidelines → DCP Tier 1 → 2a → 2b → 3 → Basic Coord → Extreme Shortage), identical scenarios, but different
 aggregation levels.  The basin map shows what each AMA / INA
 decision-maker "sees" as their basin's total ΔGW; the pixel map
 shows the intra-basin distribution that the central-pipeline ML
@@ -5338,11 +5407,11 @@ within float32 round-off (see e.g. Basic Coordination 2027–2060:
 ![CAP scenario pixel drawdown 2027-2060](../docs/images/CAP_Scenario_Pixel_Drawdown_2027_2060.png)
 
 *Figure: Pixel-level cumulative ΔGW vs Baseline over the WestWater
-2027–2060 anchor window for all 7 CAP shortage scenarios, with each
+2027–2060 anchor window for all 8 CAP shortage scenarios, with each
 CAP service-area county color-coded.  The Phoenix–Pinal–Tucson
 metro-AMA corridor inside the CAP service area carries essentially
 all of the modeled ΔGW signal under every scenario, with intensity
-ramping from DCP Tier 0 (a, near-zero) to Extreme Shortage (g,
+ramping from DCP Tier 0 (a, near-zero) to Extreme Shortage (h,
 13.08 MAF AZ-wide).  Sub-basin texture follows the per-pixel ML
 Total_GW share — it is a pro-rata distribution of the basin total,
 not a hydraulic-head response.*
@@ -5376,7 +5445,7 @@ narrower than ours in two important ways:
 1. **Geographic scope**: WestWater models only the **CAP M&I and Tribal
    subcontractors in Maricopa / Pinal / Pima counties** (~1.7 MAF/yr
    demand at 2060 in Figure 5).  AZ-Hydro reports statewide totals
-   (~7.5 MAF/yr at 2050 across all sectors).  WestWater's M&I + Tribal
+   (~7.1 MAF/yr at 2050 across all sectors in the central run).  WestWater's M&I + Tribal
    number is approximately the M&I-share of the Phoenix + Pinal +
    Tucson AMA portion of our prediction.
 2. **Adaptation pathways**: WestWater's supply model represents
@@ -5397,7 +5466,7 @@ narrower than ours in two important ways:
    contrast lets the per-pixel ML prediction respond to the
    FORE-SCE LULC projection (URBAN, AGRI, crop_fraction,
    urban_fraction all evolve) and the MACA climate signal — so our
-   total demand pool grows from ~7.0 MAF/yr (2027) toward ~8.0 MAF/yr
+   total demand pool grows from ~6.6 MAF/yr (2027) toward ~8.1 MAF/yr
    (2099).  WestWater's flat-demand assumption holds CAP-subcontractor
    demand near 1.7 MAF/yr through the entire horizon, so their
    shortage and drawdown numbers under-represent the demand-driven
@@ -5409,8 +5478,8 @@ narrower than ours in two important ways:
 
 | Scenario | WestWater Fig 4 (GW + LTSC) | AZ-Hydro central ΔGW | AZ-Hydro ±1σ band | WestWater inside ±1σ? |
 |---|---|---|---|---|
-| Basic Coordination | **8.0** (4.4 native GW + 3.6 LTSC) | **7.24** | ~0.35 – 14.13 | ✓ |
-| Extreme Shortage | **8.7** (4.5 native GW + 4.2 LTSC) | **13.08** | ~6.19 – 19.97 | ✓ |
+| Basic Coordination | **8.0** (4.4 native GW + 3.6 LTSC) | **7.24** | ~−2.4 – 16.8 | ✓ |
+| Extreme Shortage | **8.7** (4.5 native GW + 4.2 LTSC) | **13.08** | ~3.5 – 22.7 | ✓ |
 
 With the current partition (well-density split at pure_desert_with_well,
 year-dependent constant Irr-bias, pre-1948 SW-kernel σ tightening,
@@ -5422,14 +5491,14 @@ small under-shoot is consistent with WestWater's regulatory-ceiling
 framing (some shortage they count as "unmet" we route to GW substitution,
 but only up to the per-pixel ML predicted demand — we don't grow
 demand to fill an AWBA bridge).  The AZ-Hydro 1σ uncertainty on
-cumulative ΔGW 2027–2060 is approximately **±6.89 MAF**, derived by
+cumulative ΔGW 2027–2060 is approximately **±9.60 MAF**, derived by
 linearly accumulating the per-year AZ-wide σ_Total_GW (quadrature
 across the 5 projection-era components — σ_MACA + σ_Model + σ_LULC
 + σ_GW + σ_USBR; σ_Irr CSV terminates at 2025 so it does not
 contribute to the projection cumulative — followed by linear sum
 across basins, and linear time-sum 2027–2060 assuming perfect
 year-to-year correlation as a conservative upper bound).  Per-year
-AZ-wide σ_Total_GW averages ~0.20 MAF/yr over 2027-2060.
+AZ-wide σ_Total_GW averages ~0.28 MAF/yr over 2027-2060 (v1.1: ~0.20 MAF/yr, ±6.89 MAF; the v1.2 fix that applies the dynamic CAP caps in every ensemble member widened σ for the GW categories).
 **WestWater's central estimates fall well inside our ±1σ band for
 both scenarios.**
 
@@ -5481,13 +5550,13 @@ The model's per-pixel ML prediction is invariant across CAP scenarios
 WestWater calls a 446 kAF/yr "shortage" at 2060 under Basic
 Coordination is, in our framework, **additional statewide GW pumping
 of 231 kAF/yr** above the baseline at the same year (with 95 % CI of
-roughly −345 – 805 kAF/yr from σ_total ≈ 0.294 MAF/yr).  Side-by-side
+roughly −416 – 878 kAF/yr from σ_total ≈ 0.330 MAF/yr).  Side-by-side
 at the 2060 reference year:
 
 | Scenario | AZ-Hydro central ΔGW | AZ-Hydro 95 % CI | WestWater 2060 shortage | Match |
 |---|---|---|---|---|
-| Basic Coordination | **+231 kAF/yr** | ~−345 – 805 | **446 kAF/yr** | **−215 kAF (−48 %)** ✓ |
-| Extreme Shortage | **+410 kAF/yr** | ~−165 – 985 | **588 kAF/yr** | **−178 kAF (−30 %)** ✓ |
+| Basic Coordination | **+231 kAF/yr** | ~−416 – 878 | **446 kAF/yr** | **−215 kAF (−48 %)** ✓ |
+| Extreme Shortage | **+410 kAF/yr** | ~−237 – 1,057 | **588 kAF/yr** | **−178 kAF (−30 %)** ✓ |
 
 **Per-year Extreme Shortage trajectory from Fig 5** (visually
 digitized from the published chart to ±25 kAF/yr accuracy):
@@ -5565,9 +5634,9 @@ drawdown rate **and** the additional unmet shortage on top of it.
 | Fig 5 derived cumulative differential shortage | ~8.5 | **~13.7** |
 | **Total demand-supply gap = drawdown + shortage** | **~16.5** | **~22.4** |
 | AZ-Hydro central cumulative ΔGW | 7.24 | **13.08** |
-| AZ-Hydro 1σ on cumulative ΔGW | 6.89 | 6.89 |
-| **AZ-Hydro 95 % CI upper** (central + 1.96 σ) | **~20.7** | **~26.6** |
-| Upper CI brackets total gap? | **20.7 > 16.5** ✓ | **26.6 > 22.4** ✓ |
+| AZ-Hydro 1σ on cumulative ΔGW | 9.60 | 9.60 |
+| **AZ-Hydro 95 % CI upper** (central + 1.96 σ) | **~26.1** | **~31.9** |
+| Upper CI brackets total gap? | **26.1 > 16.5** ✓ | **31.9 > 22.4** ✓ |
 
 So the interpretation isn't "AZ-Hydro under-predicts what WestWater
 says" — it is that the **AZ-Hydro UQ envelope spans the regulatory-
@@ -5667,7 +5736,8 @@ from the methods.
    infrastructure, climate normals, and crop mix are similar enough to
    the training period that the predictor → pumping mapping is
    plausibly stationary, and the σ_irr component correctly inflates
-   the CI in this era (61 % of variance share at 1900) to reflect
+   the CI in this era (26 % of the variance at 1900, and 96 % at the
+   1980 peak) to reflect
    that pre-IrrMapper irrigation reconstruction is uncertain. For the
    deep hindcast (pre-1950, and especially pre-1920), the model is
    predicting 60+ years before its training window in a state with

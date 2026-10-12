@@ -22,7 +22,7 @@ Output: gee/Data/Well_Package/csv/Well_Package__<Category>.csv
         which rejected both bare and zipped CSVs).  Files are staged
         in gs://azhydro/ first by the companion upload script.  The
         CSV basename Well_Package__<Cat> becomes the asset name
-        under projects/azhydro/assets/az-wu/.
+        under projects/azhydro/assets/az-wu-v1-2/.
 
         Per-category sizing (with sigma):
           features    : 170,137 (one row per well)

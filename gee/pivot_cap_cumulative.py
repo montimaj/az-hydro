@@ -3,10 +3,10 @@
 GEE-ingest CSV (with `.geo` GeoJSON-string geometry column) suitable
 for `earthengine upload table` ingest.
 
-Source CSV (long format, ~27k rows):
+Source CSV (long format, ~31k rows):
   Data/Outputs/.../CAP_Scenario/CAP_Scenario_Cumulative.csv
     columns: Year, Scenario, Basin, Cumulative_Delta_GW_AF
-    52 basins × 7 scenarios × 74 years (2026–2099)
+    52 basins × 8 scenarios × 74 years (2026–2099)
 
 Wide-format output (one feature per [basin, scenario]):
   gee/Data/CAP_Scenario/Cumulative/CAP_Scenario_Cumulative.csv
@@ -27,8 +27,8 @@ After running this script, upload via:
   ./gee/upload_cap_cumulative.sh
 
 The visualizer (gee/azhydro-visualizer.js) reads
-  projects/azhydro/assets/az-wu/CAP_Scenario_Cumulative
-on every CAP-mode click and charts all 7 scenarios for the basin
+  projects/azhydro/assets/az-wu-v1-2/CAP_Scenario_Cumulative
+on every CAP-mode click and charts all 8 scenarios for the basin
 under the click point.
 """
 from __future__ import annotations

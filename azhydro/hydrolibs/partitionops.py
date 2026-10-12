@@ -1545,6 +1545,8 @@ def apply_ml_well_density_override(
 #   Tier 2a:  592 kAF               / 1500 = 39.5 % → factor 0.605 ≈ 0.61
 #   Tier 2b:  640 kAF               / 1500 = 42.7 % → factor 0.573 ≈ 0.57
 #   Tier 3:   720 kAF               / 1500 = 48.0 % → factor 0.520 ≈ 0.52
+#   2027-2028 Operating Guidelines:
+#             760 kAF               / 1500 = 50.7 % → factor 0.493 ≈ 0.49
 #
 # Option A (mandatory cuts only).  Voluntary conservation contributions
 # (e.g., AZ's 355 kAF extra in 2023) are discretionary water held back
@@ -1563,17 +1565,25 @@ def apply_ml_well_density_override(
 #                       AWBA 2026 Plan of Operation; 512 kAF = 320
 #                       Interim Guidelines + 192 LBDCP; last year of
 #                       the 2007 IG + 2019 DCP framework)
+#   2027, 2028: Shortage Condition under the 2027-2028 Operating
+#               Guidelines (USBR, August 2026, issued under the
+#               2027-2036 Decision Framework ROD): Lower Division
+#               apportionment 6.25 MAF (-1.25 MAF), of which Arizona
+#               2.04 MAF, a 760 kAF reduction (Section 5.3.A), in
+#               accordance with a Lower Basin implementing agreement.
 #
-# Projection (2027-2099) factor of 0.66 represents **sustained Tier 1
-# shortage conditions** — the dominant recent regime.  AZ has been in
-# Tier 1 (or Tier 2a) every year 2022-2026, and USBR's 24-month
-# projections suggest Lake Mead will remain in the 1050-1075 ft
-# elevation band (Tier 1 trigger range) for the near-term under
-# current Compact conditions.  Continuing factor 0.66 (= Tier 1's
-# 512 kAF cut from 1500 kAF design capacity, ≈ 34 % reduction) past
-# 2026 is the most defensible single central estimate; it preserves
-# continuity at the 2026→2027 boundary (no boundary step) and
-# matches the regime AZ stakeholders are actively planning around.
+# Projection (2027-2099) factor of 0.49 = the 760 kAF Arizona reduction
+# of the 2027-2028 Operating Guidelines against the 1500 kAF design
+# capacity (≈ 51 % reduction), held through 2099.  2027 and 2028 are
+# the official determination; 2029-2099 hold that latest official
+# condition as a stand-in for continued shortage (storage in Lakes
+# Powell and Mead was at an all-time low when the guidelines were
+# adopted).  The guidelines themselves cover 2027-2028 only and state
+# that they set no precedent, so the 2029-2099 values are an
+# assumption, not a forecast.  As with the 2020-2026 factors, the
+# whole Arizona reduction is assigned to CAP (the junior Arizona
+# entitlement), and the additional 700 kAF of voluntary Lower Basin
+# system conservation (2026-2028) is excluded (Option A above).
 #
 # This is a SEPARATE choice from WestWater Research (2026)'s "Basic
 # Coordination" scenario.  Basic Coord assumes a maximum policy
@@ -1588,7 +1598,7 @@ def apply_ml_well_density_override(
 # Applying a single fixed factor across 74 years is a simplification
 # — real Compact renegotiations happen every 15-20 years and
 # climate/allocation conditions will continue to evolve.  The fixed
-# 0.66 is best read as "the most likely sustained shortage condition
+# 0.49 is best read as "the most likely sustained shortage condition
 # we'd plan around today," not a year-specific forecast.  The CAP
 # scenario sweep is the right place to look for policy-bounds
 # uncertainty.
@@ -1608,7 +1618,10 @@ CAP_DELIVERY_FACTORS: dict[int, float] = {
     2024: 0.66,  # Tier 1 (returns after 2023 Tier 2a)
     2025: 0.66,  # Tier 1
     2026: 0.66,  # Tier 1 (last year of 2007 IG + 2019 DCP framework)
-    **{year: 0.66 for year in range(2027, 2100)},  # Sustained Tier 1
+    2027: 0.49,  # 2027-2028 Operating Guidelines: AZ -760 kAF
+    2028: 0.49,  # 2027-2028 Operating Guidelines: AZ -760 kAF
+    # 2029-2099: latest official condition held (assumption)
+    **{year: 0.49 for year in range(2029, 2100)},
 }
 
 # Backwards-compat alias — older external callers may still import
@@ -1648,11 +1661,25 @@ CAP_HINDCAST_FACTORS = CAP_DELIVERY_FACTORS
 #                   transition)
 #   Tier 2b  → 7.5 (same tier band as 2a)
 #   Tier 3   → 10.0 (target gw_w = 2.0; the 1981-84 GMA transition)
+#   2027-2028 Operating Guidelines (760 kAF)
+#            → 7.5  (the Tier 2a value; target gw_w = 1.5)
 #
-# Projection 2027-2099 inherits the Tier 1 boost (5.0) since the
-# central CAP_DELIVERY_FACTORS for those years also represents
-# sustained Tier 1 conditions.  This keeps the 2026→2027 boundary
-# smooth and matches the regime AZ stakeholders plan around.
+# Projection 2027-2099 uses the Tier 2a boost (7.5) with the Operating
+# Guidelines delivery factor (0.49).  Only Tier 0, Tier 1 and Tier 2a
+# occurred in the observed record, so boosts beyond Tier 2a cannot be
+# calibrated.  The boost was instead chosen so the groundwater
+# substitution share (ΔGW vs a no-cut partition, as a share of the cut
+# volume) stays within the observed range.  Statewide shares from the
+# central partition:
+#   2022 Tier 1 (0.66, 5.0)  22.7 %    2023 Tier 2a (0.61, 7.5)  29.2 %
+#   2024 Tier 1 (0.66, 5.0)  37.7 %
+#   2027, 760 kAF (0.49):  boost 5.0 → 32.5 %, 7.5 → 38.1 %, 10.0 → 42.2 %
+# A boost of 7.5 keeps the first projection year at the top of the
+# observed 22.7-37.7 % range; 10.0 would exceed it.  Shares rise later
+# in the century under every setting (e.g. Tier 1: 33.9 % in 2027,
+# 57.9 % in 2099) because projected withdrawal grows while the cut is
+# applied as a share.  The Tier 2b/Tier 3 values above are a mapping
+# only and are not used by the central run.
 #
 # Calibrated against WestWater 2026 ("Economic Impacts to Central
 # Arizona...", Fig 4 + Section 3.6) which projects ~8.0 MAF cumulative
@@ -1669,7 +1696,9 @@ CAP_CUT_GW_BOOST_FACTORS: dict[int, float] = {
     2024: 5.0,   # Tier 1 (returns)
     2025: 5.0,   # Tier 1
     2026: 5.0,   # Tier 1
-    **{year: 5.0 for year in range(2027, 2100)},  # Sustained Tier 1
+    2027: 7.5,   # 2027-2028 Operating Guidelines (760 kAF); Tier 2a boost
+    2028: 7.5,   # 2027-2028 Operating Guidelines (760 kAF); Tier 2a boost
+    **{year: 7.5 for year in range(2029, 2100)},  # held (assumption)
 }
 
 

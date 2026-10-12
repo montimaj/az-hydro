@@ -42,7 +42,7 @@ LEVELS = {
     ],
     2: [
         ('export_prism_hargreaves_eto.py', 'PRISM Hargreaves ETo 1896-1978 (996 images)'),
-        ('export_usgs_adjusted_et.py', 'USGS adjusted ET 1896-1999 (1248 images)'),
+        ('export_usgs_adjusted_et.py', 'USGS adjusted ET 1896-01 to 2018-09 (1473 images)'),
         ('export_maca_monthly_eto.py', 'MACA monthly ETo 2026-2099 (888 images)'),
     ],
     3: [

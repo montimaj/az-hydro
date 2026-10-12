@@ -1,5 +1,7 @@
 # AZ-Hydro Data Archive
 
+**Version 1.2** (Zenodo release v1.2; code release v1.2.0).
+
 Companion data archive for the AZ-Hydro pipeline (Majumdar et al. 2026,
 *Sci Data* — in prep.).  This Zenodo deposit holds the input datasets
 the pipeline consumes plus the full set of generated outputs (predictor
@@ -14,7 +16,7 @@ and methodology.
 
 | Component | Size | Notes |
 |---|---|---|
-| **Inputs** (Zenodo) | **~9 GB** | Pipeline-required files only (see per-directory inventory below).  After the user downloads the external USGS NHM / Reitz / PS reanalysis bundle from USGS ScienceBase (see "External datasets" below), on-disk Inputs grows to ~20 GB. |
+| **Inputs** (Zenodo) | **~9 GB** | Pipeline-required files only (see per-directory inventory below).  After the user downloads the external USGS NHM / Reitz / PS reanalysis bundle from USGS ScienceBase (see "External datasets" below), on-disk Inputs grows to ~15 GB. |
 | &emsp;`Inputs/GEE_Data/` | ~3.4 GB | Raw 2 km Google Earth Engine tiles + AZ HUC12 vector |
 | &emsp;`Inputs/GW_Data/` | ~5.8 GB | ADWR meter records, well registry, GW basin / AMA-INA / CAP / SRP / streamflow / USBR vectors, statewide WTD TIFs |
 | &emsp;`Inputs/USGS WU/` | <1 MB | Two curated USGS/ADWR rollup CSVs |
@@ -22,7 +24,7 @@ and methodology.
 | &emsp;`Outputs/GEE_Mosaics_2000m{,_GCM,_LULC}{,_Reproj}/` | ~14 GB | Mosaicked 2 km predictors + 9 alternate ensemble stacks |
 | &emsp;`Outputs/Predictor_Data_All_Wells_2000m/` | ~1.8 GB | Per-year predictor TIF stacks (1896–2099) |
 | &emsp;`Outputs/GW/` | ~14 GB | Observed ADWR-metered withdrawal depth/volume rasters + per-year vector shapefiles |
-| &emsp;`Outputs/GW_Data/` | ~8 GB | Reprojected vector products (basins, wells, CAP, etc.) |
+| &emsp;`Outputs/GW_Data/` | ~5 GB | Reprojected vector products (basins, wells, CAP, etc.) |
 | &emsp;`Outputs/ML_Model_All_Wells_2000m/` | ~161 GB | ML evaluation (~121 GB), Step 3 prediction + UQ + augmented rasters + figures (~40 GB) |
 | **Total** | **~220 GB** | After downloading both the Zenodo deposit and the external USGS data products |
 
@@ -75,11 +77,11 @@ hydrologic ancillary vectors.
 | `Groundwater_Basin/` | Statewide GW basin polygons shapefile (52 basin/management-area polygons spanning Arizona's 51 ADWR groundwater basins) — primary basin aggregation unit. |
 | `Meter Data/GW_<year>.csv` | Per-year ADWR meter records (1984–2024, one CSV per year, 41 files).  Each row = one well-year with reported `AF Pumped`, lat/lon, basin, etc.  These are the primary training labels for the ML model. |
 | `SRP/SRP WATER DELVS HISTORY.xlsx` | Salt River Project annual delivery history (used to validate Phoenix AMA SW totals). |
-| `Streamflow/` | USGS gauge monthly streamflow for the Colorado River system (HCDN reference + USBR sites; 8 stations, 1896-present where available).  Used in σ_USBR and Lees Ferry inflow context. |
+| `Streamflow/` | USBR CMIP3 projected monthly streamflow (112 ensemble members, 1950–2099) for 8 USBR sites (6 HCDN reference sites plus Colorado River at Lees Ferry and above Imperial Dam), and `sites.csv` mapping USGS gauge IDs to USBR site IDs.  The USGS gauge records themselves are downloaded from NWIS at run time.  Used for the streamflow projections, the bias correction to USGS, and σ_USBR. |
 | `Surface_Watershed.geojson` | Surface watershed boundaries used for stream capture index aggregation. |
-| `USBR/` | USBR / HCDN monthly streamflow zips (compressed mirror of `Streamflow/`) plus extracted CSVs.  Used by σ_USBR ensemble member loader. |
+| `USBR/` | Zipped copies of the 8 USBR monthly streamflow CSVs in `Streamflow/`.  Used by the σ_USBR ensemble-member loader. |
 | `Water Rights/stateWaterRightsHarmonized/arizona/arizonaStatePOD.{shp,dbf,shx,cpg,prj}` | HarDWR Western U.S. water-rights Point-of-Diversion shapefile (Arizona subset, ~142 MB) from Lisk et al. (2024).  DOIs: data — [10.57931/2475303](https://doi.org/10.57931/2475303); paper — [10.1038/s41597-024-03434-6](https://doi.org/10.1038/s41597-024-03434-6).  Used as the priority-date source for canal `first_delivery_year` dating and the `irr_sw_rights_density` / `nonirr_sw_rights_density` predictor rasters.  Only the shapefile is needed by the pipeline — the harmonized-records CSVs from the original release are not used and have been excluded from this bundle to save space. |
-| `Well_Registry_2024/` | ADWR Well Registry snapshot (Dec 2024) — used to build the per-pixel `well_density` feature (the #1 SHAP-importance predictor). |
+| `Well_Registry_2024/` | ADWR Well Registry snapshot (Dec 2024) — used to build the per-pixel `well_density` predictor and the irrigation / non-irrigation well densities used by the partition. |
 | `wtd_states/wtd_<state>.tif` | Water-table-depth statewide TIFs (`wtd_arizona.tif`, `wtd_california.tif`, `wtd_nevada.tif`) from Ma et al. (2026), *High resolution US water table depth estimates reveal quantity of accessible groundwater*, Communications Earth & Environment 7(1), 45.  DOI: [10.1038/s43247-025-03094-3](https://doi.org/10.1038/s43247-025-03094-3).  Bundled in this Zenodo deposit because the per-state TIFs are not separately discoverable on the source data portal.  The CONUS dataset is also available as a Google Earth Engine asset at `projects/nmose-openet/assets/WTD-US` — see the [CONUS WTD explorer](https://code.earthengine.google.com/87c965aae54facde740850b0949fc3b4) for an interactive viewer; users with GEE access can pull the WTD raster directly from there instead of downloading the bundled per-state TIFs. |
 
 ### `Inputs/USGS WU/`
@@ -92,8 +94,8 @@ Reitz) and CDL/FRIS crop surveys must be obtained from USGS ScienceBase
 
 | Path | Description |
 |---|---|
-| `AZ_Annual_WU_Summary.csv` | Curated USGS + ADWR statewide annual water-use rollup (1985–2024).  Total / Irrigation / Public Supply / GW / SW columns, derived from USGS Circulars 1950–2015 + ADWR Annual Reports 2016–2024.  Primary anchor for partition calibration. |
-| `USGS_AZ_Water_Use_1950_1980.csv` | USGS Circular legacy Arizona water-use 1950–1980 (5-year cadence).  Used as a back-cast anchor for the partition's pre-1985 era-mapped factors. |
+| `AZ_Annual_WU_Summary.csv` | Curated statewide water-use anchors, 1915–2019 (one row per year and source): groundwater withdrawals from USGS OFR 94-476 (1915–1990), USGS Circular totals and category splits (1950–2015), ADWR Annual Report totals, and the 2019 ADWR source and use shares.  Columns give total, GW, SW, reclaimed, irrigation, non-irrigation, the four use × source categories, irrigation CU, and percentage shares.  Primary anchor for partition calibration. |
+| `USGS_AZ_Water_Use_1950_1980.csv` | USGS Arizona water use by category, 1915–2015 (USGS OFR 94-476 and the five-yearly USGS Circulars), in million gallons per day and thousand acre-feet.  Despite the file name, it extends beyond 1950–1980.  Used as a back-cast anchor for the partition's pre-1985 era-mapped factors. |
 
 ---
 
@@ -106,23 +108,29 @@ analysis without a 10–20 hour full pipeline run.
 ### `Outputs/GEE_Mosaics_2000m*/`
 
 Mosaicked 2 km predictor TIFs assembled from `Inputs/GEE_Data/GEE_Tiles_*/`.
-There are 19 directories total (1 baseline + 5 GCM + 4 LULC, each in
-both raw and reprojected variants):
+There are 19 directories in total: the baseline, plus 5 GCM and 4 LULC
+ensemble directories, each of the 9 in raw and reprojected variants:
 
 | Path | Description |
 |---|---|
 | `GEE_Mosaics_2000m/` | Baseline mosaicked predictor TIFs (one per band per year). |
 | `GEE_Mosaics_2000m_<GCM>/` | Per-GCM σ_MACA mosaics for `CCSM4`, `CNRM-CM5`, `HadGEM2-ES365`, `MIROC-ESM-CHEM`, `inmcm4` (5 dirs × ~865 MB). |
 | `GEE_Mosaics_2000m_LULC_<scenario>/` | Per-LULC σ_LULC mosaics for `A1B`, `A2`, `B1`, `B2` (4 dirs × ~865 MB). |
-| `GEE_Mosaics_2000m_*_Reproj/` | Same content reprojected to working CRS for the ML pipeline (9 dirs × ~367 MB). |
+| `GEE_Mosaics_2000m_*_Reproj/` | The 5 GCM and 4 LULC mosaics reprojected to the working CRS for the ML pipeline (9 dirs × ~367 MB). |
 
 ### `Outputs/Predictor_Data_All_Wells_2000m/`
 
-Per-year per-band predictor TIFs (1896–2099 × ~12 bands = ~2,662 files,
-~1.8 GB).  Bands include `Canal_Density`, `Crop_Fraction`, `ET`, `ETo`,
-`Peff`, `Tmax`, `Tmin`, `Urban_Fraction`, `Well_Density`, etc.  Each
-TIF has the band name and year encoded in the filename
-(e.g. `Canal_Density_1985.tif`).
+Per-year predictor and partition-input TIFs (~2,650 files, ~1.8 GB):
+13 families × 204 years (1896–2099) plus the static `WTD.tif` and
+`SW_Access_Year.tif`.  `Predictor_{year}.tif` is the 15-band GEE stack
+(ET, ETo, precipitation, effective precipitation, temperature, land-cover
+fractions and densities, irrigated fractions, soils); the other families
+are single-band layers named `<Family>_{year}.tif`: `Canal_Density`,
+`Canal_Weighted_Streamflow`, `Streamflow`, `Well_Density`,
+`Well_Density_Irrigation`, `Well_Density_NonIrrigation`,
+`Irr_SW_Rights_Density`, `NonIrr_SW_Rights_Density`,
+`NonIrr_Irr_SW_Rights_Density`, `Irr_Capacity_Fraction`, `GW_Basin` and
+`GW_Subbasin`.
 
 ### `Outputs/GW/`
 
@@ -157,10 +165,10 @@ partitioned into Step 2 evaluation (~121 GB) and Step 3 full prediction
 
 | Path | Description |
 |---|---|
-| `AZ_Data.parquet` | Master predictor + meter-label DataFrame (1896–2024 metered + 1896–2099 prediction) — the input to `Model_Evaluation/` and `Full_Prediction_XGBRF/`. |
+| `AZ_Data.parquet` | Master predictor + meter-label DataFrame (predictors for 1896–2099; ADWR meter labels for 1984–2024) — the input to `Model_Evaluation/` and `Full_Prediction_XGBRF/`. |
 | `Basin_LULC_Deltas.csv` | Per-basin per-year LULC change summary (URBAN / AGRI fraction trajectory used by Step 3 LULC-projection diagnostics). |
 | `EDA/` | Exploratory data-analysis figures (predictor distributions, correlations, target histograms, IrrMapper coverage maps). |
-| `Model_Evaluation/` | Step 2 outputs — five evaluation strategies (Random / Pixel Holdout / Temporal LOO / Spatial LOO / Seeded Spatial LOO) × four model families (XGB / LGBM / RF / XGBRF) with per-fold predictions, error metrics, calibration plots, and seed ensembles for σ_Model.  ~121 GB. |
+| `Model_Evaluation/` | Step 2 outputs — five evaluation strategies (Random / Pixel Holdout / Temporal LOO / Spatial LOO / Seeded Spatial LOO) × 13 models (XGB, LGBM, RF, XGBRF, and nine additional ensemble and linear models) with per-fold predictions, error metrics, calibration plots, and seed ensembles for σ_Model.  ~121 GB. |
 | `Full_Prediction_XGBRF/` | Step 3 outputs — see breakdown below.  ~40 GB. |
 
 #### `Outputs/ML_Model_All_Wells_2000m/Full_Prediction_XGBRF/`
@@ -171,17 +179,17 @@ downstream products.
 | Sub-path | Content |
 |---|---|
 | `Predicted_Rasters/` | Per-year total-withdrawal prediction TIFs (1896–2099, mm depth). |
-| `Total_GW_Rasters/`, `Total_SW_Rasters/` | Per-year partition outputs (Total_GW, Total_SW) in mm depth. |
+| `Total_GW_Rasters/`, `Total_SW_Rasters/`, `Irrigation_Rasters/`, `Non_Irrigation_Rasters/` | Per-year partition outputs (Total_GW, Total_SW, Irrigation, Non_Irrigation). |
 | `Irrigation_GW_Rasters/`, `Irrigation_SW_Rasters/`, `Non_Irrigation_GW_Rasters/`, `Non_Irrigation_SW_Rasters/` | Per-category × per-source partition rasters. |
 | `Irrigation_CU_Rasters/`, `Irrigation_GW_CU_Rasters/`, `Irrigation_SW_CU_Rasters/` | Consumptive-use (CU) rasters derived from withdrawal × Irrigation Efficiency. |
-| `OOD_Rasters/` | Out-of-distribution probability rasters per year (isolation-forest density on the predictor stack). |
-| `Total_GW/`, `Total_SW/`, `Irrigation/`, `Irrigation_GW/`, `Irrigation_SW/`, `Irrigation_CU/`, `Irrigation_GW_CU/`, `Irrigation_SW_CU/`, `Non_Irrigation/`, `Non_Irrigation_GW/`, `Non_Irrigation_SW/` | Per-category augmented rasters: 6-band stacks (prediction, σ, CV, SNR, lower 95 % CI, upper 95 % CI) per year.  |
-| `Uncertainty/` | Step 3b UQ outputs — per-component rasters (Sigma_MACA, Sigma_Model, Sigma_Irr, Sigma_LULC, Sigma_GW, Sigma_USBR, Sigma_CU, Sigma_Total), per-basin / per-sub-basin σ CSVs, attribution figures, sensitivity diagnostics, and `CAP_Scenario/` sub-directory with the 7-scenario CAP delivery sweep (Baseline / DCP Tier 0–3 / Basic Coordination / Extreme Shortage). |
+| `OOD_Rasters/` | Out-of-distribution probability rasters per year (`OOD_Flag_{year}.tif`, values in [0, 1]): the χ²(17) CDF of each pixel's squared Mahalanobis distance between its climate and land-use predictors and those of the training data (0 = in-distribution, near 1 = strong extrapolation); per-year statistics in `OOD_Summary.csv`. |
+| `Total_GW/`, `Total_SW/`, `Irrigation/`, `Irrigation_GW/`, `Irrigation_SW/`, `Irrigation_CU/`, `Irrigation_GW_CU/`, `Irrigation_SW_CU/`, `Non_Irrigation/`, `Non_Irrigation_GW/`, `Non_Irrigation_SW/` | Per-category summaries: `Basin_Time_Series/` and `Subbasin_Time_Series/` CSVs and figures, `Full_Period_Time_Series.csv/.png`, and `Era_Summary_Bar.png`.  The per-year rasters for each category are in the matching `*_Rasters/` directory. |
+| `Uncertainty/` | Step 3b UQ outputs — per-component rasters (Sigma_MACA, Sigma_Model, Sigma_Irr, Sigma_LULC, Sigma_GW, Sigma_USBR, Sigma_CU, Sigma_Total), per-basin / per-sub-basin σ CSVs, attribution figures, sensitivity diagnostics, and `CAP_Scenario/` sub-directory with the nine-scenario CAP delivery sweep (Baseline_900kAF / DCP Tiers 0, 1, 2a, 2b, and 3 / 2027–2028 Operating Guidelines / Basic Coordination / Extreme Shortage). |
 | `Raster_Maps/` | Step 3g era-mean raster maps (Hindcast / Historical / Projection × all categories), trend maps (per-pixel Mann-Kendall + Sen slope on annual rasters), ternary attribution figures, and the `CAP_Scenario/` spatial-map suite. |
 | `Capture/` | Stream Capture Index outputs (per-pool capture fraction / depth / volume rasters with σ propagation, per-well capture disaggregation, surface-watershed summaries). |
-| `Well_Package/` | Four GeoParquet files (Parquet with embedded `geometry` column + GeoParquet metadata): `Well_Package_{mm,ft,m3,AF}.parquet`, one per unit convention.  Each holds ~34.7 M rows (every ADWR well × every year 1984–2099) × 34 columns: `REGISTRY_I`, `Year`, `WATER_USE`, `geometry`, plus prediction + σ for the 11 partition / CU categories and 3 Stream Capture bands.  Primary user-facing per-well product. |
+| `Well_Package/` | Four GeoParquet files (Parquet with embedded `geometry` column + GeoParquet metadata): `Well_Package_{mm,ft,m3,AF}.parquet`, one per unit convention.  Each holds ~34.7 M rows (170,137 ADWR wells × every year 1896–2099) × 34 columns: `REGISTRY_I`, `Year`, `WATER_USE`, `geometry`, plus prediction + σ for the 12 withdrawal / CU categories (Total, Irrigation, Non_Irrigation, the four use × source categories, Total_GW, Total_SW, and the three CU categories) and the 3 Stream Capture pools.  Primary user-facing per-well product. |
 | `Annual_Summaries/` | Statewide and per-basin annual summary CSVs (Total_Predicted, per-category, σ_Total). |
-| `ADWR/` | ADWR partner CSV delivery (Step 3i): 16 long-format CSVs — 8 per-basin (`Basin_<cat>.csv`) + 8 per-sub-basin (`Subbasin_<cat>.csv`) — covering Total_Predicted, Total_GW, Total_SW, Irrigation_GW/SW, Non_Irrigation_GW/SW, and Irrigation_CU.  Plus a `readme.txt` describing the schema and source.  Aggregated from per-basin/sub-basin `<cat>/Basin_Time_Series/*_Annual.csv` and `<cat>/Subbasin_Time_Series/*_Annual.csv` files; each row has `Year, Basin/Subbasin, Mean_Depth_mm, Mean_Depth_ft, Volume_m3, Volume_AF, Era` (sub-basin files additionally have `Parent_Basin`).  Designed for delivery to ADWR / state-agency partners (e.g. Senate Bill 1740 basin assessments) without requiring users to navigate the full per-basin file tree. |
+| `ADWR/` | ADWR partner CSV delivery (Step 3i): 16 long-format CSVs — 8 per-basin (`Basin_<cat>.csv`) + 8 per-sub-basin (`Subbasin_<cat>.csv`) — covering Total_Predicted, Total_GW, Total_SW, Irrigation_GW/SW, Non_Irrigation_GW/SW, and Irrigation_CU.  Plus a `readme.txt` describing the schema and source.  Aggregated from the per-basin / per-sub-basin `<cat>/Basin_Time_Series/<NAME>_Annual.csv` and `<cat>/Subbasin_Time_Series/<NAME>_Annual.csv` files (Total_Predicted from the top-level `Basin_Time_Series/` and `Subbasin_Time_Series/`); one row per (Year, Basin/Subbasin) with `Year, Basin/Subbasin, Mean_Depth_mm, Mean_Depth_ft, Volume_m3, Volume_AF, Era` (sub-basin files additionally have `Parent_Basin`).  Basin totals include every 2 km pixel touching the basin polygon, so summing basins exceeds the statewide total by about 2–3 % (see `readme.txt`).  Designed for delivery to ADWR / state-agency partners (e.g. Senate Bill 1740 basin assessments) without requiring users to navigate the full per-basin file tree. |
 | `Basin_Time_Series/`, `AMA_INA_Time_Series/`, `Subbasin_Time_Series/` | Per-basin / per-AMA / per-sub-basin time series figures + CSVs. |
 | `Withdrawal_Intercomparison/`, `CU_Intercomparison/`, `Peff_Intercomparison/`, `PS_Intercomparison/`, `NHM_IE_Basins/`, `USGS_Calibration_Bars/`, `CAP_SRP_Validation/` | Step 4 intercomparison outputs against USGS NHM withdrawals / NHM CU / Reitz Peff / PS reanalysis / CAP+SRP delivery records. |
 | `Model/` | Trained model pickles, hyperparameter search history, SHAP cache, calibration curves. |
@@ -301,7 +309,7 @@ companion paper:
 
 **Data archive (this Zenodo deposit):**
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C., Tadych, D.E., & Meeker, L.
 (2026).  *AZ-Hydro — Historical and Projected Arizona Annual Water
 Use: Software, Input Data, Models, Raster and Well Package
 Predictions, and Validation at 2 km Resolution (1896–2099).*
@@ -309,12 +317,12 @@ Predictions, and Validation at 2 km Resolution (1896–2099).*
 
 **Companion papers:**
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C., Tadych, D.E., & Meeker, L.
 (2026).  *Historical and Projected Freshwater Withdrawals and Irrigation
 Consumptive Use for Arizona, 1896–2099.*  In prep. for *Nature
 Scientific Data*.
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C., Tadych, D.E., & Meeker, L.
 (2026).  *Where Arizona's Water Goes: Declining Agricultural
 Dominance and Rising Urban Demand Drive a Two-Century Shift in
 Withdrawal Patterns (1896–2099).*  In prep. for *AGU Earth's Future*.

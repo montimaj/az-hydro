@@ -9,7 +9,7 @@
 #   2. Submit ingest: earthengine upload table --asset_id=... <gcs_uri>
 #
 # Result on GEE:  one FC per CSV at
-#   projects/azhydro/assets/az-wu/Well_Package__<Category>
+#   $ASSET_ROOT/Well_Package__<Category>  (default projects/azhydro/assets/az-wu-v1-2)
 # (the asset name is the CSV basename without .csv).  Each FC has
 # ~170 k well features, each with year-stamped property columns
 # (e.g. Total_AF_2024, Total_AF_sigma_2024).  The visualizer can
@@ -37,7 +37,8 @@ REPO_ROOT="$(pwd)"
 GCS_BUCKET="azhydro"
 SOURCE_DIR_REL="gee/Data/Well_Package/csv"
 SOURCE_DIR="$REPO_ROOT/$SOURCE_DIR_REL"
-DEST_FOLDER="projects/azhydro/assets/az-wu"
+ASSET_ROOT="${AZHYDRO_ASSET_ROOT:-projects/azhydro/assets/az-wu-v1-2}"   # v1.2 asset folder
+DEST_FOLDER="$ASSET_ROOT"
 LOG_DIR="$REPO_ROOT/gee/upload_logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/Well_Package_upload.log"

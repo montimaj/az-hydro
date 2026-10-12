@@ -6,7 +6,7 @@
  * Google App via Apps > Publish).
  *
  * Source: https://github.com/montimaj/az-hydro
- * Citation: Majumdar et al. (2026), Zenodo DOI 10.5281/zenodo.19057936
+ * Citation: Majumdar et al. (2026), Zenodo DOI 10.5281/zenodo.19057935
  *
  * ─────────────────────────────────────────────────────────────────────
  * What this app shows
@@ -31,10 +31,11 @@
  *     band, and CAP scenario/window apply to both.  Drag the wipe
  *     divider to compare.  Clicks on either map populate the time-
  *     series charts using THAT map's category.
- *   • CAP scenarios use a different UX — pick from 7 shortfall
- *     scenarios (Basic Coordination, DCP Tier 0–3, Tier 2a/b,
- *     Extreme Shortage) × 2 windows (2027–2060 mid-century, 2027–2099
- *     full horizon).  The year slider / unit / band controls are
+ *   • CAP scenarios use a different UX — pick from 8 shortfall
+ *     scenarios (DCP Tier 0, 1, 2a, 2b and 3, the 2027–2028 Operating
+ *     Guidelines, WestWater Basic Coordination, Extreme Shortage),
+ *     each relative to the no-cut 900 kAF baseline, × 2 windows
+ *     (2027–2060 mid-century, 2027–2099 full horizon).  The year slider / unit / band controls are
  *     hidden because each CAP raster is a cumulative integral of
  *     ΔGW (AF) over the chosen window — no per-year time series.
  *   • Click anywhere on the map to populate four panels.  Every chart
@@ -49,7 +50,7 @@
  *           prediction ± 95 % CI (capacity-disaggregated per-well
  *           value — differs from the pixel value when a 2 km cell
  *           contains multiple wells).  Pulled from
- *           projects/azhydro/assets/az-wu/Well_Package__<Cat>; AF
+ *           projects/azhydro/assets/az-wu-v1-2/Well_Package__<Cat>; AF
  *           values are converted client-side to the selected unit.
  *     The band dropdown is a MAP-only control (it picks which of the
  *     6 augmented bands to render); time-series charts always show
@@ -63,16 +64,20 @@
  * Asset paths used by this app
  * ─────────────────────────────────────────────────────────────────────
  *   Vectors (already uploaded — see gee/Data/ADWR/):
- *     projects/azhydro/assets/az-wu/Groundwater_Basin
- *     projects/azhydro/assets/az-wu/ADWR_Groundwater_Subbasin
- *     projects/azhydro/assets/az-wu/Well_Registry_2024
+ *     projects/azhydro/assets/az-wu-v1-2/Groundwater_Basin
+ *     projects/azhydro/assets/az-wu-v1-2/ADWR_Groundwater_Subbasin
+ *     projects/azhydro/assets/az-wu-v1-2/Well_Registry_2024
  *
- *   ImageCollections (one per category × unit-convention; populate by
- *   running `python gee/generate_geeup_metadata.py` then `geeup
- *   upload` on each leaf dir under gee/Data/):
- *     projects/azhydro/assets/az-wu/Predicted_Rasters__Depth_mm
- *     projects/azhydro/assets/az-wu/Total_GW_Rasters__Depth_mm
- *     ... (etc., naming convention: <Dir>__<Unit>)
+ *   ImageCollections (one per category, holding all four unit
+ *   conventions; each image carries `year` and `unit` properties and
+ *   the app filters on both).  Populate with gee/upload_to_gee.sh,
+ *   which runs `python gee/generate_geeup_metadata.py` and `geeup
+ *   upload` on each leaf dir under gee/Data/:
+ *     projects/azhydro/assets/az-wu-v1-2/Predicted_Rasters
+ *     projects/azhydro/assets/az-wu-v1-2/Total_GW_Rasters
+ *     projects/azhydro/assets/az-wu-v1-2/Capture__Total_Rasters
+ *     ... (naming convention: <Dir>, or <Parent>__<Dir> for nested
+ *     directories such as Capture/ and CAP_Scenario/)
  *
  * ─────────────────────────────────────────────────────────────────────
  */
@@ -81,7 +86,7 @@
 //  Configuration
 // ═════════════════════════════════════════════════════════════════════
 
-var ASSET_ROOT = 'projects/azhydro/assets/az-wu';
+var ASSET_ROOT = 'projects/azhydro/assets/az-wu-v1-2';
 
 // Category name -> display label and asset-prefix mapping.
 // Entry order controls the dropdown order.
@@ -134,14 +139,18 @@ var CATEGORIES = [
 // CAP scenario shortfalls (matches Raster_Maps/CAP_Scenario/Pixel_Rasters/* basenames).
 // For each (scenario, window) the asset's system:index is
 //   'CAP_Scenario_Pixel_<scenario>_cum_AF_<window>'
+// Cuts are relative to the 900 kAF Baseline delivery (WestWater 2026); the
+// Operating Guidelines' 248 kAF is their 760 kAF Arizona reduction less the
+// 512 kAF Tier 1 cut already in that baseline.
 var CAP_SCENARIOS = [
-  {key: 'Basic_Coordination_237kAF', label: 'Basic Coordination (237 kAF)'},
   {key: 'DCP_Tier0_192kAF_cut',      label: 'DCP Tier 0 (192 kAF cut)'},
+  {key: 'Operating_Guidelines_652kAF', label: '2027–2028 Operating Guidelines (248 kAF cut)'},
   {key: 'DCP_Tier1_512kAF_cut',      label: 'DCP Tier 1 (512 kAF cut)'},
   {key: 'DCP_Tier2a_592kAF_cut',     label: 'DCP Tier 2a (592 kAF cut)'},
   {key: 'DCP_Tier2b_640kAF_cut',     label: 'DCP Tier 2b (640 kAF cut)'},
   {key: 'DCP_Tier3_720kAF_cut',      label: 'DCP Tier 3 (720 kAF cut)'},
-  {key: 'Extreme_Shortage_0kAF',     label: 'Extreme Shortage (0 kAF)'},
+  {key: 'Basic_Coordination_237kAF', label: 'Basic Coordination (663 kAF cut)'},
+  {key: 'Extreme_Shortage_0kAF',     label: 'Extreme Shortage (900 kAF cut)'},
 ];
 var CAP_WINDOWS = [
   {key: '2027_2060', label: '2027–2060 (mid-century)'},
@@ -939,7 +948,7 @@ function refreshOverlays() {
       m.addLayer(subbasins.style(subbasinStyle), {}, 'Sub-basins');
     }
     if (capAreaToggle.getValue()) {
-      // The three polygons in projects/azhydro/assets/az-wu/CAP are
+      // The three polygons in projects/azhydro/assets/az-wu-v1-2/CAP are
       // COUNTY BOUNDARIES (Maricopa / Pinal / Pima — the three AZ
       // counties statutorily eligible for CAP delivery), not the
       // canal-fed delivery footprint.  Render as dashed outlines
@@ -1352,7 +1361,7 @@ function capClickReadout(pt, coords, side) {
       (d.subName || 'none') + '): '                     + fmt(d.subSum)));
     chartsPanel.add(ui.Label(
       'Single-window readout above. Per-year cumulative time series for ' +
-      'this basin across all 7 scenarios is below.',
+      'this basin across all 8 scenarios is below.',
       {fontSize: '10px', color: '#777', margin: '6px 0 6px 0'}
     ));
   });
@@ -1364,7 +1373,7 @@ function capClickReadout(pt, coords, side) {
 }
 
 /** CAP-mode helper: chart cumulative ΔGW for the click-basin across
- * all 7 scenarios, 2026–2099 (read from the CAP_Scenario_Cumulative
+ * all 8 scenarios, 2026–2099 (read from the CAP_Scenario_Cumulative
  * tabular asset).  Falls back to a friendly note if the asset isn't
  * uploaded yet. */
 function addCapBasinScenarioChart(pt) {
@@ -1382,7 +1391,7 @@ function addCapBasinScenarioChart(pt) {
   // columns + Basin + Scenario + (dummy geometry) per feature.
   var fc = ee.FeatureCollection(cumAssetId)
               .filter(ee.Filter.eq('Basin', basinName));
-  // Pull all 7 scenarios at once
+  // Pull all 8 scenarios at once
   var bundle = ee.Dictionary({
     basinName: basinName,
     rows: fc.toList(20).map(function(f) {

@@ -6,11 +6,11 @@
 #
 # Two-step:
 #   1. Stage gee/Data/CAP/CAP.csv → gs://azhydro/CAP.csv  (gsutil cp)
-#   2. Submit ingest task → projects/azhydro/assets/az-wu/CAP
+#   2. Submit ingest task → $ASSET_ROOT/CAP
 #      (earthengine upload table; .geo column auto-detected as geometry)
 #
 # Companion to gee/cap_service_area_to_csv.py.  The visualizer expects
-# the asset at projects/azhydro/assets/az-wu/CAP.
+# the asset at $ASSET_ROOT/CAP.
 #
 # Usage:
 #   ./gee/upload_cap_service_area.sh             # stage + ingest
@@ -30,7 +30,8 @@ GCS_BUCKET="azhydro"   # same bucket used for AZ_HUC12.geojson — see
                         # azhydro/hydrolibs/dataops.py:803
 SOURCE_CSV="$REPO_ROOT/gee/Data/CAP/CAP.csv"
 ASSET_NAME="CAP"
-ASSET_ID="projects/azhydro/assets/az-wu/${ASSET_NAME}"
+ASSET_ROOT="${AZHYDRO_ASSET_ROOT:-projects/azhydro/assets/az-wu-v1-2}"   # v1.2 asset folder
+ASSET_ID="${ASSET_ROOT}/${ASSET_NAME}"
 GCS_URI="gs://${GCS_BUCKET}/${ASSET_NAME}.csv"
 MAX_ERROR_M="1.0"
 LOG_FILE="$REPO_ROOT/gee/upload_logs/${ASSET_NAME}_service_area.log"

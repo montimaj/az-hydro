@@ -2646,6 +2646,12 @@ CAP_SCENARIOS: dict[str, float] = {
     'Basic_Coordination_237kAF': 0.263,
     'Extreme_Shortage_0kAF': 0.0,
     'DCP_Tier0_192kAF_cut': 0.787,
+    # 2027-2028 Operating Guidelines (USBR, Aug 2026): Arizona -760 kAF.
+    # The 900 kAF baseline already reflects the 512 kAF Tier 1 cut, so
+    # the guidelines remove a further 760 - 512 = 248 kAF, leaving
+    # 652 kAF (652 / 900 = 0.724).  Whole Arizona reduction assigned to
+    # CAP, as in the central run.
+    'Operating_Guidelines_652kAF': 0.724,
     'DCP_Tier1_512kAF_cut': 0.431,
     'DCP_Tier2a_592kAF_cut': 0.342,
     'DCP_Tier2b_640kAF_cut': 0.289,
@@ -2666,6 +2672,9 @@ CAP_SCENARIOS: dict[str, float] = {
 # to a historical regime where AZ pumping had a documented GW share:
 #   Baseline (no cut)  → 1.0   (post-CAP gw_w 0.2; effective 0.2)
 #   Tier 0 (192 kAF)   → 1.0   (no real cut; post-CAP)
+#   Operating Guidelines 2027-2028 (248 kAF beyond the 900 kAF baseline)
+#                      → 2.6   (interpolated by cut size between Tier 0
+#                                and Tier 1: 1 + 9 × (248 − 192) / 320)
 #   Tier 1 (512 kAF)   → 10.0  (GMA transition 1981-1984 gw_w=2.0;
 #                                effective gw_w = 0.2 × 10 = 2.0)
 #   Tier 2a (592 kAF)  → 18.0  (interpolated between Tier 1 and
@@ -2691,6 +2700,7 @@ CAP_SCENARIO_GW_BOOSTS: dict[str, float] = {
     'Basic_Coordination_237kAF': 25.0,
     'Extreme_Shortage_0kAF': 75.0,
     'DCP_Tier0_192kAF_cut': 1.0,
+    'Operating_Guidelines_652kAF': 2.6,
     'DCP_Tier1_512kAF_cut': 10.0,
     'DCP_Tier2a_592kAF_cut': 18.0,
     'DCP_Tier2b_640kAF_cut': 23.0,
@@ -3248,6 +3258,7 @@ def _plot_cap_scenarios(
         'Baseline_900kAF': '#2C3E50',
         'Basic_Coordination_237kAF': '#E67E22',
         'Extreme_Shortage_0kAF': '#C0392B',
+        'Operating_Guidelines_652kAF': '#1F78B4',
     }
     # Distinct hue+marker per DCP tier (mild → severe).  The previous
     # all-blue gradient ran together visually; this uses the
@@ -3546,11 +3557,12 @@ def _clip_basins_to_cap(
     ]
     return clipped
 
-# Display order for scenarios (mild → severe shortage), with the
-# reference Baseline excluded since ΔGW vs Baseline is by construction
-# zero everywhere.
+# Display order for scenarios (mild → severe cut from the 900 kAF
+# Baseline), with the reference Baseline excluded since ΔGW vs Baseline is
+# by construction zero everywhere.
 _CAP_SCENARIO_PANEL_ORDER: tuple[str, ...] = (
     'DCP_Tier0_192kAF_cut',
+    'Operating_Guidelines_652kAF',
     'DCP_Tier1_512kAF_cut',
     'DCP_Tier2a_592kAF_cut',
     'DCP_Tier2b_640kAF_cut',
@@ -3559,15 +3571,20 @@ _CAP_SCENARIO_PANEL_ORDER: tuple[str, ...] = (
     'Extreme_Shortage_0kAF',
 )
 
-# Pretty labels for figure panel titles.
+# Pretty labels for figure panel titles (kept short enough to fit the
+# panel width, so constrained_layout keeps the panels aligned; captions
+# give the full scenario names).  Every cut is relative to the
+# 900 kAF Baseline delivery; the Operating Guidelines' 248 kAF is their
+# 760 kAF Arizona reduction less the 512 kAF Tier 1 cut already in it.
 _CAP_SCENARIO_PANEL_TITLES: dict[str, str] = {
     'DCP_Tier0_192kAF_cut': 'DCP Tier 0 (−192 kAF cut)',
+    'Operating_Guidelines_652kAF': 'Operating Guidelines (−248 kAF cut)',
     'DCP_Tier1_512kAF_cut': 'DCP Tier 1 (−512 kAF cut)',
     'DCP_Tier2a_592kAF_cut': 'DCP Tier 2a (−592 kAF cut)',
     'DCP_Tier2b_640kAF_cut': 'DCP Tier 2b (−640 kAF cut)',
     'DCP_Tier3_720kAF_cut': 'DCP Tier 3 (−720 kAF cut)',
-    'Basic_Coordination_237kAF': 'WestWater Basic Coordination',
-    'Extreme_Shortage_0kAF': 'WestWater Extreme Shortage',
+    'Basic_Coordination_237kAF': 'Basic Coordination (−663 kAF cut)',
+    'Extreme_Shortage_0kAF': 'Extreme Shortage (−900 kAF cut)',
 }
 
 
@@ -3670,15 +3687,15 @@ def _plot_cap_scenario_basin_drawdown(
     discrete_cmap.set_under('#FFFFFF')  # truly-zero basins render white
     norm = BoundaryNorm(boundaries_m3, discrete_cmap.N, clip=False)
 
-    # 2 × 4 grid: 7 scenario panels + 1 legend cell
-    fig, axes = plt.subplots(2, 4, figsize=(22, 12), constrained_layout=True)
+    # 3 × 3 grid: 8 scenario panels + 1 legend cell
+    fig, axes = plt.subplots(3, 3, figsize=(18, 17), constrained_layout=True)
     fig.suptitle(
         f'CAP Scenario — Cumulative Additional GW Withdrawals vs Baseline '
         f'({year_window[0]}–{year_window[1]})',
         fontsize=16, fontweight='bold',
     )
     axes_flat = axes.flatten()
-    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)']
+    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)', '(h)']
 
     for i, sc_key in enumerate(_CAP_SCENARIO_PANEL_ORDER):
         ax = axes_flat[i]
@@ -3727,17 +3744,17 @@ def _plot_cap_scenario_basin_drawdown(
             f'{panel_labels[i]} {title_pretty}\n'
             f'AZ total: {az_cum_m3 / 1e9:.2f} km³ '
             f'({az_cum_m3 * M3_TO_AF / 1e6:.2f} MAF)',
-            fontsize=11, fontweight='bold',
+            fontsize=11, fontweight='bold', y=1.0, pad=6,
         )
 
     # Full-height shared colorbar on the right of the entire grid;
-    # AMA/INA legend in the row-2-col-4 cell (axes_flat[7]) enlarged.
-    ax_legend = axes_flat[7]
+    # AMA/INA legend in the cell after the last scenario panel.
+    ax_legend = axes_flat[len(_CAP_SCENARIO_PANEL_ORDER)]
     ax_legend.axis('off')
     sm = ScalarMappable(cmap=discrete_cmap, norm=norm)
     sm.set_array([])
     cbar = fig.colorbar(
-        sm, ax=axes_flat[:7], orientation='vertical',
+        sm, ax=axes_flat[:len(_CAP_SCENARIO_PANEL_ORDER)], orientation='vertical',
         shrink=1.0, pad=0.04, fraction=0.04, aspect=40,
         boundaries=boundaries_m3, ticks=boundaries_m3, extend='both',
     )
@@ -4040,7 +4057,10 @@ def _plot_cap_scenario_pixel_drawdown(
     # era figures) with a single HORIZONTAL colorbar spanning the bottom.
     n_sc = len(_CAP_SCENARIO_PANEL_ORDER)
     n_cols = 2
-    n_rows = int(np.ceil((n_sc + 1) / n_cols))   # +1 reserves a legend cell
+    # A spare grid cell holds the legend when the panels leave one free;
+    # when they fill complete rows the legend goes under the colorbar.
+    legend_in_cell = n_sc % n_cols != 0
+    n_rows = int(np.ceil((n_sc + (1 if legend_in_cell else 0)) / n_cols))
     fig, axes = plt.subplots(
         n_rows, n_cols, figsize=(5.0 * n_cols, 5.0 * n_rows),
         constrained_layout=True,
@@ -4050,10 +4070,10 @@ def _plot_cap_scenario_pixel_drawdown(
         f'Baseline ({year_window[0]}–{year_window[1]})\n'
         f'(per-pixel volume = basin Δ × pixel ML Total GW share — '
         f'pro-rata, NOT a hydraulic-head response)',
-        fontsize=13, fontweight='bold',
+        fontsize=13, fontweight='bold', y=1.02,
     )
     axes_flat = list(axes.flatten())
-    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)']
+    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)', '(h)']
 
     af_to_m3 = 1.0 / M3_TO_AF
     for i, sc_key in enumerate(_CAP_SCENARIO_PANEL_ORDER):
@@ -4091,18 +4111,19 @@ def _plot_cap_scenario_pixel_drawdown(
             f'{panel_labels[i]} {title_pretty}\n'
             f'{az_cum_af * af_to_m3 / 1e9:.2f} km³ '
             f'({az_cum_af / 1e6:.2f} MAF)',
-            fontsize=13, fontweight='bold',
+            fontsize=13, fontweight='bold', y=1.0, pad=6,
         )
 
-    # Legend in the first unused cell; hide any remaining trailing cells.
-    ax_legend = axes_flat[n_sc]
-    ax_legend.axis('off')
-    for j in range(n_sc + 1, len(axes_flat)):
+    # Legend in the first unused cell (if any); hide remaining cells.
+    if legend_in_cell:
+        ax_legend = axes_flat[n_sc]
+        ax_legend.axis('off')
+        add_ama_ina_legend(
+            ax_legend, loc='center', bbox_to_anchor=(0.5, 0.5),
+            fontsize=14, framealpha=1.0, include_cap=True,
+        )
+    for j in range(n_sc + (1 if legend_in_cell else 0), len(axes_flat)):
         axes_flat[j].axis('off')
-    add_ama_ina_legend(
-        ax_legend, loc='center', bbox_to_anchor=(0.5, 0.5),
-        fontsize=14, framealpha=1.0, include_cap=True,
-    )
 
     # Single horizontal colorbar across the bottom: ×10⁶ m³ on the
     # bottom axis, AF on the top axis.
@@ -4132,6 +4153,11 @@ def _plot_cap_scenario_pixel_drawdown(
         fontsize=15, fontweight='bold',
     )
     secax.tick_params(labelsize=13)
+    if not legend_in_cell:
+        add_ama_ina_legend(
+            fig, loc='upper center', bbox_to_anchor=(0.5, 0.0),
+            fontsize=13, framealpha=1.0, include_cap=True, ncol=6,
+        )
     out_path = os.path.join(
         out_dir,
         f'CAP_Scenario_Pixel_Drawdown_'
@@ -4834,7 +4860,7 @@ def _plot_cap_scenario_basin_snr(
         basins_clipped if basins_clipped is not None else basins_gdf
     )
 
-    fig, axes = plt.subplots(2, 4, figsize=(22, 11), constrained_layout=True)
+    fig, axes = plt.subplots(3, 3, figsize=(18, 16), constrained_layout=True)
     fig.suptitle(
         r'CAP Scenario — Basin Signal-to-Noise '
         r'(SNR = |$\Delta$GW$_{\mathrm{cum}}$| / $\sigma_{\mathrm{cum}}$, '
@@ -4843,7 +4869,7 @@ def _plot_cap_scenario_basin_snr(
         fontsize=20, fontweight='bold',
     )
     axes_flat = axes.flatten()
-    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)']
+    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)', '(h)']
 
     for i, sc_key in enumerate(_CAP_SCENARIO_PANEL_ORDER):
         ax = axes_flat[i]
@@ -4888,15 +4914,15 @@ def _plot_cap_scenario_basin_snr(
         ax.set_title(
             f'{panel_labels[i]} {title_pretty}\n'
             f'{n_robust}/{n_total} basins with SNR ≥ 1',
-            fontsize=11, fontweight='bold',
+            fontsize=11, fontweight='bold', y=1.0, pad=6,
         )
 
-    ax_legend = axes_flat[7]
+    ax_legend = axes_flat[len(_CAP_SCENARIO_PANEL_ORDER)]
     ax_legend.axis('off')
     sm = ScalarMappable(cmap=discrete_cmap, norm=norm)
     sm.set_array([])
     cbar = fig.colorbar(
-        sm, ax=axes_flat[:7], orientation='vertical',
+        sm, ax=axes_flat[:len(_CAP_SCENARIO_PANEL_ORDER)], orientation='vertical',
         shrink=1.0, pad=0.04, fraction=0.04, aspect=40,
         boundaries=boundaries, ticks=boundaries, extend='both',
     )
@@ -4985,7 +5011,7 @@ def _plot_cap_scenario_pixel_snr(
         pixel_sigma_cum, np.nan,
     )
 
-    fig, axes = plt.subplots(2, 4, figsize=(22, 11), constrained_layout=True)
+    fig, axes = plt.subplots(3, 3, figsize=(18, 16), constrained_layout=True)
     fig.suptitle(
         r'CAP Scenario — Pixel Signal-to-Noise '
         r'(SNR = |$\Delta$GW$_{\mathrm{cum}}$| / $\sigma_{\mathrm{cum}}$, '
@@ -4996,7 +5022,7 @@ def _plot_cap_scenario_pixel_snr(
         fontsize=20, fontweight='bold',
     )
     axes_flat = axes.flatten()
-    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)']
+    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)', '(h)']
 
     for i, sc_key in enumerate(_CAP_SCENARIO_PANEL_ORDER):
         ax = axes_flat[i]
@@ -5041,15 +5067,15 @@ def _plot_cap_scenario_pixel_snr(
         ax.set_title(
             f'{panel_labels[i]} {title_pretty}\n'
             f'{pct_robust:.1f}% of pixels with SNR ≥ 1',
-            fontsize=11, fontweight='bold',
+            fontsize=11, fontweight='bold', y=1.0, pad=6,
         )
 
-    ax_legend = axes_flat[7]
+    ax_legend = axes_flat[len(_CAP_SCENARIO_PANEL_ORDER)]
     ax_legend.axis('off')
     sm = ScalarMappable(cmap=discrete_cmap, norm=norm)
     sm.set_array([])
     cbar = fig.colorbar(
-        sm, ax=axes_flat[:7], orientation='vertical',
+        sm, ax=axes_flat[:len(_CAP_SCENARIO_PANEL_ORDER)], orientation='vertical',
         shrink=1.0, pad=0.04, fraction=0.04, aspect=40,
         boundaries=boundaries, ticks=boundaries, extend='both',
     )
@@ -5828,6 +5854,7 @@ def run_uncertainty_quantification(
     Returns:
         None.
     """
+    import hydrolibs.partitionops as partops
     import hydrolibs.visualops as vizops
     from hydrolibs.sysops import makedirs
 
@@ -6070,12 +6097,25 @@ def run_uncertainty_quantification(
                 os.path.dirname(basin_shp), 'CAP_Service_Area.geojson',
             )
         if os.path.isfile(cap_geojson):
-            run_cap_scenario_analysis(
-                model, feature_cols, az_df, drop_attrs,
-                pred_data_dir, unc_dir, start_year, end_year,
-                year_list, mosaic_res,
-                cap_service_area_geojson=cap_geojson,
-            )
+            # The sweep is a counterfactual that bypasses the central CAP
+            # perturbation.  The dynamic CAP NonIrr cap / irrigation floor
+            # read the central CAP_DELIVERY_FACTORS for projection years,
+            # so with the delivery lookup active the central-run shortage
+            # assumption would leak into every scenario, including the
+            # no-cut Baseline.  Run the sweep with the lookup disabled
+            # (full-delivery caps), the setting its GW boosts were
+            # calibrated against WestWater with.
+            _saved_lookup = _CAP_DELIVERY_CTX.get('lookup')
+            _set_cap_delivery_context(None)
+            try:
+                run_cap_scenario_analysis(
+                    model, feature_cols, az_df, drop_attrs,
+                    pred_data_dir, unc_dir, start_year, end_year,
+                    year_list, mosaic_res,
+                    cap_service_area_geojson=cap_geojson,
+                )
+            finally:
+                _set_cap_delivery_context(_saved_lookup)
         else:
             logger.warning(
                 '  CAP service area geojson not found; '

@@ -35,7 +35,7 @@ Usage::
     python gee/generate_geeup_metadata.py            # generate all
     python gee/generate_geeup_metadata.py --dry-run  # preview only
     python gee/generate_geeup_metadata.py --root gee/Data --asset-prefix \\
-        projects/azhydro/assets/az-wu                # custom asset root
+        projects/azhydro/assets/az-wu-v1-2                # custom asset root
 """
 from __future__ import annotations
 
@@ -92,16 +92,16 @@ def asset_id_for_dir(dir_path: Path, root: Path, asset_prefix: str) -> str:
     Examples
     --------
     Total_GW_Rasters/  (unit-parent)
-        → projects/azhydro/assets/az-wu/Total_GW_Rasters
+        → projects/azhydro/assets/az-wu-v1-2/Total_GW_Rasters
 
     Capture/Total_Rasters/  (nested unit-parent)
-        → projects/azhydro/assets/az-wu/Capture__Total_Rasters
+        → projects/azhydro/assets/az-wu-v1-2/Capture__Total_Rasters
 
     Capture/Total_Fraction/  (flat, no units)
-        → projects/azhydro/assets/az-wu/Capture__Total_Fraction
+        → projects/azhydro/assets/az-wu-v1-2/Capture__Total_Fraction
 
     OOD_Rasters/
-        → projects/azhydro/assets/az-wu/OOD_Rasters
+        → projects/azhydro/assets/az-wu-v1-2/OOD_Rasters
     """
     rel = dir_path.relative_to(root)
     # Flatten path with __ separator so each leaf becomes a unique asset
@@ -215,7 +215,7 @@ def main() -> int:
                                      formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('--root', default='gee/Data',
                         help='Root directory to walk (default: gee/Data)')
-    parser.add_argument('--asset-prefix', default='projects/azhydro/assets/az-wu',
+    parser.add_argument('--asset-prefix', default='projects/azhydro/assets/az-wu-v1-2',
                         help='GEE asset path prefix for ImageCollections')
     parser.add_argument('--dry-run', action='store_true',
                         help='Preview what would be written; do not write CSVs')

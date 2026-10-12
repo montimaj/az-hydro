@@ -99,6 +99,9 @@ AMA_CODE_MAP = {
 
 START_YEAR = 1896
 END_YEAR = 2099
+# Set by --force-predict: re-run the Step 3 prediction/partition loop even
+# when the output rasters already exist (needed after partition changes).
+FORCE_PREDICT = False
 YEAR_LIST = list(range(1984, 2025))
 TRAIN_YEAR_LIST_BASELINE = list(range(2002, 2021))  # for direct comparison with Majumdar et al., 2022
 RANDOM_STATE = 42
@@ -2041,7 +2044,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
     _first_tif = os.path.join(raster_dirs['mm'], f'Total_Predicted_{START_YEAR}_mm.tif')
     _last_tif = os.path.join(raster_dirs['mm'], f'Total_Predicted_{END_YEAR}_mm.tif')
     _all_tifs_exist = os.path.isfile(_first_tif) and os.path.isfile(_last_tif)
-    _skip_loop = _all_tifs_exist and _load_yearly_summary()
+    _skip_loop = (not FORCE_PREDICT) and _all_tifs_exist and _load_yearly_summary()
     if _skip_loop:
         logger.info('All rasters and summaries exist, skipping prediction loop.')
 
@@ -2054,7 +2057,7 @@ def predict_full_period(az_df: pd.DataFrame) -> tuple:
             break
         # Skip year if raster already exists
         year_tif = os.path.join(raster_dirs['mm'], f'Total_Predicted_{year}_mm.tif')
-        if os.path.isfile(year_tif):
+        if os.path.isfile(year_tif) and not FORCE_PREDICT:
             logger.info(f'  Year {year}: rasters exist, skipping.')
             continue
 
@@ -3631,10 +3634,10 @@ def create_graphical_abstract_only() -> None:
 # =============================================================================
 
 # 7 partition categories that have per-category Basin_Time_Series and
-# Subbasin_Time_Series sub-directories.  Total_Predicted is handled
-# separately because it's already aggregated as Annual_Summaries/
-# Basin_Total.csv and Subbasin_Total.csv and not present as a per-
-# category Total_Predicted/ directory.
+# Subbasin_Time_Series sub-directories.  Total_Predicted is added
+# separately because its per-basin series sit in the top-level
+# Basin_Time_Series/ and Subbasin_Time_Series/ directories rather than
+# under a Total_Predicted/ directory.
 _ADWR_DELIVERY_CATEGORIES: tuple[str, ...] = (
     'Total_GW',
     'Total_SW',
@@ -3659,15 +3662,16 @@ def create_adwr_csv_delivery() -> None:
     Categories: ``Total_Predicted, Total_GW, Total_SW, Irrigation_GW,
     Irrigation_SW, Non_Irrigation_GW, Non_Irrigation_SW, Irrigation_CU``.
 
-    For ``Total_Predicted``, copies the already-aggregated
-    ``Annual_Summaries/Basin_Total.csv`` and
-    ``Annual_Summaries/Subbasin_Total.csv`` directly.  For the other
-    seven categories, concatenates the per-basin / per-subbasin
+    For every category, concatenates the per-basin / per-subbasin
     ``<cat>/Basin_Time_Series/<NAME>_Annual.csv`` and
     ``<cat>/Subbasin_Time_Series/<NAME>_Annual.csv`` files into one
     long-format CSV per (category, level), preserving the source schema
     (Year, Basin/Subbasin, Mean_Depth_mm, Mean_Depth_ft, Volume_m3,
     Volume_AF, Era; sub-basin files additionally have Parent_Basin).
+    ``Total_Predicted`` reads the top-level ``Basin_Time_Series/`` and
+    ``Subbasin_Time_Series/`` directories.  The all-basin aggregate
+    files ``Basin_Annual.csv`` / ``Subbasin_Annual.csv`` that sit in the
+    same directories are skipped, since they repeat every per-basin row.
 
     Reads only files Step 3 / 3b have already cached on disk; runs in
     a few seconds.  Idempotent — overwrites previous deliverables on
@@ -3685,8 +3689,6 @@ def create_adwr_csv_delivery() -> None:
     prediction_dir = os.path.join(
         MODEL_DIR, f'Full_Prediction_{PREDICTION_MODEL}',
     )
-    annual_dir = os.path.join(prediction_dir, 'Annual_Summaries')
-
     # Output dir = {prediction_dir}/ADWR (sibling of Annual_Summaries/,
     # Raster_Maps/, Uncertainty/, etc.).  Lives under Data/Outputs/ so
     # it ships with both Zenodo .7z archives by default.
@@ -3714,35 +3716,26 @@ def create_adwr_csv_delivery() -> None:
             f'  Template missing: {template_readme} — readme.txt not refreshed',
         )
 
-    # ── 1. Total_Predicted (already aggregated by Step 3) ──────────
-    for src_name, dst_name in [
-        ('Basin_Total.csv', 'Basin_Total_Predicted.csv'),
-        ('Subbasin_Total.csv', 'Subbasin_Total_Predicted.csv'),
-    ]:
-        src = os.path.join(annual_dir, src_name)
-        dst = os.path.join(out_dir, dst_name)
-        if os.path.isfile(src):
-            shutil.copy2(src, dst)
-            logger.info(f'  Copied {dst_name} from Annual_Summaries/{src_name}')
-        else:
-            logger.warning(
-                f'  {src} not found — skipping {dst_name}.  Run Step 3 first.',
-            )
-
-    # ── 2. Per-category basin + sub-basin time series ──────────────
-    for cat in _ADWR_DELIVERY_CATEGORIES:
+    # ── Per-category basin + sub-basin time series ──────────────────
+    # Total_Predicted's per-basin series live directly under the
+    # prediction directory; the other categories under <cat>/.
+    aggregate_files = {'Basin_Annual.csv', 'Subbasin_Annual.csv'}
+    for cat in ['Total_Predicted'] + list(_ADWR_DELIVERY_CATEGORIES):
+        cat_dir = (prediction_dir if cat == 'Total_Predicted'
+                   else os.path.join(prediction_dir, cat))
         for src_subdir, out_prefix in [
             ('Basin_Time_Series', 'Basin'),
             ('Subbasin_Time_Series', 'Subbasin'),
         ]:
-            src_dir = os.path.join(prediction_dir, cat, src_subdir)
+            src_dir = os.path.join(cat_dir, src_subdir)
             if not os.path.isdir(src_dir):
                 logger.warning(
                     f'  {src_dir} not found — skipping {cat} {out_prefix}',
                 )
                 continue
             files = sorted(
-                f for f in os.listdir(src_dir) if f.endswith('_Annual.csv')
+                f for f in os.listdir(src_dir)
+                if f.endswith('_Annual.csv') and f not in aggregate_files
             )
             if not files:
                 logger.warning(
@@ -4166,6 +4159,14 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        '--force-predict', action='store_true', default=False,
+        help=(
+            'Re-run the Step 3 prediction and partition loop for every year '
+            'even if the output rasters already exist (use after changing '
+            'partition parameters such as CAP delivery factors).'
+        ),
+    )
+    parser.add_argument(
         '--skip-maps', type=str, default='',
         help=(
             'Comma-separated Step 3g map-generation sub-steps to '
@@ -4174,6 +4175,8 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    global FORCE_PREDICT
+    FORCE_PREDICT = args.force_predict
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)

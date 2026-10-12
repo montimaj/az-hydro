@@ -11,7 +11,7 @@ Output: gee/Data/CAP/CAP.csv
         3 features (MARICOPA / PIMA / PINAL polygons) with columns:
           OBJECTID, NAME, .geo
         The visualizer expects the asset at
-          projects/azhydro/assets/az-wu/CAP — that's the asset_id
+          projects/azhydro/assets/az-wu-v1-2/CAP — that's the asset_id
         the upload script passes to `earthengine upload table`.
 
 Why bypass geeup tabup:
