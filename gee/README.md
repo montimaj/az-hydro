@@ -4,6 +4,7 @@
 [![Google Earth Engine](https://img.shields.io/badge/Google%20Earth%20Engine-4285F4?logo=google-earth&logoColor=white)](https://earthengine.google.com/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-orange.svg)](https://opensource.org/licenses/BSD-3-Clause)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19057935.svg)](https://doi.org/10.5281/zenodo.19057935)
+[![EarthArXiv](https://img.shields.io/badge/EarthArXiv-10.31223%2FX56N63-008080.svg)](https://doi.org/10.31223/X56N63)
 
 Pre-exports computationally expensive [Google Earth Engine](https://earthengine.google.com/) (GEE; [Gorelick et al., 2017](https://doi.org/10.1016/j.rse.2017.06.031), [Roy et al., 2025](https://doi.org/10.5281/zenodo.17641528)) collections as asset ImageCollections under `projects/azhydro/assets/`. These assets are consumed by `dataops.py` at tile-download time via simple `ee.ImageCollection(...)` loads and `filterDate()` calls, eliminating repeated on-the-fly computation.
 
