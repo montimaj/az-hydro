@@ -3,7 +3,7 @@
 **Version 1.2** (Zenodo release v1.2; code release v1.2.0).
 
 This is the **focused subset** of the full AZ-Hydro data deposit
-(Majumdar et al. 2026, *Sci Data* — in prep.; preprint at https://doi.org/10.31223/X56N63) — the actual scientific
+(Majumdar et al. 2026, *Sci Data* — submitted; preprint at https://doi.org/10.31223/X56N63) — the actual scientific
 deliverables highlighted in the paper, sized for reasonable download.
 
 | Archive | Size | Contents |
@@ -19,7 +19,7 @@ citations, see [`Data/README.md`](README.md) inside this archive
 
 ## Citation
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C., Tadych, D.E., & Meeker, L.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C.
 (2026). *AZ-Hydro — Historical and Projected Arizona Annual Water
 Use: Software, Input Data, Models, Raster and Well Package
 Predictions, and Validation at 2 km Resolution (1896–2099).* Zenodo.
@@ -27,7 +27,7 @@ Predictions, and Validation at 2 km Resolution (1896–2099).* Zenodo.
 
 Companion paper:
 
-Majumdar, S., Smith, R., ReVelle, P., Hasan, M. F., Wogenstahl, C., Tadych, D., & Meeker, L. (2026). Historical and projected freshwater withdrawals and irrigation consumptive use for Arizona, 1896–2099. In preparation for Nature Scientific Data. Preprint at [https://doi.org/10.31223/X56N63](https://doi.org/10.31223/X56N63)
+Majumdar, S., Smith, R., ReVelle, P., Hasan, M. F., & Wogenstahl, C. (2026). Historical and projected freshwater withdrawals and irrigation consumptive use for Arizona, 1896–2099. Submitted to Nature Scientific Data. Preprint at [https://doi.org/10.31223/X56N63](https://doi.org/10.31223/X56N63)
 
 ---
 

@@ -21,30 +21,29 @@ archive plus the relevant companion paper(s):
 
    Data archive (this Zenodo deposit):
 
-   Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C.,
-   Tadych, D.E., & Meeker, L. (2026).  AZ-Hydro -- Historical and Projected
-   Arizona Annual Water Use: Software, Input Data, Models,
+   Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C.
+   (2026).  AZ-Hydro -- Historical and Projected Arizona Annual Water
+   Use: Software, Input Data, Models,
    Raster and Well Package Predictions, and Validation at 2 km
    Resolution (1896-2099).  Zenodo.
    https://doi.org/10.5281/zenodo.19057935
 
 
-   Sci Data data paper (in preparation):
+   Sci Data data paper (submitted):
 
-   Majumdar, S., Smith, R., ReVelle, P., Hasan, M. F., Wogenstahl, C.,
-   Tadych, D., & Meeker, L. (2026).  Historical and projected
-   freshwater withdrawals and irrigation consumptive use for
-   Arizona, 1896-2099.  In preparation for Nature Scientific Data.
+   Majumdar, S., Smith, R., ReVelle, P., Hasan, M. F., & Wogenstahl, C.
+   (2026).  Historical and projected freshwater withdrawals and
+   irrigation consumptive use for Arizona, 1896-2099.  Submitted to
+   Nature Scientific Data.
    Preprint at https://doi.org/10.31223/X56N63
 
 
    AGU Earth's Future analysis paper (in preparation):
 
-   Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C.,
-   Tadych, D.E., & Meeker, L. (2026).  Where Arizona's Water Goes: Declining
-   Agricultural Dominance and Rising Urban Demand Drive a
-   Two-Century Shift in Withdrawal Patterns (1896-2099).  In
-   prep. for AGU Earth's Future.
+   Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C.
+   (2026).  Where Arizona's Water Goes: Declining Agricultural
+   Dominance and Rising Urban Demand Drive a Two-Century Shift in
+   Withdrawal Patterns (1896-2099).  In prep. for AGU Earth's Future.
 
 
 ----------------------------------------------------------------

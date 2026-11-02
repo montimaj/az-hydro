@@ -194,11 +194,11 @@ prediction years are added.
 
 ## Citations
 
-Majumdar, S., Smith, R., ReVelle, P., Hasan, M. F., Wogenstahl, C., Tadych, D., & Meeker, L. (2026). Historical and projected freshwater withdrawals and irrigation consumptive use for Arizona, 1896–2099. In preparation for Nature Scientific Data. Preprint at [https://doi.org/10.31223/X56N63](https://doi.org/10.31223/X56N63)
+Majumdar, S., Smith, R., ReVelle, P., Hasan, M. F., & Wogenstahl, C. (2026). Historical and projected freshwater withdrawals and irrigation consumptive use for Arizona, 1896–2099. Submitted to Nature Scientific Data. Preprint at [https://doi.org/10.31223/X56N63](https://doi.org/10.31223/X56N63)
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C., Tadych, D.E., & Meeker, L. (2026). Where Arizona's Water Goes: Declining Agricultural Dominance and Rising Urban Demand Drive a Two-Century Shift in Withdrawal Patterns (1896–2099). _In prep. for AGU Earth's Future_.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). Where Arizona's Water Goes: Declining Agricultural Dominance and Rising Urban Demand Drive a Two-Century Shift in Withdrawal Patterns (1896–2099). _In prep. for AGU Earth's Future_.
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C., Tadych, D.E., & Meeker, L. (2026). AZ-Hydro — Historical and Projected Arizona Annual Water Use: Software, Input Data, Models, Raster and Well Package Predictions, and Validation at 2 km Resolution (1896–2099). _Zenodo_. https://doi.org/10.5281/zenodo.19057935.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C. (2026). AZ-Hydro — Historical and Projected Arizona Annual Water Use: Software, Input Data, Models, Raster and Well Package Predictions, and Validation at 2 km Resolution (1896–2099). _Zenodo_. https://doi.org/10.5281/zenodo.19057935.
 
 ## Acknowledgments
 This work was supported by NASA (Grant numbers 80NSSC21K0979, 80NSSC23K1453, and 80NSSC26K0983) and U.S. Army Corps of Engineers (Grant number W912HZ25C0016). We thank the open-source software and data communities, the OpenET consortium, and the Arizona Department of Water Resources for making their resources and datasets publicly available, and Google Earth Engine for compute and storage support. S.M. and P.R. acknowledge Dr. Justin L. Huntington, Christopher Pearson, Charles G. Morton, Blake A. Minor, Thomas J. Ott, Dr. Samapriya Roy at the Desert Research Institute, and Dr. David Ketchum at the University of Montana for their contributions to related projects that informed this work. We also thank Rahel Pommerenke at Colorado State University for presenting preliminary results from this work at the 2025 ESA Living Planet Symposium. The views expressed herein are those of the authors and do not necessarily reflect those of the funding agencies.

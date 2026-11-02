@@ -3,7 +3,7 @@
 **Version 1.2** (Zenodo release v1.2; code release v1.2.0).
 
 Companion data archive for the AZ-Hydro pipeline (Majumdar et al. 2026,
-*Sci Data* — in prep.; preprint at https://doi.org/10.31223/X56N63).  This Zenodo deposit holds the input datasets
+*Sci Data* — submitted; preprint at https://doi.org/10.31223/X56N63).  This Zenodo deposit holds the input datasets
 the pipeline consumes plus the full set of generated outputs (predictor
 rasters, ML predictions, uncertainty bands, intercomparisons, figures).
 
@@ -309,7 +309,7 @@ companion paper:
 
 **Data archive (this Zenodo deposit):**
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C., Tadych, D.E., & Meeker, L.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C.
 (2026).  *AZ-Hydro — Historical and Projected Arizona Annual Water
 Use: Software, Input Data, Models, Raster and Well Package
 Predictions, and Validation at 2 km Resolution (1896–2099).*
@@ -317,9 +317,9 @@ Predictions, and Validation at 2 km Resolution (1896–2099).*
 
 **Companion papers:**
 
-Majumdar, S., Smith, R., ReVelle, P., Hasan, M. F., Wogenstahl, C., Tadych, D., & Meeker, L. (2026). Historical and projected freshwater withdrawals and irrigation consumptive use for Arizona, 1896–2099. In preparation for Nature Scientific Data. Preprint at [https://doi.org/10.31223/X56N63](https://doi.org/10.31223/X56N63)
+Majumdar, S., Smith, R., ReVelle, P., Hasan, M. F., & Wogenstahl, C. (2026). Historical and projected freshwater withdrawals and irrigation consumptive use for Arizona, 1896–2099. Submitted to Nature Scientific Data. Preprint at [https://doi.org/10.31223/X56N63](https://doi.org/10.31223/X56N63)
 
-Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., Wogenstahl, C., Tadych, D.E., & Meeker, L.
+Majumdar, S., Smith, R.G., ReVelle, P., Hasan, M.F., & Wogenstahl, C.
 (2026).  *Where Arizona's Water Goes: Declining Agricultural
 Dominance and Rising Urban Demand Drive a Two-Century Shift in
 Withdrawal Patterns (1896–2099).*  In prep. for *AGU Earth's Future*.

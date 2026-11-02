@@ -193,6 +193,7 @@ gee/Data
 zenodo/*.md
 zenodo/*.html
 zenodo/excluded*
+zenodo/record_files/
 
 # Track the paper analysis scripts, figures, and derived result CSVs in the repo
 # (the manuscript .md and the preprint PDF under paper/ stay ignored via paper/*)
